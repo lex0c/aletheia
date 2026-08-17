@@ -426,19 +426,28 @@ func readCgroup(p *Process) {
 	// Duas gramáticas: v2 é "0::/path", v1 é "N:controller:/path".
 	// O cgroup sobrevive ao daemonizar, então é o que restaura a origem quando
 	// PPid vira 1 (runbook §3.11).
+	//
+	// No v1 há uma LINHA POR CONTROLADOR, e só a de name=systemd carrega a
+	// unit. Pegar a primeira — que pode ser cpuset, net_cls, freezer — destrói
+	// exatamente a proveniência que este campo existe para preservar.
+	var fallback string
 	for _, ln := range strings.Split(strings.TrimSpace(string(b)), "\n") {
 		parts := strings.SplitN(ln, ":", 3)
 		if len(parts) != 3 {
 			continue
 		}
-		if parts[0] == "0" && parts[1] == "" {
+		switch {
+		case parts[0] == "0" && parts[1] == "": // v2: hierarquia unificada
 			p.Cgroup = parts[2]
 			return
-		}
-		if p.Cgroup == "" {
+		case parts[1] == "name=systemd": // v1: a que tem a unit
 			p.Cgroup = parts[2]
+			return
+		case fallback == "":
+			fallback = parts[2]
 		}
 	}
+	p.Cgroup = fallback
 }
 
 func readNS(p *Process) {
@@ -515,14 +524,9 @@ func readMaps(p *Process) {
 	}
 	oddSeen := map[string]bool{}
 	for _, ln := range lines {
-		fs := strings.Fields(ln)
-		if len(fs) < 5 {
+		perms, path, ok := splitMapLine(ln)
+		if !ok {
 			continue
-		}
-		perms := fs[1]
-		path := ""
-		if len(fs) >= 6 {
-			path = fs[5]
 		}
 		if strings.Contains(perms, "w") && strings.Contains(perms, "x") {
 			d := path
@@ -542,6 +546,31 @@ func readMaps(p *Process) {
 			p.MapsOdd = append(p.MapsOdd, path)
 		}
 	}
+}
+
+// splitMapLine separa "addr perms offset dev inode [path]". O kernel NÃO escapa
+// espaço no path, então strings.Fields quebra em qualquer diretório com espaço
+// no nome — e um rename derrotaria o MapsOdd em silêncio.
+func splitMapLine(ln string) (perms, path string, ok bool) {
+	var f [5]string
+	i := 0
+	for n := 0; n < 5; n++ {
+		for i < len(ln) && ln[i] == ' ' {
+			i++
+		}
+		start := i
+		for i < len(ln) && ln[i] != ' ' {
+			i++
+		}
+		if start == i {
+			return "", "", false
+		}
+		f[n] = ln[start:i]
+	}
+	for i < len(ln) && ln[i] == ' ' {
+		i++
+	}
+	return f[1], ln[i:], true
 }
 
 func isLibDir(path string) bool {

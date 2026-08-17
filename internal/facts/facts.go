@@ -26,6 +26,7 @@ type Facts struct {
 
 	Host      Host      `json:"host"`
 	Processes []Process `json:"processes,omitempty"`
+	Sockets   []Socket  `json:"sockets,omitempty"`
 
 	// Partial registra o que a própria coleta não conseguiu ler, por coletor.
 	// Não é o mesmo que "não havia nada": é "não deu para olhar".
@@ -51,11 +52,25 @@ func Collect(e *env.Env) *Facts {
 
 	if e.Has(env.CapProcfs) {
 		collectProcesses(f, e)
+		// Depois dos processos: o dono de cada socket sai do join com os fds
+		// que o coletor de processo já leu.
+		collectSockets(f, e)
 	} else {
 		f.partial("proc", e.Reason(env.CapProcfs))
 	}
 
 	return f
+}
+
+// SocketsOf devolve os sockets pertencentes a um PID.
+func (f *Facts) SocketsOf(pid int) []Socket {
+	var out []Socket
+	for _, s := range f.Sockets {
+		if s.PID == pid {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // ProcessByPID devolve o processo, ou nil.

@@ -24,14 +24,14 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 - [ ] **2.3** `proc.suspicious_path` — `/tmp`, `/dev/shm`, `~/.config/<dir>/<bin>`; `~/.local` é XDG legítimo (§8)
 - [ ] **2.4** `proc.caps_unexpected` — `CapEff` **comparado com o esperado**, não apenas != 0 (§3.7)
 - [ ] **2.5** `proc.tracer`, `proc.ns_divergent`, `proc.maps_rwx_anon` (§3.7, §3.15, §3.10)
-- [ ] **2.6** `correlate.revshell` — fd 0,1,2 no mesmo socket **descartando socket activation** (§17)
+- [x] **2.6** `correlate.revshell` — fd 0,1,2 no mesmo socket **descartando socket activation** (§17)
 - [ ] **2.7** `wtf` — mesma coleta, renderização e orçamento próprios
 
 ## Fase 3 — rede
 
-- [ ] **3.1** `facts/net` — `/proc/net/tcp{,6}` + mapeamento inode→pid sob orçamento
+- [x] **3.1** `facts/net` — `/proc/net/tcp{,6}` + mapeamento inode→pid sob orçamento
 - [ ] **3.2** checks §2 — saída para IP público, listener fora de loopback
-- [ ] **3.3** `net.pivot` — **saída** externa + **saída** interna no mesmo PID (direção é o que separa do proxy)
+- [x] **3.3** `net.pivot` — **saída** externa + **saída** interna no mesmo PID (direção é o que separa do proxy)
 - [ ] **3.4** `net.systemd_listener_orphan` — listener do PID 1 **sem** `.socket` unit correspondente
 
 ## Fase 4 — persistência (§7)  ▸ maior economia de tempo manual
@@ -329,3 +329,73 @@ em que o defeito se manifestava.
                                arquivo REGULAR existente; device/fifo/socket
                                abre sem criar e sem truncar
 ```
+
+---
+
+## Registro — rede (2.6, 3.1, 3.3)
+
+`facts/net` lê `/proc/net/tcp{,6}` e junta inode→PID pelos fds que o coletor de
+processo já tinha lido. Duas coisas custaram o tempo:
+
+```
+endianness    o endereço vem em hex com cada palavra de 32 bits em ordem de
+              HOST. Ignorar a inversão faz 127.0.0.1 virar 1.0.0.127 — e aí
+              loopback é classificado como público, e o relatório acusa "saída
+              para endereço público" em todo processo local
+direção       o kernel NÃO registra quem iniciou a conexão. É inferida
+              comparando a porta local com a tabela de LISTEN. O parser foi
+              conferido contra o `ss` do host: IPs, portas, estados e o join
+              inode→PID batem
+```
+
+**A direção é o produto todo.** Sem ela os dois checks estão errados, e errados
+do jeito pior — disparando no que é legítimo:
+
+```
+correlate.revshell   fd 0,1,2 no mesmo socket é também a forma EXATA da ativação
+                     por socket do systemd (StandardInput=socket) e do inetd.
+                     Sem a direção, dispara em sshd.socket
+net.pivot            saída externa + saída interna é também a forma de todo
+                     proxy reverso. Sem a direção, dispara em todo nginx
+```
+
+Por isso os cenários vêm em par: uma forma que precisa disparar e a forma
+legítima quase idêntica que não pode. O positivo sozinho não prova que o check
+discrimina — prova só que ele dispara.
+
+```
+40-revshell                            CRITICAL, exit 2
+41-socket-activation-nao-eh-revshell   Forbid revshell — a matriz inteira
+42-pivot                               WARN, exit 1
+43-proxy-reverso-nao-eh-pivo           Forbid pivot
+```
+
+### Endereço público sem rede
+
+Os cenários precisam de peer de escopo público para exercitar a classificação, e
+depender de internet num teste é inaceitável. `--network=none` mais
+`--cap-add=NET_ADMIN`, e o cenário cria apelidos em `lo`:
+
+```
+ip addr add 51.91.190.241/32 dev lo     público para quem classifica
+ip addr add 10.0.0.9/32      dev lo     privado para quem classifica
+```
+
+Nenhum pacote sai do namespace. O contêiner não tem sequer `eth0`. Isso também
+tornou desnecessário levar estes cenários para a VM — o que estava sob teste era
+a classificação, não o kernel.
+
+### Limite conhecido, registrado no código
+
+Não há campo de direção em `/proc/net/tcp`, e não há fonte melhor sem conntrack
+ou eBPF. A inferência erra em dois casos, ambos caros de provocar:
+
+```
+falso NEGATIVO   implante que amarra a porta de origem numa porta também em
+                 LISTEN aparece como entrada
+falso POSITIVO   serviço que fecha o listener depois do accept: a conexão
+                 aceita passa a parecer saída
+```
+
+Trocar isso por faixa de porta efêmera seria pior — é chute, e quem escolhe a
+porta é o implante.

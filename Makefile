@@ -36,9 +36,12 @@ verify: lint test build
 
 # dist cross-compila. O eixo que varia é ARQUITETURA, não distro — e o piso é
 # kernel 2.6.32 (RHEL/CentOS 6+); RHEL 5 fica com o script shell.
-dist:
+# dist DEPENDE de verify: sem isso, um GOOS herdado do ambiente produzia
+# executáveis PE chamados aletheia-linux-* com manifesto sha256 de aparência
+# autoritativa.
+dist: verify
 	for arch in amd64 arm64 386; do \
-		GOARCH=$$arch go build $(GOFLAGS) -ldflags="$(LDFLAGS)" \
+		GOOS=linux GOARCH=$$arch go build $(GOFLAGS) -ldflags="$(LDFLAGS)" \
 			-o dist/aletheia-linux-$$arch ./cmd/aletheia || exit 1; \
 	done
 	sha256sum dist/aletheia-linux-*

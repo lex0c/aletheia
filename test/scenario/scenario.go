@@ -63,6 +63,14 @@ type Scenario struct {
 	// Args extras para o scan.
 	Args []string
 
+	// NetAdmin dá CAP_NET_ADMIN ao contêiner e o deixa SEM REDE
+	// (--network=none). Os cenários de rede precisam de endereços de escopo
+	// público e privado para exercitar a classificação de peer, e a forma
+	// honesta de obter isso é criar apelidos em `lo` dentro de um namespace de
+	// rede isolado: o endereço é público para quem classifica, e nenhum pacote
+	// jamais sai da máquina.
+	NetAdmin bool
+
 	// Expect precisa aparecer; Forbid não pode aparecer. As proibições são
 	// tão valiosas quanto as expectativas: elas travam confusão entre checks
 	// e ruído em host limpo.

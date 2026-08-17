@@ -148,14 +148,20 @@ func (e *Env) Has(c Cap) bool { return e.Caps&c == c }
 // Missing devolve as capacidades de c que faltam.
 func (e *Env) Missing(c Cap) Cap { return c &^ e.Caps }
 
-// Reason explica por que uma capacidade falta.
+// Reason explica por que as capacidades do conjunto faltam. Devolve TODAS as
+// razões: colapsar para a primeira faz o rodapé citar "sem root" e omitir
+// "debugfs não montado", e o operador conclui que basta rodar com sudo.
 func (e *Env) Reason(c Cap) string {
+	var rs []string
 	for _, n := range c.Names() {
 		if r, ok := e.CapReason[n]; ok {
-			return r
+			rs = append(rs, r)
 		}
 	}
-	return "indisponível"
+	if len(rs) == 0 {
+		return "indisponível"
+	}
+	return strings.Join(rs, " · ")
 }
 
 // Options são as escolhas do operador que afetam o probe.

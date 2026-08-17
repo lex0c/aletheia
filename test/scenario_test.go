@@ -191,6 +191,11 @@ func runLive(t *testing.T, bin, img string, sc scenario.Scenario) result {
 	args := []string{"run", "--rm",
 		"-v", bin + ":/aletheia:ro",
 		"-v", helper + ":/helper:ro"}
+	if sc.NetAdmin {
+		// Sem rede E com poder de configurar a que não existe: o cenário monta
+		// apelidos em lo dentro do próprio namespace. Nenhum pacote sai.
+		args = append(args, "--network=none", "--cap-add=NET_ADMIN")
+	}
 	if sc.User != "" {
 		args = append(args, "-u", sc.User)
 	}

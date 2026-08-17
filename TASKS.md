@@ -39,9 +39,9 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 - [x] **4.1** `facts/systemd` — **baseado em arquivo**: units, timers, `.socket`, `.path`, `*.wants/`, drop-ins
 - [ ] **4.2** cron, `at`, anacron — incluindo extração do intervalo `*/N`
 - [x] **4.3** SSH — `authorized_keys`, `sshd_config` efetivo, `AuthorizedKeysCommand`, `.ssh/rc`
-- [ ] **4.4** shell startup — lista exata + diff contra `/etc/skel` (contexto, não achado) + `BASH_ENV`
+- [x] **4.4** shell startup — lista exata + diff contra `/etc/skel` (contexto, não achado) + `BASH_ENV`
 - [x] **4.5** loader — `ld.so.preload`, `ld.so.conf.d`, `/etc/environment`
-- [ ] **4.6** `rc.local`/`init.d`/generators, PAM, udev, MOTD, hooks de pacote
+- [x] **4.6** `rc.local`/`init.d`/generators, PAM, udev, MOTD, hooks de pacote
 - [ ] **4.7** CA plantada, `/etc/hosts`, resolver, git hooks, `auto_prepend_file`, metadata de nuvem
 - [ ] **4.8** supervisores (pm2, supervisord) e containers (`docker diff`, restart policy)
 
@@ -1370,3 +1370,73 @@ Depois das duas: zero falso positivo contra o host real e contra a matriz.
 26 checks, 59 cenários. Falta da fase 4: 4.4 (shell startup), 4.6 (rc.local,
 PAM, udev, generators), 4.7 (CA plantada, hosts, git hooks, metadata de nuvem),
 4.8 (supervisores e containers).
+
+---
+
+## Registro — fase 4.4 e 4.6: gatilhos de execução
+
+Cinco checks, 31 no total. O que junta um `.bashrc`, uma regra de udev e um hook
+do apt é a mesma pergunta: **QUANDO isto roda**.
+
+Por isso `When` virou CAMPO do modelo, não comentário: um achado em
+`/etc/profile.d` vale para TODO usuário, e um em `~/.zshenv` roda até em shell
+não interativo. São alcances diferentes, e o relatório precisa dizer qual — o
+operador usa isso para saber o que já rodou desde a invasão.
+
+```
+.bashrc              shell INTERATIVO — a cada login SSH, o favorito
+.zshenv              SEMPRE em zsh, inclusive não interativo — o mais forte
+BASH_ENV             shell NÃO interativo: script, cron, scp, comando remoto
+/etc/profile.d/*     shell de login, para TODO usuário
+rc.local             no boot, SE tiver bit de execução
+/etc/init.d/*        vira unit pelo systemd-sysv-generator, e NÃO aparece em
+                     /etc/systemd/system
+pam.d                a cada autenticação — o caminho que vê a senha
+udev                 em evento de dispositivo: sem horário, sem login, fora de
+                     toda correlação temporal
+generator            em todo boot e reload, ANTES das units
+```
+
+### Duas informações que a §7.6 dá de graça
+
+```
+diff contra /etc/skel   o esqueleto é a versão que a distribuição copiou para
+                        cada home. O que sobra foi ACRESCENTADO — baseline sem
+                        precisar de baseline
+posição no arquivo      o .bashrc de distro tem dezenas de linhas e ninguém rola
+                        até o fim. Acrescentar lá embaixo é o padrão do `echo >>`
+```
+
+As duas entram na evidência. `Tail` só é marcado em arquivo com mais de seis
+linhas de conteúdo — "no fim" não significa nada num arquivo de duas, e o
+cenário precisou plantar um `.bashrc` REALISTA para exercitar isso.
+
+### `rc.local` sem bit de execução
+
+Detalhe que decide, e que virou severidade: sem `+x` o arquivo é INERTE.
+Reportar como crítico algo que não roda desperdiça a atenção; omitir também
+erra, porque um `chmod +x` o ativa e o ctime data isso. Sai como AVISO dizendo
+que hoje não roda.
+
+### Dois falsos positivos contra o host real, com causas diferentes
+
+**`/etc/profile.d/gpm.sh`** de qualquer Arch. A linha é
+`/dev/tty[0-9]*) [ -n "$(pidof -s gpm)" ] && …` — um padrão de `case`, não um
+comando. O classificador de caminho é compartilhado com as units, onde o
+primeiro token É um executável; em linha de SHELL pode ser sintaxe.
+
+Correção na raiz: `pareceCaminho` recusa token com metacaractere de shell
+(`*?[]()|;&$"'` e crase). É um teste de "isto não pode ser caminho de
+executável", não um remendo para um arquivo.
+
+**`systemd-debug-generator`** — que é um **ELF**. Eu estava fatiando um binário
+em linhas, e `TTYPath=/dev/%s` no meio do código virava achado. O coletor passou
+a detectar binário pela mesma heurística do `grep` (byte NUL nos primeiros 512),
+e o arquivo continua registrado como gatilho — a existência é o fato — sem
+linhas para avaliar.
+
+### Estado
+
+31 checks, 61 cenários, zero falso positivo contra o host real. Falta da fase 4:
+4.7 (CA plantada, hosts, resolver, git hooks, metadata de nuvem) e 4.8
+(supervisores e containers).

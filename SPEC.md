@@ -814,7 +814,8 @@ ordem sugerida (§19 — não inverta):
 ```jsonl
 {"host":"web-01","ts":"2026-08-16T21:44:03Z","tool":"aletheia/0.2+a1b2c3f","mode":"live",
  "id":"proc.revshell_fd_socket","ref":"17","sev":"CRITICAL","origin":"native",
- "subject":"pid=6574","title":"fd 0,1,2 no mesmo socket",
+ "subject":"pid=6574","actor":"/usr/local/sbin/systemd-netlinkd",
+ "title":"fd 0,1,2 no mesmo socket",
  "evidence":["exe=/home/node/.config/htop/defunct (deleted)","peer=51.91.190.241:443"],
  "next_steps":["aletheia preserve --pid 6574 --out $IR"]}
 {"host":"web-01","ts":"...","id":"coverage","checked":39,"total":47,
@@ -822,6 +823,10 @@ ordem sugerida (§19 — não inverta):
 ```
 
 > **A cobertura vai no JSONL também.** Sem essa linha, a agregação de frota mostra "web-02 sem achados" escondendo que lá metade dos checks não rodou — que é precisamente o erro que a ferramenta existe para não cometer.
+
+**`actor`** é o binário por trás do `subject`, quando o sujeito não é ele: o `exe` de um pid, o alvo do `ExecStart` de uma unit. Sai ausente na maioria dos achados, e existe porque um invasor competente dispara checks cujos sujeitos são de tipos diferentes — um caminho, um pid, um nome de unit — apontando para o mesmo implante. Com o campo, a agregação de frota consegue perguntar "quantos hosts têm sinal neste binário" sem reconstruir a tradução em cada consumidor.
+
+> Ele é preenchido pelo MOTOR, não pelo check, e só quando algum outro achado da mesma execução já nomeia aquele caminho como sujeito próprio. Sem essa condição, todo processo de um interpretador compartilhado viraria o mesmo ator.
 
 ### 7.5. Rebaixamento de confiança
 

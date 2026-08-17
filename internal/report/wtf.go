@@ -110,9 +110,22 @@ func writeWtfFindings(w io.Writer, r *check.Report) {
 			break
 		}
 		linhas++
-		fmt.Fprintln(w, pad(fmt.Sprintf("%s %-12s %d sinais: %s",
-			g.Sev().Mark(), Safe(g.Subject), len(g.Findings),
-			Safe(resumoTitulos(g))), 72)+"§"+strings.Join(g.Refs(), " §"))
+		// O `pad` alinha e NÃO corta. Com o alvo virando um caminho inteiro e
+		// três títulos atrás dele, a linha passou de duzentas colunas — e este
+		// comando promete UMA TELA. O corte é no resumo, que é a parte
+		// recuperável: `scan` imprime os títulos por extenso.
+		//
+		// O caminho pode sozinho estourar o orçamento — `/home/deploy/.local/
+		// share/app/versions/1.2.3/bin/daemon` tem 60 colunas —, e aí não sobra
+		// resumo nenhum. Nesse caso o `: ` sai junto: dois-pontos sem nada
+		// depois parece saída truncada por defeito. As seções continuam ali, e
+		// são elas que dizem o que olhar.
+		cab := fmt.Sprintf("%s %-12s %d sinais",
+			g.Sev().Mark(), Safe(g.Subject), len(g.Findings))
+		if s := corta(Safe(resumoTitulos(g)), 70-len([]rune(cab))); s != "" {
+			cab += ": " + s
+		}
+		fmt.Fprintln(w, pad(cab, 72)+"§"+strings.Join(g.Refs(), " §"))
 	}
 
 	// O denominador conta só o que SERIA impresso: usar len(r.Findings) incluiria

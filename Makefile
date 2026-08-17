@@ -39,6 +39,12 @@ test:
 mutacao:
 	python3 test/mutacao.py --alvo internal/checks --limite 40
 
+# O -race exige cgo, e o CGO_ENABLED=0 do topo vale para o arquivo inteiro:
+# sem esta linha o alvo morre em "requires cgo" sem rodar teste nenhum — que é
+# o pior jeito de uma verificação falhar, porque parece que ela rodou. A
+# concessão vale só AQUI; o binário entregue continua estático pelas outras
+# regras, e o `verify` confirma isso.
+race: export CGO_ENABLED = 1
 race:
 	go test -race ./...
 	go test -race -tags scenarios -count=1 -timeout 15m ./test/...

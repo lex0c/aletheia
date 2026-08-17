@@ -3,6 +3,7 @@ package report
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -475,5 +476,129 @@ func TestAcoesNaoPerdemComandoDistinto(t *testing.T) {
 	}
 	if strings.Count(out, "cp /proc/10/exe") != 1 {
 		t.Errorf("o comando repetido precisa aparecer UMA vez:\n%s", out)
+	}
+}
+
+// Dois listeners do mesmo processo produzem dois achados de mesmo ID e mesmo
+// sujeito. Dentro do bloco de um alvo eles viravam duas linhas idênticas — o
+// que as separa está na evidência, não no título — e o operador procurava uma
+// diferença que a tela não mostrava.
+func TestSinaisDoGrupoCompactaRepeticao(t *testing.T) {
+	g := check.SubjectGroup{Subject: "/x", Findings: []check.Finding{
+		{ID: "net.listener_unowned", Subject: "pid=1", Title: "porta exposta"},
+		{ID: "net.listener_unowned", Subject: "pid=1", Title: "porta exposta"},
+		{ID: "integrity.no_package_owner", Subject: "/x", Title: "sem dono"},
+	}}
+	s := sinaisDoGrupo(g)
+	if len(s) != 2 {
+		t.Fatalf("duas linhas: a repetida e a outra; deu %d", len(s))
+	}
+	if s[0].n != 2 {
+		t.Errorf("a contagem tem que sobreviver — duas portas não são uma: n=%d", s[0].n)
+	}
+	if s[1].n != 1 {
+		t.Errorf("o achado distinto não pode ser somado ao anterior: n=%d", s[1].n)
+	}
+	// A ORDEM é a do relatório: compactar não pode reordenar o bloco.
+	if s[0].fd.ID != "net.listener_unowned" || s[1].fd.ID != "integrity.no_package_owner" {
+		t.Error("a ordem original do grupo se perdeu")
+	}
+}
+
+func TestCortaPorRune(t *testing.T) {
+	// Cortar por byte parte o acento no meio e emite lixo no terminal.
+	if got := corta("binário", 4); got != "bin…" {
+		t.Errorf("corta = %q", got)
+	}
+	if got := corta("abc", 10); got != "abc" {
+		t.Errorf("o que cabe não é tocado: %q", got)
+	}
+	if got := corta("abc", 1); got != "" {
+		t.Errorf("sem espaço não se inventa linha: %q", got)
+	}
+}
+
+// O bloco de um alvo é onde a correlação por ator aparece para o operador, e
+// ele tem três decisões que a mutação alcança e nenhum teste unitário afirmava.
+func TestBlocoDeAlvoPorAtor(t *testing.T) {
+	fd := func(id, subj, ator, title string) check.Finding {
+		return check.Finding{ID: id, Ref: "1", Subject: subj, Ator: ator,
+			Title: title, Sev: check.SevWarn}
+	}
+	r := &check.Report{
+		Coverage: check.Coverage{Total: 1, Complete: 1},
+		Findings: []check.Finding{
+			fd("a", "/x", "", "sem dono"),
+			fd("b", "pid=7", "/x", "fala com a internet"),
+		},
+	}
+	out := render(r, 0)
+
+	if !strings.Contains(out, "/x") || !strings.Contains(out, "2 sinais no mesmo alvo") {
+		t.Fatalf("o grupo tinha que se formar pelo ator:\n%s", out)
+	}
+	// O sujeito PRÓPRIO do achado sobrevive: é ele que o operador usa depois.
+	if !strings.Contains(out, "(pid=7)") {
+		t.Errorf("o pid do achado de rede sumiu dentro do bloco:\n%s", out)
+	}
+	// E o achado que JÁ é o alvo não ganha um parêntese redundante "(/x)".
+	if strings.Contains(out, "(/x)") {
+		t.Errorf("o achado cujo sujeito é o próprio alvo não repete o alvo:\n%s", out)
+	}
+}
+
+// Um binário acusado reúne todo processo que o executa. Vinte deles não podem
+// imprimir vinte linhas numa seção que existe para caber na tela — e o que
+// ficou de fora precisa aparecer como contagem, nunca sumir calado.
+func TestBlocoDeAlvoCortaComContagem(t *testing.T) {
+	var fs []check.Finding
+	for i := 0; i < 20; i++ {
+		fs = append(fs, check.Finding{
+			ID: "net.egress_unowned", Ref: "4.3", Sev: check.SevWarn,
+			Subject: "pid=" + strconv.Itoa(i), Ator: "/x",
+			Title: "fala com a internet",
+		})
+	}
+	fs = append(fs, check.Finding{ID: "integrity.no_package_owner", Ref: "24",
+		Sev: check.SevWarn, Subject: "/x", Title: "sem dono"})
+	r := &check.Report{Coverage: check.Coverage{Total: 1, Complete: 1}, Findings: fs}
+
+	out := render(r, 0)
+	if !strings.Contains(out, "21 sinais no mesmo alvo") {
+		t.Errorf("a contagem do cabeçalho tem que ser a real:\n%s", out)
+	}
+	if !strings.Contains(out, "e mais 13 sinal(is)") {
+		t.Errorf("o que passou do teto tem que aparecer como contagem:\n%s", out)
+	}
+	if n := strings.Count(out, "     · "); n != 9 {
+		t.Errorf("esperava 8 linhas de sinal + a do corte, deu %d:\n%s", n, out)
+	}
+}
+
+// As oito linhas impressas podem representar MAIS de oito achados, porque a
+// repetição já foi compactada. Contar o corte sobre o total bruto dizia "e mais
+// 14" onde faltavam 5 — um número inventado no lugar exato onde o comentário
+// promete que nada some calado.
+func TestBlocoDeAlvoContaOCorteSobreLinhasCompactadas(t *testing.T) {
+	var fs []check.Finding
+	for i := 0; i < 10; i++ { // dez achados IDÊNTICOS: uma linha só, n=10
+		fs = append(fs, check.Finding{ID: "net.listener_unowned", Ref: "4.2",
+			Sev: check.SevWarn, Subject: "pid=1", Ator: "/x", Title: "porta exposta"})
+	}
+	for i := 0; i < 11; i++ { // e onze distintos
+		fs = append(fs, check.Finding{ID: "net.egress_unowned", Ref: "4.3",
+			Sev: check.SevWarn, Subject: "pid=" + strconv.Itoa(100+i), Ator: "/x",
+			Title: "fala com a internet"})
+	}
+	fs = append(fs, check.Finding{ID: "integrity.no_package_owner", Ref: "24",
+		Sev: check.SevWarn, Subject: "/x", Title: "sem dono"})
+
+	out := render(&check.Report{Coverage: check.Coverage{Total: 1, Complete: 1}, Findings: fs}, 0)
+	if !strings.Contains(out, "22 sinais no mesmo alvo") {
+		t.Errorf("o cabeçalho conta ACHADOS, e são 22:\n%s", out)
+	}
+	// 8 linhas cobrem 10+7 = 17 achados; sobram 5.
+	if !strings.Contains(out, "e mais 5 sinal(is)") {
+		t.Errorf("o corte tem que contar o que sobrou de verdade:\n%s", out)
 	}
 }

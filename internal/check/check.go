@@ -99,6 +99,13 @@ type Finding struct {
 	Sev     Severity `json:"-"`
 	Origin  Origin   `json:"origin"`
 
+	// Ator é o binário por trás do sujeito, quando o sujeito não é ele: o exe
+	// de um pid, o alvo do ExecStart de uma unit. É preenchido pelo MOTOR, e
+	// não pelo check — quem escreve o achado conhece o próprio sujeito e não os
+	// dos outros, e é justamente a visão de conjunto que faltava. Vazio é o
+	// normal.
+	Ator string `json:"actor,omitempty"`
+
 	Evidence  []string `json:"evidence,omitempty"`
 	NextSteps []string `json:"next_steps,omitempty"`
 

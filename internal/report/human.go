@@ -88,6 +88,42 @@ func writeHeader(w io.Writer, f *facts.Facts, e *env.Env) {
 	fmt.Fprintln(w)
 }
 
+// maxSinaisPorGrupo é o teto de linhas de um alvo correlacionado no resumo. O
+// que passa disso vira uma linha com a contagem, e nunca desaparece.
+const maxSinaisPorGrupo = 8
+
+// sinal é uma linha do bloco de um alvo, com quantos achados idênticos ela
+// representa.
+type sinal struct {
+	fd check.Finding
+	n  int
+}
+
+// sinaisDoGrupo junta o que é REPETIÇÃO dentro do bloco de um alvo.
+//
+// O caso apareceu no primeiro host real: o `adb` escuta em duas portas, o check
+// de listener emitiu dois achados de mesmo ID e mesmo pid, e o bloco imprimiu
+// duas linhas idênticas — o que distingue as duas está na evidência, não no
+// título. Solto, isso já vinha compactado como "2×"; dentro do grupo voltava a
+// ser texto repetido sem motivo aparente, que faz o operador procurar uma
+// diferença que a linha não mostra.
+//
+// A contagem fica, porque duas portas não são uma. Some só a duplicata visual.
+func sinaisDoGrupo(g check.SubjectGroup) []sinal {
+	var out []sinal
+	pos := map[string]int{}
+	for _, fd := range g.Findings {
+		k := fd.ID + "\x00" + fd.Subject
+		if i, ok := pos[k]; ok {
+			out[i].n++
+			continue
+		}
+		pos[k] = len(out)
+		out = append(out, sinal{fd: fd, n: 1})
+	}
+	return out
+}
+
 func writeCompact(w io.Writer, r *check.Report) {
 	crit, warn, manual, _ := r.Counts()
 	cov := r.Coverage
@@ -107,8 +143,41 @@ func writeCompact(w io.Writer, r *check.Report) {
 	for _, g := range grupos {
 		fmt.Fprintf(w, "%s %-13s %d sinais no mesmo alvo\n",
 			g.Sev().Mark(), Safe(g.Subject), len(g.Findings))
-		for _, fd := range g.Findings {
-			line := "     · " + Safe(fd.Title) + marcaNovo(fd)
+		sinais := sinaisDoGrupo(g)
+		for i, e := range sinais {
+			// Antes do ator, um grupo só reunia achados do MESMO sujeito e o
+			// teto era o número de checks. Agora um binário acusado reúne todos
+			// os processos que o executam, e um interpretador modificado com
+			// quarenta processos imprimiria quarenta linhas numa seção que
+			// existe para caber na tela. O corte diz quanto sobrou e onde ver:
+			// truncar em silêncio é a forma de mentir que esta ferramenta não
+			// pode ter.
+			//
+			// As duas contas são sobre as LINHAS JÁ COMPACTADAS, e não sobre o
+			// total bruto de achados. Misturar as duas escalas dizia "e mais
+			// 14" onde faltavam 5: as oito linhas impressas podem representar
+			// mais de oito achados, e a diferença ia toda para o número errado.
+			if i == maxSinaisPorGrupo && len(sinais) > maxSinaisPorGrupo+1 {
+				resta := 0
+				for _, s := range sinais[maxSinaisPorGrupo:] {
+					resta += s.n
+				}
+				fmt.Fprintf(w, "     · … e mais %d sinal(is) no mesmo alvo — `-v` mostra todos\n", resta)
+				break
+			}
+			fd := e.fd
+			line := "     · "
+			if e.n > 1 {
+				line += strconv.Itoa(e.n) + "× "
+			}
+			line += Safe(fd.Title) + marcaNovo(fd)
+			// Quando o grupo se formou por ATOR, o sujeito próprio do achado é
+			// outra coisa — `pid=17`, `sshd.service` —, e é ELE que o operador
+			// usa no passo seguinte. Perdê-lo dentro do bloco trocaria uma
+			// história por um alvo que ninguém consegue seguir.
+			if fd.Ator != "" && fd.Subject != "" {
+				line += " (" + Safe(fd.Subject) + ")"
+			}
 			if fd.Downgraded {
 				line += " ⚠rebaixado"
 			}
@@ -356,6 +425,21 @@ func dedupe(ss []string) []string {
 		}
 	}
 	return out
+}
+
+// corta limita a n colunas, por RUNE: o texto é em português e cortar por byte
+// parte um acento no meio e emite lixo no terminal. Devolve "" quando não sobra
+// espaço nenhum — melhor perder o pedaço do que estourar a linha que o chamador
+// prometeu.
+func corta(s string, n int) string {
+	if n <= 1 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
 }
 
 func pad(s string, n int) string {

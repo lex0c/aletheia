@@ -845,11 +845,28 @@ func init() {
 		// nível de esforço, e é esse o ganho: não é uma regra melhor, são três
 		// perguntas que não se contornam com a mesma jogada.
 		//
-		// O QUE AINDA ESCAPA, e continua valendo como limite: os três achados
-		// têm sujeitos diferentes — um pid, um caminho e um nome de unit — e a
-		// correlação agrupa por sujeito. O operador recebe três avisos soltos e
-		// precisa juntá-los na cabeça. Ver que são o MESMO ator ainda é trabalho
-		// humano.
+		// O LIMITE QUE ESTE CENÁRIO REGISTRAVA FOI FECHADO, e é a segunda vez
+		// que ele mede a própria previsão se cumprindo.
+		//
+		// O texto anterior dizia: "os três achados têm sujeitos diferentes — um
+		// pid, um caminho e um nome de unit — e a correlação agrupa por
+		// sujeito. Ver que são o MESMO ator ainda é trabalho humano." Era
+		// verdade, e a saída era esta:
+		//
+		//	⚠ 2×            binário que nenhum pacote reivindica
+		//	⚠ pid=17        conexão para endereço público
+		//	⚠ sshd.service  drop-in acrescenta execução
+		//
+		// Três avisos, três sujeitos, UM binário. A resolução de ator
+		// (check/ator.go) passou a traduzir pid e unit para o binário por trás
+		// deles, e o mesmo host agora sai como uma história só — que é o que
+		// esta ferramenta promete e o que uma lista de fatos não dá.
+		//
+		// O que continua fora do alcance é o adversário cujos sujeitos não
+		// apontam para o mesmo lugar: implante empacotado, persistência por
+		// caminho que não cita o binário, execução por interpretador. Ali não
+		// há o que correlacionar, e a resposta é check novo — não correlação
+		// melhor.
 		Images:    minimal,
 		Caps:      []string{"NET_ADMIN"},
 		NoNetwork: true,
@@ -876,6 +893,14 @@ func init() {
 			// derrota por completo. É o limite do atalho da §5.10, e é por isso
 			// que ele não pode ser a detecção primária.
 			"tool.binary", "tool.artifact",
+		},
+		// O QUE ESTE CENÁRIO MEDE AGORA, e o motivo de ele existir: não é cada
+		// check, é os três chegarem ao operador como um alvo só. O nome do
+		// binário na linha do grupo é a prova de que a fusão foi por ATOR — o
+		// caminho não é sujeito de dois dos três achados.
+		ExpectOutput: []string{
+			"/usr/local/sbin/systemd-netlinkd 3 sinais no mesmo alvo",
+			"(pid=", "(sshd.service)", // e o sujeito próprio sobreviveu ao grupo
 		},
 		Exit:           1,
 		MustBeComplete: true,

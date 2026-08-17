@@ -173,6 +173,9 @@ func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 	}
 
 	r.applyTrustDowngrade()
+	// Depois de TODOS os checks, porque a resolução precisa ver os achados uns
+	// dos outros — é um achado nomear o caminho que autoriza a fusão.
+	resolverAtores(r, f)
 	r.sortFindings()
 	return r
 }
@@ -341,6 +344,19 @@ type SubjectGroup struct {
 
 // Sev é a maior severidade do grupo: um implante com três avisos e um crítico
 // é um crítico.
+//
+// E é MÁXIMO, não soma. A tentação seguinte, depois que o ator passou a juntar
+// três avisos num alvo só, é promover o grupo por contagem — "três sinais no
+// mesmo binário é crítico". Uma medição mata a ideia: um agente compilado
+// localmente em /usr/local produz exatamente esses três, e legitimamente —
+// nenhum pacote o reivindica, ele fala com a internet, e tem uma unit que o
+// inicia. Promover por contagem quebraria o exit code em todo host que instala
+// software fora do gerenciador de pacotes, que é a maioria dos servidores.
+//
+// A correlação melhora a LEITURA, não a acusação. Os sinais que não têm
+// história legítima — caminho oculto, atributo imutável, exe apagado, memfd,
+// rastro removido — já entram como críticos por conta própria, e sobem o grupo
+// pelo máximo sem precisar de aritmética nova.
 func (g SubjectGroup) Sev() Severity {
 	s := SevInfo
 	for _, f := range g.Findings {
@@ -387,11 +403,19 @@ func (r *Report) Correlate() ([]SubjectGroup, []Finding) {
 		if f.Subject == "" || f.Sev == SevInfo {
 			continue
 		}
-		if _, ok := porAlvo[f.Subject]; !ok {
-			ordem = append(ordem, f.Subject)
+		// O ATOR vence o sujeito quando existe: `pid=17`, `sshd.service` e o
+		// caminho do binário são três sujeitos de UM alvo, e sem esta linha o
+		// invasor que espalha sinais por tipos diferentes de sujeito nunca
+		// forma grupo. Vazio é o normal, e aí é o sujeito de sempre.
+		alvo := f.Subject
+		if f.Ator != "" {
+			alvo = f.Ator
 		}
-		porAlvo[f.Subject] = append(porAlvo[f.Subject], f)
-		posDoAlvo[f.Subject] = append(posDoAlvo[f.Subject], i)
+		if _, ok := porAlvo[alvo]; !ok {
+			ordem = append(ordem, alvo)
+		}
+		porAlvo[alvo] = append(porAlvo[alvo], f)
+		posDoAlvo[alvo] = append(posDoAlvo[alvo], i)
 	}
 
 	// agrupado é marcado por POSIÇÃO, não por alvo. Marcar por alvo descartava

@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -267,5 +268,37 @@ func TestWtfLimitaGruposEAvulsosJuntos(t *testing.T) {
 	}
 	if !strings.Contains(out, "e mais") {
 		t.Errorf("o que ficou de fora precisa ser contado:\n%s", out)
+	}
+}
+
+// Um caminho longo sozinho estoura o orçamento da linha, e o resumo fica sem
+// espaço. O que não pode sair é "3 sinais:" com nada depois — dois-pontos vazio
+// parece defeito de truncamento, e a linha do `wtf` é lida em dez segundos.
+func TestWtfComAlvoLongoNaoDeixaDoisPontosVazio(t *testing.T) {
+	longo := "/home/deploy/.local/share/aplicacao/versions/1.2.3/bin/daemon-longo"
+	r := &check.Report{
+		Coverage: check.Coverage{Total: 2, Complete: 2},
+		Findings: []check.Finding{
+			{ID: "integrity.no_package_owner", Ref: "24", Sev: check.SevWarn,
+				Subject: longo, Title: "binário que nenhum pacote reivindica"},
+			{ID: "net.egress_unowned", Ref: "4.3", Sev: check.SevWarn,
+				Subject: "pid=7", Ator: longo, Title: "conexão para endereço público"},
+		},
+	}
+	var b bytes.Buffer
+	Wtf(&b, r, &facts.Facts{}, wtfEnv(), time.Second, r.Coverage.Total, nil)
+
+	for _, l := range strings.Split(b.String(), "\n") {
+		if !strings.Contains(l, "sinais") {
+			continue
+		}
+		// O `pad` insere espaço depois do cabeçalho, então a forma ruim é
+		// "sinais:" seguido só de branco até a seção ou até o fim da linha.
+		if regexp.MustCompile(`sinais:\s*(§|$)`).MatchString(l) {
+			t.Errorf("dois-pontos sem resumo atrás: %q", l)
+		}
+		if !strings.Contains(l, "§24") || !strings.Contains(l, "§4.3") {
+			t.Errorf("as seções são o que sobra quando o resumo não cabe: %q", l)
+		}
 	}
 }

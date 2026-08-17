@@ -124,10 +124,18 @@ firewall    tabela vazia é comum e legítima (grupo de segurança da nuvem faz
 ## O que este mapa NÃO diz
 
 Cobertura de técnica não é cobertura de ADVERSÁRIO. Um invasor que combina
-técnicas cobertas de forma que nenhum check correlacione continua passando — é
-exatamente o que o cenário 71 media, e o que ele ainda registra como limite: os
-três achados dele têm sujeitos diferentes, e ver que são o mesmo ator continua
-sendo trabalho humano.
+técnicas cobertas de forma que nenhum check correlacione continua passando.
+
+Metade desse limite caiu. O cenário 71 registrava que os três achados dele têm
+sujeitos diferentes — um caminho, um pid e um nome de unit — e que ver o mesmo
+ator por trás deles era trabalho humano. A resolução de ator
+(`internal/check/ator.go`) traduz pid e unit para o binário e o host sai como
+uma história só.
+
+A outra metade continua: ela funde o que aponta para o mesmo binário, e o
+adversário cujos sujeitos **não** convergem — implante empacotado, persistência
+que não cita o binário, execução por interpretador — não tem o que correlacionar.
+Ali a resposta é check novo, não correlação melhor.
 
 E há o eixo que nenhuma técnica desta lista captura: **tempo**. O cenário A3 —
 ativação adiada, nada rodando no instante da varredura — não é uma técnica

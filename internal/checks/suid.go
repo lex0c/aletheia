@@ -111,10 +111,20 @@ var suidInesperado = check.Check{
 					"não para root, e por isso pesa menos")
 			}
 			if ehInterpretador(s.Path) {
-				// Um shell ou interpretador com setuid não precisa de análise
-				// nenhuma: `.x -p` já devolve root. É a forma mais direta que
-				// existe, e o operador precisa saber que é imediata.
-				sev = check.SevCritical
+				// EVIDÊNCIA, e não severidade — e a diferença veio de um teste de
+				// mutação.
+				//
+				// Rebaixar este ramo de crítico para aviso passou pela suíte
+				// inteira sem ninguém reclamar, e a investigação explicou por quê:
+				// ele só MUDA alguma coisa num caso contorcido — sem dono de
+				// pacote, fora de diretório gravável, dono não-root e nome
+				// preservado. Nos caminhos reais a severidade já é crítica por
+				// outro motivo.
+				//
+				// A nota continua: saber que executar aquilo já devolve
+				// privilégio, sem análise nem exploração, muda o que o operador
+				// faz primeiro. O que saiu foi o ramo de decisão que não se
+				// pagava.
 				ev = append(ev, "e é um interpretador ("+baseDe(s.Path)+"): não "+
 					"precisa de análise nem de exploração — executar já devolve "+
 					"a identidade do dono")

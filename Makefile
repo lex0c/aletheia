@@ -27,6 +27,18 @@ test:
 # t.Parallel() e um mapa global era montado de forma preguiçosa. Rodar o
 # detector só no que já estava coberto dá a sensação de cobertura sem a
 # cobertura.
+# mutacao mede se a suíte TEM DENTES.
+#
+# Cobertura diz quais linhas foram executadas; não diz se alguém estava olhando.
+# A mutação estraga uma decisão e pergunta se algum teste reclama — e o número
+# que sai é a resposta.
+#
+# Sem --completo roda só os unitários, e MEDE MENOS: metade da verificação desta
+# base está nos cenários. A primeira execução deu 70% com unitários e 67% com a
+# suíte inteira sobre outra amostra, e achou dois defeitos reais.
+mutacao:
+	python3 test/mutacao.py --alvo internal/checks --limite 40
+
 race:
 	go test -race ./...
 	go test -race -tags scenarios -count=1 -timeout 15m ./test/...

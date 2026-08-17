@@ -128,6 +128,29 @@ func init() {
 	})
 
 	Register(Scenario{
+		ID:   "E7-auditoria-sem-execve",
+		Desc: "auditoria configurada e sem regra de execução: a presença dela faz parecer que há trilha",
+		// O terceiro estado, e o que mais engana: há auditd, há regras, e
+		// nenhuma registra execução.
+		//
+		// Vigiar escrita em arquivo é uso legítimo e comum — conformidade pede
+		// exatamente isso. Mas não responde "o que rodou", e um host assim é
+		// tão cego quanto um sem regra nenhuma para reconstruir execução. A
+		// diferença é que a presença do auditd faz parecer que há trilha.
+		//
+		// Este cenário existe porque um TESTE DE MUTAÇÃO o exigiu: rebaixar a
+		// severidade deste ramo passava pela suíte inteira sem ninguém
+		// reclamar.
+		Images: matriz,
+		Plant:  auditoriaSemExecve,
+		Expect: []Expect{
+			{ID: "antiforense.audit_disabled", Sev: "WARN", Subject: "auditoria sem execve"},
+			{ID: "antiforense.audit_disabled", Evidence: "faz parecer que há trilha"},
+		},
+		Exit: 1,
+	})
+
+	Register(Scenario{
 		ID:   "E5-sem-auditoria-nao-eh-achado",
 		Desc: "host sem auditoria não produz achado: é o estado da maioria dos servidores",
 		// O outro lado, e ele importa mais que o primeiro.
@@ -210,4 +233,14 @@ chmod 644 /root/.aws/credentials
 
 printf 'DB_PASSWORD=exemplo\nAPI_TOKEN=exemplo\n' > /srv/app/.env
 chmod 600 /srv/app/.env
+`
+
+// auditoriaSemExecve: regras que vigiam ARQUIVO, nenhuma que vigie execução.
+const auditoriaSemExecve = `
+mkdir -p /etc/audit/rules.d
+cat > /etc/audit/rules.d/audit.rules <<'FIM'
+-w /etc/passwd -p wa -k identidade
+-w /etc/shadow -p wa -k identidade
+-w /etc/sudoers -p wa -k escalada
+FIM
 `

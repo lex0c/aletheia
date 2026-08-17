@@ -78,3 +78,37 @@ for h in pre-commit post-update commit-msg; do
   chmod 755 /var/tmp/projeto/.git/hooks/$h.sample
 done
 `
+
+// I1 nasceu de um TESTE DE MUTAÇÃO.
+//
+// Rebaixar de aviso para informativo o ramo do `rc.local` sem bit de execução
+// passou pela suíte inteira sem ninguém reclamar — e a razão apareceu ao
+// procurar: TODOS os cenários de rc.local fazem `chmod +x`. A distinção que a
+// ferramenta faz de propósito nunca tinha sido exercitada.
+func init() {
+	Register(Scenario{
+		ID:   "I1-rc-local-inerte",
+		Desc: "rc.local com o mesmo payload e SEM bit de execução: inerte hoje, e um chmod o ativa",
+		// O detalhe que decide, e que a ferramenta diz em voz alta: sem o bit
+		// de execução o arquivo não roda. Ele continua sendo persistência
+		// PLANTADA — o conteúdo está lá, e um `chmod +x` de um segundo o ativa
+		// —, mas hoje não faz nada, e a severidade acompanha isso.
+		//
+		// O ctime do arquivo data a ativação quando ela vier, e é por isso que
+		// o achado não some: o que se vê aqui é uma arma carregada e travada.
+		Images: matriz,
+		Plant:  rcLocalInerte,
+		Expect: []Expect{
+			{ID: "persist.trigger_exec", Sev: "WARN", Subject: "/etc/rc.local"},
+			{ID: "persist.trigger_exec", Evidence: "INERTE hoje"},
+			{ID: "persist.trigger_exec", Evidence: "chmod +x o ativa"},
+		},
+		Exit: 1,
+	})
+}
+
+// rcLocalInerte é o mesmo conteúdo do cenário de gatilhos, sem o `chmod +x`.
+const rcLocalInerte = `
+printf '#!/bin/sh\n/dev/shm/agent &\nexit 0\n' > /etc/rc.local
+chmod 644 /etc/rc.local
+`

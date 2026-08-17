@@ -3104,3 +3104,80 @@ a afirmativa.
 **Seis das sete lacunas do `ATTACK.md` fechadas.** Sobrou a de pior relação
 custo/sinal — AppArmor em modo complain e firewall vazio —, que é o resultado
 esperado de trabalhar uma lista priorizada até o fim.
+
+---
+
+## Registro — teste de mutação
+
+Era o item 3 da minha própria lista de "o que subiria a confiança". Os dois
+primeiros já tinham sido feitos; este é o que mede em vez de afirmar.
+
+### Por que, exatamente
+
+Cobertura diz quais linhas foram EXECUTADAS. Não diz se alguém estava olhando.
+Um teste que executa uma linha e não afirma nada sobre ela conta como cobertura
+e não protege nada — e `facts` estava em 37%, com as duas últimas auditorias
+achando defeito justamente ali.
+
+A mutação faz a pergunta certa: **se eu estragar esta decisão, algum teste
+reclama?**
+
+As mutações não vêm de catálogo genérico — vêm do que ESTE código decide:
+severidade, limiar e guarda. É nelas que um defeito vira falso positivo ou
+achado perdido.
+
+### O número
+
+```
+70%   mortas, só com os testes unitários       (amostra de 40)
+67%   mortas, unitários + cenários             (amostra de 12)
+```
+
+O segundo número parece pior e não é: são amostras diferentes, e é justamente
+esse o defeito que a primeira versão do script escondia — ele prometia
+comparabilidade entre execuções via semente fixa, e **assim que o fonte muda os
+números de linha mudam junto**. Comparar taxas entre versões diferentes do
+código compara coisas diferentes. O comentário agora diz isso.
+
+### Dois achados reais, de tipos diferentes
+
+**Teste que faltava.** Rebaixar a severidade do estado "auditoria instalada e
+sem regra de execve" passou pela suíte inteira. Não havia cenário para o
+terceiro estado do check — o que mais engana, porque a presença do auditd faz
+parecer que há trilha.
+
+Junto, o mesmo tipo: rebaixar o ramo do `rc.local` SEM bit de execução também
+passava. A razão apareceu ao procurar — **todos** os cenários de rc.local fazem
+`chmod +x`. A distinção que a ferramenta faz de propósito, entre arma carregada
+e arma disparada, nunca tinha sido exercitada.
+
+**Decisão que não se pagava.** O ramo que promovia a crítico um interpretador
+com setuid sobreviveu — e a investigação explicou: ele só MUDA alguma coisa num
+caso contorcido (sem dono, fora de diretório gravável, dono não-root e nome
+preservado). Nos caminhos reais a severidade já é crítica por outro motivo.
+
+Eu já tinha escrito, no cenário C1, que aquele reconhecimento "não é detecção,
+porque é por NOME e invasor renomeia". A mutação mostrou a consequência: o ramo
+de DECISÃO não se pagava. A nota continua — saber que executar aquilo já devolve
+privilégio muda o que o operador faz primeiro —, o que saiu foi o `if` que
+mudava severidade.
+
+Essa é a categoria mais rara e a mais valiosa: código que pode sair.
+
+### E os sobreviventes que NÃO são lacuna
+
+Nem todo sobrevivente é defeito. Dois exemplos desta rodada:
+
+```
+i >= 0 → i > 0    num índice que nunca pode ser zero (a linha de sudoers
+                  nunca COMEÇA com NOPASSWD:) — mutação equivalente
+&& → ||           numa condição onde a precedência do Go faz o resultado ser
+                  o mesmo em todo caminho testado
+```
+
+O script não distingue equivalente de sobrevivente, e isso é limite conhecido: a
+distinção exige ler o código, que é o trabalho que ele existe para direcionar.
+
+### Estado
+
+70 checks, 99 cenários, 148 execuções. `make mutacao` é alvo próprio.

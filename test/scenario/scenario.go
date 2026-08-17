@@ -122,6 +122,20 @@ type Scenario struct {
 	// Exit é o código esperado. -1 = não verificar.
 	Exit int
 
+	// MaxWarn é o ORÇAMENTO DE RUÍDO: o máximo de avisos que este cenário pode
+	// produzir. Vale só onde foi declarado (0 = não verificar).
+	//
+	// Existe por causa de um cenário: um servidor de produção legítimo, com dois
+	// anos de acúmulo — binário instalado à mão, agente de APM com preload,
+	// backup por rclone, CA corporativa, gente no grupo docker. Nada ali é
+	// ataque, e a ferramenta tem coisas verdadeiras a dizer sobre quase tudo.
+	//
+	// O ponto é que "quantos avisos um host limpo produz" decide se a
+	// ferramenta é usável numa frota. Acima de uma dúzia o operador aprende a
+	// ignorar a saída, e aí o achado que importa se perde junto. Sem este
+	// campo isso seria opinião; com ele é regressão.
+	MaxWarn int
+
 	// Coverage exige que a execução termine reportando cobertura incompleta —
 	// é o invariante central da ferramenta e precisa de teste próprio.
 	MustBeIncomplete bool

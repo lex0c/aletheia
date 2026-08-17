@@ -36,19 +36,30 @@ func TestPidOcultoSeveridadePelaVia(t *testing.T) {
 	}
 }
 
-// Runtime com pool de threads cria e encerra thread o tempo todo: uma de
-// diferença entre as duas leituras é corrida, não ocultação.
-func TestThreadOcultaIgnoraDiferencaDeUm(t *testing.T) {
+// O filtro de corrida MUDOU DE LUGAR, e a mudança tem motivo.
+//
+// A primeira versão descartava diferença de 1 aqui, no check. Não bastou: o
+// helper desta suíte, que é Go, produziu uma diferença de 5 num contêiner —
+// runtime com pool encerra threads em rajada, e nenhum limiar fixo separa isso
+// de ocultação.
+//
+// O que separa é PERSISTIR. O coletor relê as duas fontes e só entrega o que
+// sobreviveu à segunda leitura, então tudo que chega aqui já foi confirmado — e
+// o check não pode descartar mais nada sem descartar ocultação real.
+func TestThreadOcultaReportaOQueOColetorConfirmou(t *testing.T) {
 	f := &facts.Facts{
-		Processes: []facts.Process{{PID: 10, Comm: "java"}, {PID: 11, Comm: "x"}},
+		Processes: []facts.Process{{PID: 11, Comm: "x"}},
 		Cross: facts.CrossView{Threads: []facts.ThreadDiff{
-			{PID: 10, Status: 41, Task: 40}, // corrida de pool
-			{PID: 11, Status: 8, Task: 3},   // divergência real
+			{PID: 11, Status: 8, Task: 3},
 		}},
 	}
 	r := threadOculta.Run(threadOculta, f, testEnv())
 	if len(r.Findings) != 1 || r.Findings[0].Subject != "pid=11" {
 		t.Fatalf("achados = %v", r.Findings)
+	}
+	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "status declara 8") {
+		t.Error("a evidência precisa trazer os DOIS números: sem eles o operador " +
+			"não sabe o tamanho da divergência")
 	}
 }
 

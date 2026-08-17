@@ -231,3 +231,30 @@ func TestCronFrequentUsaLimiteEstrito(t *testing.T) {
 		t.Error("*/7 é o favorito do beacon e precisa disparar")
 	}
 }
+
+// A RESTRIÇÃO inverte o sinal. `command=` sozinho é a forma do atacante — ele
+// quer que algo rode. `command=` com `no-pty` e `restrict` é a forma do
+// administrador: ele está IMPEDINDO o shell que o atacante quer.
+func TestComandoForcadoCaiComRestricao(t *testing.T) {
+	f := &facts.Facts{SSHKeys: []facts.SSHKey{
+		{User: "root", Line: 1, File: "/root/.ssh/authorized_keys",
+			Options: `command="/usr/bin/backup.sh"`},
+		{User: "root", Line: 2, File: "/root/.ssh/authorized_keys",
+			Options: `restrict,command="/usr/bin/rrsync -ro /srv",no-pty`},
+	}}
+	r := sshForcedCommand.Run(sshForcedCommand, f, testEnv())
+	if len(r.Findings) != 2 {
+		t.Fatalf("as duas continuam no inventário: %v", r.Findings)
+	}
+	sev := map[string]check.Severity{}
+	for _, fd := range r.Findings {
+		sev[fd.Subject] = fd.Sev
+	}
+	if sev["root:1"] != check.SevWarn {
+		t.Error("comando forçado sem restrição é a forma do atacante")
+	}
+	if sev["root:2"] != check.SevInfo {
+		t.Error("chave endurecida vira informação: acusá-la de backdoor ensina o " +
+			"operador a ignorar este check, e aí ele perde o achado que importa")
+	}
+}

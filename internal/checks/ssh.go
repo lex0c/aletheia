@@ -35,7 +35,8 @@ var sshForcedCommand = check.Check{
 			"qualquer chave de automação restrita a UM comando. Nesses casos o " +
 			"comando aponta para um binário conhecido e a chave tem dono claro",
 		"`from=` e `no-pty` são RESTRIÇÕES — sinal de endurecimento, não de " +
-			"backdoor. Só o `command=` executa algo",
+			"backdoor. Só o `command=` executa algo, e uma chave que traz as duas " +
+			"coisas cai para informativo justamente por isso",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
@@ -66,6 +67,23 @@ var sshForcedCommand = check.Check{
 			sev := check.SevWarn
 			if _, s, susp := execSuspect(cmd); susp && s == check.SevCritical {
 				sev = check.SevCritical
+			}
+			// A RESTRIÇÃO é o discriminador, e ela inverte o sinal.
+			//
+			// `command=` sozinho é a forma do atacante: ele quer que algo rode e
+			// não se importa com o resto. `command=` com `no-pty` e `restrict` é a
+			// forma do administrador — ele está justamente IMPEDINDO o shell que o
+			// atacante quer. É o padrão de chave de backup (rrsync, borg), e num
+			// servidor real ele aparece em toda parte.
+			//
+			// Uma chave endurecida assim continua no inventário, mas como
+			// informação: acusá-la de backdoor faz o operador aprender a ignorar
+			// este check, e aí ele perde o achado que importa.
+			if r := restricoes(k.Options); len(r) > 0 && sev == check.SevWarn {
+				sev = check.SevInfo
+				ev = append(ev, "e vem com restrição: "+strings.Join(r, ", ")+
+					" — é a forma ENDURECIDA, o oposto do backdoor: quem restringe "+
+					"está impedindo o shell que o atacante quer")
 			}
 			fd := self.F(sev, k.User+":"+strconv.Itoa(k.Line), "", ev...)
 			fd.NextSteps = []string{
@@ -295,4 +313,23 @@ func caminhoPadraoDeChave(p string) bool {
 		}
 	}
 	return true
+}
+
+// restricoes devolve as opções de ENDURECIMENTO presentes na linha da chave.
+//
+// São o oposto de `command=`: elas tiram poder de quem entra. A presença delas
+// junto de um comando forçado descreve chave de automação restrita, que é
+// prática recomendada — e não backdoor.
+func restricoes(opts string) []string {
+	var out []string
+	baixo := strings.ToLower(opts)
+	for _, r := range []string{
+		"restrict", "no-pty", "no-port-forwarding", "no-agent-forwarding",
+		"no-x11-forwarding", "no-user-rc", "from=",
+	} {
+		if strings.Contains(baixo, r) {
+			out = append(out, strings.TrimSuffix(r, "="))
+		}
+	}
+	return out
 }

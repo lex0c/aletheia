@@ -159,6 +159,20 @@ func TestCenarios(t *testing.T) {
 
 func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 	t.Helper()
+	// Um ID inexistente em Forbid NUNCA dispara, e o cenário passa sem provar
+	// nada. É a mesma armadilha que a ferramenta existe para evitar — "não
+	// apareceu" indistinguível de "não foi procurado" — desta vez na suíte.
+	for _, id := range append(append([]string{}, sc.Forbid...), sc.UntestableChecks...) {
+		if !idsDeCheck()[id] {
+			t.Fatalf("cenário %q cita o check %q, que não existe: um Forbid com ID "+
+				"errado passa calado e não prova nada", sc.Desc, id)
+		}
+	}
+	for _, e := range sc.Expect {
+		if !idsDeCheck()[e.ID] {
+			t.Fatalf("cenário %q espera o check %q, que não existe", sc.Desc, e.ID)
+		}
+	}
 	r = r.semArtefatoDoRig()
 
 	for _, e := range sc.Expect {
@@ -181,6 +195,25 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 				sc.Desc, want, r.stderr)
 		}
 	}
+	// O orçamento de ruído. Num host legítimo a ferramenta tem coisas
+	// verdadeiras a dizer, e cada uma delas gasta a atenção do operador.
+	if sc.MaxWarn > 0 {
+		var avisos int
+		var quais []string
+		for _, f := range r.findings {
+			if f.Sev == "WARN" {
+				avisos++
+				quais = append(quais, f.ID+"("+f.Subject+")")
+			}
+		}
+		if avisos > sc.MaxWarn {
+			t.Errorf("cenário %q: %d avisos, orçamento é %d — num host legítimo o "+
+				"excesso de ruído faz o operador ignorar a saída, e o achado que "+
+				"importa se perde junto\navisos: %v",
+				sc.Desc, avisos, sc.MaxWarn, quais)
+		}
+	}
+
 	if sc.Exit >= 0 && r.exit != sc.Exit {
 		t.Errorf("exit = %d, quer %d — o exit code é o que a automação de frota lê\nstderr:\n%s",
 			r.exit, sc.Exit, r.stderr)
@@ -565,4 +598,17 @@ func copyFile(src, dst string) error {
 func sanitizeName(s string) string {
 	r := strings.NewReplacer(":", "-", "/", "-", ".", "-")
 	return r.Replace(s)
+}
+
+// idsDeCheck é o catálogo real, para recusar cenário que cita check inexistente.
+var idsDeCheckCache map[string]bool
+
+func idsDeCheck() map[string]bool {
+	if idsDeCheckCache == nil {
+		idsDeCheckCache = map[string]bool{}
+		for _, c := range check.All() {
+			idsDeCheckCache[c.ID] = true
+		}
+	}
+	return idsDeCheckCache
 }

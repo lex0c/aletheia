@@ -14,6 +14,7 @@ func init() {
 	check.Register(semSenha)
 	check.Register(contaDeServicoComShell)
 	check.Register(grupoEquivalenteARoot)
+	check.Register(sudoSemSenha)
 }
 
 // uidZero — runbook §7.9.
@@ -276,4 +277,127 @@ func metaDeAcesso(f *facts.Facts) []string {
 		}
 	}
 	return ev
+}
+
+// sudoSemSenha — runbook §7.9.
+//
+// Escalar para root sem responder nada. É o mecanismo de privilégio mais
+// discreto que existe: não cria conta, não muda uid, não deixa processo — só
+// uma linha num arquivo que ninguém abre depois de instalar a máquina.
+//
+// E é o caminho de MENOR atrito para quem já entrou com uma conta comum: a
+// senha que ele não tem deixa de ser necessária.
+//
+// Duas formas, e a segunda quase não é conhecida:
+//
+//	NOPASSWD:        concede o comando sem pedir senha
+//	!authenticate    desliga a pergunta de senha para o alvo inteiro
+var sudoSemSenha = check.Check{
+	ID:       "priv.sudo_nopasswd",
+	Ref:      "7.9",
+	Title:    "regra de sudo que escala sem pedir senha",
+	Group:    "priv",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Optional: env.CapRoot,
+	Wtf:      true,
+	FalsePositives: []string{
+		"automação legítima vive disto: Ansible, provisionamento em nuvem e " +
+			"agente de CI precisam de sudo sem senha porque não há ninguém para " +
+			"digitá-la. O `cloud-init` deixa NOPASSWD para o usuário padrão em " +
+			"praticamente toda imagem de nuvem, e isso é de fábrica",
+		"regra restrita a UM comando é desenho comum de menor privilégio, e sai " +
+			"com severidade menor do que a que concede ALL",
+		"sem root o /etc/sudoers é ilegível, e a ausência de achado passa a ser " +
+			"desconhecimento em vez de resposta — a cobertura diz qual dos dois",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		var r check.Result
+		for i := range f.Sudoers {
+			s := &f.Sudoers[i]
+			up := strings.ToUpper(s.Text)
+			nopass := strings.Contains(up, "NOPASSWD")
+			naoAutentica := strings.Contains(strings.ToLower(s.Text), "!authenticate")
+			if !nopass && !naoAutentica {
+				continue
+			}
+
+			quem := campoInicial(s.Text)
+			// ALL como especificação de comando é root inteiro; um comando
+			// nomeado é menor privilégio, que é desenho e não achado.
+			amplo := regraAmpla(s.Text)
+			sev := check.SevWarn
+			ev := []string{
+				s.File + ":" + strconv.Itoa(s.Line) + " — " + s.Text,
+			}
+			if naoAutentica {
+				ev = append(ev, "`!authenticate` desliga a pergunta de senha para o "+
+					"alvo inteiro, e quase ninguém procura por essa forma")
+			}
+			if amplo {
+				sev = check.SevCritical
+				ev = append(ev, "e a especificação de comando é ALL: é root inteiro, "+
+					"sem responder nada")
+			} else {
+				ev = append(ev, "restrita a comando nomeado — é desenho de menor "+
+					"privilégio, e vale conferir só se ninguém reconhecer a regra")
+			}
+			if strings.HasPrefix(s.File, "/etc/sudoers.d/") {
+				// Um arquivo novo em sudoers.d não altera nada existente: ele
+				// ACRESCENTA, e por isso não aparece em diff do /etc/sudoers.
+				ev = append(ev, "veio de um arquivo PRÓPRIO em sudoers.d: acrescenta "+
+					"sem alterar o /etc/sudoers, e some de qualquer comparação que "+
+					"olhe só o arquivo principal")
+			}
+			ev = append(ev, "alvo: "+quem)
+			ev = append(ev, metaDeAcesso(f)...)
+
+			fd := self.F(sev, quem, "", ev...)
+			fd.NextSteps = []string{
+				"`sudo -l -U " + quem + "` mostra o que a regra concede de verdade, " +
+					"já resolvendo alias e herança de grupo",
+				"o ctime do arquivo data a inserção mesmo que o conteúdo pareça " +
+					"antigo (runbook §9)",
+				"compare com outro host da frota: a mesma regra em vários é " +
+					"provisionamento; em um só, é alteração (runbook §23)",
+			}
+			r.Findings = append(r.Findings, fd)
+		}
+		r.Partial = append(r.Partial, f.PersistDenied["users"]...)
+		return r
+	},
+}
+
+// regraAmpla diz se a regra concede QUALQUER comando. É o que separa "root
+// inteiro sem senha" de "pode reiniciar o nginx sem senha".
+func regraAmpla(texto string) bool {
+	// A especificação de comando é o que vem depois do último `=` ou dos
+	// dois-pontos do NOPASSWD.
+	corte := texto
+	if i := strings.LastIndex(strings.ToUpper(texto), "NOPASSWD:"); i >= 0 {
+		corte = texto[i+len("NOPASSWD:"):]
+	} else if i := strings.LastIndex(texto, "="); i >= 0 {
+		corte = texto[i+1:]
+	}
+	for _, campo := range strings.FieldsFunc(corte, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	}) {
+		if strings.TrimSpace(campo) == "ALL" {
+			return true
+		}
+	}
+	return false
+}
+
+// campoInicial é o alvo da regra: usuário, %grupo ou Defaults:alvo.
+func campoInicial(texto string) string {
+	fs := strings.Fields(texto)
+	if len(fs) == 0 {
+		return "?"
+	}
+	if alvo, ok := strings.CutPrefix(fs[0], "Defaults:"); ok && alvo != "" {
+		return alvo
+	}
+	return fs[0]
 }

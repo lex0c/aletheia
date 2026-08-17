@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"os"
 	"strconv"
 	"strings"
 
@@ -127,13 +128,22 @@ func collectSudoers(f *Facts, e *env.Env) {
 	for _, p := range arquivos {
 		b, err := e.ReadFile(p)
 		if err != nil {
+			// /etc/sudoers é 0440 de root: sem privilégio ele é ILEGÍVEL, e
+			// engolir isso faria a ferramenta dizer "nenhuma regra de sudo
+			// perigosa" quando o que houve foi não ter conseguido olhar.
+			if !os.IsNotExist(err) {
+				f.denyPersist("users", p+" ilegível: as regras de sudo NÃO foram avaliadas")
+			}
 			continue
 		}
 		for i, raw := range strings.Split(string(b), "\n") {
 			ln := strings.TrimSpace(raw)
-			if ln == "" || strings.HasPrefix(ln, "#") || strings.HasPrefix(ln, "Defaults") {
+			if ln == "" || strings.HasPrefix(ln, "#") {
 				continue
 			}
+			// `Defaults` fica: `Defaults:usuario !authenticate` desliga a
+			// pergunta de senha para aquele usuário, e é forma de backdoor tanto
+			// quanto um NOPASSWD.
 			f.Sudoers = append(f.Sudoers, SudoRule{File: p, Line: i + 1, Text: ln})
 		}
 	}

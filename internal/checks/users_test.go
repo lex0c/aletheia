@@ -176,3 +176,40 @@ func TestAtribuicaoSoContaSeAVariavelEhExecutada(t *testing.T) {
 		}
 	}
 }
+
+// A escada do sudo: `ALL` é root inteiro sem responder nada; um comando nomeado
+// é desenho de menor privilégio. Sem essa distinção, todo host provisionado com
+// Ansible vira crítico.
+func TestSudoSeparaAmploDeRestrito(t *testing.T) {
+	f := &facts.Facts{Sudoers: []facts.SudoRule{
+		{File: "/etc/sudoers.d/90-x", Line: 1, Text: "sysadm ALL=(ALL) NOPASSWD:ALL"},
+		{File: "/etc/sudoers.d/90-x", Line: 2, Text: "deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart api"},
+		{File: "/etc/sudoers", Line: 9, Text: "%wheel ALL=(ALL) ALL"},
+	}}
+	r := sudoSemSenha.Run(sudoSemSenha, f, testEnv())
+	if len(r.Findings) != 2 {
+		t.Fatalf("a regra que PEDE senha não é achado: %v", r.Findings)
+	}
+	sev := map[string]check.Severity{}
+	for _, fd := range r.Findings {
+		sev[fd.Subject] = fd.Sev
+	}
+	if sev["sysadm"] != check.SevCritical {
+		t.Error("NOPASSWD:ALL é root inteiro sem responder nada")
+	}
+	if sev["deploy"] != check.SevWarn {
+		t.Error("restrita a um comando é desenho de menor privilégio")
+	}
+}
+
+// `Defaults:usuario !authenticate` desliga a pergunta de senha sem NOPASSWD
+// nenhum — e quase ninguém procura por essa forma.
+func TestSudoPegaNaoAutentica(t *testing.T) {
+	f := &facts.Facts{Sudoers: []facts.SudoRule{
+		{File: "/etc/sudoers.d/90-x", Line: 1, Text: "Defaults:jenkins !authenticate"},
+	}}
+	r := sudoSemSenha.Run(sudoSemSenha, f, testEnv())
+	if len(r.Findings) != 1 || r.Findings[0].Subject != "jenkins" {
+		t.Fatalf("achados = %v", r.Findings)
+	}
+}

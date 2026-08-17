@@ -804,16 +804,30 @@ func init() {
 		// beacon de hora em hora em vez de 45s, persistência por drop-in com
 		// comando de aparência inocente.
 		//
-		// Resultado hoje: UM aviso. E ele sobrevive só por causa do único check
-		// construído sobre FORMA em vez de conteúdo — o drop-in dispara porque
-		// alguém acrescentou execução a uma unit alheia, não porque o comando
-		// parecia ruim.
+		// A PREVISÃO SE CUMPRIU, e é por isso que este comentário mudou.
 		//
-		// O que falta para fechar isto NÃO são checks errados, são checks que
-		// ainda não existem: saída para IP público (3.2), integridade de pacote
-		// (fase 7) e amostragem em janela (fase 10). Quando algum deles chegar,
-		// o Exit abaixo vira 2 e o cenário QUEBRA — de propósito. É assim que o
-		// ponto cego deixa de ser esquecível.
+		// A versão original media UM aviso, e dizia: "quando saída para IP
+		// público (3.2) e integridade de pacote (fase 7) chegarem, este cenário
+		// QUEBRA — de propósito". Os dois chegaram, e ele quebrou.
+		//
+		// São TRÊS ângulos independentes agora, e nenhum olha o conteúdo do
+		// comando nem o nome do binário:
+		//
+		//	§7.2   alguém acrescentou execução a uma unit alheia
+		//	§24    nenhum pacote reivindica este binário
+		//	§4.3   e ele fala com um endereço público
+		//
+		// O adversário derrota qualquer um dos três isoladamente — empacotar o
+		// implante mata o §24, persistir por outro caminho mata o §7.2, esperar
+		// para conectar mata o §4.3. Derrotar os três ao mesmo tempo é outro
+		// nível de esforço, e é esse o ganho: não é uma regra melhor, são três
+		// perguntas que não se contornam com a mesma jogada.
+		//
+		// O QUE AINDA ESCAPA, e continua valendo como limite: os três achados
+		// têm sujeitos diferentes — um pid, um caminho e um nome de unit — e a
+		// correlação agrupa por sujeito. O operador recebe três avisos soltos e
+		// precisa juntá-los na cabeça. Ver que são o MESMO ator ainda é trabalho
+		// humano.
 		Images:    minimal,
 		Caps:      []string{"NET_ADMIN"},
 		NoNetwork: true,
@@ -821,13 +835,18 @@ func init() {
 			ip addr add 51.91.190.241/32 dev lo
 			mkdir -p /usr/local/sbin /etc/systemd/system/sshd.service.d
 			cp /helper /usr/local/sbin/systemd-netlinkd
-			/helper listen 51.91.190.241:443 &
+			/helper listen 51.91.190.241:8443 &
 			sleep 0.4
-			/usr/local/sbin/systemd-netlinkd connect 51.91.190.241:443 &
+			/usr/local/sbin/systemd-netlinkd connect 51.91.190.241:8443 &
 			printf '[Service]\nExecStartPre=/usr/local/sbin/systemd-netlinkd sleep 1\n' > /etc/systemd/system/sshd.service.d/10-hardening.conf
 			printf '[Timer]\nOnUnitActiveSec=1h\n' > /etc/systemd/system/systemd-netlinkd.timer
 			sleep 0.5`,
-		Expect: []Expect{{ID: "persist.unit_dropin_exec", Sev: "WARN"}},
+		Expect: []Expect{
+			{ID: "persist.unit_dropin_exec", Sev: "WARN"},
+			// Os dois que fecharam a lacuna prevista.
+			{ID: "integrity.no_package_owner", Subject: "/usr/local/sbin/systemd-netlinkd"},
+			{ID: "net.egress_unowned", Evidence: "nenhuma lista de reputação"},
+		},
 		Forbid: []string{
 			"correlate.revshell", "proc.kthread_disguise", "proc.suspicious_path",
 			"proc.memfd_exec", "persist.timer_frequent", "persist.unit_exec_suspect",

@@ -132,11 +132,34 @@ func cruzarThreads(f *Facts) {
 		if err != nil {
 			continue // sem permissão ou morreu: não é divergência
 		}
-		if len(ents) != p.Threads {
-			f.Cross.Threads = append(f.Cross.Threads, ThreadDiff{
-				PID: p.PID, Status: p.Threads, Task: len(ents),
-			})
+		// SÓ uma direção, e ela vem do mecanismo.
+		//
+		// Esconder uma thread significa sumir com a entrada do diretório: o
+		// contador do status continua N, o diretório mostra N-1. A direção
+		// oposta — diretório com MAIS do que o status declara — é a ordem de
+		// leitura: o status foi lido antes, e uma thread nasceu no intervalo.
+		if len(ents) >= p.Threads {
+			continue
 		}
+		// E confirma antes de acusar. Uma thread que MORREU entre as duas
+		// leituras produz exatamente esta forma, e runtime com pool de threads
+		// (Go, JVM, Node) faz isso o tempo todo — o helper desta suíte gerou o
+		// falso positivo que trouxe esta releitura.
+		//
+		// A diferença é que ocultação PERSISTE e corrida não: reler os dois na
+		// ordem inversa custa duas leituras num caso raro e elimina a classe
+		// inteira.
+		ents2, err := os.ReadDir(procPath(p.PID, "task"))
+		if err != nil {
+			continue
+		}
+		st2, ok := threadsDe(p.PID)
+		if !ok || len(ents2) >= st2 {
+			continue
+		}
+		f.Cross.Threads = append(f.Cross.Threads, ThreadDiff{
+			PID: p.PID, Status: st2, Task: len(ents2),
+		})
 	}
 }
 
@@ -184,6 +207,23 @@ func sondarPids(f *Facts, visiveis map[int]bool, maior int) {
 			h.Comm = c
 		}
 		f.Cross.Hidden = append(f.Cross.Hidden, h)
+	}
+
+	// CONFIRMA, e a confirmação precisa das DUAS metades ao mesmo tempo.
+	//
+	// "Oculto" significa uma coisa só: EXISTE e NÃO É LISTADO. Verificar as
+	// duas em momentos diferentes deixa passar as duas corridas opostas —
+	// nascer depois da listagem, e morrer depois da sondagem.
+	//
+	// Num guest recém-bootado as threads de kernel fazem exatamente isso: uma
+	// `kworker/u2:0` nasce, responde à sondagem e morre. O kernel 3.18 acusava
+	// uma a cada varredura, sempre com PID diferente — o sinal de corrida, e
+	// não de ocultação.
+	//
+	// Relistar e reconferir a existência resolve as duas de uma vez, ao preço
+	// de um readdir e de um stat por candidato.
+	if len(f.Cross.Hidden) > 0 {
+		f.Cross.Hidden = confirmarOcultos(f.Cross.Hidden)
 	}
 
 	if f.Cross.ProbeTeto {
@@ -269,3 +309,50 @@ func tgidDe(pid int) (int, bool) {
 }
 
 func normalizaModulo(s string) string { return strings.ReplaceAll(s, "-", "_") }
+
+// threadsDe relê o contador de threads direto do status. Existe para a
+// confirmação: o valor coletado no início da varredura já envelheceu.
+func threadsDe(pid int) (int, bool) {
+	b, err := os.ReadFile(procPath(pid, "status"))
+	if err != nil {
+		return 0, false
+	}
+	for _, ln := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(ln, "Threads:"); ok {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			return n, err == nil
+		}
+	}
+	return 0, false
+}
+
+// confirmarOcultos exige que as duas metades da definição valham JUNTAS: o
+// processo continua existindo e continua fora da listagem.
+//
+// Descarta as duas corridas opostas — quem nasceu depois da primeira listagem
+// (agora aparece nela) e quem morreu depois da sondagem (agora não existe).
+func confirmarOcultos(cands []HiddenPid) []HiddenPid {
+	ents, err := os.ReadDir("/proc")
+	if err != nil {
+		// Sem a segunda listagem não há confirmação, e acusar sem ela seria
+		// pior que não acusar: devolve vazio e o caso vira silêncio honesto.
+		return nil
+	}
+	listado := map[int]bool{}
+	for _, ent := range ents {
+		if n, err := strconv.Atoi(ent.Name()); err == nil {
+			listado[n] = true
+		}
+	}
+	out := cands[:0]
+	for _, h := range cands {
+		if listado[h.PID] {
+			continue // nasceu entre a listagem e a sondagem
+		}
+		if _, err := os.Stat(procPath(h.PID, "stat")); err != nil {
+			continue // morreu depois da sondagem: era efêmero, não oculto
+		}
+		out = append(out, h)
+	}
+	return out
+}

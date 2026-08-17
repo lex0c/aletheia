@@ -41,9 +41,10 @@ var pidOculto = check.Check{
 	Optional: env.CapRoot,
 	Wtf:      true,
 	FalsePositives: []string{
-		"corrida de nascimento: um processo criado ENTRE a listagem e a sondagem " +
-			"aparece aqui sem estar oculto. Por isso a contagem importa — um " +
-			"processo novo é um, não vinte, e a via 'ppid' não sofre disso",
+		"corrida de nascimento NÃO produz mais este achado: o coletor relista " +
+			"/proc depois da sondagem, e quem nasceu no intervalo aparece na " +
+			"segunda listagem e é descartado. Foi o que fazia um guest de kernel " +
+			"3.18 acusar as threads de kernel nascidas durante o boot",
 		"hidepid não causa isto: sob hidepid o processo some das DUAS vias, e o " +
 			"que degrada é a cobertura, não a comparação",
 		"LIMITE que vale mais que o check: se o KERNEL estiver comprometido, as " +
@@ -105,22 +106,19 @@ var threadOculta = check.Check{
 	Optional: env.CapRoot,
 	Wtf:      true,
 	FalsePositives: []string{
-		"processo que cria ou encerra thread ENTRE as duas leituras produz " +
-			"divergência de 1 legitimamente — runtime com pool de threads (JVM, " +
-			"Go, Node) faz isso o tempo todo. Diferença grande é que dá sinal",
+		"thread que MORRE entre as duas leituras produz exatamente esta forma, " +
+			"e runtime com pool (Go, JVM, Node) faz isso o tempo todo. Por isso " +
+			"o coletor relê e só reporta o que PERSISTE — mas um processo em " +
+			"encolhimento rápido e contínuo ainda pode escapar",
+		"a direção oposta — diretório com mais entradas que o status declara — " +
+			"não é reportada: é só a ordem de leitura, com uma thread nascendo " +
+			"no intervalo",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
 		for _, d := range f.Cross.Threads {
-			// Uma de diferença é corrida de pool de threads, e acontece o tempo
-			// todo em runtime moderno.
-			delta := d.Status - d.Task
-			if delta < 0 {
-				delta = -delta
-			}
-			if delta <= 1 {
-				continue
-			}
+			// O coletor já filtrou direção e confirmou por releitura; aqui só
+			// resta o que sobreviveu às duas.
 			p := f.ProcessByPID(d.PID)
 			nome := "?"
 			if p != nil {

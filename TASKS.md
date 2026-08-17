@@ -1727,3 +1727,122 @@ comparações não produzem achado nenhum.
 ### Estado
 
 46 checks, 70 cenários. `wtf` em 336ms.
+
+---
+
+## Registro — cenários de SITUAÇÃO, e o que eles encontraram
+
+Os cenários até aqui exercitavam um check por vez: planta o artefato que aquele
+check procura, verifica que ele dispara. Necessário e não suficiente — ficou
+provado quando a cadeia completa do 66 saiu com `RESULT: OK`, cada peça
+invisível porque nenhuma isolada era o que algum check procurava.
+
+Os novos são histórias inteiras. E foram eles que acharam os defeitos.
+
+### O cenário sem invasor nenhum
+
+O 80 é um servidor de produção com dois anos de acúmulo: node e rclone
+instalados à mão, agente de APM com preload, certbot em timer E cron, CA
+corporativa, chave de automação com `command=`, gente no grupo docker, nvm no
+fim do `.bashrc`. **Nada ali é ataque.**
+
+A ferramenta tem coisas verdadeiras a dizer sobre quase tudo. Binário sem dono
+de pacote É um fato; CA fora do bundle É um fato; grupo docker É root por outro
+caminho. Nenhum é falso positivo — são achados corretos sobre um host que
+ninguém invadiu.
+
+O que decide se a ferramenta é usável numa frota é justamente esse número.
+`Scenario` ganhou `MaxWarn`, e o 80 gasta 10 do orçamento: acima de uma dúzia o
+operador aprende a ignorar a saída, e aí perde o achado que importa. Sem o
+campo isso seria opinião; com ele é regressão.
+
+E ele encontrou um erro de desenho no primeiro rodada:
+
+```
+command="/usr/bin/rrsync -ro /srv",restrict,no-pty
+```
+
+Eu acusava isso de backdoor. É o contrário: `command=` sozinho é a forma do
+atacante — ele quer que algo rode; `command=` com `restrict` e `no-pty` é a
+forma do administrador, que está IMPEDINDO o shell que o atacante quer. O check
+já DOCUMENTAVA a distinção nos falsos positivos e não a usava. Agora a chave
+endurecida cai para informativo.
+
+### Três lacunas que os cenários expuseram
+
+```
+priv.sudo_nopasswd   f.Sudoers era COLETADO e nenhum check o lia. Dado morto:
+                     o coletor trabalhava, o fato ia para o JSON, nada avaliava
+net.listener_unowned porta aberta para fora por binário sem dono de pacote
+net.egress_unowned   conexão para endereço público vinda de binário sem dono
+```
+
+O de sudo trouxe junto a mesma confusão de sempre: `/etc/sudoers` é 0440 de
+root, e o coletor engolia o erro de leitura. Sem privilégio a ferramenta diria
+"nenhuma regra perigosa" quando o que houve foi não ter conseguido olhar.
+
+Os dois de rede só foram possíveis agora. O discriminador não existia quando o
+`revshell` e o `pivot` foram escritos — sem propriedade de pacote, "processo com
+conexão de saída" descreve metade de um servidor normal. E eles deliberadamente
+NÃO olham o destino: reputação de IP envelhece em dias, exige fonte externa e
+falha justamente contra quem alugou infraestrutura ontem. "Ninguém empacotou
+este binário" é local e não envelhece.
+
+### A previsão que se cumpriu
+
+O cenário 71 media o adversário competente — o que leu as mesmas seções que eu.
+O comentário dele dizia, por escrito:
+
+> quando saída para IP público (3.2) e integridade de pacote (fase 7)
+> chegarem, este cenário QUEBRA — de propósito.
+
+Os dois chegaram, e ele quebrou. De **1 aviso** para **4**, por três ângulos que
+não se contornam com a mesma jogada:
+
+```
+§7.2   alguém acrescentou execução a uma unit alheia
+§24    nenhum pacote reivindica este binário
+§4.3   e ele fala com um endereço público
+```
+
+Empacotar o implante mata o §24; persistir por outro caminho mata o §7.2;
+esperar para conectar mata o §4.3. Os três ao mesmo tempo é outro nível de
+esforço.
+
+O limite que sobrou está escrito lá: os três achados têm sujeitos diferentes —
+um pid, um caminho e um nome de unit — e a correlação agrupa por sujeito. Ver
+que são o MESMO ator ainda é trabalho humano.
+
+### Corridas: a mesma pergunta, quatro portas
+
+O `cross.hidden_pid` acusou uma `kworker` a cada boot do kernel 3.18, sempre com
+PID diferente — o sinal de corrida, não de ocultação. A primeira correção
+(relistar `/proc`) não bastou: a thread nascia, era sondada e MORRIA antes da
+relistagem.
+
+"Oculto" significa uma coisa só, e as duas metades precisam valer JUNTAS:
+
+```
+EXISTE   e   NÃO É LISTADO
+```
+
+Verificar em momentos diferentes deixa passar as duas corridas opostas. Relistar
+e reconferir a existência resolve as duas, ao preço de um readdir e um stat por
+candidato. Três boots seguidos do 3.18: zero.
+
+O `cross.thread_count` teve a mesma história do outro lado — o helper desta
+suíte, que é Go, produziu divergência de 5 num contêiner. Nenhum limiar fixo
+separa pool de threads de ocultação; o que separa é PERSISTIR. O filtro saiu do
+check e virou releitura no coletor.
+
+### E um defeito na própria suíte
+
+`Forbid` com ID errado nunca dispara, e o cenário passa sem provar nada — a
+mesma armadilha que a ferramenta existe para evitar, desta vez dentro do teste.
+Quatro IDs meus estavam errados e passavam calados. Agora o cenário que cita
+check inexistente falha.
+
+### Estado
+
+49 checks, 60 cenários, 85 execuções. Zero achado em host limpo, Debian 12,
+Alpine 3.20, CentOS 7 e Ubuntu 14.04.

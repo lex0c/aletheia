@@ -314,6 +314,22 @@ func execSuspect(cmd string) (string, check.Severity, bool) {
 			check.SevCritical, true
 	}
 
+	// Interpretador com código EM LINHA que decodifica a si mesmo.
+	//
+	// O `pipesToShell` acima exige um pipe literal, e o adversário do cenário
+	// A2 não deixa nenhum: `python3 -c "os.system(base64.b64decode(...))"` põe
+	// o pipe DENTRO do blob, onde nenhuma leitura de texto o encontra.
+	//
+	// Não é assinatura de família: é a forma. Configuração de persistência que
+	// esconde o próprio conteúdo não tem explicação legítima — administrador
+	// não ofusca o que ele mesmo instalou, e quem lê o arquivo depois é ele.
+	if temInterpretadorEmLinha(low) && ofuscaPayload(low) {
+		return "interpretador com código em linha que DECODIFICA o próprio payload: " +
+				"o que vai executar não está legível aqui, e configuração de " +
+				"persistência não tem motivo para se esconder de quem a lê",
+			check.SevCritical, true
+	}
+
 	// O caminho do executável — o primeiro token, sem os prefixos que o
 	// systemd aceita ("-", "@", "+", "!", "!!").
 	//
@@ -387,4 +403,36 @@ func unitContext(u *facts.Unit) []string {
 		ev = append(ev, "modificada em "+u.ModUTC)
 	}
 	return ev
+}
+
+// temInterpretadorEmLinha diz se o comando entrega código pela linha de
+// comando, em vez de apontar para um arquivo que se pode ler.
+func temInterpretadorEmLinha(low string) bool {
+	var temInterp bool
+	for _, i := range []string{"python", "perl", "ruby", "php", "node", "bash", "sh ", "zsh"} {
+		if strings.Contains(low, i) {
+			temInterp = true
+			break
+		}
+	}
+	if !temInterp {
+		return false
+	}
+	return strings.Contains(low, " -c") || strings.Contains(low, " -e") ||
+		strings.Contains(low, " -r ") || strings.Contains(low, "eval")
+}
+
+// ofuscaPayload reconhece as primitivas que transformam texto ilegível em
+// código executável. É a forma, não a família.
+func ofuscaPayload(low string) bool {
+	for _, p := range []string{
+		"b64decode", "base64.b64", "atob(", "codecs.decode", "unhexlify",
+		"decode('hex", "fromcharcode", "pack(\"h", "eval(", "exec(",
+		"base64 -d", "base64 --decode", "openssl enc -d", "|xxd -r", "| xxd -r",
+	} {
+		if strings.Contains(low, p) {
+			return true
+		}
+	}
+	return false
 }

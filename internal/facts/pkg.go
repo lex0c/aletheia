@@ -45,6 +45,53 @@ type PkgDB struct {
 	Motivo      string `json:"reason,omitempty"`
 }
 
+// ReivindicacaoEstranha é um caminho que a base de pacotes DIZ pertencer a um
+// pacote, num lugar onde distribuição nenhuma instala.
+//
+// A FHS reserva /usr/local ao administrador local, e a política do Debian
+// proíbe explicitamente que pacote escreva ali. O mesmo vale, com ainda mais
+// força, para /tmp e /home. Uma linha dessas na base significa que a BASE foi
+// editada — e editar a base é como se derrota a pergunta de propriedade, que é
+// a defesa em que cinco checks desta ferramenta se apoiam.
+type ReivindicacaoEstranha struct {
+	Path string `json:"path"`
+	File string `json:"file"`
+}
+
+// territorioNaoEmpacotado são as árvores onde pacote de distribuição não
+// instala. Uma reivindicação aqui é adulteração, não configuração.
+var territorioNaoEmpacotado = []string{
+	"/usr/local/", "/tmp/", "/var/tmp/", "/dev/shm/", "/home/", "/root/",
+}
+
+func reivindicacaoEstranha(caminho, arquivo string, f *Facts) {
+	// DIRETÓRIO não é reivindicação estranha.
+	//
+	// O pacote `filesystem` do Arch cria /home, /root e /usr/local — é ele que
+	// entrega a árvore da FHS, e por isso reivindica esses diretórios de
+	// fábrica. Contá-los rendeu vinte e um críticos num host limpo.
+	//
+	// O que não tem explicação é um ARQUIVO reivindicado dentro deles.
+	if strings.HasSuffix(caminho, "/") {
+		return
+	}
+	for _, d := range territorioNaoEmpacotado {
+		if !strings.HasPrefix(caminho, d) {
+			continue
+		}
+		// E precisa estar DENTRO da árvore, não ser a árvore. "/usr/local/bin"
+		// sem barra final ainda é um diretório da FHS que o pacote entrega.
+		resto := strings.TrimPrefix(caminho, d)
+		if resto == "" || !strings.Contains(resto, "/") {
+			return
+		}
+		f.PkgEstranho = append(f.PkgEstranho, ReivindicacaoEstranha{
+			Path: caminho, File: arquivo,
+		})
+		return
+	}
+}
+
 // Ownership é a resposta para um caminho.
 type Ownership struct {
 	Path  string   `json:"path"`
@@ -69,11 +116,11 @@ func collectPkg(f *Facts, e *env.Env) {
 	donos := map[string]bool{}
 	switch f.Pkg.Kind {
 	case "dpkg":
-		donosDpkg(e, candidatos, donos)
+		donosDpkg(f, e, candidatos, donos)
 	case "apk":
-		donosApk(e, candidatos, donos)
+		donosApk(f, e, candidatos, donos)
 	case "pacman":
-		donosPacman(e, candidatos, donos)
+		donosPacman(f, e, candidatos, donos)
 	}
 
 	caminhos := make([]string, 0, len(candidatos))
@@ -218,7 +265,7 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 // A armadilha aqui é o usrmerge: o dpkg lista `/bin/cat`, e o processo roda
 // `/usr/bin/cat`. Sem casar as duas formas, TODO binário de /usr/bin apareceria
 // sem dono — um falso positivo catastrófico, em todo host Debian moderno.
-func donosDpkg(e *env.Env, cand map[string][]string, donos map[string]bool) {
+func donosDpkg(f *Facts, e *env.Env, cand map[string][]string, donos map[string]bool) {
 	cacheDir := map[string]string{}
 	// forma no arquivo -> caminhos perguntados. A LISTA importa: com usrmerge
 	// duas formas do mesmo arquivo podem ser perguntadas ao mesmo tempo
@@ -243,7 +290,9 @@ func donosDpkg(e *env.Env, cand map[string][]string, donos map[string]bool) {
 		sc := bufio.NewScanner(strings.NewReader(string(b)))
 		sc.Buffer(make([]byte, 0, 4096), 64*1024)
 		for sc.Scan() {
-			for _, alvo := range procurados[sc.Text()] {
+			ln := sc.Text()
+			reivindicacaoEstranha(ln, "/var/lib/dpkg/info/"+n, f)
+			for _, alvo := range procurados[ln] {
 				donos[alvo] = true
 			}
 		}
@@ -252,7 +301,7 @@ func donosDpkg(e *env.Env, cand map[string][]string, donos map[string]bool) {
 
 // donosApk lê /lib/apk/db/installed. O formato é de blocos: `F:` fixa o
 // diretório corrente e `R:` é um arquivo dentro dele.
-func donosApk(e *env.Env, cand map[string][]string, donos map[string]bool) {
+func donosApk(f *Facts, e *env.Env, cand map[string][]string, donos map[string]bool) {
 	cacheDir := map[string]string{}
 	// Lista, e não valor único: duas grafias do mesmo arquivo podem ser
 	// perguntadas ao mesmo tempo e geram as MESMAS chaves aqui. Guardando um
@@ -281,7 +330,9 @@ func donosApk(e *env.Env, cand map[string][]string, donos map[string]bool) {
 		case 'F':
 			dir = "/" + ln[2:]
 		case 'R':
-			for _, alvo := range procurados[dir+"/"+ln[2:]] {
+			cheio := dir + "/" + ln[2:]
+			reivindicacaoEstranha(cheio, "/lib/apk/db/installed", f)
+			for _, alvo := range procurados[cheio] {
 				donos[alvo] = true
 			}
 		}
@@ -401,7 +452,7 @@ func PrimeiroCaminhoAbsoluto(linha string) string {
 // barra no fim. Sem suporte a pacman a pergunta de propriedade ficava muda em
 // todo host Arch — e ficar mudo enfraquece meia dúzia de checks em silêncio,
 // que é a coisa que esta ferramenta existe para não fazer.
-func donosPacman(e *env.Env, cand map[string][]string, donos map[string]bool) {
+func donosPacman(f *Facts, e *env.Env, cand map[string][]string, donos map[string]bool) {
 	cacheDir := map[string]string{}
 	procurados := map[string][]string{}
 	for p := range cand {
@@ -428,6 +479,7 @@ func donosPacman(e *env.Env, cand map[string][]string, donos map[string]bool) {
 			if !dentro || ln == "" {
 				continue
 			}
+			reivindicacaoEstranha("/"+ln, "/var/lib/pacman/local/"+dir+"/files", f)
 			for _, alvo := range procurados[ln] {
 				donos[alvo] = true
 			}

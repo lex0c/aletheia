@@ -120,14 +120,28 @@ var persistRedundant = check.Check{
 			if len(porMec) < 2 {
 				continue
 			}
-			if dono[alvo] {
-				continue
-			}
 			mecs := make([]string, 0, len(porMec))
 			for m := range porMec {
 				mecs = append(mecs, m)
 			}
 			sort.Strings(mecs)
+
+			// A ISENÇÃO POR DONO DE PACOTE ERA LARGA DEMAIS.
+			//
+			// Ela existe por um caso real e estreito: um daemon empacotado em
+			// transição do SysV tem init.d E unit ao mesmo tempo, e isso é a
+			// distribuição, não um invasor. Mas ela isentava QUALQUER alvo com
+			// dono — e o cenário A1 mostrou o custo: uma linha escrita na lista
+			// do dpkg (`echo caminho >> coreutils.list`, texto puro, gravável
+			// por root) fazia um implante SUID com unit e cron @reboot sair com
+			// "RESULT: OK — nenhum indicador coberto disparou".
+			//
+			// Agora a isenção casa a FORMA da transição e nada além dela: dois
+			// mecanismos, um deles init.d. Três mecanismos não são transição de
+			// ninguém.
+			if dono[alvo] && len(mecs) == 2 {
+				continue
+			}
 
 			sev := check.SevWarn
 			if len(mecs) >= 3 {
@@ -227,3 +241,14 @@ func pidsComExe(f *facts.Facts, exe string) []string {
 	}
 	return out
 }
+
+// A ISENÇÃO POR DONO DE PACOTE, e por que ela ficou em DOIS.
+//
+// A distribuição entrega o mesmo alvo por dois caminhos o tempo todo, e não é
+// só a transição do SysV: o apt entrega /etc/cron.daily/apt-compat E
+// apt-daily.timer, o dpkg faz o mesmo com o backup da base. São compatibilidade
+// entre sistemas de agendamento, e medir isso na debian:12 rendeu dois avisos.
+//
+// TRÊS é onde a explicação acaba. Ninguém instala a mesma coisa por três
+// caminhos por acidente, empacotado ou não — e é justamente aí que o cenário A1
+// mora: implante com unit, cron e setuid, registrado na base com um `echo`.

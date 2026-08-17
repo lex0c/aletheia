@@ -1953,3 +1953,96 @@ de propriedade e o diretório gravável, e as duas independem do nome.
 
 51 checks, 66 cenários, 97 execuções. Zero achado em host limpo, Debian 12,
 Alpine 3.20, CentOS 7 e Ubuntu 14.04.
+
+---
+
+## Registro — adversários que atacam ESTA ferramenta
+
+Os cenários de implante reproduzem famílias conhecidas. Estes perguntam outra
+coisa: **o que faz um invasor que leu esta ferramenta?**
+
+A pergunta importa porque a arma principal virou uma só — "nenhum pacote
+reivindica este binário". Ela sustenta o §24, os dois checks de rede por origem,
+o SUID e o alvo de gatilho. Defesa que carrega esse peso precisa ser atacada de
+propósito.
+
+```
+A1  implante EMPACOTADO     derrota a pergunta de propriedade
+A2  sem binário nenhum      persistência só com o que a distro já entregou
+A3  ativação adiada         nada roda no instante da varredura
+A4  data forjada            o relógio do arquivo mente
+A5  ativação por socket     o backdoor só nasce quando alguém conecta
+```
+
+### A1: uma linha apagou tudo
+
+Primeira medição: **`RESULT: OK — 51/51 checks. Nenhum indicador coberto
+disparou.`**
+
+Um implante SUID, com unit de systemd E cron `@reboot`, invisível por causa de:
+
+```
+echo /usr/local/sbin/implante >> /var/lib/dpkg/info/coreutils.list
+```
+
+A lista do dpkg é texto puro e gravável por root. Quem já é root para instalar o
+implante já é root para escrever nela — não precisa construir pacote nenhum.
+
+Duas coisas saíram disso.
+
+A isenção por dono de pacote na redundância era larga demais: ela isentava
+QUALQUER alvo empacotado. E o check novo, que é a resposta certa — em vez de
+confiar na base, **perguntar se a base foi editada**.
+
+A premissa forte que eu escrevi primeiro estava errada, e o host mostrou: o
+Manjaro empacota `lightdm-settings` e `xflock4` em /usr/local. "Distribuição
+nenhuma instala ali" é política do Debian, não regra da FHS. Então a
+reivindicação sozinha é AVISO; ela vira crítica quando está **fazendo
+trabalho** — o arquivo tem setuid, ou algum mecanismo aponta para ele.
+
+### A2: o payload que se esconde de quem lê
+
+`python3 -c "os.system(base64.b64decode(...))"` — o pipe para shell está DENTRO
+do blob, e a detecção de "baixa e executa" exigia um pipe literal.
+
+O sinal não é a família, é a forma: **configuração de persistência que ofusca o
+próprio conteúdo não tem explicação legítima.** Administrador não esconde o que
+ele mesmo instalou — quem lê o arquivo depois é ele.
+
+### A5: o backdoor que não existe até alguém bater
+
+Ativação por socket é desenho recomendado do systemd. O PID 1 escuta, e o
+processo do invasor só nasce na conexão. Numa varredura a porta é do systemd, e
+o implante não está em lugar nenhum.
+
+Virou o gêmeo em disco do §4.2: unit `.socket` ou `.path` cujo serviço pareado
+executa binário sem dono de pacote. E o roteiro diz a ordem que importa —
+desabilitar o SOCKET antes do serviço, porque parar só o serviço deixa o gatilho
+armado.
+
+### A3 e A4 passaram, e vale dizer por quê
+
+Ativação adiada e timestomping **não derrotaram nada**. As perguntas
+estruturais — quem entregou este binário, quantos mecanismos apontam para ele —
+não olham processo nem relógio.
+
+A ferramenta cita data em dezenas de evidências, e o A4 mostra que nenhuma delas
+é a detecção. Fica o limite escrito: ela não detecta o timestomping em si.
+Comparar mtime com ctime (o `touch` não move o ctime) é barato e ainda não
+existe.
+
+### Falsos positivos, de novo medidos
+
+```
+21  host Arch     o pacote `filesystem` reivindica /home e /root — DIRETÓRIO
+ 3  host Arch     Manjaro empacota em /usr/local, e a premissa era falsa
+ 2  debian:12     apt e dpkg entregam cron.daily E timer para o mesmo alvo
+```
+
+O terceiro define onde ficou a linha da redundância: **dois mecanismos num alvo
+empacotado é a distribuição; três não é ninguém por acidente.**
+
+### Estado
+
+53 checks, 71 cenários, 106 execuções. Zero achado em host limpo, Debian 12,
+Alpine 3.20, CentOS 7 e Ubuntu 14.04.

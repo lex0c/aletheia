@@ -90,12 +90,17 @@ type Process struct {
 	MapsDenied bool `json:"maps_denied,omitempty"`
 	NSDenied   bool `json:"ns_denied,omitempty"`
 
-	Cgroup    string            `json:"cgroup,omitempty"`
-	NS        map[string]string `json:"ns,omitempty"`
-	FDs       []FD              `json:"fds,omitempty"`
-	MapsRWX   []string          `json:"maps_rwx,omitempty"`  // regiões graváveis E executáveis
-	MapsOdd   []string          `json:"maps_odd,omitempty"`  // path fora dos diretórios de biblioteca
-	Truncated []string          `json:"truncated,omitempty"` // o que não coube no orçamento
+	Cgroup  string            `json:"cgroup,omitempty"`
+	NS      map[string]string `json:"ns,omitempty"`
+	FDs     []FD              `json:"fds,omitempty"`
+	MapsRWX []string          `json:"maps_rwx,omitempty"` // regiões graváveis E executáveis
+	MapsOdd []string          `json:"maps_odd,omitempty"` // path fora dos diretórios de biblioteca
+
+	// MapsLibs é TODA biblioteca carregada, inclusive as de diretório normal.
+	// É a única fonte que torna uma biblioteca candidata à pergunta de
+	// propriedade — ela não executa, então nada mais a traria.
+	MapsLibs  []string `json:"maps_libs,omitempty"`
+	Truncated []string `json:"truncated,omitempty"` // o que não coube no orçamento
 
 	// Self marca a própria ferramenta e seus ancestrais: um scanner que se
 	// reporta é um scanner que ninguém usa duas vezes.
@@ -732,6 +737,11 @@ func readFDs(p *Process) {
 //
 // Em fluxo, o teto de linhas também deixa de ser cosmético: passando dele, o
 // resto do arquivo simplesmente não é lido.
+// maxMapsLibs limita as bibliotecas guardadas por processo. Um processo mapeia
+// dezenas; o teto existe para o caso patológico (runtime que carrega centenas
+// de plugins), e a lista global é deduplicada depois.
+const maxMapsLibs = 128
+
 func readMaps(p *Process) {
 	fh, err := os.Open(procPath(p.PID, "maps"))
 	if err != nil {
@@ -772,10 +782,27 @@ func readMaps(p *Process) {
 			continue
 		}
 		ps := string(path)
-		if isLibDir(ps) || oddSeen[ps] {
+		if oddSeen[ps] {
 			continue
 		}
 		oddSeen[ps] = true
+
+		// TODA biblioteca carregada, inclusive as dos diretórios normais.
+		//
+		// O MapsOdd abaixo guarda só as que vêm de lugar estranho, e isso é a
+		// pergunta certa para "de onde veio". Mas o Ebury põe a dele NO LUGAR
+		// da legítima — /lib/x86_64-linux-gnu/libkeyutils.so.1, caminho certo,
+		// nome certo. Para perguntar "e o conteúdo confere?", a lista precisa
+		// incluir justamente as que o MapsOdd descarta.
+		//
+		// É também a única fonte que existe para isso: biblioteca não executa,
+		// então nada mais a torna candidata à pergunta de propriedade.
+		if len(p.MapsLibs) < maxMapsLibs {
+			p.MapsLibs = append(p.MapsLibs, ps)
+		}
+		if isLibDir(ps) {
+			continue
+		}
 		p.MapsOdd = append(p.MapsOdd, ps)
 	}
 	// Mesmo motivo do readStatus: metade do maps lida sem rwx não é "não há

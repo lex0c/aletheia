@@ -148,13 +148,28 @@ func init() {
 		// mecanismos apontam para ele — não olham o relógio, e por isso
 		// sobrevivem intactas.
 		//
-		// LIMITE ESCRITO: a ferramenta não detecta o timestomping em si. Fazer
-		// isso exigiria comparar mtime com ctime (o `touch` não move o ctime) —
-		// é barato, é possível, e ainda não existe.
+		// O LIMITE QUE ESTAVA ESCRITO AQUI FOI FECHADO. A versão anterior dizia:
+		// "a ferramenta não detecta o timestomping em si; fazer isso exigiria
+		// comparar mtime com ctime — é barato, é possível, e ainda não existe".
+		//
+		// Existe. O `touch` mexe na data de modificação e NÃO alcança a de
+		// metadados: só o kernel escreve ali, e ele a atualiza justamente quando
+		// alguém mexe no arquivo. A pegada da falsificação é a falsificação.
+		//
+		// O check só reporta arquivo que FAZ TRABALHO — com setuid ou alvo de
+		// persistência —, porque a diferença sozinha descreve extração de
+		// tarball, restauração de backup e camada de contêiner. Na debian:12 sem
+		// esse recorte foram doze avisos, todos do próprio Docker.
 		Images: matriz,
 		Plant:  dataForjada,
 		Expect: []Expect{
 			{ID: "integrity.no_package_owner", Subject: "/usr/local/sbin/dbus-broker-helper"},
+			// E AGORA a falsificação em si, que a primeira versão deste cenário
+			// declarava como limite escrito: o `touch` mexe no mtime e não
+			// alcança o ctime — só o kernel escreve ali.
+			{ID: "integrity.timestomp", Sev: "CRITICAL",
+				Subject: "/usr/local/sbin/dbus-broker-helper"},
+			{ID: "integrity.timestomp", Evidence: "alvo de persistência"},
 		},
 		Exit: -1,
 	})

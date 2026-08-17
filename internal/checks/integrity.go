@@ -73,6 +73,13 @@ var semDonoDePacote = check.Check{
 			if soVeioDeConfig(o.Onde) {
 				continue
 			}
+			// /etc inteiro fora, pelo mesmo motivo de sempre: é o território da
+			// configuração local, e o gerenciador só reivindica o que ELE
+			// entregou ali. O /etc/ld.so.cache é o exemplo puro — gerado pelo
+			// ldconfig, mapeado por todo processo dinâmico, e de pacote nenhum.
+			if strings.HasPrefix(o.Path, "/etc/") {
+				continue
+			}
 
 			sev := check.SevWarn
 			nota := "está em diretório de instalação manual (/usr/local, /opt): " +

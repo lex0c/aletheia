@@ -97,6 +97,12 @@ type Ownership struct {
 	Path  string   `json:"path"`
 	Owned bool     `json:"owned"`
 	Onde  []string `json:"where,omitempty"` // por que perguntamos por ele
+
+	// Pacote é QUEM entregou. Guardá-lo é o que torna a verificação de hash
+	// barata: em vez de decomprimir a base inteira, lê-se a fonte de hash
+	// apenas dos pacotes que entregaram algum candidato — tipicamente meia
+	// dúzia, contra os milhares instalados.
+	Pacote string `json:"package,omitempty"`
 }
 
 func collectPkg(f *Facts, e *env.Env) {
@@ -113,7 +119,7 @@ func collectPkg(f *Facts, e *env.Env) {
 		return
 	}
 
-	donos := map[string]bool{}
+	donos := map[string]string{}
 	switch f.Pkg.Kind {
 	case "dpkg":
 		donosDpkg(f, e, candidatos, donos)
@@ -123,6 +129,8 @@ func collectPkg(f *Facts, e *env.Env) {
 		donosPacman(f, e, candidatos, donos)
 	}
 
+	verificarHashes(f, e, donos)
+
 	caminhos := make([]string, 0, len(candidatos))
 	for p := range candidatos {
 		caminhos = append(caminhos, p)
@@ -130,9 +138,12 @@ func collectPkg(f *Facts, e *env.Env) {
 	sort.Strings(caminhos)
 	for _, p := range caminhos {
 		f.Ownership = append(f.Ownership, Ownership{
-			Path: p, Owned: donos[p], Onde: candidatos[p],
+			Path: p, Owned: donos[p] != "", Pacote: donos[p], Onde: candidatos[p],
 		})
 	}
+	// Depois de Ownership estar montado: a comparação de datas só vale nos
+	// arquivos SEM dono de pacote.
+	coletarTimestomp(f, e)
 }
 
 func detectarPkgDB(e *env.Env) PkgDB {
@@ -182,6 +193,12 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 			continue
 		}
 		add(p.Exe, "processo pid="+strconv.Itoa(p.PID))
+		// As bibliotecas que ele carregou. É o que faz o Ebury aparecer: a
+		// biblioteca trocada NO LUGAR dela não executa nada, e nenhuma outra
+		// fonte a traria para a pergunta.
+		for _, lib := range p.MapsLibs {
+			add(lib, "biblioteca carregada")
+		}
 	}
 	for i := range f.Units {
 		u := &f.Units[i]
@@ -265,7 +282,7 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 // A armadilha aqui é o usrmerge: o dpkg lista `/bin/cat`, e o processo roda
 // `/usr/bin/cat`. Sem casar as duas formas, TODO binário de /usr/bin apareceria
 // sem dono — um falso positivo catastrófico, em todo host Debian moderno.
-func donosDpkg(f *Facts, e *env.Env, cand map[string][]string, donos map[string]bool) {
+func donosDpkg(f *Facts, e *env.Env, cand map[string][]string, donos map[string]string) {
 	cacheDir := map[string]string{}
 	// forma no arquivo -> caminhos perguntados. A LISTA importa: com usrmerge
 	// duas formas do mesmo arquivo podem ser perguntadas ao mesmo tempo
@@ -293,7 +310,7 @@ func donosDpkg(f *Facts, e *env.Env, cand map[string][]string, donos map[string]
 			ln := sc.Text()
 			reivindicacaoEstranha(ln, "/var/lib/dpkg/info/"+n, f)
 			for _, alvo := range procurados[ln] {
-				donos[alvo] = true
+				donos[alvo] = strings.TrimSuffix(n, ".list")
 			}
 		}
 	}
@@ -301,7 +318,7 @@ func donosDpkg(f *Facts, e *env.Env, cand map[string][]string, donos map[string]
 
 // donosApk lê /lib/apk/db/installed. O formato é de blocos: `F:` fixa o
 // diretório corrente e `R:` é um arquivo dentro dele.
-func donosApk(f *Facts, e *env.Env, cand map[string][]string, donos map[string]bool) {
+func donosApk(f *Facts, e *env.Env, cand map[string][]string, donos map[string]string) {
 	cacheDir := map[string]string{}
 	// Lista, e não valor único: duas grafias do mesmo arquivo podem ser
 	// perguntadas ao mesmo tempo e geram as MESMAS chaves aqui. Guardando um
@@ -318,7 +335,7 @@ func donosApk(f *Facts, e *env.Env, cand map[string][]string, donos map[string]b
 	if err != nil {
 		return
 	}
-	dir := ""
+	dir, pacote := "", ""
 	sc := bufio.NewScanner(strings.NewReader(string(b)))
 	sc.Buffer(make([]byte, 0, 4096), 256*1024)
 	for sc.Scan() {
@@ -329,11 +346,13 @@ func donosApk(f *Facts, e *env.Env, cand map[string][]string, donos map[string]b
 		switch ln[0] {
 		case 'F':
 			dir = "/" + ln[2:]
+		case 'P':
+			pacote = ln[2:]
 		case 'R':
 			cheio := dir + "/" + ln[2:]
 			reivindicacaoEstranha(cheio, "/lib/apk/db/installed", f)
 			for _, alvo := range procurados[cheio] {
-				donos[alvo] = true
+				donos[alvo] = pacote
 			}
 		}
 	}
@@ -452,7 +471,7 @@ func PrimeiroCaminhoAbsoluto(linha string) string {
 // barra no fim. Sem suporte a pacman a pergunta de propriedade ficava muda em
 // todo host Arch — e ficar mudo enfraquece meia dúzia de checks em silêncio,
 // que é a coisa que esta ferramenta existe para não fazer.
-func donosPacman(f *Facts, e *env.Env, cand map[string][]string, donos map[string]bool) {
+func donosPacman(f *Facts, e *env.Env, cand map[string][]string, donos map[string]string) {
 	cacheDir := map[string]string{}
 	procurados := map[string][]string{}
 	for p := range cand {
@@ -481,7 +500,7 @@ func donosPacman(f *Facts, e *env.Env, cand map[string][]string, donos map[strin
 			}
 			reivindicacaoEstranha("/"+ln, "/var/lib/pacman/local/"+dir+"/files", f)
 			for _, alvo := range procurados[ln] {
-				donos[alvo] = true
+				donos[alvo] = dir
 			}
 		}
 	}

@@ -1,6 +1,7 @@
 package env
 
 import (
+	"io"
 	"io/fs"
 	"os"
 	"strings"
@@ -52,6 +53,17 @@ func (e *Env) Readlink(p string) (string, error) {
 		return os.Readlink(p)
 	}
 	return e.root.Readlink(rel(p))
+}
+
+// Open abre um arquivo para leitura em FLUXO, travado na raiz quando em modo
+// image. Existe para o cálculo de hash: carregar um binário de centenas de
+// megabytes inteiro na memória para depois copiá-lo num hash gasta o dobro do
+// necessário, e alguns candidatos são grandes.
+func (e *Env) Open(p string) (io.ReadCloser, error) {
+	if e.root == nil {
+		return os.Open(p)
+	}
+	return e.root.Open(rel(p))
 }
 
 // ReadDir lista um diretório dentro da raiz.

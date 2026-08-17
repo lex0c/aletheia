@@ -1108,9 +1108,79 @@ func init() {
 
 	Register(Scenario{
 		ID:   "92-userland-trojanizado",
-		Desc: "ls/ss/ps substituídos não podem mudar o resultado da CLI",
-		Untestable: "prova a decisão da SPEC 4 (binário estático, sem chamar binário do " +
-			"host). Precisa de uma imagem com userland adulterado de propósito — " +
-			"vale construir quando a fase 7 (integridade) existir.",
+		Desc: "binário e biblioteca do sistema SUBSTITUÍDOS no lugar: a forma do Ebury",
+		// ESTE CENÁRIO ESTEVE DECLARADO IMPOSSÍVEL, e a declaração dizia por
+		// quê: "vale construir quando a fase 7 (integridade) existir". Ela
+		// existe, e ele foi construído.
+		//
+		// É a forma do Ebury, que operou anos em servidores de hospedagem: a
+		// biblioteca fica NO LUGAR DELA. Caminho legítimo, nome certo, dono de
+		// pacote em ordem — e conteúdo trocado. Toda pergunta de propriedade
+		// responde "sim, veio de um pacote", e todas estão certas e cegas ao
+		// mesmo tempo.
+		//
+		// O que ele exercita são as duas metades da decisão da SPEC 4:
+		//
+		//	o binário do host mente, e a CLI não pergunta a ele — ela é
+		//	estática e lê /proc direto, então `ls` e `ps` trocados não mudam
+		//	uma linha do resultado
+		//
+		//	e agora ela DENUNCIA a troca, comparando com o hash que o próprio
+		//	gerenciador de pacotes guarda
+		Images: []string{"debian:12", "alpine:3.20"},
+		Plant:  userlandTrojanizado,
+		Expect: []Expect{
+			// O binário de sistema alterado. O caminho difere por distribuição —
+			// o que o cenário cobra é que a alteração apareça, não onde.
+			{ID: "integrity.pkg_file_modified", Sev: "CRITICAL", Evidence: "não confere com o que o pacote"},
+			// E a biblioteca, que é o caso mais grave: o carregador põe o código
+			// do invasor dentro de todo processo que linkar contra ela, sem
+			// nenhum processo novo aparecer.
+			{ID: "integrity.pkg_file_modified", Evidence: "é uma BIBLIOTECA"},
+			// E a evidência que explica por que isto é pior que um binário
+			// trocado: não aparece processo novo nenhum.
+			{ID: "integrity.pkg_file_modified", Evidence: "sem nenhum"},
+		},
+		// E a resposta precisa continuar completa: userland adulterado não
+		// degrada a cobertura, porque a CLI nunca dependeu dele.
+		ExpectOutput:   []string{"não confere com o que o pacote"},
+		Exit:           2,
+		MustBeComplete: true,
 	})
 }
+
+// userlandTrojanizado altera um binário e uma biblioteca NO LUGAR deles.
+const userlandTrojanizado = `
+# um processo vivo, para que a biblioteca dele apareça no mapa de memória: é a
+# ÚNICA fonte que torna uma biblioteca candidata, porque ela não executa
+sleep 120 &
+sleep 0.2
+
+# a biblioteca alterada no lugar dela, que é a forma do Ebury.
+#
+# Acrescentar um byte ao FIM de um ELF muda o hash e não quebra o carregamento
+# — o carregador lê os cabeçalhos de programa e ignora o resto. É por isso que
+# dá para fazer isto com a libc de um contêiner descartável sem derrubá-lo, e é
+# também uma técnica real de anexar carga a uma biblioteca.
+for lib in /lib/x86_64-linux-gnu/libc.so.6 /usr/lib/x86_64-linux-gnu/libc.so.6 \
+           /lib/ld-musl-x86_64.so.1; do
+  [ -f "$lib" ] || continue
+  printf '\0' >> "$lib"
+  break
+done
+
+# e um binário de sistema, alterado no lugar dele.
+#
+# Precisa ser um que o gerenciador REALMENTE reivindique: na Alpine o
+# /usr/bin/wc é um symlink que o busybox cria no pós-install, e o apk não o
+# lista — a ferramenta o trata como sem dono, e está certa.
+mkdir -p /etc/systemd/system
+for bin in /usr/bin/wc /bin/busybox; do
+  [ -f "$bin" ] && [ ! -L "$bin" ] || continue
+  printf '\0' >> "$bin"
+  # alguma coisa precisa fazer a CLI PERGUNTAR por ele: só é candidato o que
+  # executa, agenda ou é alvo de gatilho
+  printf '[Unit]\nDescription=Log Count\n[Service]\nExecStart=%s -l /var/log/syslog\n[Install]\nWantedBy=multi-user.target\n' "$bin" > /etc/systemd/system/logcount.service
+  break
+done
+`

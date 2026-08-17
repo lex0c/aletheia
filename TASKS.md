@@ -2046,3 +2046,99 @@ empacotado é a distribuição; três não é ninguém por acidente.**
 
 53 checks, 71 cenários, 106 execuções. Zero achado em host limpo, Debian 12,
 Alpine 3.20, CentOS 7 e Ubuntu 14.04.
+
+---
+
+## Registro — fase 7: integridade por hash
+
+A pergunta de propriedade responde *"veio de um pacote?"*. Faltava a seguinte, e
+a distância entre as duas é a distância entre ver e não ver o Ebury:
+
+> **e continua sendo o que o pacote entregou?**
+
+O Ebury põe a biblioteca dele NO LUGAR da legítima — caminho certo, nome certo,
+dono de pacote em ordem. Todo check de propriedade responde "sim, veio de um
+pacote", e todos estão certos e cegos ao mesmo tempo.
+
+As três bases guardam o hash nativamente, o que mantém a regra de não chamar
+binário do host:
+
+```
+dpkg     <pkg>.md5sums          md5, "hash  caminho"
+         status: Conffiles:     md5 dos arquivos de configuração
+apk      linha Z: no installed  SHA1 em base64, prefixo Q1
+pacman   <pkg>/mtree            gzip, sha256digest= por linha
+```
+
+### O que mudou de forma estrutural
+
+**Biblioteca virou candidata.** Ela não executa, não agenda, não conecta —
+nenhuma das fontes anteriores a traria. A única que existe é o mapa de memória
+dos processos, que já era lido para outra coisa. O `MapsOdd` guardava só as
+bibliotecas de lugar ESTRANHO, que é a pergunta certa para "de onde veio"; para
+"o conteúdo confere?" a lista precisa incluir justamente as que ele descarta.
+
+**Cenário 92 saiu da lista de impossíveis.** Ele estava declarado
+`Untestable` com o motivo escrito: *"vale construir quando a fase 7
+(integridade) existir"*. Existe, e ele foi construído.
+
+O plantio acrescenta um byte ao FIM de uma biblioteca ELF: o hash muda, o
+carregador ignora os bytes extras, e o contêiner continua de pé. Dá para fazer
+isso com a libc de um contêiner descartável sem derrubá-lo — e é também uma
+técnica real de anexar carga.
+
+**O limite do A4 foi fechado.** Ele dizia por escrito: *"a ferramenta não
+detecta o timestomping em si; comparar mtime com ctime é barato, é possível, e
+ainda não existe"*. O `touch` mexe na data de modificação e não alcança a de
+metadados — só o kernel escreve ali. A pegada da falsificação é a falsificação.
+
+### Três mecanismos legítimos que precisaram de nome
+
+```
+conffile   o dpkg NÃO põe config nos .md5sums — põe no status, campo próprio.
+           Sem ler de lá, 18 arquivos por host ficavam "sem hash declarado" e
+           toda varredura de Debian saía degradada. E são justamente
+           /etc/init.d, /etc/pam.d e /etc/cron.*, onde a modificação importa
+
+diversão   um pacote MOVE o arquivo de outro, de propósito e com registro. A
+           imagem oficial do Ubuntu 14.04 desvia o /sbin/initctl assim. Não é
+           lacuna: é um mecanismo cuja explicação é o próprio registro
+
+symlink    o hash declarado descreve o LINK, não o alvo. Comparar conteúdo ali
+           daria divergência em todo caminho ligado
+```
+
+O segundo é a terceira vez que a mesma distinção aparece nesta ferramenta —
+*mecanismo declarado* não é *cegueira*. Um parcial que nunca sai gasta o sinal
+de cobertura, que é justamente o que separa "não achei" de "não consegui
+olhar".
+
+### Custo, medido e limitado
+
+Com as bibliotecas entrando na lista, o `wtf` no host saltou de 1,1s para 3,3s.
+Duas correções:
+
+```
+paralelizar   hashear é I/O mais CPU, que reparte bem     3,3s → 1,5s
+em fluxo      carregar o arquivo inteiro para depois copiá-lo num hash gasta
+              o dobro; alguns candidatos são binários de centenas de megabytes
+```
+
+E um teto TOTAL de bytes, com os menores primeiro para caber mais antes do
+corte. Sem ele o custo cresce com o host — dois mil mapeamentos distintos
+levariam a varredura a dezenas de segundos. O que fica de fora é lacuna
+declarada.
+
+O `wtf` fica em 1,5s, dentro do orçamento de 2s que a SPEC 6.1 fixa, e o tempo
+REAL continua impresso no RESULT.
+
+### E o cross-compile pegou um defeito de portabilidade
+
+`st.Ctim.Sec` é `int64` em 64 bits e `int32` em 32. Sem a conversão explícita o
+binário i686 não compila — o mesmo eixo que os cenários 30 e 54 cobrem, e a
+razão de o `make` construir as duas arquiteturas.
+
+### Estado
+
+55 checks, 73 cenários, 108 execuções. Zero achado em Debian 12, Alpine 3.20,
+CentOS 7, Rocky 9 e Ubuntu 14.04, com cobertura completa nos três primeiros.

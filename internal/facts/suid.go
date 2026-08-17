@@ -192,6 +192,7 @@ func collectSuid(f *Facts, e *env.Env) {
 	// Ordem estável: a fila é consumida por vários trabalhadores, e sem isto o
 	// relatório mudaria de forma entre execuções idênticas.
 	sort.Slice(f.Suid, func(i, j int) bool { return f.Suid[i].Path < f.Suid[j].Path })
+	sort.Strings(f.ExecOculto)
 }
 
 // tarefaDir é um diretório a percorrer, com o que a decisão precisa saber.
@@ -290,6 +291,7 @@ func (v *varredura) visitar(t tarefaDir) {
 
 	var novos []tarefaDir
 	var achados []SuidFile
+	var achadosOcultos []string
 	var fora []string
 
 	for _, ent := range ents {
@@ -310,7 +312,17 @@ func (v *varredura) visitar(t tarefaDir) {
 			continue
 		}
 		if tipo.IsDir() {
-			if pularPorNome[ent.Name()] {
+			// A PODA não vale em árvore temporária.
+			//
+			// Ela existe por volume: um home de desenvolvedor tem 270 mil
+			// diretórios, quase todos em `node_modules` e `.cache`. /tmp e
+			// /var/tmp não têm volume nenhum — e `.cache` ali é exatamente onde
+			// um esconderijo se põe.
+			//
+			// Sem esta exceção, a lista que acelerou a varredura cegava o check
+			// que procura executável em diretório oculto: as duas decisões
+			// colidiam num ponto só, e a mais antiga vencia em silêncio.
+			if pularPorNome[ent.Name()] && !emArvoreTemporaria(t.dir) {
 				continue
 			}
 			if t.prof+1 > t.teto {
@@ -342,6 +354,19 @@ func (v *varredura) visitar(t tarefaDir) {
 		setuid := fi.Mode()&os.ModeSetuid != 0
 		setgid := fi.Mode()&os.ModeSetgid != 0
 
+		// EXECUTÁVEL DENTRO DE DIRETÓRIO OCULTO, em árvore temporária.
+		//
+		// A varredura já percorre /tmp, /var/tmp e /dev/shm, então isto sai de
+		// graça — e fecha um limite que estava escrito no check de propriedade:
+		// "um binário largado em disco e nunca executado não entra".
+		//
+		// Diretório oculto sozinho é ruído: `.X11-unix` e `.ICE-unix` vêm de
+		// fábrica. Medido no host, NENHUM deles contém executável — o que os
+		// separa é o cruzamento, não o nome.
+		if fi.Mode()&0o111 != 0 && emDiretorioOculto(p) && !inerteDeFabrica(ent.Name()) {
+			achadosOcultos = append(achadosOcultos, p)
+		}
+
 		// A capability só é perguntada em arquivo EXECUTÁVEL: xattr em arquivo
 		// que ninguém executa não confere poder a ninguém.
 		var capPerm uint64
@@ -368,10 +393,11 @@ func (v *varredura) visitar(t tarefaDir) {
 	// Um bloqueio por DIRETÓRIO e não por entrada: com doze trabalhadores e
 	// centenas de milhares de arquivos, travar por arquivo transformaria o
 	// paralelismo em fila.
-	if len(novos) > 0 || len(achados) > 0 || len(fora) > 0 {
+	if len(novos) > 0 || len(achados) > 0 || len(fora) > 0 || len(achadosOcultos) > 0 {
 		v.mu.Lock()
 		v.fila = append(v.fila, novos...)
 		v.f.Suid = append(v.f.Suid, achados...)
+		v.f.ExecOculto = append(v.f.ExecOculto, achadosOcultos...)
 		v.outroFS = append(v.outroFS, fora...)
 		v.mu.Unlock()
 	}
@@ -474,4 +500,52 @@ func (f *Facts) ehOutroFilesystem(p string, dev uint64) bool {
 	// E ponto de montagem sem dispositivo resolvido desce mesmo assim — perder
 	// um galho por engano é pior que percorrer um a mais.
 	return ehPonto && d != 0 && d != dev
+}
+
+// inerteDeFabrica reconhece arquivo que vem executável e NUNCA é executado.
+//
+// O git entrega quatorze hooks de exemplo em `.git/hooks`, todos em modo 755, e
+// não roda nenhum: o sufixo `.sample` é o que os desativa. Num host com
+// diretório de build do gerenciador de pacotes — repositórios clonados em
+// /var/tmp — isso rendeu dois achados de catorze arquivos cada.
+//
+// A regra não é nova nesta base: o coletor de hooks de git já pula `.sample`
+// pelo mesmo motivo. Ela é que não tinha sido aplicada aqui.
+func inerteDeFabrica(nome string) bool {
+	return strings.HasSuffix(nome, ".sample")
+}
+
+// emDiretorioOculto diz se algum componente do caminho, DEPOIS da árvore
+// temporária, começa com ponto.
+//
+// A restrição às árvores temporárias é o que torna isto utilizável: home de
+// usuário é cheio de diretório oculto com executável dentro — `.local/bin`,
+// `.cargo/bin`, `.nvm` —, e tudo isso é legítimo. Em /tmp não é.
+func emDiretorioOculto(p string) bool {
+	for _, raiz := range []string{"/tmp/", "/var/tmp/", "/dev/shm/"} {
+		resto, ok := strings.CutPrefix(p, raiz)
+		if !ok {
+			continue
+		}
+		// O último componente é o arquivo; só os DIRETÓRIOS contam. Um binário
+		// chamado `.x` solto em /tmp já é achado do check de caminho.
+		partes := strings.Split(resto, "/")
+		for _, d := range partes[:max(0, len(partes)-1)] {
+			if strings.HasPrefix(d, ".") {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// emArvoreTemporaria diz se o caminho está sob /tmp, /var/tmp ou /dev/shm.
+func emArvoreTemporaria(p string) bool {
+	for _, raiz := range []string{"/tmp", "/var/tmp", "/dev/shm"} {
+		if p == raiz || strings.HasPrefix(p, raiz+"/") {
+			return true
+		}
+	}
+	return false
 }

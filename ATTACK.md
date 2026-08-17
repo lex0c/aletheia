@@ -29,7 +29,7 @@ Três rótulos, e o do meio é o que mais informa:
 | T1546.005 Trap | coberto | `persist.shell_startup` — DEBUG, EXIT e ERR; `trap -` restaura o padrão e não é achado |
 | T1546.016 Hook de instalador | coberto | `persist.trigger_exec` (apt.conf.d, dnf, yum) |
 | T1098.004 Chave SSH autorizada | coberto | `persist.ssh_keys`, `ssh_forced_command`, `sshd_key_source` |
-| T1136.001 Conta local criada | parcial | `priv.uid_zero`, `no_password`, `service_account_shell` — não há sinal de conta RECÉM-criada |
+| T1136.001 Conta local criada | coberto | `priv.account_no_shadow` — a conta que não passou pelo `useradd`, mais os três de privilégio |
 | T1505.003 Web shell | parcial | `persist.web_prepend` cobre `auto_prepend_file`; arquivo de webshell largado na raiz do site não é procurado |
 | T1574.006 Sequestro do ligador dinâmico | coberto | `persist.ld_preload_global`, `ld_so_conf_odd`, `env_preload`, `proc.ld_preload_env` |
 | T1037.004 Script de boot (rc) | coberto | `persist.trigger_exec` |
@@ -54,7 +54,7 @@ Três rótulos, e o do meio é o que mais informa:
 | T1070.002 Apagar logs do sistema | coberto | `antiforense.log_rotation_gap`, `antiforense.wtmp_cleared` |
 | T1014 Rootkit | parcial | `cross.hidden_pid`, `module_view`, `thread_count`, `kernel.ftrace_hook` — e o limite está declarado: se o kernel mente, as fontes mentem juntas |
 | T1036.005 Nome/lugar legítimo | coberto | `proc.kthread_disguise`, `integrity.no_package_owner` |
-| T1564.001 Arquivo oculto | **ausente** | diretório com ponto em `/tmp` e `/var/tmp` não é procurado |
+| T1564.001 Arquivo oculto | coberto | `path.hidden_exec` — só com executável dentro, e só em árvore temporária |
 | T1562.001 Desabilitar ferramenta de defesa | parcial | `antiforense.mac_downgraded` — só a CONTRADIÇÃO entre config e runtime do SELinux; AppArmor e "MAC simplesmente inativo" ficam de fora, e o texto abaixo diz por quê |
 | T1562.004 Desabilitar firewall | **ausente** | tabela vazia não é notada |
 | T1562.012 Desabilitar auditoria do Linux | coberto | `antiforense.audit_disabled` — só o `-e 0` é achado; sem regra nenhuma é o estado da maioria dos hosts |
@@ -93,9 +93,12 @@ Três rótulos, e o do meio é o que mais informa:
 O critério é duplo: **frequência em intrusão real** e **detectabilidade a
 partir de um retrato**. Técnica comum que só se vê em fluxo contínuo não entra.
 
-QUATRO já foram fechadas e saíram desta lista: T1562.012 (auditoria desligada),
-T1070.002 (logs apagados), T1552.001 (credencial em arquivo) e T1546.005 (trap
-de shell). O que sobrou:
+SEIS foram fechadas e saíram desta lista: T1562.012 (auditoria desligada),
+T1070.002 (logs apagados), T1552.001 (credencial em arquivo), T1546.005 (trap de
+shell), T1564.001 (arquivo oculto) e T1136.001 (conta criada à mão).
+
+Sobrou UMA, e ela é a de pior relação custo/sinal da lista original — o que é o
+resultado esperado quando se trabalha uma lista priorizada até o fim:
 
 ### 1. T1562.001 (resto) e T1562.004 — AppArmor e firewall
 
@@ -115,20 +118,6 @@ firewall    tabela vazia é comum e legítima (grupo de segurança da nuvem faz
             a filtragem), e ler regra nativamente exige netlink de nftables.
             Custo alto, sinal fraco — é a de pior relação da lista
 ```
-
-### 2. T1564.001 — arquivo oculto em diretório temporário
-
-Diretório com ponto em `/tmp`, `/var/tmp` e `/dev/shm`. O velociraptor cobre
-isso, e é barato — a varredura de privilégio já percorre essas árvores.
-
-Sozinho é ruído: `.X11-unix` e `.ICE-unix` são de fábrica. Vale cruzado com
-executável dentro.
-
-### 3. T1136.001 — conta criada na janela do incidente
-
-Os checks de privilégio veem uid 0, senha vazia e shell indevido. Nenhum vê
-"esta conta nasceu ontem" — e o ctime do `/etc/passwd`, que a ferramenta já
-coleta, responde por aproximação.
 
 ---
 

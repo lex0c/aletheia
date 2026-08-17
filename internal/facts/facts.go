@@ -63,6 +63,7 @@ type Facts struct {
 	Logs           []ArquivoDeLog          `json:"logs,omitempty"`
 	MAC            MAC                     `json:"mac"`
 	Segredos       []Segredo               `json:"secret_files,omitempty"`
+	ExecOculto     []string                `json:"hidden_exec,omitempty"`
 	MetaAcesso     []ArquivoMeta           `json:"access_meta,omitempty"`
 	Cross          CrossView               `json:"cross_view"`
 

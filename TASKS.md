@@ -3028,3 +3028,79 @@ para uma.** `.aws/config` saiu pelo mesmo motivo, e onde este host se conecta j�
 68 checks, 95 cenários, 140 execuções. Quatro das seis lacunas do `ATTACK.md`
 fechadas; restam arquivo oculto em diretório temporário e conta criada na janela
 do incidente.
+
+---
+
+## Registro — as duas últimas lacunas com sinal
+
+### Conta que não passou pelo `useradd`
+
+O acesso permanente mais antigo que existe cabe num `echo`:
+
+```
+echo 'backdoor:x:0:0::/root:/bin/bash' >> /etc/passwd
+```
+
+E deixa um rastro estrutural que quem o escreve quase sempre esquece: o
+`useradd` escreve em `/etc/passwd` E em `/etc/shadow`, **sempre**. Uma conta só
+no primeiro nunca passou por ele.
+
+Medido antes de escrever o check, nas quatro distribuições da matriz:
+
+```
+debian:12    passwd=18  shadow=18  só-em-passwd=[]
+alpine:3.20  passwd=17  shadow=17  só-em-passwd=[]
+centos:7     passwd=15  shadow=15  só-em-passwd=[]
+ubuntu:14.04 passwd=20  shadow=20  só-em-passwd=[]
+```
+
+Batem conta por conta, sem exceção. Divergência aqui não é variação de
+distribuição — e o backdoor plantado sai com DOIS sinais correlacionados, este e
+o de uid 0.
+
+Uma guarda que decide: sem root o shadow é ilegível e o mapa vem vazio, o que
+marcaria TODA conta do host. A lacuna já era declarada pelo leitor do shadow, e
+o check só olha quando há shadow.
+
+### Executável escondido, e a colisão entre duas decisões minhas
+
+Fecha um limite escrito em voz alta no check de propriedade: *"um binário
+largado em disco e nunca executado não entra — isso é a §8, e ela exige
+varredura de filesystem"*. A varredura já existia; faltava olhar o que ela
+passava na frente.
+
+E aí apareceu uma colisão que vale mais que o check: **a lista de poda que
+acelerou a varredura incluía `.cache`** — exatamente onde este check procura. As
+duas decisões se encontravam num ponto só, e a mais antiga vencia em silêncio.
+
+A poda existe por VOLUME: um home de desenvolvedor tem 270 mil diretórios. `/tmp`
+e `/var/tmp` não têm volume nenhum, então a poda passou a não valer ali.
+
+### E o falso positivo do primeiro host real
+
+Dois achados de catorze arquivos cada, todos `*.sample` — os hooks de exemplo
+que o git entrega em toda cópia, em modo 755, e que ele nunca executa. Apareceram
+em diretório de build do gerenciador de pacotes, com repositórios clonados.
+
+A regra não era nova nesta base: **o coletor de hooks de git já pula `.sample`
+pelo mesmo motivo.** Ela é que não tinha sido aplicada aqui — a mesma decisão,
+tomada duas vezes, aplicada uma.
+
+### Uma lacuna no harness, achada pelo cenário
+
+Existia `Forbid` para achado e nada para SAÍDA. O cenário H2 planta o esconderijo
+E os hooks de exemplo ao lado, e precisa provar que só o primeiro apareceu — sem
+negativa sobre a saída, a alternativa era afirmar contagem de achados, que quebra
+à primeira mudança de formatação e não diz o que está sendo protegido.
+
+`ForbidOutput` existe pelo mesmo motivo do `Forbid`: a negativa vale tanto quanto
+a afirmativa.
+
+### Estado
+
+70 checks, 97 cenários, 144 execuções. `make race` limpo. Zero achado em Debian
+12, Alpine 3.20, Ubuntu 14.04, CentOS 7 e Rocky 9.
+
+**Seis das sete lacunas do `ATTACK.md` fechadas.** Sobrou a de pior relação
+custo/sinal — AppArmor em modo complain e firewall vazio —, que é o resultado
+esperado de trabalhar uma lista priorizada até o fim.

@@ -28,6 +28,11 @@ type Account struct {
 	// diferente de não haver.
 	SemSenha  bool `json:"no_password,omitempty"`
 	Bloqueada bool `json:"locked,omitempty"`
+
+	// SemShadow marca a conta que existe no passwd e NÃO tem entrada no
+	// shadow. O `useradd` escreve nos dois sempre; a divergência é assinatura
+	// de edição à mão. Só vale quando o shadow foi legível.
+	SemShadow bool `json:"no_shadow_entry,omitempty"`
 }
 
 // Grupo é a associação que dá privilégio indireto.
@@ -73,6 +78,14 @@ func collectUsers(f *Facts, e *env.Env) {
 		if s, ok := shadow[a.Name]; ok {
 			a.SemSenha = s == ""
 			a.Bloqueada = strings.HasPrefix(s, "!") || strings.HasPrefix(s, "*")
+		} else if len(shadow) > 0 {
+			// A conta está no passwd e NÃO no shadow. O `useradd` escreve nos
+			// dois, sempre — a divergência é assinatura de edição à mão.
+			//
+			// A guarda `len(shadow) > 0` importa: sem root o shadow é ilegível e
+			// o mapa vem vazio, o que marcaria TODA conta do host. A lacuna já é
+			// declarada pelo leitor do shadow.
+			a.SemShadow = true
 		}
 		f.Accounts = append(f.Accounts, a)
 	}

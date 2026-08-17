@@ -181,6 +181,13 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 				sc.Desc, want, r.stderr)
 		}
 	}
+	for _, nao := range sc.ForbidOutput {
+		if strings.Contains(r.stderr, nao) {
+			t.Errorf("cenário %q: o relatório humano NÃO podia conter %q — a "+
+				"negativa é o que está sendo protegido aqui.\nsaída:\n%s",
+				sc.Desc, nao, r.stderr)
+		}
+	}
 	// O orçamento de ruído. Num host legítimo a ferramenta tem coisas
 	// verdadeiras a dizer, e cada uma delas gasta a atenção do operador.
 	if sc.MaxWarn > 0 {

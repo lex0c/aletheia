@@ -113,6 +113,16 @@ type Scenario struct {
 	// nada garante que o operador enxergue o que a ferramenta descobriu.
 	ExpectOutput []string
 
+	// ForbidOutput são substrings que NÃO podem sair. Existe pelo mesmo motivo
+	// do `Forbid`: a negativa vale tanto quanto a afirmativa.
+	//
+	// O caso que a criou: um cenário planta o esconderijo E os hooks de exemplo
+	// do git ao lado, e precisa provar que só o primeiro apareceu. Sem uma
+	// negativa sobre a SAÍDA, a única alternativa era afirmar a contagem de
+	// achados — que quebra à primeira mudança de formatação e não diz o que
+	// está sendo protegido.
+	ForbidOutput []string
+
 	// Expect precisa aparecer; Forbid não pode aparecer. As proibições são
 	// tão valiosas quanto as expectativas: elas travam confusão entre checks
 	// e ruído em host limpo.

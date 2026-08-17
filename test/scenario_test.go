@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,7 @@ type line struct {
 	Ref           string   `json:"ref"`
 	Sev           string   `json:"sev"`
 	Subject       string   `json:"subject"`
+	Evidence      []string `json:"evidence"`
 	Total         int      `json:"total"`
 	Complete      int      `json:"complete"`
 	Verdict       string   `json:"verdict"`
@@ -63,6 +65,9 @@ func (r result) has(e scenario.Expect) bool {
 			continue
 		}
 		if e.Subject != "" && !strings.Contains(f.Subject, e.Subject) {
+			continue
+		}
+		if e.Evidence != "" && !strings.Contains(strings.Join(f.Evidence, "\n"), e.Evidence) {
 			continue
 		}
 		return true
@@ -132,8 +137,8 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 
 	for _, e := range sc.Expect {
 		if !r.has(e) {
-			t.Errorf("cenário %q: esperava %s/%s e não veio.\nachados: %v\nstderr:\n%s",
-				sc.Desc, e.ID, e.Sev, r.ids(), r.stderr)
+			t.Errorf("cenário %q: esperava %s/%s%s e não veio.\nachados: %v\nstderr:\n%s",
+				sc.Desc, e.ID, e.Sev, evidenceHint(e), r.ids(), r.stderr)
 		}
 	}
 	for _, id := range sc.Forbid {
@@ -189,7 +194,7 @@ func runLive(t *testing.T, bin, img string, sc scenario.Scenario) result {
 		t.Fatal(err)
 	}
 	args := []string{"run", "--rm",
-		"-v", bin + ":/aletheia:ro",
+		"-v", binFor(t, bin, sc) + ":/aletheia:ro",
 		"-v", helper + ":/helper:ro"}
 	if sc.NoNetwork {
 		args = append(args, "--network=none")
@@ -260,7 +265,7 @@ func runVM(t *testing.T, sc scenario.Scenario) result {
 	if _, err := os.Stat(initramfs); err != nil {
 		t.Skipf("initramfs ausente — rode `make vm-image`: %v", err)
 	}
-	kernel := hostKernel(t)
+	kernel := kernelFor(t, sc)
 
 	logf := filepath.Join(t.TempDir(), "serial.log")
 	appendArgs := "console=ttyS0 panic=1 loglevel=3" +
@@ -274,6 +279,12 @@ func runVM(t *testing.T, sc scenario.Scenario) result {
 
 	cmd := exec.Command("qemu-system-x86_64",
 		"-enable-kvm", "-no-reboot", "-m", "512", "-display", "none",
+		// -nic none é obrigatório, não cosmético: sem ele o QEMU x86 acrescenta
+		// uma placa de rede em modo usuário POR PADRÃO, e o guest sai com acesso
+		// à internet através do host. O comentário que promete "sem rede"
+		// precisa ser verdade — um cenário de resposta a incidente não pode dar
+		// saída de rede a implante de teste nenhum.
+		"-nic", "none",
 		"-kernel", kernel, "-initrd", initramfs,
 		"-append", appendArgs,
 		"-serial", "file:"+logf)
@@ -286,6 +297,23 @@ func runVM(t *testing.T, sc scenario.Scenario) result {
 		t.Fatalf("console serial ilegível: %v", err)
 	}
 	return parseSerial(t, string(raw))
+}
+
+// kernelFor resolve o kernel do guest. Pular por ausência é aceitável; pular em
+// SILÊNCIO não é — a mensagem diz exatamente o que rodar.
+func kernelFor(t *testing.T, sc scenario.Scenario) string {
+	t.Helper()
+	if sc.Kernel == "" {
+		return hostKernel(t)
+	}
+	p, err := filepath.Abs("../dist/vm/kernels/vmlinuz-" + sc.Kernel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Skipf("kernel %s ausente — rode `make vm-kernels` (exige rede): %v", sc.Kernel, err)
+	}
+	return p
 }
 
 // hostKernel usa o kernel do HOST. Ele cobre tudo que é opção de mount, sysctl,
@@ -350,6 +378,30 @@ func parseSerial(t *testing.T, out string) result {
 	}
 	r.stderr = human.String()
 	return r
+}
+
+func evidenceHint(e scenario.Expect) string {
+	if e.Evidence == "" {
+		return ""
+	}
+	return " com evidência contendo " + strconv.Quote(e.Evidence)
+}
+
+// binFor escolhe o binário. Outra arquitetura é outro artefato, e um servidor
+// legado de 32 bits é onde tamanho de int e número de syscall divergem.
+func binFor(t *testing.T, bin string, sc scenario.Scenario) string {
+	t.Helper()
+	if sc.Arch == "" {
+		return bin
+	}
+	p, err := filepath.Abs("../dist/aletheia-" + sc.Arch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Skipf("binário %s ausente — rode `make arches`: %v", sc.Arch, err)
+	}
+	return p
 }
 
 func cmdOf(sc scenario.Scenario) string {

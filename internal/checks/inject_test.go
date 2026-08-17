@@ -166,3 +166,33 @@ func TestNSIlegivelViraCoberturaParcial(t *testing.T) {
 		t.Errorf("ns ilegível precisa virar cobertura parcial com contagem: %v", r.Partial)
 	}
 }
+
+// Achado do guest de kernel 4.14: kdevtmpfs é thread de KERNEL e tem mount
+// namespace próprio por design, em todo kernel. Disparar nela é acusar o
+// kernel de esconder algo de si mesmo.
+func TestNSNaoDisparaEmThreadDeKernel(t *testing.T) {
+	f := &facts.Facts{Processes: []facts.Process{
+		{PID: 1, Comm: "systemd", NS: nsInit},
+		// Thread de kernel de verdade: CmdlineEmpty é FALSE nela, porque o
+		// coletor só marca esse campo em processo que tem exe. Quem responde
+		// aqui é o ExeMissing.
+		{PID: 13, Comm: "kdevtmpfs", ExeErr: "não existe", ExeMissing: true,
+			NS: nsOutro("mnt", "mnt:[4026531861]")},
+	}}
+	if r := nsDivergent.Run(nsDivergent, f, testEnv()); len(r.Findings) != 0 {
+		t.Errorf("disparou em thread de kernel: %v", r.Findings[0].Evidence)
+	}
+}
+
+// Mas "exe ilegível" NÃO é "exe inexistente": sem root, todo processo alheio
+// parece thread de kernel, e a isenção apagaria o check inteiro em silêncio.
+func TestNSNaoConfundeExeIlegivelComThreadDeKernel(t *testing.T) {
+	f := &facts.Facts{Processes: []facts.Process{
+		{PID: 1, Comm: "systemd", NS: nsInit},
+		{PID: 500, Comm: "x", CmdlineEmpty: true, ExeErr: "sem permissão", ExeDenied: true,
+			NS: nsOutro("net", "net:[4026532999]")},
+	}}
+	if r := nsDivergent.Run(nsDivergent, f, testEnv()); len(r.Findings) != 1 {
+		t.Error("exe ilegível por permissão não é thread de kernel")
+	}
+}

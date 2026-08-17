@@ -272,9 +272,9 @@ func TestTodoCheckTemRefEIDEstavel(t *testing.T) {
 // não-root — e o check ainda era contado como completo.
 func TestExeIlegivelNaoEhKthreadLegitima(t *testing.T) {
 	procs := []facts.Process{
-		{PID: 2, Comm: "kthreadd", Exe: "", ExeErr: "não existe"},   // kthread real
-		{PID: 700, Comm: "sshd", Exe: "", ExeErr: "sem permissão"},  // root, ilegível
-		{PID: 701, Comm: "nginx", Exe: "", ExeErr: "sem permissão"}, // root, ilegível
+		{PID: 2, Comm: "kthreadd", Exe: "", ExeErr: "não existe"},                    // kthread real
+		{PID: 700, Comm: "sshd", Exe: "", ExeErr: "sem permissão", ExeDenied: true},  // root, ilegível
+		{PID: 701, Comm: "nginx", Exe: "", ExeErr: "sem permissão", ExeDenied: true}, // root, ilegível
 	}
 	for _, c := range []check.Check{memfdExec, exeDeleted, kthreadDisguise} {
 		res := c.Run(c, &facts.Facts{Processes: procs}, testEnv())

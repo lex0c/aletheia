@@ -137,11 +137,18 @@ func readEnvTrim(e *env.Env, p string) (string, bool) {
 // readTrim lê caminho ABSOLUTO do host vivo (/proc). Não aceita alvo sob
 // --root: em modo image não há /proc.
 func readTrim(p string) (string, bool) {
+	s, err := readTrimErr(p)
+	return s, err == nil
+}
+
+// readTrimErr devolve o ERRO. Quem precisa dele é quem distingue "não existe"
+// de "não pude ler" — e essa distinção decide se a cobertura degrada.
+func readTrimErr(p string) (string, error) {
 	b, err := os.ReadFile(p)
 	if err != nil {
-		return "", false
+		return "", err
 	}
-	return strings.TrimSpace(string(b)), true
+	return strings.TrimSpace(string(b)), nil
 }
 
 func firstFields(s string, n int) string {

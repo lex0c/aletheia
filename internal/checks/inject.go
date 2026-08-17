@@ -127,6 +127,8 @@ var nsDivergent = check.Check{
 			"upower e accounts-daemon já somam dezenas. Quem comprometeu uma unit " +
 			"não aparece aqui; aparece nos outros checks",
 		"sem root, /proc/<pid>/ns/* de processo alheio é ilegível e não há o que comparar",
+		"thread de KERNEL não entra: kdevtmpfs tem mount namespace próprio por " +
+			"design, em todo kernel. Isso é do kernel, não de quem o administra",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
@@ -144,6 +146,13 @@ var nsDivergent = check.Check{
 		for i := range f.Processes {
 			p := &f.Processes[i]
 			if p.Self || p.Vanished || p.PID == 1 {
+				continue
+			}
+			// Thread de kernel tem namespace próprio por design — kdevtmpfs é o
+			// caso clássico, e aparece em TODO host. Um guest de kernel 4.14,
+			// com sete processos ao todo, foi o que deixou isso visível: no
+			// desktop ele se perdia no meio do ruído do sandbox de navegador.
+			if isKernelThread(p) {
 				continue
 			}
 			if p.NSDenied || len(p.NS) == 0 {
@@ -193,6 +202,17 @@ var nsDivergent = check.Check{
 		}
 		return r
 	},
+}
+
+// isKernelThread reconhece a thread de kernel de verdade: o kernel não associa
+// executável nenhum ao PID. A distinção com "exe ILEGÍVEL" é o que separa isto
+// de um implante — que tem exe, e cai no proc.kthread_disguise.
+//
+// Não dá para usar CmdlineEmpty aqui: o coletor só o marca em processo que TEM
+// exe, porque é assim que o check de disfarce precisa. Numa thread de kernel de
+// verdade ele nunca fica true.
+func isKernelThread(p *facts.Process) bool {
+	return p.ExeMissing
 }
 
 // jitRuntimes gera código em memória por projeto. A isenção só vale para o

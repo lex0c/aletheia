@@ -531,3 +531,92 @@ sequência de escape vinda de argv forjaria a linha dos outros hosts.
 O harness ganhou `Cmd`, e `44-wtf-revshell` roda o comando de verdade. O que ele
 trava não é a renderização — é o CONTRATO: mesmo JSONL, mesmo exit code. É por
 ele que a frota se ordena.
+
+---
+
+## Registro — ambientes legados
+
+Pergunta que motivou: **a CLI funciona em qualquer Linux? versão antiga? VM
+legada?** A resposta honesta exigia bootar kernel legado, e não dava para
+responder com contêiner: contêiner compartilha o kernel do host.
+
+### Os dois eixos, e por que são separados
+
+```
+userland    contêiner resolve. centos:7 e debian:9 na matriz `legado` —
+            valor real: base de pacotes RPM, que a matriz principal não tem
+kernel      só VM. `make vm-kernels` baixa 3.18 (2014) e 4.14 (o LTS do
+            Amazon Linux 2 e da era do Ubuntu 18.04), verifica o sha256 e
+            grava em dist/vm/kernels/. NÃO toca em /boot, não instala nada,
+            não encosta no bootloader — os arquivos vão para o QEMU com -kernel
+arquitetura `make arches` cross-compila 386 e arm64. O cenário 30 roda o
+            binário de 32 bits contra /proc real
+```
+
+Sem `make vm-kernels`, os cenários 50–53 são **pulados dizendo o comando** —
+nunca passam em silêncio.
+
+### Resultado
+
+```
+3.18 · 4.14 · 6.12    guest limpo: 10/10 · OK · exit 0
+                      com implantes: os MESMOS seis achados, exit 2
+386                   mesmos achados que o binário nativo
+cgroup v1 puro        1:name=systemd:/legado.service → cgroup=/legado.service
+sem /etc/os-release   cabeçalho perde o nome da distro e SEGUE
+```
+
+O limite fica documentado no cenário `90-kernel-2.6`: descer a 2.6.32 exigiria
+rootfs de época junto, e o próprio runtime do Go não sustenta mais esse kernel.
+
+### Dois defeitos que só o ambiente legado expôs
+
+**1. `proc.ns_divergent` disparava em thread de KERNEL.** `kdevtmpfs` tem mount
+namespace próprio por design, em todo kernel. No desktop isso se perdia no meio
+dos oito achados de sandbox de navegador; num guest de sete processos ficou
+sozinho na tela.
+
+A causa raiz era pior que o sintoma: meu predicado usava `CmdlineEmpty`, que o
+coletor só marca em processo que TEM exe — numa thread de kernel de verdade ele
+nunca fica true. E a correção expôs que o controle de fluxo dependia de comparar
+`ExeErr == "sem permissão"`, uma string em PORTUGUÊS. Traduzir a mensagem
+desligaria checks em silêncio, com a suíte inteira verde. Virou campo tipado:
+
+```
+ExeMissing   o kernel não associa executável nenhum ao PID: thread de
+             kernel, ou zumbi
+ExeDenied    existe, e nós é que não pudemos ler
+```
+
+**2. O oposto exato do defeito original.** O cenário de guest limpo falhava uma
+vez em quatro com `exit 1`. Não era flake do teste — era a ferramenta contando a
+verdade de um jeito que a torna inútil:
+
+```
+antes    readProcess devolvia (nil, false) para os dois casos, e ambos viravam
+         lacuna de cobertura
+```
+
+Processo que TERMINOU durante a coleta não é lacuna: ele não existe mais para
+ninguém, nem para um humano rodando `ps`. Num servidor ocupado isso acontece em
+toda varredura — bastava um processo sair nos 60ms da coleta para o host nunca
+mais reportar OK. A ferramenta passaria de mentir para gritar lobo, que é
+igualmente inútil.
+
+```
+readGone     terminou     → NÃO é lacuna; a contagem fica no JSONL, porque um
+                            número alto é rotatividade anormal
+readDenied   existe e não → É lacuna. hidepid=1, permissão. É o que a
+             pudemos ler    ferramenta existe para não calar
+```
+
+Seis rodadas seguidas dos cenários de VM depois da correção: nenhuma falha.
+
+### Uma correção de segurança do próprio harness
+
+O QEMU x86 acrescenta uma placa de rede em modo usuário **por padrão**. O
+comentário do harness prometia "sem rede" e o guest saía com acesso à internet
+pelo host. Agora roda com `-nic none`. Um cenário de resposta a incidente não
+pode dar saída de rede a implante de teste nenhum.
+
+Total: **44 cenários**, 2 pulados com motivo documentado.

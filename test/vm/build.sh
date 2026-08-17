@@ -59,6 +59,11 @@ chmod 1777 /tmp
 # hostname próprio, para o relatório não parecer o do host
 hostname aletheia-guest 2>/dev/null
 
+# loopback de pé: sem ele os cenários de rede não conseguem nem escutar. É a
+# rede DO GUEST — o QEMU roda com -nic none e não existe placa nenhuma, então
+# nada aqui alcança o host.
+ip link set lo up 2>/dev/null || ifconfig lo up 2>/dev/null
+
 setup=""
 for arg in $(cat /proc/cmdline); do
 	case "$arg" in

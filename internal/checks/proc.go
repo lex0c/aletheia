@@ -45,7 +45,7 @@ var memfdExec = check.Check{
 		var unreadable int
 		for i := range f.Processes {
 			p := &f.Processes[i]
-			if p.ExeErr == "sem permissão" {
+			if p.ExeDenied {
 				unreadable++
 			}
 			if p.Self || p.Vanished || !p.ExeMemfd {
@@ -109,7 +109,7 @@ var exeDeleted = check.Check{
 		var unreadable int
 		for i := range f.Processes {
 			p := &f.Processes[i]
-			if p.ExeErr == "sem permissão" {
+			if p.ExeDenied {
 				unreadable++
 			}
 			if p.Self || p.Vanished || !p.ExeDeleted || p.ExeMemfd {
@@ -167,7 +167,7 @@ var kthreadDisguise = check.Check{
 				// permissão. Sem root, um `exec -a '[kworker/2:1]' /tmp/.x` de
 				// root cai no segundo caso — e a versão anterior o classificava
 				// como kthread legítima e o pulava.
-				if p.ExeErr == "sem permissão" {
+				if p.ExeDenied {
 					unreadable++
 				}
 				continue

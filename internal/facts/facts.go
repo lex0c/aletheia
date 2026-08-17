@@ -28,6 +28,11 @@ type Facts struct {
 	Processes []Process `json:"processes,omitempty"`
 	Sockets   []Socket  `json:"sockets,omitempty"`
 
+	// ProcessesGone conta os PIDs que estavam em /proc e sumiram antes de serem
+	// lidos. NÃO é lacuna de cobertura — o processo não existe mais para
+	// ninguém. Fica registrado porque um número alto é rotatividade anormal.
+	ProcessesGone int `json:"processes_gone,omitempty"`
+
 	// Partial registra o que a própria coleta não conseguiu ler, por coletor.
 	// Não é o mesmo que "não havia nada": é "não deu para olhar".
 	Partial map[string][]string `json:"partial,omitempty"`

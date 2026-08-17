@@ -44,7 +44,7 @@ var suspiciousPath = check.Check{
 			if p.Self || p.Vanished {
 				continue
 			}
-			if p.ExeErr == "sem permissão" {
+			if p.ExeDenied {
 				unreadable++
 				continue
 			}

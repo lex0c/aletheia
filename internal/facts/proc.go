@@ -39,8 +39,20 @@ type Process struct {
 	Comm  string `json:"comm"`  // de /proc/<pid>/stat, entre parênteses
 	State string `json:"state"` // R S D Z T ...
 
-	Exe        string `json:"exe,omitempty"`
-	ExeErr     string `json:"exe_err,omitempty"`
+	Exe    string `json:"exe,omitempty"`
+	ExeErr string `json:"exe_err,omitempty"` // texto para o relatório
+
+	// ExeMissing e ExeDenied são a MESMA informação do ExeErr, tipada. Quem
+	// decide precisa delas: comparar `ExeErr == "sem permissão"` faz o controle
+	// de fluxo depender de uma string em português, e traduzir a mensagem
+	// desligaria checks em silêncio, com a suíte inteira verde.
+	//
+	//	ExeMissing   o kernel não associa executável nenhum a este PID:
+	//	             thread de kernel, ou zumbi
+	//	ExeDenied    existe, e nós é que não pudemos ler
+	ExeMissing bool `json:"exe_missing,omitempty"`
+	ExeDenied  bool `json:"exe_denied,omitempty"`
+
 	ExeDeleted bool   `json:"exe_deleted,omitempty"`
 	ExeMemfd   bool   `json:"exe_memfd,omitempty"`
 	Cwd        string `json:"cwd,omitempty"`
@@ -142,20 +154,25 @@ func collectProcesses(f *Facts, e *env.Env) {
 
 	self := os.Getpid()
 
-	var denied, deniedMaps, deniedNS, dropped, listed int
+	var denied, deniedMaps, deniedNS, gone, hidden, listed int
 	for _, ent := range ents {
 		pid, err := strconv.Atoi(ent.Name())
 		if err != nil {
 			continue
 		}
 		listed++
-		p, ok := readProcess(pid)
-		if !ok {
-			// Pode ser processo que morreu entre o ReadDir e a leitura (normal)
-			// OU /proc/<pid>/stat ilegível — sob hidepid=1/2, que é hardening
-			// CIS comum, é a MAIORIA. Descartar em silêncio faz a ferramenta
-			// ver 4 de 310 processos e imprimir RESULT: OK.
-			dropped++
+		p, outcome := readProcess(pid)
+		switch outcome {
+		case readGone:
+			// Terminou entre o ReadDir e a leitura. Não há o que avaliar, e não
+			// há lacuna: o processo não existe mais para ninguém.
+			gone++
+			continue
+		case readDenied:
+			// Existe e não pudemos ler — sob hidepid=1, que é hardening CIS
+			// comum, é a MAIORIA. Calar isso faz a ferramenta ver 4 de 310
+			// processos e imprimir RESULT: OK.
+			hidden++
 			continue
 		}
 		// SÓ o próprio processo é isento. A versão anterior isentava toda a
@@ -201,11 +218,15 @@ func collectProcesses(f *Facts, e *env.Env) {
 		f.partial("proc", strconv.Itoa(deniedNS)+" processos com /proc/<pid>/ns/* ilegível "+
 			"(sem permissão): namespace próprio não pôde ser avaliado neles")
 	}
-	if dropped > 0 {
-		f.partial("proc", strconv.Itoa(dropped)+" de "+strconv.Itoa(listed)+
-			" PIDs listados em /proc não puderam ser lidos (morreram na coleta, "+
-			"ou hidepid restringe): esses processos NÃO foram avaliados por check nenhum")
+	if hidden > 0 {
+		f.partial("proc", strconv.Itoa(hidden)+" de "+strconv.Itoa(listed)+
+			" PIDs existem em /proc e não puderam ser LIDOS (hidepid ou permissão): "+
+			"esses processos NÃO foram avaliados por check nenhum")
 	}
+	// gone NÃO entra em partial. Fica registrado para quem lê o JSONL: um
+	// número alto é rotatividade fora do normal, e vale o olho humano — mas
+	// não é "não consegui olhar".
+	f.ProcessesGone = gone
 	if noExe := countNoExe(f); noExe > 0 {
 		f.partial("proc", strconv.Itoa(noExe)+" processos com /proc/<pid>/exe ilegível "+
 			"(sem permissão): memfd, binário apagado e disfarce de kthread não puderam "+
@@ -231,7 +252,7 @@ func collectProcesses(f *Facts, e *env.Env) {
 func countNoExe(f *Facts) int {
 	n := 0
 	for i := range f.Processes {
-		if f.Processes[i].ExeErr == "sem permissão" {
+		if f.Processes[i].ExeDenied {
 			n++
 		}
 	}
@@ -256,16 +277,40 @@ func splitStatComm(s string) (comm string, rest []string, ok bool) {
 	return comm, rest, true
 }
 
-func readProcess(pid int) (*Process, bool) {
+// readOutcome separa os dois desfechos que a versão anterior confundia. A
+// diferença decide se a cobertura degrada:
+//
+//	readGone     o processo TERMINOU durante a coleta. Ninguém pode avaliá-lo
+//	             — nem nós, nem um humano com ps. Não é lacuna de cobertura:
+//	             é rotina, e acontece em toda varredura de servidor ocupado
+//	readDenied   o processo EXISTE e nós é que não pudemos lê-lo — hidepid,
+//	             permissão. Isso É lacuna, e é o que a ferramenta existe para
+//	             não calar
+//
+// Tratar os dois como um só fazia um host de produção nunca reportar OK: basta
+// um processo terminar nos 60ms da coleta.
+type readOutcome int
+
+const (
+	readOK readOutcome = iota
+	readGone
+	readDenied
+)
+
+func readProcess(pid int) (*Process, readOutcome) {
 	p := &Process{PID: pid, NS: map[string]string{}}
 
-	st, ok := readTrim(procPath(pid, "stat"))
-	if !ok {
-		return nil, false
+	st, err := readTrimErr(procPath(pid, "stat"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, readGone
+		}
+		return nil, readDenied
 	}
 	comm, rest, ok := splitStatComm(st)
 	if !ok {
-		return nil, false
+		// stat existe e não parseia: não é ausência, é algo que não entendemos.
+		return nil, readDenied
 	}
 	p.Comm = comm
 	// rest[0] é o campo 3 (state); rest[n] é o campo n+3.
@@ -291,7 +336,7 @@ func readProcess(pid int) (*Process, bool) {
 	readNS(p)
 	readFDs(p)
 	readMaps(p)
-	return p, true
+	return p, readOK
 }
 
 // readStatus parseia por CHAVE. O conjunto de campos varia muito entre kernels;
@@ -340,6 +385,8 @@ func readExe(p *Process) {
 	t, err := os.Readlink(procPath(p.PID, "exe"))
 	if err != nil {
 		p.ExeErr = classifyErr(err)
+		p.ExeMissing = os.IsNotExist(err)
+		p.ExeDenied = os.IsPermission(err)
 		return
 	}
 	// Um binário executado via memfd_create nunca esteve em disco: o link

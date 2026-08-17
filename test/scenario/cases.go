@@ -6,7 +6,25 @@ package scenario
 var (
 	matriz  = []string{"debian:12", "alpine:3.20"}
 	minimal = []string{"alpine:3.20"} // rápido, e sem glibc: prova o binário estático
+
+	// Userland de época. O que ele cobre é LAYOUT — base de pacotes rpm, que a
+	// matriz principal não tem, e árvore de systemd de outra geração. O que ele
+	// NÃO cobre é o kernel: contêiner usa o do host, e por isso os cenários de
+	// kernel legado são de VM.
+	legado = []string{"centos:7", "debian:9"}
 )
+
+// implantes é o conjunto de formas plantado tanto no userland de época quanto
+// nos kernels de época. Ser o MESMO texto nos dois é o ponto: a diferença de
+// resultado, se houvesse, seria do ambiente e não do plantio.
+const implantes = `/helper argv0 "[kworker/0:9]" /helper sleep 300 &
+	/helper memfd /helper sleep 300 &
+	/helper rwx &
+	/helper trace &
+	/helper caps 1000 &
+	cp /helper /tmp/.x
+	/tmp/.x sleep 300 &
+	sleep 0.6`
 
 func init() {
 	// ---------------------------------------------------------------- negativos
@@ -209,6 +227,67 @@ func init() {
 		MustBeComplete: true,
 	})
 
+	// ------------------------------------------------------- userland de época
+
+	Register(Scenario{
+		ID:     "28-userland-legado-limpo",
+		Desc:   "userland de época intocado não pode produzir achado",
+		Images: legado,
+		Forbid: []string{
+			"proc.memfd_exec", "proc.exe_deleted", "proc.kthread_disguise",
+			"proc.suspicious_path", "proc.caps_unexpected", "proc.tracer",
+			"proc.maps_rwx_anon", "proc.ns_divergent",
+			"correlate.revshell", "net.pivot",
+		},
+		Exit: 0,
+	})
+
+	Register(Scenario{
+		ID:   "29-userland-legado-implante",
+		Desc: "userland de época não muda o que a ferramenta enxerga",
+		// A ferramenta é ELF estático e lê /proc direto, sem chamar binário do
+		// host (SPEC 4). Se a distribuição importasse para o resultado, é aqui
+		// que apareceria.
+		Images: legado,
+		Plant:  implantes,
+		Expect: []Expect{
+			{ID: "proc.kthread_disguise", Sev: "CRITICAL"},
+			{ID: "proc.memfd_exec", Sev: "CRITICAL"},
+			{ID: "proc.suspicious_path", Sev: "WARN"},
+		},
+		Exit: 2,
+	})
+
+	Register(Scenario{
+		ID:   "30-32-bits",
+		Desc: "binário de 32 bits enxerga o mesmo: servidor i686 legado ainda existe",
+		// Prova o BINÁRIO de 32 bits contra /proc real — tamanho de int, número
+		// de syscall, parsing de campo de 64 bits em máquina de 32. O kernel
+		// aqui continua sendo o do host: um kernel de 32 bits é o cenário 54.
+		Images: legado,
+		Arch:   "386",
+		Plant:  implantes,
+		Expect: []Expect{
+			{ID: "proc.kthread_disguise", Sev: "CRITICAL"},
+			{ID: "proc.memfd_exec", Sev: "CRITICAL"},
+		},
+		Exit: 2,
+	})
+
+	Register(Scenario{
+		ID:   "31-sem-os-release",
+		Desc: "distribuição anterior ao os-release não pode quebrar o cabeçalho",
+		// RHEL 6 e anteriores só têm /etc/redhat-release. O cabeçalho perde o
+		// nome da distribuição e SEGUE — degradar não é falhar.
+		Images: legado,
+		Plant: `rm -f /etc/os-release /usr/lib/os-release
+			cp /helper /tmp/.x
+			/tmp/.x sleep 300 &
+			sleep 0.4`,
+		Expect: []Expect{{ID: "proc.suspicious_path", Sev: "WARN"}},
+		Exit:   1,
+	})
+
 	// ------------------------------------------------------------------- rede
 	//
 	// Os quatro cenários abaixo existem em pares: uma forma que precisa
@@ -355,10 +434,11 @@ func init() {
 	// ------------------------------------------------------- fora do contêiner
 
 	Register(Scenario{
-		ID:   "90-kernel-antigo",
-		Desc: "procfs de kernel 2.6.32 (campos ausentes em /proc/<pid>/status)",
-		Untestable: "contêiner compartilha o kernel do host: uma imagem centos:6 testa o " +
-			"LAYOUT de userland, não o procfs antigo. Exige VM.",
+		ID:   "90-kernel-2.6",
+		Desc: "procfs de kernel 2.6.32 (RHEL 6): campos ausentes em /proc/<pid>/status",
+		Untestable: "os cenários 50–52 cobrem 3.18 e 4.14, que é até onde o initramfs " +
+			"de Alpine atual boota. Descer a 2.6.32 exigiria um rootfs de época " +
+			"junto — e o próprio runtime do Go não sustenta mais esse kernel.",
 	})
 
 	// ----------------------------------------------------------------- VM
@@ -396,6 +476,80 @@ func init() {
 		Forbid:           []string{"proc.kthread_disguise"},
 		MustBeIncomplete: true,
 		Exit:             1,
+	})
+
+	// ------------------------------------------------------- kernel de época
+	//
+	// O único eixo que contêiner nenhum alcança. Exige `make vm-kernels`, que
+	// baixa os dois kernels; sem ele estes cenários são PULADOS com o motivo
+	// dito em voz alta.
+	//
+	// 3.18 é o mais antigo que ainda boota com este initramfs (2014). 4.14 é o
+	// LTS do Amazon Linux 2 e da era do Ubuntu 18.04 — o "legado" que mais se
+	// encontra em produção de verdade.
+
+	Register(Scenario{
+		ID:             "50-kernel-3.18-limpo",
+		Desc:           "kernel de 2014, guest limpo: cobertura completa e nenhum achado",
+		Mode:           VM,
+		Kernel:         "3.18",
+		Exit:           0,
+		MustBeComplete: true,
+	})
+
+	Register(Scenario{
+		ID:     "51-kernel-3.18-implante",
+		Desc:   "kernel de 2014 enxerga os mesmos implantes que o kernel atual",
+		Mode:   VM,
+		Kernel: "3.18",
+		Setup:  implantes,
+		Expect: []Expect{
+			{ID: "proc.kthread_disguise", Sev: "CRITICAL"},
+			{ID: "proc.memfd_exec", Sev: "CRITICAL"},
+			{ID: "proc.maps_rwx_anon", Sev: "WARN"},
+			{ID: "proc.tracer", Sev: "WARN"},
+			{ID: "proc.caps_unexpected", Sev: "WARN"},
+			{ID: "proc.suspicious_path", Sev: "WARN"},
+		},
+		Exit:           2,
+		MustBeComplete: true,
+	})
+
+	Register(Scenario{
+		ID:     "52-kernel-4.14-implante",
+		Desc:   "kernel do Amazon Linux 2 enxerga os mesmos implantes",
+		Mode:   VM,
+		Kernel: "4.14",
+		Setup:  implantes,
+		Expect: []Expect{
+			{ID: "proc.kthread_disguise", Sev: "CRITICAL"},
+			{ID: "proc.memfd_exec", Sev: "CRITICAL"},
+			{ID: "proc.tracer", Sev: "WARN"},
+		},
+		Exit:           2,
+		MustBeComplete: true,
+	})
+
+	Register(Scenario{
+		ID:   "53-cgroup-v1-puro",
+		Desc: "servidor legado sem cgroup v2: a hierarquia nomeada é a que responde",
+		// Kernel 3.18 não TEM cgroup v2. O coletor prefere v2, cai para
+		// `name=systemd` e só então para qualquer controlador — e essa ordem
+		// existe porque é a hierarquia nomeada que carrega a unit. Sem este
+		// cenário a preferência ficava sem prova.
+		Mode:   VM,
+		Kernel: "3.18",
+		Setup: `mkdir -p /tmp/cg
+			mount -t cgroup -o none,name=systemd cgroup /tmp/cg
+			mkdir -p /tmp/cg/legado.service
+			/helper caps 1000 &
+			echo $! > /tmp/cg/legado.service/cgroup.procs
+			sleep 0.5`,
+		Expect: []Expect{{
+			ID: "proc.caps_unexpected", Sev: "WARN",
+			Evidence: "cgroup=/legado.service",
+		}},
+		Exit: 1,
 	})
 
 	Register(Scenario{

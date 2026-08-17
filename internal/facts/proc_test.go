@@ -2,6 +2,7 @@ package facts
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -139,4 +140,38 @@ func TestIsLibDir(t *testing.T) {
 
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o600)
+}
+
+// A distinção que separa "não achei" de "não consegui olhar" — e, deste lado,
+// separa "não consegui olhar" de "não havia mais nada para olhar".
+//
+// Sem ela, um servidor de produção nunca reportaria OK: basta UM processo
+// terminar durante os 60ms da coleta para a cobertura degradar. O oposto do
+// defeito original, e igualmente inútil.
+func TestReadProcessSeparaSumidoDeIlegivel(t *testing.T) {
+	// PID que não pode existir: acima de qualquer pid_max praticado.
+	if _, got := readProcess(1 << 30); got != readGone {
+		t.Errorf("PID inexistente devolveu %v, quer readGone", got)
+	}
+	// O próprio processo é sempre legível.
+	if _, got := readProcess(os.Getpid()); got != readOK {
+		t.Errorf("o próprio PID devolveu %v, quer readOK", got)
+	}
+}
+
+// E o desfecho "sumiu" NÃO pode virar lacuna de cobertura: o processo não
+// existe mais para ninguém, nem para um humano rodando ps.
+func TestProcessosQueSumiramNaoDegradamCobertura(t *testing.T) {
+	f := &Facts{}
+	f.ProcessesGone = 7
+	for _, rs := range f.Partial {
+		for _, r := range rs {
+			if strings.Contains(r, "sumir") || strings.Contains(r, "terminaram") {
+				t.Errorf("processo que terminou virou lacuna: %q", r)
+			}
+		}
+	}
+	if f.ProcessesGone != 7 {
+		t.Error("mas a contagem precisa continuar visível no JSONL")
+	}
 }

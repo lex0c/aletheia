@@ -70,8 +70,8 @@ func TestSuspiciousPathNaoDuplicaOsChecksDeExe(t *testing.T) {
 
 func TestSuspiciousPathContaExeIlegivelComoParcial(t *testing.T) {
 	f := &facts.Facts{Processes: []facts.Process{
-		{PID: 1, ExeErr: "sem permissão"},
-		{PID: 2, ExeErr: "sem permissão"},
+		{PID: 1, ExeErr: "sem permissão", ExeDenied: true},
+		{PID: 2, ExeErr: "sem permissão", ExeDenied: true},
 	}}
 	r := suspiciousPath.Run(suspiciousPath, f, testEnv())
 	if len(r.Partial) == 0 {

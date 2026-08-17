@@ -7,7 +7,7 @@ GOFLAGS := -trimpath
 # LD_PRELOAD e a binário de sistema trojanizado (SPEC 4).
 export CGO_ENABLED = 0
 
-.PHONY: all build helper vm-image test lint verify clean dist scenarios images
+.PHONY: all build helper vm-image test lint verify clean dist scenarios images vm-kernels arches
 
 all: verify
 
@@ -52,7 +52,20 @@ dist: verify
 vm-image: build helper
 	./test/vm/build.sh
 
-scenarios: build helper vm-image
+# Separado de propósito: exige REDE. Sem ele, os cenários de kernel legado são
+# pulados com o motivo dito — nunca passam em silêncio. Não escreve em /boot.
+vm-kernels:
+	./test/vm/kernels.sh
+
+# Servidor legado de 32 bits ainda existe. Cross-compilar custa segundos e é a
+# única forma de provar que a ferramenta roda lá — tamanho de int e número de
+# syscall divergem, e o compilador não pega tudo.
+arches:
+	CGO_ENABLED=0 GOOS=linux GOARCH=386   go build -trimpath -o dist/aletheia-386   ./cmd/aletheia
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o dist/aletheia-arm64 ./cmd/aletheia
+	CGO_ENABLED=0 GOOS=linux GOARCH=386   go build -trimpath -o dist/helper-386     ./test/helper
+
+scenarios: build helper arches vm-image
 	go test -tags scenarios -v -timeout 10m ./test/...
 
 # images pré-baixa a matriz, para o primeiro `make scenarios` não medir download.

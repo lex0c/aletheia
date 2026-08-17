@@ -40,6 +40,11 @@ type Expect struct {
 	ID      string
 	Sev     string // "CRITICAL" | "WARN" | "MANUAL" | ""=qualquer
 	Subject string // substring; ""=qualquer
+
+	// Evidence é uma substring que precisa aparecer na evidência do achado.
+	// Existe para travar PARSING, não severidade: "o cgroup v1 nomeado virou
+	// /legado.service" só é verificável olhando o que foi impresso.
+	Evidence string
 }
 
 // Scenario é uma situação e o contrato de saída correspondente.
@@ -68,6 +73,20 @@ type Scenario struct {
 	// contrato de JSONL e de exit code é o mesmo, e é justamente isso que
 	// tem de continuar valendo.
 	Cmd string
+
+	// Kernel fixa a versão do kernel do guest — "3.18", "4.14". Vazio usa o do
+	// HOST, que é o caso comum.
+	//
+	// É o único eixo que contêiner nenhum alcança: contêiner compartilha o
+	// kernel de quem o roda, então a matriz de imagens prova layout de
+	// userland e não procfs de época. "Roda em VM legada?" só tem resposta
+	// honesta bootando um kernel legado.
+	Kernel string
+
+	// Arch roda um binário de outra arquitetura — "386". Vazio usa o nativo.
+	// Servidor legado de 32 bits ainda existe, e é onde tamanho de int e
+	// número de syscall divergem.
+	Arch string
 
 	// Caps são capabilities extras do contêiner (--cap-add). Só os cenários que
 	// PRECISAM de privilégio para montar a situação as pedem: NET_ADMIN para

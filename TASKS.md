@@ -3417,3 +3417,86 @@ achado que **nenhum dos falsos positivos corrigidos tinha teste**; este tem.
 cenários limpos. Sete das oito lacunas do `ATTACK.md` continuam fechadas, e o
 mapa ganhou uma linha nova: `T1205.002`, filtro de socket — a forma do BPFDoor,
 que não abre porta e por isso nunca apareceu na tabela de conexões.
+
+---
+
+## Registro — o outro lado do BPFDoor: quem segura o filtro
+
+Continuação direta da fase 8, e ela existe porque o achado terminava numa
+instrução vaga. O `kernel.bpf_unowned` dizia "procure quem o segura: um
+processo com socket aberto que não explique o que faz" — e essa frase é o tipo
+de coisa que um relatório escreve quando não sabe.
+
+### O ponto cego era mais largo que o eBPF
+
+A ferramenta lê `/proc/net/tcp` e `/proc/net/udp`. Um socket AF_PACKET não
+aparece em nenhum dos dois, não abre porta e não tem par remoto: **para a
+tabela de conexões inteira, quem tem um deles não tem rede.** É o mecanismo do
+sniffer, e era invisível ao catálogo todo — não só ao check novo.
+
+Com `/proc/net/packet` e `/proc/net/raw{,6}` lidos, o achado de eBPF órfão
+passou de instrução vaga para lista de nomes:
+
+```
+· candidatos a detentor, entre os processos que têm socket de captura:
+  helper (pid=70) — é candidato, não prova: o kernel não diz qual socket
+  carrega qual programa
+```
+
+A ressalva é obrigatória e não é modéstia: **o kernel não expõe a ligação**
+entre socket e programa. Afirmar mais que candidato seria inventar o elo que
+falta, que é o defeito que esta base persegue em todos os outros lugares.
+
+### A população legítima, medida dos dois lados
+
+```
+desktop com wifi   3 sockets AF_PACKET, todos de root: ARP, EAPOL e TDLS
+                   + 1 raw6 de ICMPv6 — é o wpa_supplicant e o DHCP
+contêiner debian   1 socket AF_PACKET, protocolo 0000, sem interface,
+                   coluna R em ZERO
+```
+
+O segundo derrubou **quarenta cenários de uma vez** na primeira execução da
+suíte. Todo contêiner tem esse socket: o runtime o cria ao montar o namespace
+de rede, e o dono dele vive fora do contêiner — então ele saía como "alguém
+pode ler o tráfego, dono não identificado" em toda varredura de contêiner, e
+ainda degradava a cobertura.
+
+A correção não é uma exceção por nome: é a coluna `R` do próprio kernel. Sem
+estar enganchado no caminho de recepção, **o socket não recebe quadro nenhum**.
+A §2.6 pergunta por quem LÊ, e ele não lê. Um socket inerte não entra no
+inventário, não conta na cobertura e não é oferecido como candidato.
+
+### E os kernels legados pegaram o segundo
+
+Os guests de 3.18 e 4.14 não têm `/proc/net/packet` — são compilados sem
+`CONFIG_PACKET`. O coletor tratava ausência como ilegível e degradava a
+cobertura dos três cenários de kernel antigo.
+
+O comentário que eu tinha escrito ali dizia exatamente a regra certa
+("AUSENTE não é ILEGÍVEL") e o código fazia o contrário. É a mesma distinção do
+coletor de ftrace, e agora ela está implementada e não só descrita:
+
+```
+não existe        kernel sem CONFIG_PACKET: não há socket para achar
+existe e não abre lacuna de verdade, declarada
+```
+
+### Por que é inventário, e não acusação
+
+Cliente de DHCP, wpa_supplicant e NetworkManager usam o mesmo mecanismo do
+sniffer. O que separa é o NOME de quem segura, e reconhecer nome é trabalho de
+quem opera o host — a ferramenta entrega o quadro. Nem ETH_P_ALL escapa disso:
+o dhclient da ISC pede TODO o tráfego e filtra por cima, e o `tcpdump` do
+próprio respondedor produz a mesma linha.
+
+O juízo objetivo mora na correlação, não no socket: é o eBPF órfão que
+transforma a lista de candidatos em pergunta.
+
+### Estado
+
+77 checks, 119 cenários, 181 execuções. `make verify`, `make race` e a suíte
+inteira limpos. O `P8` monta a forma completa do BPFDoor numa VM — socket
+AF_PACKET com filtro eBPF e descritor fechado, sem porta aberta nenhuma — e o
+`P9` prova a metade negativa em debian e alpine: o mesmo socket, sem programa,
+não vira acusação.

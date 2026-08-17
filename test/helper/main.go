@@ -111,6 +111,15 @@ const usage = `helper — monta situações para a suíte de cenários
   helper bpf tailcall <nome>
       deixa o programa preso a um prog_array e segura o MAPA. É como cilium
       encadeia o datapath: o programa não tem descritor próprio.
+
+  helper bpf pacote <nome>
+      a forma COMPLETA do BPFDoor: socket AF_PACKET com ETH_P_ALL, filtro eBPF
+      anexado e o descritor do programa fechado. Não abre porta nenhuma.
+
+  helper pacote
+      só o socket AF_PACKET, sem programa: é o gerenciador de rede. O mecanismo
+      é o mesmo, e não há implante — existe para provar que a leitura da §2.6
+      não vira acusação sozinha.
 `
 
 func main() {
@@ -290,6 +299,10 @@ func main() {
 		die(mapRWX())
 		hold()
 
+	case "pacote":
+		die(pacoteSemBPF())
+		hold()
+
 	case "bpf":
 		need(4)
 		switch os.Args[2] {
@@ -315,6 +328,8 @@ func main() {
 			return
 		case "tailcall":
 			die(bpfNoTailCall(os.Args[3]))
+		case "pacote":
+			die(bpfNoSocketDePacote(os.Args[3]))
 		default:
 			fmt.Fprint(os.Stderr, usage)
 			os.Exit(2)

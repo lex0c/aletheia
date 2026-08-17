@@ -84,7 +84,8 @@ Três rótulos, e o do meio é o que mais informa:
 | T1071 Protocolo de aplicação | parcial | `net.egress_unowned` — pela ORIGEM, nunca pelo destino |
 | T1571 Porta fora do padrão | parcial | `net.listener_unowned` |
 | T1090 Proxy / pivô | coberto | `net.pivot` |
-| T1205.002 Filtro de socket | coberto | `kernel.bpf_unowned` — é a forma do BPFDoor: programa de `socket_filter` carregado, anexado a um socket e com o descritor fechado, esperando um pacote-gatilho. Não abre porta, e por isso a tabela de conexões não o mostra |
+| T1205.002 Filtro de socket | coberto | `kernel.bpf_unowned` + `net.packet_socket` — é a forma do BPFDoor: programa de `socket_filter` carregado, anexado a um socket e com o descritor fechado, esperando um pacote-gatilho. Não abre porta, e por isso a tabela de conexões não o mostra; o segundo check lê `/proc/net/packet` e NOMEIA os candidatos a detentor |
+| T1040 Captura de tráfego | parcial | `net.packet_socket` — inventário de quem tem socket AF_PACKET ou raw, com o modo promíscuo como contexto. É quadro, não acusação: cliente de DHCP e wpa_supplicant usam o mesmo mecanismo, e o que separa é o nome de quem segura |
 | T1219 Ferramenta de acesso remoto | coberto | `tool.artifact`, `tool.binary` |
 | T1567 Exfiltração por serviço web | parcial | `tool.artifact` reconhece rclone e afins pelo artefato |
 | T1496 Sequestro de recurso | parcial | a forma do minerador é vista por caminho, disfarce e memória; consumo de CPU não é medido |

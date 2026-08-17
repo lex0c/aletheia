@@ -142,6 +142,51 @@ func init() {
 	})
 
 	Register(Scenario{
+		ID:   "P8-bpfdoor-completo",
+		Desc: "socket AF_PACKET com filtro eBPF e descritor fechado: o implante que não abre porta, e quem o segura nomeado",
+		Mode: VM,
+		// A forma inteira, e o que ela tem de traiçoeiro: o processo existe, o
+		// programa existe, e a tabela de conexões não mostra NADA. Não há porta
+		// escutando, não há conexão estabelecida — o kernel entrega o quadro
+		// direto ao filtro, e o gatilho é um pacote que ninguém vê chegar.
+		//
+		// O par de achados é o ponto: o eBPF órfão diz que algo está carregado
+		// sem dono, e a leitura da §2.6 diz QUEM tem socket de captura neste
+		// host. Junto, o relatório para de mandar procurar e passa a apontar.
+		Setup: `/helper bpf pacote implante &
+			sleep 1`,
+		Expect: []Expect{
+			{ID: "kernel.bpf_unowned", Sev: "CRITICAL", Evidence: "socket_filter"},
+			{ID: "kernel.bpf_unowned", Evidence: "candidatos a detentor"},
+			{ID: "kernel.bpf_unowned", Evidence: "helper"},
+			{ID: "net.packet_socket", Sev: "MANUAL", Evidence: "ETH_P_ALL"},
+		},
+		Exit: 2,
+	})
+
+	Register(Scenario{
+		ID:   "P9-socket-de-captura-sem-implante",
+		Desc: "o MESMO socket de captura, sem programa nenhum: é o gerenciador de rede, e não pode virar acusação",
+		// Em contêiner de propósito: AF_PACKET só exige CAP_NET_RAW, que o
+		// runtime concede por padrão — e é ali que a leitura precisa funcionar
+		// em distribuições diferentes.
+		//
+		// O que ele trava é a metade negativa da §2.6: um socket de captura
+		// sozinho é INVENTÁRIO. Cliente de DHCP e wpa_supplicant abrem
+		// exatamente este socket em todo host com rede, e se isso virasse aviso
+		// a ferramenta gritaria em todos eles.
+		Images: matriz,
+		Plant: `/helper pacote &
+			sleep 0.5`,
+		Expect: []Expect{
+			{ID: "net.packet_socket", Sev: "MANUAL", Evidence: "helper"},
+			{ID: "net.packet_socket", Evidence: "ETH_P_ALL"},
+		},
+		Forbid: []string{"kernel.bpf_unowned"},
+		Exit:   -1,
+	})
+
+	Register(Scenario{
 		ID:   "P5-taint-sem-modulo-que-admita",
 		Desc: "o kernel registra módulo não assinado e nenhum módulo carregado assume: o que fica depois que o módulo sai",
 		Mode: VM,

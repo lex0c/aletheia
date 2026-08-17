@@ -148,6 +148,50 @@ func bpfNoSocket(nome string) error {
 	return nil
 }
 
+// bpfNoSocketDePacote é a forma COMPLETA do BPFDoor.
+//
+// A diferença para o bpfNoSocket é o tipo do socket: AF_PACKET com ETH_P_ALL
+// recebe todo quadro que passa pela interface, sem abrir porta nenhuma. É por
+// isso que um implante desses não aparece em tabela de conexão alguma — ele
+// espera um pacote-gatilho que o kernel entrega direto ao filtro.
+//
+// O filtro plantado aqui devolve zero, ou seja, descarta tudo: o cenário exibe
+// a ESTRUTURA e não o comportamento.
+func bpfNoSocketDePacote(nome string) error {
+	progFD, err := carregaBPF(progTipoSocketFilter, nome, 0)
+	if err != nil {
+		return err
+	}
+	// htons(ETH_P_ALL): o protocolo vai em ordem de rede.
+	const ethPAll = 0x0003
+	sock, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW,
+		int(uint16(ethPAll<<8|ethPAll>>8)))
+	if err != nil {
+		return fmt.Errorf("socket AF_PACKET (exige CAP_NET_RAW): %w", err)
+	}
+	if err := syscall.SetsockoptInt(sock, syscall.SOL_SOCKET, soAttachBPF, progFD); err != nil {
+		return fmt.Errorf("SO_ATTACH_BPF: %w", err)
+	}
+	if err := syscall.Close(progFD); err != nil {
+		return err
+	}
+	guardaFD(sock)
+	return nil
+}
+
+// pacoteSemBPF abre só o socket de captura, sem programa nenhum. É o
+// gerenciador de rede: o mecanismo é o mesmo, e não há implante.
+func pacoteSemBPF() error {
+	const ethPAll = 0x0003
+	sock, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW,
+		int(uint16(ethPAll<<8|ethPAll>>8)))
+	if err != nil {
+		return fmt.Errorf("socket AF_PACKET (exige CAP_NET_RAW): %w", err)
+	}
+	guardaFD(sock)
+	return nil
+}
+
 // bpfSegura carrega e MANTÉM o descritor aberto. É o caso legítimo: toda
 // ferramenta baseada em libbpf faz isto, e a ferramenta precisa NÃO acusar.
 func bpfSegura(nome string) error {

@@ -72,6 +72,45 @@ func TestBPFSemDonoSeveridadePorFamilia(t *testing.T) {
 	}
 }
 
+// O fio que fecha o achado do BPFDoor: quem segura um filtro de socket é um
+// SOCKET, e a lista de quem tem socket de captura neste host agora é lida. O
+// achado para de mandar procurar e passa a apontar.
+func TestBPFSemDonoNomeiaCandidatos(t *testing.T) {
+	f := fatosBPF(facts.ProgramaBPF{ID: 9, TipoNum: kbpf.ProgSocketFilter, Tipo: "socket_filter"})
+	f.SocketsBrutos = []facts.SocketBruto{
+		{Familia: "packet", Proto: "ETH_P_ALL (TODO o tráfego)", ProtoNum: 3, Inode: 5, PID: 812, Comm: "implante", Ativo: true},
+	}
+	r := bpfSemDono.Run(bpfSemDono, f, testEnv())
+	if len(r.Findings) != 1 {
+		t.Fatalf("achados = %v", r.Findings)
+	}
+	junto := strings.Join(r.Findings[0].Evidence, " | ")
+	if !strings.Contains(junto, "implante (pid=812)") {
+		t.Errorf("o candidato precisa ser nomeado: %q", junto)
+	}
+	// E precisa dizer que é candidato: o kernel NÃO diz qual socket carrega
+	// qual programa, e afirmar a ligação seria inventar o que falta.
+	if !strings.Contains(junto, "não prova") {
+		t.Errorf("candidato não pode ser apresentado como prova: %q", junto)
+	}
+
+	// Sem socket de captura nenhum, o achado diz isso em vez de calar.
+	f.SocketsBrutos = nil
+	r = bpfSemDono.Run(bpfSemDono, f, testEnv())
+	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "NÃO há socket de captura") {
+		t.Errorf("a ausência de candidato também precisa ser dita: %v", r.Findings[0].Evidence)
+	}
+
+	// E candidato só faz sentido para quem é preso por socket: oferecer a
+	// mesma lista num programa de kprobe apontaria para o lugar errado.
+	f2 := fatosBPF(facts.ProgramaBPF{ID: 10, TipoNum: kbpf.ProgKprobe, Tipo: "kprobe"})
+	f2.SocketsBrutos = []facts.SocketBruto{{Familia: "packet", Inode: 5, PID: 812, Comm: "implante", Ativo: true}}
+	r2 := bpfSemDono.Run(bpfSemDono, f2, testEnv())
+	if strings.Contains(strings.Join(r2.Findings[0].Evidence, " "), "candidatos a detentor") {
+		t.Error("programa de kprobe não é preso por socket: não oferecer candidato")
+	}
+}
+
 // O que a ferramenta NÃO sabe atribuir vira lacuna declarada, nunca achado. É a
 // linha que impede um nó com cilium — dezenas de programas de tc e de cgroup —
 // de virar dezenas de acusações.

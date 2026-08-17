@@ -135,6 +135,21 @@ var bpfSemDono = check.Check{
 			if m := fix.Motivo(); m != "" {
 				ev = append(ev, m)
 			}
+			// O detentor de um filtro de socket é um SOCKET, e socket não diz o
+			// que carrega. Mas a lista de quem tem socket de captura neste host
+			// é curta e agora é lida (§2.6): em vez de mandar o operador
+			// procurar, o achado nomeia os candidatos.
+			candidatos := detentoresCandidatos(f, fix)
+			if len(candidatos) > 0 {
+				ev = append(ev, "candidatos a detentor, entre os processos que têm "+
+					"socket de captura: "+strings.Join(corta(candidatos, 6), " · ")+
+					" — é candidato, não prova: o kernel não diz qual socket carrega "+
+					"qual programa")
+			} else if fix == kbpf.FixSocket {
+				ev = append(ev, "e NÃO há socket de captura visível neste host: ou o "+
+					"detentor é um socket comum, ou ele está fora do alcance desta "+
+					"varredura")
+			}
 			if kbpf.Intercepta(p.TipoNum) {
 				ev = append(ev, "o tipo deste programa OBSERVA ou ALTERA a execução do "+
 					"kernel: é a família usada para esconder arquivo, ler credencial "+
@@ -146,16 +161,23 @@ var bpfSemDono = check.Check{
 			// kernel e some no reboot. Se ninguém guardar agora, não há o que
 			// analisar depois.
 			fd.Irreversible = true
-			fd.NextSteps = []string{
+			passos := []string{
 				"guarde AGORA o que identifica o programa — id, tag e tipo saem " +
 					"deste relatório, e o programa some no próximo boot",
 				"`bpftool prog dump xlated id " + strconv.Itoa(int(p.ID)) +
 					"` mostra o bytecode, quando houver bpftool no host",
-				"procure quem o segura: um processo com socket aberto que não " +
-					"explique o que faz (runbook §3.8)",
-				"NÃO reinicie o host antes de decidir: o reboot é o que apaga a " +
-					"única cópia desta evidência",
 			}
+			if len(candidatos) > 0 {
+				passos = append(passos, "comece pelos candidatos acima: `sudo ls -l "+
+					"/proc/<pid>/exe` e `sudo ls -l /proc/<pid>/fd` de cada um "+
+					"(runbook §3.8)")
+			} else {
+				passos = append(passos, "procure quem o segura: um processo com socket "+
+					"aberto que não explique o que faz (runbook §3.8)")
+			}
+			fd.NextSteps = append(passos,
+				"NÃO reinicie o host antes de decidir: o reboot é o que apaga a "+
+					"única cópia desta evidência")
 			r.Findings = append(r.Findings, fd)
 		}
 
@@ -397,6 +419,38 @@ func trampolimSemPrograma(f *facts.Facts) []string {
 		}
 	}
 	return simbolos
+}
+
+// detentoresCandidatos lista os processos que PODEM estar segurando um
+// programa preso a socket.
+//
+// Vale só para a fixação por socket: para os outros tipos o detentor é outra
+// coisa, e oferecer candidato ali confundiria em vez de ajudar. E é candidato
+// mesmo — o kernel não expõe qual socket carrega qual programa, e afirmar mais
+// que isso seria inventar a ligação que falta.
+func detentoresCandidatos(f *facts.Facts, fix kbpf.Fixacao) []string {
+	if fix != kbpf.FixSocket {
+		return nil
+	}
+	var out []string
+	visto := map[string]bool{}
+	for _, s := range f.SocketsBrutos {
+		// Socket inerte não recebe pacote e não pode ser o detentor: oferecê-lo
+		// como candidato mandaria o operador investigar o runtime de contêiner.
+		if s.Inerte() {
+			continue
+		}
+		rot := "dono não identificado"
+		if s.PID > 0 {
+			rot = nz(s.Comm, "?") + " (pid=" + strconv.Itoa(s.PID) + ")"
+		}
+		if visto[rot] {
+			continue
+		}
+		visto[rot] = true
+		out = append(out, rot)
+	}
+	return out
 }
 
 // mecanismoDeDono reduz o "como" ao mecanismo, sem o detalhe do caso: a

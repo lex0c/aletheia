@@ -34,6 +34,11 @@ type Facts struct {
 	Host      Host      `json:"host"`
 	Processes []Process `json:"processes,omitempty"`
 	Sockets   []Socket  `json:"sockets,omitempty"`
+	// SocketsBrutos são os que leem PACOTE e não conexão: AF_PACKET e raw.
+	// Ficam fora de Sockets de propósito — não têm par remoto, não têm estado
+	// e nenhum check de conexão faz pergunta que caiba neles.
+	SocketsBrutos []SocketBruto `json:"raw_sockets,omitempty"`
+	Interfaces    []Interface   `json:"interfaces,omitempty"`
 
 	// Persistência vem de ARQUIVO, então existe também em modo image — onde o
 	// kernel é o do analista e ocultamento por rootkit não acontece (§35.6).
@@ -185,6 +190,9 @@ func Collect(e *env.Env) *Facts {
 		// Depois dos processos: o dono de cada socket sai do join com os fds
 		// que o coletor de processo já leu.
 		collectSockets(f, e)
+		// E os que leem PACOTE, que não aparecem em tabela de conexão nenhuma:
+		// é por eles que um filtro de socket eBPF órfão continua vivo.
+		collectSocketsBrutos(f, e)
 		// Depois dos processos e ANTES de qualquer pergunta de propriedade: é
 		// a classificação que decide se "que pacote entregou este binário?" faz
 		// sentido para aquele processo.

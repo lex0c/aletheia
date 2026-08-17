@@ -2619,3 +2619,78 @@ wtf    2088ms → 1285ms      dentro do orçamento de 2s da SPEC 6.1
 
 Nenhum achado mudou: 122 execuções de cenário, `make race` limpo nos dois
 pacotes.
+
+---
+
+## Registro — a outra metade da história de SSH, e a anti-forense
+
+Vindos de ler o velociraptor, e os três fecham o MESMO padrão: fonte que a
+ferramenta mandava olhar e nunca lia. É o terceiro caso — o wtmp foi o primeiro.
+
+### Chave privada: para onde este host CONSEGUE ir
+
+A ferramenta lia `authorized_keys`, que responde quem ENTRA. Não lia nada do
+caminho inverso, e ele importa tanto quanto: um invasor que chegou aqui herda
+tudo que este host alcança.
+
+Sem senha, a chave é usada direto — não quebra nada, não abre sessão de teste,
+não deixa tentativa registrada em lugar nenhum.
+
+Três formatos, e cada um responde de um jeito:
+
+```
+PEM clássico   cabeçalho Proc-Type: 4,ENCRYPTED
+PKCS#8         o próprio cabeçalho diz ENCRYPTED
+OpenSSH novo   o corpo em base64 traz o nome da cifra, e `none` é sem senha
+```
+
+O terceiro é o padrão desde 2018 e o único que exige decodificar. Sem isso toda
+chave moderna sairia como "sem senha" ou como "com senha" dependendo do palpite
+— e as duas respostas erradas são piores que nenhuma.
+
+Duas exclusões que evitam acusar toda instalação de SSH: chave de HOST
+(`/etc/ssh/ssh_host_*`) é sem senha por desenho, e chave sem senha em automação
+é a norma. Por isso o achado descreve ALCANCE e não erro — a pergunta é se
+aquele alcance é aceitável para um host comprometido.
+
+### Anti-forense: a categoria que não existia
+
+Nenhum dos 60 checks anteriores olhava para a AUSÊNCIA deliberada de rastro.
+
+```
+.bash_history → /dev/null    o arquivo continua existindo para quem só olhar
+                             se ele está lá
+unset HISTFILE no .bashrc    o shell fica sem onde gravar
+HISTSIZE=0, set +o history   as outras duas formas
+```
+
+O que a ferramenta NÃO faz é ler o CONTEÚDO do histórico. Julgar comando por
+comando é trabalho humano e cheio de falso positivo; dizer que o registro foi
+DESLIGADO é objetivo — ninguém escreve nenhuma dessas linhas sem querer.
+
+Detalhe que decide: `Lstat` e não `Stat`. Seguindo o link vê-se um dispositivo
+de tamanho zero, e a informação de que alguém o desviou some.
+
+### known_hosts: o raio de alcance
+
+Dezenas de evidências terminam em *"procure a mesma coisa na frota (§23)"* sem
+dizer QUAIS máquinas. Esta diz.
+
+Não é achado — é o tamanho do problema. Um servidor de aplicação com três
+destinos e um bastion com quatrocentos são incidentes de escalas diferentes, e
+a diferença não aparece em nenhum outro lugar.
+
+Com `HashKnownHosts` o destino não volta, e a ferramenta diz isso em vez de
+fingir lista completa: a CONTAGEM continua dimensionando o alcance.
+
+### Os cenários usam chaves de verdade
+
+Geradas com `ssh-keygen`, uma sem senha e uma com. Construir um blob que só o
+meu parser aceita seria testar o parser contra a própria ficção — e a chave
+cifrada existe para provar o outro lado: se ela saísse como aviso, o check
+viraria "todo host que usa SSH tem um problema".
+
+### Estado
+
+63 checks, 84 cenários, 128 execuções. `make race` limpo. Zero achado em Debian
+12, Alpine 3.20 e Ubuntu 14.04.

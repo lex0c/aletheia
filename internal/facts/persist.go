@@ -151,6 +151,8 @@ func collectPersist(f *Facts, e *env.Env) {
 	collectPkg(f, e)
 	collectUsers(f, e)
 	collectLogins(f, e)
+	collectCredenciais(f, e)
+	collectHistorico(f, e)
 
 	// Environment= de unit tem o MESMO efeito do /etc/environment, e por isso
 	// alimenta a mesma lista: um check só, uma leitura só.

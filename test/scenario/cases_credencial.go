@@ -1,0 +1,125 @@
+package scenario
+
+// A outra metade da história de SSH, e a categoria que faltava.
+//
+//	E1  chave privada sem senha   para onde este host CONSEGUE ir
+//	E2  histórico desligado       anti-forense: a AUSÊNCIA deliberada de rastro
+//	E3  known_hosts               para onde este host JÁ foi, e o raio da §23
+//
+// Os três vieram de ler o velociraptor, e todos fecham o mesmo padrão: fonte
+// que a ferramenta MANDAVA olhar e nunca lia.
+
+func init() {
+	Register(Scenario{
+		ID:   "E1-chave-privada-sem-senha",
+		Desc: "chave SSH privada sem senha: credencial de movimento lateral largada aberta",
+		// A ferramenta lia `authorized_keys` — quem ENTRA — e nada sobre o
+		// caminho inverso. Sem senha, quem lê o arquivo já pode usar a chave:
+		// não quebra nada, não abre sessão de teste, não deixa tentativa
+		// registrada em lugar nenhum.
+		//
+		// As duas chaves deste cenário são REAIS, geradas pelo ssh-keygen. A
+		// cifrada existe para provar o outro lado: uma chave protegida por
+		// senha não pode sair como aviso, ou o check viraria "todo host que usa
+		// SSH tem um problema".
+		Images: matriz,
+		Plant:  chavesPrivadas,
+		Expect: []Expect{
+			{ID: "cred.ssh_private_key", Sev: "WARN", Subject: "/root/.ssh/deploy_key"},
+			{ID: "cred.ssh_private_key", Evidence: "SEM SENHA"},
+			// A cifrada entra no inventário e NÃO como aviso.
+			{ID: "cred.ssh_private_key", Sev: "MANUAL", Subject: "/root/.ssh/pessoal"},
+			{ID: "cred.ssh_private_key", Evidence: "protegida por senha"},
+		},
+		Exit: 1,
+	})
+
+	Register(Scenario{
+		ID:   "E2-historico-desligado",
+		Desc: "histórico de shell apontado para /dev/null e desligado no rc: rastro apagado de propósito",
+		// ANTI-FORENSE, categoria que nenhum outro check cobria. O achado não é
+		// o implante: é a ausência DELIBERADA de rastro.
+		//
+		// Ninguém aponta .bash_history para /dev/null por acidente, e ninguém
+		// escreve `unset HISTFILE` sem querer. Custa uma linha, e quem faz isso
+		// está contando que alguém fosse procurar.
+		Images: matriz,
+		Plant:  historicoApagado,
+		Expect: []Expect{
+			{ID: "antiforense.shell_history", Sev: "CRITICAL",
+				Subject: "/root/.bash_history"},
+			{ID: "antiforense.shell_history", Evidence: "dispositivo nulo"},
+			// E a forma que mora no arquivo de inicialização.
+			{ID: "antiforense.shell_history", Sev: "WARN", Evidence: "sem onde gravar"},
+		},
+		// O roteiro precisa dizer onde procurar o que o histórico não guardou.
+		ExpectOutput: []string{"rastro apagado de propósito"},
+		Exit:         2,
+	})
+
+	Register(Scenario{
+		ID:   "E3-alcance-do-host",
+		Desc: "known_hosts: dezenas de evidências mandam procurar na frota, e esta diz em quais máquinas",
+		// Não é achado — é o tamanho do problema. Um servidor de aplicação com
+		// três destinos e um bastion com quatrocentos são incidentes de escalas
+		// diferentes, e a diferença aparece aqui e em nenhum outro lugar.
+		//
+		// A entrada embaralhada entra de propósito: com HashKnownHosts o
+		// destino não volta, e a ferramenta precisa dizer isso em vez de
+		// fingir que a lista está completa.
+		Images: matriz,
+		Plant:  destinosConhecidos,
+		Expect: []Expect{
+			{ID: "cred.known_hosts", Sev: "MANUAL"},
+			{ID: "cred.known_hosts", Evidence: "bastion.interno"},
+			{ID: "cred.known_hosts", Evidence: "embaralhado"},
+			{ID: "cred.known_hosts", Evidence: "runbook §23"},
+		},
+		Exit: -1,
+	})
+}
+
+// ---------------------------------------------------------------------------
+
+// chavesPrivadas planta duas chaves REAIS: uma sem senha e uma com.
+const chavesPrivadas = `
+mkdir -p /root/.ssh
+cat > /root/.ssh/deploy_key <<'CHAVE'
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACAKlbMkWN+4WnJuLfhyXdl5i1VnqO7eVL2ylTZYW5SomwAAAIjyYC208mAt
+tAAAAAtzc2gtZWQyNTUxOQAAACAKlbMkWN+4WnJuLfhyXdl5i1VnqO7eVL2ylTZYW5Somw
+AAAEBrbDoMoAuq7HZCajDx/3AQt4P6QM8Xgho0Ef+zdcWHiwqVsyRY37hacm4t+HJd2XmL
+VWeo7t5UvbKVNlhblKibAAAABXRlc3Rl
+-----END OPENSSH PRIVATE KEY-----
+CHAVE
+cat > /root/.ssh/pessoal <<'CHAVE'
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABBwe+jSOr
+Ua1z1m/NVBajklAAAAGAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAICiM3xxP6tHcJ7jd
+U51SK5eI5/hbSoNcabBpaUKeWBZFAAAAkBczTN/lkJ60ZN6b2xgf1VzL9pdwyZthB41OBG
+sEkLChgs+EIZxthAStpYEsYRpPugTpchB6k/MUOh+3c47/Xmg8nnlZt15c/8AzebAsSqQ6
+OOlpDZNqS4S4Bf9+LASkOWaflPQx7nwySN7WyqH2jeMBAOGvYw28a+nugE+gd1yQXaUvbX
+v/bMcTuNb8wErBvQ==
+-----END OPENSSH PRIVATE KEY-----
+CHAVE
+chmod 600 /root/.ssh/deploy_key /root/.ssh/pessoal
+`
+
+// historicoApagado usa as duas formas mais baratas de anti-forense.
+const historicoApagado = `
+mkdir -p /root
+ln -sf /dev/null /root/.bash_history
+printf '\nunset HISTFILE\n' >> /root/.bashrc
+`
+
+// destinosConhecidos planta o alcance, com uma entrada embaralhada.
+const destinosConhecidos = `
+mkdir -p /root/.ssh
+cat > /root/.ssh/known_hosts <<'FIM'
+bastion.interno.corp ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExemploDoBastion
+db01.interno.corp,10.0.0.31 ssh-rsa AAAAB3NzaC1yc2EAAAADAQABExemploDoBanco
+|1|F1E2D3C4B5A6978877665544332211AABBCCDD=|AABBCCDDEEFF00112233445566778899AA= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExemploEmbaralhado
+FIM
+chmod 600 /root/.ssh/known_hosts
+`

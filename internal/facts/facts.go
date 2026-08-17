@@ -30,34 +30,37 @@ type Facts struct {
 
 	// Persistência vem de ARQUIVO, então existe também em modo image — onde o
 	// kernel é o do analista e ocultamento por rootkit não acontece (§35.6).
-	Loader        Loader                  `json:"loader"`
-	Units         []Unit                  `json:"units,omitempty"`
-	ToolArtifacts []ToolArtifact          `json:"tool_artifacts,omitempty"`
-	Cron          []CronEntry             `json:"cron,omitempty"`
-	SSH           SSHConfig               `json:"ssh"`
-	SSHKeys       []SSHKey                `json:"ssh_keys,omitempty"`
-	Triggers      []Trigger               `json:"triggers,omitempty"`
-	CACerts       []CACert                `json:"ca_certs,omitempty"`
-	Hosts         []HostEntry             `json:"hosts,omitempty"`
-	Resolver      Resolver                `json:"resolver"`
-	Pkg           PkgDB                   `json:"pkg"`
-	Ownership     []Ownership             `json:"ownership,omitempty"`
-	Accounts      []Account               `json:"accounts,omitempty"`
-	Grupos        []Grupo                 `json:"groups,omitempty"`
-	Sudoers       []SudoRule              `json:"sudoers,omitempty"`
-	Suid          []SuidFile              `json:"suid,omitempty"`
-	Modules       []ModuleConf            `json:"modules,omitempty"`
-	ModuleFiles   []string                `json:"module_files,omitempty"`
-	PkgEstranho   []ReivindicacaoEstranha `json:"pkg_odd_claims,omitempty"`
-	HashDiff      []HashDivergente        `json:"hash_mismatch,omitempty"`
-	Timestomps    []Timestomp             `json:"timestomps,omitempty"`
-	HashOK        []string                `json:"hash_verified,omitempty"`
-	Atributos     []AtributoInode         `json:"inode_attrs,omitempty"`
-	Mounts        []Montagem              `json:"mounts,omitempty"`
-	Logins        []Login                 `json:"logins,omitempty"`
-	Ftrace        []HookFtrace            `json:"ftrace_hooks,omitempty"`
-	MetaAcesso    []ArquivoMeta           `json:"access_meta,omitempty"`
-	Cross         CrossView               `json:"cross_view"`
+	Loader         Loader                  `json:"loader"`
+	Units          []Unit                  `json:"units,omitempty"`
+	ToolArtifacts  []ToolArtifact          `json:"tool_artifacts,omitempty"`
+	Cron           []CronEntry             `json:"cron,omitempty"`
+	SSH            SSHConfig               `json:"ssh"`
+	SSHKeys        []SSHKey                `json:"ssh_keys,omitempty"`
+	Triggers       []Trigger               `json:"triggers,omitempty"`
+	CACerts        []CACert                `json:"ca_certs,omitempty"`
+	Hosts          []HostEntry             `json:"hosts,omitempty"`
+	Resolver       Resolver                `json:"resolver"`
+	Pkg            PkgDB                   `json:"pkg"`
+	Ownership      []Ownership             `json:"ownership,omitempty"`
+	Accounts       []Account               `json:"accounts,omitempty"`
+	Grupos         []Grupo                 `json:"groups,omitempty"`
+	Sudoers        []SudoRule              `json:"sudoers,omitempty"`
+	Suid           []SuidFile              `json:"suid,omitempty"`
+	Modules        []ModuleConf            `json:"modules,omitempty"`
+	ModuleFiles    []string                `json:"module_files,omitempty"`
+	PkgEstranho    []ReivindicacaoEstranha `json:"pkg_odd_claims,omitempty"`
+	HashDiff       []HashDivergente        `json:"hash_mismatch,omitempty"`
+	Timestomps     []Timestomp             `json:"timestomps,omitempty"`
+	HashOK         []string                `json:"hash_verified,omitempty"`
+	Atributos      []AtributoInode         `json:"inode_attrs,omitempty"`
+	Mounts         []Montagem              `json:"mounts,omitempty"`
+	Logins         []Login                 `json:"logins,omitempty"`
+	Ftrace         []HookFtrace            `json:"ftrace_hooks,omitempty"`
+	ChavesPrivadas []ChavePrivada          `json:"private_keys,omitempty"`
+	Destinos       []DestinoConhecido      `json:"known_hosts,omitempty"`
+	Historicos     []HistoricoShell        `json:"shell_history,omitempty"`
+	MetaAcesso     []ArquivoMeta           `json:"access_meta,omitempty"`
+	Cross          CrossView               `json:"cross_view"`
 
 	// PidsListados é o que o readdir de /proc devolveu — NÃO o que foi lido
 	// com sucesso. A comparação cruzada depende dessa distinção.

@@ -26,7 +26,7 @@ Três rótulos, e o do meio é o que mais informa:
 | T1053.002 At | coberto | `persist.at_job` |
 | T1547.006 Módulo de kernel | parcial | `persist.modprobe_install`, `cross.module_view` — a carga por `modules-load.d` é vista pela propriedade do `.ko`, não por check próprio |
 | T1546.004 Configuração de shell | coberto | `persist.shell_startup`, `persist.bash_env` |
-| T1546.005 Trap | **ausente** | `trap '...' DEBUG` num rc não é reconhecido |
+| T1546.005 Trap | coberto | `persist.shell_startup` — DEBUG, EXIT e ERR; `trap -` restaura o padrão e não é achado |
 | T1546.016 Hook de instalador | coberto | `persist.trigger_exec` (apt.conf.d, dnf, yum) |
 | T1098.004 Chave SSH autorizada | coberto | `persist.ssh_keys`, `ssh_forced_command`, `sshd_key_source` |
 | T1136.001 Conta local criada | parcial | `priv.uid_zero`, `no_password`, `service_account_shell` — não há sinal de conta RECÉM-criada |
@@ -71,7 +71,7 @@ Três rótulos, e o do meio é o que mais informa:
 | T1552.004 Chave privada exposta | coberto | `cred.ssh_private_key` |
 | T1556.003 PAM alterado | coberto | `persist.pam_exec` |
 | T1110 Força bruta | coberto | `auth.bruteforce_success` — pelo cruzamento entre btmp e wtmp |
-| T1552.001 Credencial em arquivo | **ausente** | `~/.aws/credentials`, `.env`, kubeconfig, token de nuvem |
+| T1552.001 Credencial em arquivo | coberto | `cred.secret_file` — inventário, com a PERMISSÃO como único juízo objetivo |
 | T1003.008 Dump de passwd/shadow | fora de escopo | a LEITURA não deixa rastro num retrato |
 
 ## Movimento lateral, C2, exfiltração e impacto
@@ -93,8 +93,9 @@ Três rótulos, e o do meio é o que mais informa:
 O critério é duplo: **frequência em intrusão real** e **detectabilidade a
 partir de um retrato**. Técnica comum que só se vê em fluxo contínuo não entra.
 
-Duas já foram fechadas e saíram desta lista: T1562.012 (auditoria desligada) e
-T1070.002 (logs apagados). O que sobrou:
+QUATRO já foram fechadas e saíram desta lista: T1562.012 (auditoria desligada),
+T1070.002 (logs apagados), T1552.001 (credencial em arquivo) e T1546.005 (trap
+de shell). O que sobrou:
 
 ### 1. T1562.001 (resto) e T1562.004 — AppArmor e firewall
 
@@ -115,16 +116,7 @@ firewall    tabela vazia é comum e legítima (grupo de segurança da nuvem faz
             Custo alto, sinal fraco — é a de pior relação da lista
 ```
 
-### 2. T1552.001 — credencial em arquivo
-
-`~/.aws/credentials`, `.env` de aplicação, kubeconfig, token de registro. É o
-que um invasor procura primeiro depois de entrar, e o que define até onde ele
-vai a partir daqui.
-
-Vale como INVENTÁRIO, no molde do `known_hosts`: a ferramenta não sabe quais
-são esperadas, e a superfície de falso positivo é enorme se ela tentar julgar.
-
-### 3. T1564.001 — arquivo oculto em diretório temporário
+### 2. T1564.001 — arquivo oculto em diretório temporário
 
 Diretório com ponto em `/tmp`, `/var/tmp` e `/dev/shm`. O velociraptor cobre
 isso, e é barato — a varredura de privilégio já percorre essas árvores.
@@ -132,12 +124,7 @@ isso, e é barato — a varredura de privilégio já percorre essas árvores.
 Sozinho é ruído: `.X11-unix` e `.ICE-unix` são de fábrica. Vale cruzado com
 executável dentro.
 
-### 4. T1546.005 — trap de shell
-
-`trap '...' DEBUG` num arquivo de rc executa a cada comando. Uma linha no
-reconhecimento de configuração de shell, que já é lido.
-
-### 5. T1136.001 — conta criada na janela do incidente
+### 3. T1136.001 — conta criada na janela do incidente
 
 Os checks de privilégio veem uid 0, senha vazia e shell indevido. Nenhum vê
 "esta conta nasceu ontem" — e o ctime do `/etc/passwd`, que a ferramenta já

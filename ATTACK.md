@@ -57,7 +57,7 @@ Três rótulos, e o do meio é o que mais informa:
 | T1564.001 Arquivo oculto | **ausente** | diretório com ponto em `/tmp` e `/var/tmp` não é procurado |
 | T1562.001 Desabilitar ferramenta de defesa | **ausente** | auditd parado, SELinux permissivo, AppArmor desligado |
 | T1562.004 Desabilitar firewall | **ausente** | tabela vazia não é notada |
-| T1562.012 Desabilitar auditoria do Linux | **ausente** | regras de audit removidas — e sem elas não há registro de execução nenhum |
+| T1562.012 Desabilitar auditoria do Linux | coberto | `antiforense.audit_disabled` — só o `-e 0` é achado; sem regra nenhuma é o estado da maioria dos hosts |
 | T1222.002 Alterar permissão | parcial | `integrity.immutable_flag` cobre o atributo de inode; mudança de modo não é comparada |
 | T1027 Ofuscação | parcial | payload que decodifica a si mesmo é reconhecido em config de persistência |
 | T1620 Carga refletida | coberto | `proc.memfd_exec`, `proc.maps_rwx_anon` |
@@ -93,37 +93,30 @@ Três rótulos, e o do meio é o que mais informa:
 O critério é duplo: **frequência em intrusão real** e **detectabilidade a
 partir de um retrato**. Técnica comum que só se vê em fluxo contínuo não entra.
 
-### ~~1. T1562.012 — auditoria desabilitada~~ — FECHADA
+Duas já foram fechadas e saíram desta lista: T1562.012 (auditoria desligada) e
+T1070.002 (logs apagados). O que sobrou:
 
-A mais valiosa, e por um motivo que vai além dela mesma: **sem regra de audit,
-o host não registra execução nenhuma**. Não é só uma defesa a menos — é a
-resposta a incidente ficando cega para tudo que aconteceu antes da varredura.
-
-É a pergunta de CAPACIDADE FORENSE, e é do feitio desta ferramenta: um servidor
-sem auditoria de exec não é um servidor limpo, é um servidor onde não dá para
-saber. Tudo em disco: unit do auditd, `/etc/audit/rules.d`, `/etc/audit/auditd.conf`.
-
-### 3. T1562.001 e T1562.004 — MAC e firewall desligados
+### 1. T1562.001 e T1562.004 — MAC e firewall desligados
 
 SELinux em permissivo, AppArmor descarregado, tabela de firewall vazia. Todos
 legíveis em disco e em `/sys`.
 
 Falso positivo grande e conhecido: **metade dos servidores roda com SELinux
-permissivo de propósito**, e contêiner não tem firewall próprio. Por isso o
-achado precisa nascer informativo e só subir quando houver outra coisa junto —
-é o mesmo desenho da reivindicação em `/usr/local`.
+permissivo de propósito**, e contêiner não tem firewall próprio. O achado
+precisa nascer informativo e só subir quando houver outra coisa junto — é o
+mesmo desenho da reivindicação em `/usr/local`, e a mesma lição do
+`antiforense.audit_disabled`: estado de fábrica não é ataque.
 
-### 3. T1552.001 — credencial em arquivo
+### 2. T1552.001 — credencial em arquivo
 
 `~/.aws/credentials`, `.env` de aplicação, kubeconfig, token de registro. É o
 que um invasor procura primeiro depois de entrar, e o que define até onde ele
 vai a partir daqui.
 
-Vale como INVENTÁRIO, no mesmo molde do `known_hosts`: a ferramenta não sabe
-quais são esperadas, e a superfície de falso positivo é enorme se ela tentar
-julgar.
+Vale como INVENTÁRIO, no molde do `known_hosts`: a ferramenta não sabe quais
+são esperadas, e a superfície de falso positivo é enorme se ela tentar julgar.
 
-### 4. T1564.001 — arquivo oculto em diretório temporário
+### 3. T1564.001 — arquivo oculto em diretório temporário
 
 Diretório com ponto em `/tmp`, `/var/tmp` e `/dev/shm`. O velociraptor cobre
 isso, e é barato — a varredura de privilégio já percorre essas árvores.
@@ -131,10 +124,16 @@ isso, e é barato — a varredura de privilégio já percorre essas árvores.
 Sozinho é ruído: `.X11-unix` e `.ICE-unix` são de fábrica. Vale cruzado com
 executável dentro.
 
-### 5. T1546.005 — trap de shell
+### 4. T1546.005 — trap de shell
 
 `trap '...' DEBUG` num arquivo de rc executa a cada comando. Uma linha no
 reconhecimento de configuração de shell, que já é lido.
+
+### 5. T1136.001 — conta criada na janela do incidente
+
+Os checks de privilégio veem uid 0, senha vazia e shell indevido. Nenhum vê
+"esta conta nasceu ontem" — e o ctime do `/etc/passwd`, que a ferramenta já
+coleta, responde por aproximação.
 
 ---
 

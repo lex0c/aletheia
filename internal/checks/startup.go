@@ -10,11 +10,77 @@ import (
 )
 
 func init() {
+	check.Register(webPrepend)
 	check.Register(shellStartup)
 	check.Register(bashEnv)
 	check.Register(triggerExec)
 	check.Register(pamExec)
 	check.Register(udevRun)
+}
+
+// webPrepend — runbook §7.12.
+//
+// `auto_prepend_file` faz o PHP executar um arquivo ANTES de cada requisição,
+// em qualquer rota. O docroot fica limpo, o grep de webshell da §16 não acha
+// nada, e o backdoor roda em 100% dos acessos.
+//
+// Aqui o sinal é a DIRETIVA, não o comando: diferente dos outros gatilhos, o
+// caminho apontado pode parecer perfeitamente normal — o que importa é que
+// alguém pôs código no caminho de toda requisição.
+var webPrepend = check.Check{
+	ID:       "persist.web_prepend",
+	Ref:      "7.12",
+	Title:    "PHP executa arquivo antes de cada requisição",
+	Group:    "app",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Wtf:      true,
+	FalsePositives: []string{
+		"auto_prepend_file tem uso legítimo: APM, profiler e framework que " +
+			"precisa de bootstrap global usam exatamente isto. O arquivo apontado " +
+			"tem nome reconhecível e vem junto do pacote da ferramenta",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		var r check.Result
+		for i := range f.Triggers {
+			t := &f.Triggers[i]
+			if t.Kind != "php" {
+				continue
+			}
+			for _, ln := range t.Lines {
+				k, v, ok := strings.Cut(ln.Text, "=")
+				k = strings.TrimSpace(k)
+				v = strings.Trim(strings.TrimSpace(v), `"'`)
+				if !ok || v == "" || v == "none" ||
+					(k != "auto_prepend_file" && k != "auto_append_file") {
+					continue
+				}
+				ev := []string{
+					k + " = " + v,
+					"o PHP executa este arquivo em TODA requisição, em qualquer rota",
+					"o docroot fica limpo: a busca por webshell da §16 não acha nada",
+					"arquivo: " + t.File + ":" + strconv.Itoa(ln.N),
+				}
+				sev := check.SevWarn
+				if m, s, susp := execSuspect(v); susp {
+					ev = append(ev, m)
+					sev = s
+				}
+				ev = append(ev, contextoDoTrigger(t)...)
+
+				fd := self.F(sev, v, "", ev...)
+				fd.NextSteps = []string{
+					"leia o arquivo apontado como se fosse malware (runbook §5)",
+					"um módulo carregado no nginx ou no apache tem o mesmo efeito um " +
+						"nível abaixo (runbook §7.12)",
+				}
+				r.Findings = append(r.Findings, fd)
+			}
+		}
+		r.Partial = append(r.Partial, f.PersistDenied["startup"]...)
+		return r
+	},
 }
 
 // shellStartup — runbook §7.6.
@@ -169,13 +235,17 @@ var triggerExec = check.Check{
 			"separa é o caminho do que executam e o dono do pacote",
 		"hook de gerenciador de pacote é usado por ferramenta de configuração " +
 			"(needrestart, unattended-upgrades) de forma legítima",
+		"hook de git legítimo existe: lint, teste e deploy. O que separa é o " +
+			"caminho do que ele executa — e um hook fora do .sample num servidor " +
+			"que atualiza por `git pull` roda a cada deploy",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
 		for i := range f.Triggers {
 			t := &f.Triggers[i]
 			switch t.Kind {
-			case "rc", "initd", "motd", "ssh_rc", "pkg_hook", "generator":
+			case "rc", "initd", "motd", "ssh_rc", "pkg_hook", "generator",
+				"git_hook", "mail", "supervisor":
 			default:
 				continue
 			}
@@ -209,6 +279,7 @@ var triggerExec = check.Check{
 			}
 		}
 		r.Partial = append(r.Partial, f.PersistDenied["startup"]...)
+		r.Partial = append(r.Partial, f.PersistDenied["githook"]...)
 		return r
 	},
 }
@@ -349,6 +420,19 @@ func linhaExecutavel(s string) string {
 	for _, p := range []string{"source ", ". ", "eval ", "exec "} {
 		if r, ok := strings.CutPrefix(s, p); ok {
 			return strings.TrimSpace(r)
+		}
+	}
+	// Alias e .forward: uma linha |"/caminho/comando" faz o MTA executar aquilo
+	// a cada e-mail recebido. Sem extrair, o classificador vê o nome do alias.
+	if i := strings.IndexByte(s, '|'); i >= 0 {
+		cmd := strings.TrimSpace(s[i+1:])
+		if len(cmd) > 1 && (cmd[0] == '"' || cmd[0] == '\'') {
+			if fim := strings.IndexByte(cmd[1:], cmd[0]); fim >= 0 {
+				return cmd[1 : 1+fim]
+			}
+		}
+		if strings.HasPrefix(cmd, "/") {
+			return cmd
 		}
 	}
 	// `export X=/tmp/y` e `VAR=/tmp/y cmd` escondem o caminho depois do "=".

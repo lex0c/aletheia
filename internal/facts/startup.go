@@ -65,6 +65,10 @@ var gatilhosDeSistema = []struct{ path, kind, when string }{
 	{"/etc/rc.local", "rc", "no BOOT, se tiver bit de execução"},
 	{"/etc/rc.d/rc.local", "rc", "no BOOT, se tiver bit de execução"},
 	{"/etc/ssh/sshrc", "ssh_rc", "a cada login SSH, antes do shell do usuário"},
+
+	// Uma linha |"comando" no aliases faz o MTA executar aquilo a cada e-mail.
+	{"/etc/aliases", "mail", "a cada e-mail recebido pelo alias"},
+	{"/etc/supervisord.conf", "supervisor", "quando o supervisord sobe"},
 }
 
 // gatilhosDeDiretorio: tudo que cair no diretório executa.
@@ -79,6 +83,11 @@ var gatilhosDeDiretorio = []struct{ dir, kind, when string }{
 	{"/etc/pam.d", "pam", "a cada autenticação"},
 	{"/usr/lib/systemd/system-generators", "generator", "em todo boot e reload, ANTES das units"},
 	{"/etc/systemd/system-generators", "generator", "em todo boot e reload, ANTES das units"},
+
+	// Supervisores de processo (runbook §7.10): eles ressuscitam o que você
+	// matar, e a config deles não está em /etc/systemd.
+	{"/etc/supervisor/conf.d", "supervisor", "quando o supervisord sobe, e a cada restart que ele faz"},
+	{"/etc/supervisord.d", "supervisor", "quando o supervisord sobe, e a cada restart que ele faz"},
 }
 
 // gatilhosDeHome: o mesmo arquivo em cada home, e cada um roda num evento
@@ -92,7 +101,20 @@ var gatilhosDeHome = []struct{ nome, when string }{
 	{".zshrc", "shell interativo em zsh"},
 	{".zshenv", "SEMPRE em zsh, inclusive não interativo — o mais forte"},
 	{".ssh/rc", "a cada login SSH daquele usuário"},
+
+	// Legado que continua funcionando onde há MTA local: uma linha
+	// |"/caminho/comando" faz o MTA executar aquilo a CADA e-mail recebido.
+	{".forward", "a cada e-mail recebido por aquele usuário"},
+	{".procmailrc", "a cada e-mail entregue por procmail"},
+
+	// pm2 guarda o que ressuscita no dump (runbook §7.10).
+	{".pm2/dump.pm2", "a cada boot, se o pm2 estiver com startup configurado"},
 }
+
+// phpDirs: auto_prepend_file faz o PHP executar um arquivo ANTES de cada
+// requisição, em qualquer rota. O docroot fica limpo, o grep de webshell da §16
+// não acha nada, e o backdoor roda em 100% dos acessos.
+var phpDirs = []string{"/etc/php", "/etc/php.d", "/etc/php5", "/etc/php7", "/etc/php8"}
 
 func collectTriggers(f *Facts, e *env.Env) {
 	for _, g := range gatilhosDeSistema {
@@ -110,6 +132,11 @@ func collectTriggers(f *Facts, e *env.Env) {
 				f.Triggers = append(f.Triggers, t)
 			}
 		}
+	}
+
+	// PHP: a árvore varia demais entre distribuições para ser lista fixa.
+	for _, base := range phpDirs {
+		procurarPHP(f, e, base, 0)
 	}
 
 	// Home: o esqueleto da distribuição é o baseline de graça.
@@ -139,6 +166,29 @@ func collectTriggers(f *Facts, e *env.Env) {
 		f.denyPersist("startup", strconv.Itoa(len(negados))+
 			" arquivos de inicialização de shell ilegíveis (permissão): "+
 			resumoCaminhos(negados))
+	}
+}
+
+// procurarPHP desce na árvore de config do PHP, que muda de forma a cada
+// distribuição e a cada versão. Profundidade curta: o que interessa está em
+// php.ini e nos conf.d.
+func procurarPHP(f *Facts, e *env.Env, dir string, prof int) {
+	if prof > 3 {
+		return
+	}
+	for _, n := range e.ReadDirNames(dir) {
+		p := dir + "/" + n
+		if e.IsDir(p) {
+			procurarPHP(f, e, p, prof+1)
+			continue
+		}
+		if !strings.HasSuffix(n, ".ini") {
+			continue
+		}
+		if t, ok := lerTrigger(e, p, "php",
+			"antes de CADA requisição, em qualquer rota", ""); ok {
+			f.Triggers = append(f.Triggers, t)
+		}
 	}
 }
 

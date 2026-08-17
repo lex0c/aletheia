@@ -37,6 +37,9 @@ type Facts struct {
 	SSH           SSHConfig      `json:"ssh"`
 	SSHKeys       []SSHKey       `json:"ssh_keys,omitempty"`
 	Triggers      []Trigger      `json:"triggers,omitempty"`
+	CACerts       []CACert       `json:"ca_certs,omitempty"`
+	Hosts         []HostEntry    `json:"hosts,omitempty"`
+	Resolver      Resolver       `json:"resolver"`
 
 	// PersistDenied é o que a coleta de persistência não pôde LER, por
 	// categoria. Não é o mesmo que "não havia nada" — e sem root, /root e o

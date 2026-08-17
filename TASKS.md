@@ -42,8 +42,8 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 - [x] **4.4** shell startup — lista exata + diff contra `/etc/skel` (contexto, não achado) + `BASH_ENV`
 - [x] **4.5** loader — `ld.so.preload`, `ld.so.conf.d`, `/etc/environment`
 - [x] **4.6** `rc.local`/`init.d`/generators, PAM, udev, MOTD, hooks de pacote
-- [ ] **4.7** CA plantada, `/etc/hosts`, resolver, git hooks, `auto_prepend_file`, metadata de nuvem
-- [ ] **4.8** supervisores (pm2, supervisord) e containers (`docker diff`, restart policy)
+- [x] **4.7** CA plantada, `/etc/hosts`, resolver, git hooks, `auto_prepend_file`, metadata de nuvem
+- [~] **4.8** supervisores (pm2, supervisord) — feito; containers (`docker diff`, restart policy) fica para a fase 12
 
 ## Fase 5 — IOC e janela  ▸ o que fecha a §23
 
@@ -1440,3 +1440,79 @@ linhas para avaliar.
 31 checks, 61 cenários, zero falso positivo contra o host real. Falta da fase 4:
 4.7 (CA plantada, hosts, resolver, git hooks, metadata de nuvem) e 4.8
 (supervisores e containers).
+
+---
+
+## Registro — fase 4.7 e 4.8: confiança, deploy e supervisores
+
+Quatro checks, 35 no total. Fecha a fase 4 no que é lido de arquivo.
+
+### O MITM que não faz barulho
+
+CA plantada e `/etc/hosts` moram no mesmo arquivo do coletor de propósito:
+separá-las esconderia que o valor está na COMBINAÇÃO. Juntas, o nome resolve
+para o atacante e o certificado dele é aceito — não há erro de TLS, processo
+estranho nem porta aberta. **Nenhuma ferramenta reclama.**
+
+O certificado é decodificado NATIVAMENTE (`crypto/x509`), não pelo `openssl` do
+host: o que se quer saber é em quem o host passou a confiar, e perguntar isso ao
+binário do host seria perguntar ao suspeito. Titular, emissor, auto-assinatura e
+validade entram na evidência.
+
+Em `/etc/hosts`, a severidade sai do DESTINO e do NOME:
+
+```
+destino privado          aviso — espelho de pacote e registro interno são comuns
+destino público          crítico — o nome deixou de resolver pelo DNS
+domínio de ATUALIZAÇÃO   crítico mesmo com destino interno: quem controla para
+                         onde o deb.debian.org aponta controla o que o host instala
+```
+
+### O ponto cego que virou pergunta
+
+`persist.cloud_metadata` é MANUAL, e é o único check que existe para declarar
+uma **ausência**. O startup-script da instância não está em disco nenhum: não há
+arquivo, cron nem unit, e ele roda como root a cada boot — inclusive depois de
+trocar o disco.
+
+Reportar silêncio ali como "nada encontrado" seria a mentira exata que esta
+ferramenta existe para não contar. Então o achado é a PERGUNTA, com o comando
+pronto — e só aparece quando há agente de nuvem no host ou virtualização
+detectada.
+
+### A primeira busca em ÁRVORE do coletor
+
+Hook de git é persistência que **sobrevive ao redeploy** e não mora em `/etc`.
+Achá-lo exige caminhar a árvore, o que até agora nenhum coletor fazia.
+
+O orçamento saiu de medição, não de palpite:
+
+```
+400 diretórios   ~45ms de coleta
+2000             ~150ms
+4000             ~200ms
+```
+
+Ficou em 2000. Mas o que decide mais que o teto é a **ordem**: as raízes de
+deploy (`/srv`, `/opt`, `/var/www`, `/data`) vêm ANTES dos homes, então uma
+estação de trabalho com mil repositórios nunca deixa `/var/www` de fora — que é
+onde a §7.12 diz que o hook importa.
+
+Estourar o teto vira lacuna DECLARADA, e no host real ela aparece:
+`a busca por hooks de git parou em 2000 diretórios`.
+
+### `auto_prepend_file`: o sinal é a DIRETIVA
+
+Diferente dos outros gatilhos, aqui o caminho apontado pode parecer
+perfeitamente normal. O que importa é que alguém pôs código no caminho de TODA
+requisição — o docroot fica limpo e a busca por webshell da §16 não acha nada.
+Mesma lógica do drop-in de systemd: o sinal é a forma, não o conteúdo.
+
+### Estado
+
+35 checks, 63 cenários, zero falso positivo contra o host real. `wtf` em 176ms.
+
+A fase 4 fecha aqui no que é legível de arquivo. Ficou de fora, e está
+registrado: `docker diff` e restart policy de container (4.8) precisam falar com
+o runtime, o que pertence à fase 12; e contas na camada de dados (§7.12) exigem
+credencial de banco, que a ferramenta não tem e não deve pedir.

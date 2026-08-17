@@ -14,17 +14,32 @@
 # O guest NÃO tem rede, NÃO monta diretório do host e NÃO tem SSH. O único canal
 # é o console serial: o /init roda o scan, escreve o JSONL em /dev/console e
 # desliga. O QEMU captura com -serial file:. Hermético e trivial de roteirizar.
+#
+# Uso: build.sh [amd64|386]
+#
+# A variante de 32 bits existe porque servidor i686 legado é um ambiente
+# INTEIRO diferente, não só um binário diferente: kernel de 32 bits, userland de
+# 32 bits, e um /proc onde os campos de 64 bits do stat são formatados por um
+# kernel que não tem registradores de 64 bits.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 out="$root/dist/vm"
-img="${ALETHEIA_VM_IMAGE:-alpine:3.20}"
+arch="${1:-amd64}"
+
+case "$arch" in
+	amd64) img_default="alpine:3.20";      sfx="" ;;
+	386)   img_default="i386/alpine:3.20"; sfx="-386" ;;
+	*) echo "arquitetura desconhecida: $arch (use amd64 ou 386)" >&2; exit 3 ;;
+esac
+img="${ALETHEIA_VM_IMAGE:-$img_default}"
 
 mkdir -p "$out"
 
 for b in aletheia helper; do
-	[[ -x "$root/dist/$b" ]] || { echo "dist/$b não existe — rode 'make build helper'" >&2; exit 3; }
+	[[ -x "$root/dist/$b$sfx" ]] || {
+		echo "dist/$b$sfx não existe — rode 'make build helper arches'" >&2; exit 3; }
 done
 
 work="$(mktemp -d)"
@@ -38,8 +53,8 @@ docker export "$cid" | tar -x -C "$rootfs"
 docker rm -f "$cid" >/dev/null
 
 # os binários sob teste, estáticos: rodam no guest sem libc nenhuma
-install -m 0755 "$root/dist/aletheia" "$rootfs/aletheia"
-install -m 0755 "$root/dist/helper" "$rootfs/helper"
+install -m 0755 "$root/dist/aletheia$sfx" "$rootfs/aletheia"
+install -m 0755 "$root/dist/helper$sfx"   "$rootfs/helper"
 
 # /init: PID 1 do guest. Monta o mínimo, aplica o cenário, varre, desliga.
 cat > "$rootfs/init" <<'INIT'
@@ -108,6 +123,6 @@ sleep 5
 INIT
 chmod 0755 "$rootfs/init"
 
-( cd "$rootfs" && find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -1 ) > "$out/initramfs.gz"
+( cd "$rootfs" && find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -1 ) > "$out/initramfs$sfx.gz"
 
-echo "initramfs: $out/initramfs.gz ($(du -h "$out/initramfs.gz" | cut -f1))"
+echo "initramfs ($arch): $out/initramfs$sfx.gz ($(du -h "$out/initramfs$sfx.gz" | cut -f1))"

@@ -83,9 +83,12 @@ type Scenario struct {
 	// honesta bootando um kernel legado.
 	Kernel string
 
-	// Arch roda um binário de outra arquitetura — "386". Vazio usa o nativo.
-	// Servidor legado de 32 bits ainda existe, e é onde tamanho de int e
-	// número de syscall divergem.
+	// Arch é "386" ou vazio (nativo). Servidor legado de 32 bits ainda existe,
+	// e é onde tamanho de int e número de syscall divergem.
+	//
+	// Em contêiner troca só o BINÁRIO — o kernel continua sendo o do host.
+	// Em VM troca o ambiente inteiro: emulador, kernel e initramfs de 32 bits,
+	// que é o i686 de verdade.
 	Arch string
 
 	// Caps são capabilities extras do contêiner (--cap-add). Só os cenários que

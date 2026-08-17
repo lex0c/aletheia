@@ -561,10 +561,28 @@ nunca passam em silêncio.
 ```
 3.18 · 4.14 · 6.12    guest limpo: 10/10 · OK · exit 0
                       com implantes: os MESMOS seis achados, exit 2
-386                   mesmos achados que o binário nativo
+i686 3.18 e 4.14      kernel, userland e binário de 32 bits: idem, exit 2
+386 sobre kernel 64   mesmos achados que o binário nativo
 cgroup v1 puro        1:name=systemd:/legado.service → cgroup=/legado.service
 sem /etc/os-release   cabeçalho perde o nome da distro e SEGUE
 ```
+
+### i686: arquitetura é um AMBIENTE, não um binário
+
+O cenário 30 roda o binário de 32 bits contra o kernel de 64 do host. Isso prova
+o binário, não o ambiente — e servidor i686 legado tem um kernel SEM registrador
+de 64 bits formatando os campos de 64 bits do `/proc`. Fechar isso exigiu as
+três peças combinando:
+
+```
+emulador    qemu-system-i386 (com KVM: o host x86_64 roda guest de 32 nativo)
+kernel      linux-vanilla do repositório x86 do Alpine, não do x86_64
+initramfs   i386/alpine:3.20 + dist/aletheia-386 + dist/helper-386
+```
+
+`build.sh` passou a receber a arquitetura, e o `Arch` do cenário significa coisas
+diferentes por modo: em contêiner troca só o binário; em VM troca o ambiente
+inteiro.
 
 O limite fica documentado no cenário `90-kernel-2.6`: descer a 2.6.32 exigiria
 rootfs de época junto, e o próprio runtime do Go não sustenta mais esse kernel.
@@ -619,4 +637,4 @@ comentário do harness prometia "sem rede" e o guest saía com acesso à interne
 pelo host. Agora roda com `-nic none`. Um cenário de resposta a incidente não
 pode dar saída de rede a implante de teste nenhum.
 
-Total: **44 cenários**, 2 pulados com motivo documentado.
+Total: **46 cenários**, 2 pulados com motivo documentado.

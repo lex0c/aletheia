@@ -553,6 +553,39 @@ func init() {
 	})
 
 	Register(Scenario{
+		ID:   "54-i686-limpo",
+		Desc: "i686 de verdade — kernel, userland e binário de 32 bits — limpo",
+		// Fecha o último canto de "servidor legado". O cenário 30 prova o
+		// BINÁRIO de 32 bits contra um kernel de 64; aqui o kernel também é de
+		// 32, e é ele que formata os campos de 64 bits do /proc sem ter
+		// registrador de 64 bits para isso.
+		Mode:           VM,
+		Arch:           "386",
+		Kernel:         "4.14",
+		Exit:           0,
+		MustBeComplete: true,
+	})
+
+	Register(Scenario{
+		ID:     "55-i686-implante",
+		Desc:   "i686 enxerga exatamente os mesmos implantes que amd64",
+		Mode:   VM,
+		Arch:   "386",
+		Kernel: "3.18",
+		Setup:  implantes,
+		Expect: []Expect{
+			{ID: "proc.kthread_disguise", Sev: "CRITICAL"},
+			{ID: "proc.memfd_exec", Sev: "CRITICAL"},
+			{ID: "proc.maps_rwx_anon", Sev: "WARN"},
+			{ID: "proc.tracer", Sev: "WARN"},
+			{ID: "proc.caps_unexpected", Sev: "WARN"},
+			{ID: "proc.suspicious_path", Sev: "WARN"},
+		},
+		Exit:           2,
+		MustBeComplete: true,
+	})
+
+	Register(Scenario{
 		ID:   "92-userland-trojanizado",
 		Desc: "ls/ss/ps substituídos não podem mudar o resultado da CLI",
 		Untestable: "prova a decisão da SPEC 4 (binário estático, sem chamar binário do " +

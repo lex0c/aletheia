@@ -258,12 +258,23 @@ func runImage(t *testing.T, bin, img string, sc scenario.Scenario) result {
 func runVM(t *testing.T, sc scenario.Scenario) result {
 	t.Helper()
 
-	initramfs, err := filepath.Abs("../dist/vm/initramfs.gz")
+	// Arquitetura é um AMBIENTE inteiro, não só um binário: emulador, kernel e
+	// initramfs precisam combinar. i686 legado tem kernel sem registrador de 64
+	// bits formatando os campos de 64 bits do /proc.
+	qemu, suffix := "qemu-system-x86_64", ""
+	if sc.Arch == "386" {
+		qemu, suffix = "qemu-system-i386", "-386"
+	}
+	if _, err := exec.LookPath(qemu); err != nil {
+		t.Skipf("%s ausente: %v", qemu, err)
+	}
+
+	initramfs, err := filepath.Abs("../dist/vm/initramfs" + suffix + ".gz")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(initramfs); err != nil {
-		t.Skipf("initramfs ausente — rode `make vm-image`: %v", err)
+		t.Skipf("initramfs%s ausente — rode `make vm-image`: %v", suffix, err)
 	}
 	kernel := kernelFor(t, sc)
 
@@ -277,7 +288,7 @@ func runVM(t *testing.T, sc scenario.Scenario) result {
 		appendArgs += " aletheia.args=" + strings.Join(sc.Args, ",")
 	}
 
-	cmd := exec.Command("qemu-system-x86_64",
+	cmd := exec.Command(qemu,
 		"-enable-kvm", "-no-reboot", "-m", "512", "-display", "none",
 		// -nic none é obrigatório, não cosmético: sem ele o QEMU x86 acrescenta
 		// uma placa de rede em modo usuário POR PADRÃO, e o guest sai com acesso
@@ -306,12 +317,16 @@ func kernelFor(t *testing.T, sc scenario.Scenario) string {
 	if sc.Kernel == "" {
 		return hostKernel(t)
 	}
-	p, err := filepath.Abs("../dist/vm/kernels/vmlinuz-" + sc.Kernel)
+	name := sc.Kernel
+	if sc.Arch == "386" {
+		name += "-386"
+	}
+	p, err := filepath.Abs("../dist/vm/kernels/vmlinuz-" + name)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(p); err != nil {
-		t.Skipf("kernel %s ausente — rode `make vm-kernels` (exige rede): %v", sc.Kernel, err)
+		t.Skipf("kernel %s ausente — rode `make vm-kernels` (exige rede): %v", name, err)
 	}
 	return p
 }

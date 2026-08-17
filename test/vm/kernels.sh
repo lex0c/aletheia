@@ -23,19 +23,24 @@ here="$(cd "$(dirname "$0")" && pwd)"
 out="$(cd "$here/../.." && pwd)/dist/vm/kernels"
 mkdir -p "$out"
 
-# versão | ramo do alpine | pacote | sha256 do apk
+# nome | ramo do alpine | arquitetura do repo | pacote | sha256 do apk
 #
-# Os dois extremos que importam:
+# Os dois extremos que importam, em 64 e em 32 bits:
 #   3.18  o mais antigo que ainda boota com este initramfs (2014)
 #   4.14  o LTS do Amazon Linux 2 e da era do Ubuntu 18.04 — o "legado" que
 #         mais se encontra em produção de verdade
+#
+# A variante de 32 bits não é redundante: servidor i686 legado tem kernel SEM
+# registrador de 64 bits formatando os campos de 64 bits do /proc.
 kernels=(
-	"3.18|v3.2|linux-vanilla-3.18.22-r1.apk|eff7bcc5b08681cee610fccc8df0caa7ea7bff5cbece96abe421c0775486154a"
-	"4.14|v3.8|linux-vanilla-4.14.167-r0.apk|20ac63df99948259a38cd3caff50279bc4632ca526c6b7640ac8636420bdcbc6"
+	"3.18|v3.2|x86_64|linux-vanilla-3.18.22-r1.apk|eff7bcc5b08681cee610fccc8df0caa7ea7bff5cbece96abe421c0775486154a"
+	"4.14|v3.8|x86_64|linux-vanilla-4.14.167-r0.apk|20ac63df99948259a38cd3caff50279bc4632ca526c6b7640ac8636420bdcbc6"
+	"3.18-386|v3.2|x86|linux-vanilla-3.18.22-r1.apk|6a539f5582a1950a5bd4a9bc447a79a6bcfb1bbb98265d2e5025bef10509b746"
+	"4.14-386|v3.8|x86|linux-vanilla-4.14.167-r0.apk|53d9e429f6ba037c67668bec928c82b8a3d089717ecc84e83d930f02c7cb2c87"
 )
 
 for entry in "${kernels[@]}"; do
-	IFS='|' read -r ver branch pkg sum <<< "$entry"
+	IFS='|' read -r ver branch repoarch pkg sum <<< "$entry"
 	dest="$out/vmlinuz-$ver"
 	if [[ -f "$dest" ]]; then
 		echo "já existe: $dest"
@@ -44,7 +49,7 @@ for entry in "${kernels[@]}"; do
 
 	work="$(mktemp -d)"
 	trap 'rm -rf "$work"' EXIT
-	url="https://dl-cdn.alpinelinux.org/alpine/$branch/main/x86_64/$pkg"
+	url="https://dl-cdn.alpinelinux.org/alpine/$branch/main/$repoarch/$pkg"
 	echo "baixando kernel $ver…"
 	curl -fsSL --max-time 600 -o "$work/k.apk" "$url"
 

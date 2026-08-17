@@ -49,8 +49,9 @@ dist: verify
 # scenarios roda a CLI de verdade contra /proc de verdade, em distribuições de
 # verdade. Fica separado de `test` porque exige docker e leva dezenas de
 # segundos — `go test ./...` continua rápido e sem dependência externa.
-vm-image: build helper
-	./test/vm/build.sh
+vm-image: build helper arches
+	./test/vm/build.sh amd64
+	./test/vm/build.sh 386
 
 # Separado de propósito: exige REDE. Sem ele, os cenários de kernel legado são
 # pulados com o motivo dito — nunca passam em silêncio. Não escreve em /boot.

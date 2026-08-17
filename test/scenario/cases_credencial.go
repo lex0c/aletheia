@@ -77,7 +77,58 @@ func init() {
 		},
 		Exit: -1,
 	})
+	Register(Scenario{
+		ID:   "E4-auditoria-desligada",
+		Desc: "auditoria instalada e neutralizada com `-e 0`: a trilha some sem o arquivo sumir",
+		// A pergunta que vem ANTES de todas numa resposta a incidente: este host
+		// consegue dizer o que foi executado antes da varredura?
+		//
+		// O `-e 0` é a forma mais silenciosa de responder não. A configuração
+		// continua no lugar, as regras continuam escritas, e nada é registrado —
+		// quem só verifica se o arquivo existe não vê diferença nenhuma.
+		//
+		// O cenário planta a regra de execve JUNTO, de propósito: é o que prova
+		// que o check olha o estado do subsistema e não a presença de regra.
+		Images: matriz,
+		Plant:  auditoriaDesligada,
+		Expect: []Expect{
+			{ID: "antiforense.audit_disabled", Sev: "CRITICAL",
+				Subject: "auditoria desligada"},
+			{ID: "antiforense.audit_disabled", Evidence: "quem só verificar se o arquivo existe"},
+			// E o passo que impede destruir a própria evidência ao consertar.
+			{ID: "antiforense.audit_disabled", Evidence: "NÃO religue antes de preservar"},
+		},
+		Exit: 2,
+	})
+
+	Register(Scenario{
+		ID:   "E5-sem-auditoria-nao-eh-achado",
+		Desc: "host sem auditoria não produz achado: é o estado da maioria dos servidores",
+		// O outro lado, e ele importa mais que o primeiro.
+		//
+		// Auditoria não é padrão em quase nenhuma distribuição, e contêiner
+		// nunca tem. Se "sem auditoria" produzisse linha, este check falaria em
+		// praticamente todo host do mundo — e advertência que sai sempre é papel
+		// de parede.
+		//
+		// Há também um limite de conhecimento: regra DELETADA e regra nunca
+		// escrita são indistinguíveis em disco. Acusar sem poder separar as duas
+		// seria acusar no escuro.
+		Images: matriz,
+		Plant:  "",
+		Forbid: []string{"antiforense.audit_disabled"},
+		Exit:   0,
+	})
 }
+
+// auditoriaDesligada instala regra e desliga o subsistema.
+const auditoriaDesligada = `
+mkdir -p /etc/audit/rules.d
+cat > /etc/audit/rules.d/audit.rules <<'FIM'
+-a always,exit -F arch=b64 -S execve -k exec
+-e 0
+FIM
+`
 
 // ---------------------------------------------------------------------------
 

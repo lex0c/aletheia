@@ -2771,3 +2771,78 @@ Teste de regressão que não falha na regressão é decoração.
 63 checks, 84 cenários, 128 execuções, e a imagem limpa agora prova os quinze
 checks acrescentados depois dela. Zero achado em Debian 12, Alpine 3.20 e
 Ubuntu 14.04.
+
+---
+
+## Registro — mapa ATT&CK e a primeira lacuna fechada
+
+O motivo de mapear não é conformidade. É que **os cenários desta suíte codificam
+o que eu pensei**, e mais cenários provam principalmente que eu consigo
+continuar pensando. Uma taxonomia externa acha buraco sem depender da minha
+imaginação.
+
+O mapa está em `ATTACK.md`. O produto dele é a lista de lacunas, não a de
+coberturas.
+
+### O que o mapa mostrou
+
+Os pontos fortes ficaram onde eu esperava — persistência, sequestro do ligador,
+setuid — e apareceu um agrupamento que eu não tinha visto como agrupamento:
+**T1562 inteiro, "prejudicar defesas", estava vazio**. Auditoria, MAC e firewall
+desligados: nenhum check olhava para nada disso.
+
+E o mapa nomeou o que já se sabia sem nome: cobertura de TÉCNICA não é cobertura
+de ADVERSÁRIO. O cenário 71 combina técnicas todas cobertas e continua exigindo
+um humano para ver que são o mesmo ator.
+
+### T1562.012 — a primeira fechada
+
+É a mais valiosa por um motivo que vai além dela: **sem regra de auditoria o
+kernel não emite registro de execução nenhum**. Não é uma defesa a menos — é a
+investigação cega para todo o passado.
+
+Três estados, e confundi-los era o risco inteiro do check:
+
+```
+nunca teve             não há configuração
+instalado sem regra    o pacote veio com a distribuição, ninguém configurou
+tinha e perdeu         havia regra e alguém a neutralizou com `-e 0`
+```
+
+Só o terceiro é achado. O `-e 0` é a forma mais silenciosa que existe: a
+configuração continua no lugar, as regras continuam escritas, e nada é
+registrado — quem só verifica se o arquivo existe não vê diferença.
+
+### A linha que eu escrevi e apaguei
+
+A primeira versão informava "este host não registra execução" como limite da
+investigação, em todo host sem auditoria. É verdade, e não vale uma linha por
+host: auditoria não é padrão em quase nenhuma distribuição, então a advertência
+apareceria em praticamente todo servidor do mundo.
+
+**Advertência que sai sempre é papel de parede.** E a ferramenta JÁ diz, em toda
+varredura limpa, que o resultado não prova host limpo — repetir a mesma ressalva
+por outro caminho não acrescenta nada.
+
+Quem pegou isso foi o invariante `TestNenhumCheckDisparaEmHostLimpo`, que existe
+exatamente para essa classe de erro. O cenário E5 agora PROÍBE o achado, em vez
+de esperá-lo.
+
+Junto veio um limite de conhecimento que decide o desenho: regra **deletada** e
+regra **nunca escrita** são indistinguíveis em disco. Acusar sem poder separar
+as duas seria acusar no escuro.
+
+### Estado
+
+64 checks, 89 cenários, 132 execuções. Zero achado em Debian 12, Alpine 3.20 e
+CentOS 7.
+
+### As próximas, na ordem do ATTACK.md
+
+```
+T1070.002  logs apagados        fecha a categoria que o histórico abriu
+T1562.001  MAC desligado        SELinux permissivo, AppArmor descarregado
+T1552.001  credencial em arquivo  ~/.aws, .env, kubeconfig — inventário
+T1564.001  arquivo oculto       barato: a varredura já percorre /tmp
+T1546.005  trap de shell        uma linha no reconhecimento que já existe
+```

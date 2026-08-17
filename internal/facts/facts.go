@@ -59,6 +59,7 @@ type Facts struct {
 	ChavesPrivadas []ChavePrivada          `json:"private_keys,omitempty"`
 	Destinos       []DestinoConhecido      `json:"known_hosts,omitempty"`
 	Historicos     []HistoricoShell        `json:"shell_history,omitempty"`
+	Audit          Auditoria               `json:"audit"`
 	MetaAcesso     []ArquivoMeta           `json:"access_meta,omitempty"`
 	Cross          CrossView               `json:"cross_view"`
 

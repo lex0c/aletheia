@@ -2,6 +2,7 @@ package facts
 
 import (
 	"bufio"
+	"io/fs"
 	"sort"
 	"strconv"
 	"strings"
@@ -103,6 +104,10 @@ type Ownership struct {
 	// apenas dos pacotes que entregaram algum candidato — tipicamente meia
 	// dúzia, contra os milhares instalados.
 	Pacote string `json:"package,omitempty"`
+
+	// Via é o caminho por onde a propriedade foi encontrada, quando não foi
+	// pelo próprio Path: o alvo final de uma cadeia de links simbólicos.
+	Via string `json:"via,omitempty"`
 }
 
 func collectPkg(f *Facts, e *env.Env) {
@@ -137,9 +142,30 @@ func collectPkg(f *Facts, e *env.Env) {
 	}
 	sort.Strings(caminhos)
 	for _, p := range caminhos {
-		f.Ownership = append(f.Ownership, Ownership{
-			Path: p, Owned: donos[p] != "", Pacote: donos[p], Onde: candidatos[p],
-		})
+		o := Ownership{Path: p, Owned: donos[p] != "", Pacote: donos[p], Onde: candidatos[p]}
+		// A CADEIA DE LINKS, quando o próprio caminho não tem dono.
+		//
+		// É assim que o `update-alternatives` funciona, e ele é o mecanismo
+		// PADRÃO do Debian e do RHEL para escolher entre implementações:
+		//
+		//	/usr/bin/java -> /etc/alternatives/java -> /usr/lib/jvm/…/bin/java
+		//
+		// O dpkg reivindica o alvo final e NUNCA os dois links: eles são
+		// criados no postinst, não empacotados. Sem seguir a cadeia,
+		// /usr/bin/java saía como "nenhum pacote reivindica" — e em /usr/bin
+		// isso é CRÍTICO. Medido num servidor de CI montado por outra pessoa:
+		// 101 alternatives na imagem, e todo host com java, python ou editor
+		// tem essa forma.
+		//
+		// O que a resolução NÃO afrouxa: link apontando para lugar SEM dono
+		// continua sem dono. `/usr/bin/java -> /tmp/x` segue sendo achado, e
+		// agora com a cadeia na evidência.
+		if !o.Owned {
+			if alvo := alvoFinal(e, p); alvo != "" && alvo != p && donos[alvo] != "" {
+				o.Owned, o.Pacote, o.Via = true, donos[alvo], alvo
+			}
+		}
+		f.Ownership = append(f.Ownership, o)
 	}
 	// Depois de Ownership estar montado: a comparação de datas só vale nos
 	// arquivos SEM dono de pacote, e os atributos de inode são lidos sobre o
@@ -186,6 +212,17 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 		fi, err := e.Lstat(p)
 		if err != nil {
 			return
+		}
+		// Link vira DOIS candidatos: ele e o alvo final. Sem perguntar pelo
+		// alvo, a cadeia do update-alternatives não tem como ser respondida.
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			if alvo := alvoFinal(e, p); alvo != "" && alvo != p {
+				if _, ja := out[alvo]; !ja {
+					if afi, err := e.Lstat(alvo); err == nil && !afi.IsDir() {
+						out[alvo] = append(out[alvo], "alvo de "+p)
+					}
+				}
+			}
 		}
 		// E não pode ser DIRETÓRIO. Linha de agendamento e de unit cita caminho
 		// que não é executável o tempo todo — `cd /srv/app`, `--report
@@ -461,6 +498,41 @@ func formasUsrMerge(p string) []string {
 // Resolver o diretório é exato em vez de adivinhado, e funciona em qualquer
 // esquema de fusão presente ou futuro. O custo é um readlink por diretório
 // distinto, com cache.
+// maxSaltosDeLink é o teto da cadeia. O update-alternatives usa dois saltos;
+// mais que isso é configuração incomum, e o teto existe para que um ciclo de
+// links não trave a coleta.
+const maxSaltosDeLink = 8
+
+// alvoFinal segue a cadeia de links simbólicos de um ARQUIVO e devolve onde ela
+// termina, ou "" se o caminho não é link.
+//
+// É diferente do formasResolvidas, que resolve o DIRETÓRIO para tratar usrmerge:
+// aqui o link é o próprio arquivo, e a cadeia tem mais de um salto.
+func alvoFinal(e *env.Env, p string) string {
+	atual := p
+	for i := 0; i < maxSaltosDeLink; i++ {
+		alvo, err := e.Readlink(atual)
+		if err != nil || alvo == "" {
+			if i == 0 {
+				return "" // não é link
+			}
+			return atual
+		}
+		if strings.HasPrefix(alvo, "/") {
+			atual = alvo
+			continue
+		}
+		// Link RELATIVO resolve contra o diretório do PRÓPRIO link, e não
+		// contra a raiz — a mesma regra que já valia para o usrmerge.
+		dir := "/"
+		if j := strings.LastIndex(atual, "/"); j > 0 {
+			dir = atual[:j] + "/"
+		}
+		atual = dir + strings.TrimPrefix(alvo, "./")
+	}
+	return atual
+}
+
 func formasResolvidas(e *env.Env, p string, cache map[string]string) []string {
 	out := formasUsrMerge(p)
 	i := strings.LastIndex(p, "/")

@@ -1,0 +1,1053 @@
+# ---------------------------------------------------------------------------
+# ci-runner-07.build.example.net
+#
+# Ubuntu 22.04 LTS build agent from a Jenkins fleet.  The controller launches
+# this agent over SSH (the "Launch agents via SSH" method), so there is no
+# agent daemon installed: what makes it a build agent is the jenkins account,
+# its remote root at /var/lib/jenkins, the toolchains, and above all the
+# caches - .m2, .npm, ccache, pip - which are the bulk of a real agent's disk.
+#
+# It is a cloud VM, so cloud-init artifacts are present; it builds container
+# images, so dockerd is configured (not running); and it accumulates junk, so
+# it has the workspace-GC and docker-prune cron jobs every build fleet grows.
+#
+#   docker build -f Dockerfile.build -t servidor-build:test .
+# ---------------------------------------------------------------------------
+FROM ubuntu:22.04
+
+LABEL org.opencontainers.image.title="ci-runner-07.build.example.net" \
+      org.opencontainers.image.description="Fixture: Ubuntu 22.04 Jenkins SSH build agent" \
+      fixture.role="ci-agent" \
+      fixture.env="build"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    TZ=America/Sao_Paulo
+
+# ---------------------------------------------------------------------------
+# 1. Toolchains and ops packages.  A Java/Node/Python shop: JDK + Maven,
+#    node/npm, python, a C toolchain with ccache for the native bits, docker
+#    for image builds, plus the usual agent-side utilities.
+#
+#    Maven is installed in a second apt call on purpose: if it goes in the
+#    same transaction, apt satisfies its java-runtime dependency with
+#    default-jre-headless and drags a whole second JVM (openjdk-11) onto the
+#    agent.  With JDK 17 already present, that dependency is already met.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        git git-lfs gcc make libc6-dev ccache pkg-config \
+        openjdk-17-jdk-headless \
+        nodejs npm \
+        python3 python3-pip python3-venv \
+        docker.io \
+        shellcheck \
+        openssh-server sudo cron logrotate rsyslog prometheus-node-exporter \
+        curl wget jq unzip zip xz-utils zstd pigz rsync gnupg ca-certificates \
+        lsof net-tools iproute2 dnsutils tree less vim-tiny htop tmux \
+        bash-completion tzdata; \
+    apt-get install -y --no-install-recommends maven; \
+    java -version 2>&1 | head -1; mvn -v | head -1; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    ln -sf /usr/share/zoneinfo/America/Sao_Paulo /etc/localtime; \
+    printf '%s\n' 'America/Sao_Paulo' > /etc/timezone; \
+    printf '%s\n' 'ci-runner-07' > /etc/hostname; \
+    printf '%s\n' \
+      '127.0.0.1       localhost' \
+      '127.0.1.1       ci-runner-07.build.example.net ci-runner-07' \
+      '' \
+      '10.30.1.27      ci-runner-07.build.example.net ci-runner-07' \
+      '10.30.0.10      jenkins.example.net jenkins       # controller' \
+      '10.30.0.20      nexus.example.net nexus          # maven/npm/pypi proxy + registry docker' \
+      '10.30.0.21      registry.example.net registry' \
+      '10.30.0.25      sonar.example.net sonar' \
+      '10.20.0.4       bastion.example.net bastion' \
+      '10.30.0.5       apt-cache.build.example.net apt-cache' \
+      '' \
+      '::1     localhost ip6-localhost ip6-loopback' \
+      > /etc/hosts; \
+    printf '%s\n' \
+      '' \
+      '  ci-runner-07  --  agente de build (Jenkins, launch via SSH)' \
+      '' \
+      '  Label do agente: linux && docker && java17' \
+      '  Remote root:     /var/lib/jenkins   (executors: 4)' \
+      '' \
+      '  NAO instale dependencia de build a mao neste host: adicione no' \
+      '  packer/ansible (repo infra/ci-images) senao o proximo rebuild perde.' \
+      '  Cache: ~/.m2, ~/.npm, /var/cache/ccache  -> limpeza automatica no cron' \
+      '' \
+      > /etc/motd
+
+# ---------------------------------------------------------------------------
+# 2. The jenkins account.  uid 1000, member of docker, key from the controller
+#    restricted by from=; the controller drops remoting.jar into the remote
+#    root itself at connect time, which is why there is no agent package here.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    groupadd --gid 1000 jenkins; \
+    useradd --uid 1000 --gid 1000 --home-dir /var/lib/jenkins --create-home \
+            --shell /bin/bash --comment 'Jenkins build agent' jenkins; \
+    usermod -aG docker jenkins; \
+    install -d -m 0700 -o jenkins -g jenkins /var/lib/jenkins/.ssh; \
+    ssh-keygen -q -t ed25519 -N '' -C 'jenkins@jenkins.example.net' -f /tmp/jk; \
+    printf 'from="10.30.0.10",no-agent-forwarding,no-port-forwarding,no-X11-forwarding %s\n' \
+      "$(cat /tmp/jk.pub)" > /var/lib/jenkins/.ssh/authorized_keys; \
+    ssh-keygen -q -t ed25519 -N '' -C 'jenkins@ci-runner-07 (deploy key p/ git)' -f /var/lib/jenkins/.ssh/id_ed25519; \
+    chown -R jenkins:jenkins /var/lib/jenkins/.ssh; \
+    chmod 0600 /var/lib/jenkins/.ssh/authorized_keys /var/lib/jenkins/.ssh/id_ed25519; \
+    rm -f /tmp/jk /tmp/jk.pub; \
+    useradd --uid 1001 --create-home --shell /bin/bash --groups sudo,docker \
+            --comment 'Bruno Tavares (infra)' btavares; \
+    useradd --uid 1002 --create-home --shell /bin/bash --groups sudo \
+            --comment 'Camila Nunes (infra)' cnunes; \
+    passwd -l root; \
+    printf '%s\n' \
+      '# O agente NAO tem sudo irrestrito desde a auditoria de 2025-09 (SEC-118).' \
+      '# Se um job precisar de pacote novo, ele entra na imagem do packer.' \
+      'Cmnd_Alias CI_OPS = /usr/bin/systemctl restart docker, \' \
+      '                    /usr/bin/systemctl status docker, \' \
+      '                    /usr/local/bin/ci-cleanup.sh, \' \
+      '                    /usr/local/bin/workspace-gc.sh, \' \
+      '                    /usr/bin/docker system prune -af' \
+      'jenkins ALL=(root) NOPASSWD: CI_OPS' \
+      'Defaults:jenkins !requiretty' \
+      'Defaults:jenkins env_keep += "JOB_NAME BUILD_NUMBER BUILD_URL"' \
+      > /etc/sudoers.d/40-jenkins; \
+    chmod 0440 /etc/sudoers.d/40-jenkins; \
+    visudo -c >/dev/null
+
+# ---------------------------------------------------------------------------
+# 3. SSH for an agent host: key-only, and a Match block that keeps the
+#    controller's session from being killed by the idle timeout.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    install -d /run/sshd /etc/ssh/sshd_config.d; \
+    ssh-keygen -A; \
+    printf '%s\n' \
+      '# roles/ci-agent/templates/60-ci.conf' \
+      'PermitRootLogin no' \
+      'PasswordAuthentication no' \
+      'KbdInteractiveAuthentication no' \
+      'PubkeyAuthentication yes' \
+      'X11Forwarding no' \
+      'AllowAgentForwarding no' \
+      'MaxSessions 20' \
+      'MaxStartups 30:30:60' \
+      'LoginGraceTime 30' \
+      'AllowGroups sudo jenkins' \
+      'Banner none' \
+      'LogLevel VERBOSE' \
+      '' \
+      '# a sessao do controller fica aberta o tempo todo; sem isso o agente' \
+      '# cai como "offline" no meio de builds longos (INC-1802)' \
+      'Match User jenkins' \
+      '    ClientAliveInterval 60' \
+      '    ClientAliveCountMax 30' \
+      '    PermitTTY yes' \
+      > /etc/ssh/sshd_config.d/60-ci.conf; \
+    printf '%s\n' \
+      '# distribuido pelo ansible - evita prompt de host key nos clones' \
+      > /etc/ssh/ssh_known_hosts; \
+    ssh-keygen -q -t ed25519 -N '' -C 'git.example.net' -f /tmp/g1; \
+    ssh-keygen -q -t rsa -b 3072 -N '' -C 'github.com' -f /tmp/g2; \
+    printf '%s %s\n' 'git.example.net,10.30.0.30' "$(cut -d' ' -f1-2 /tmp/g1.pub)" >> /etc/ssh/ssh_known_hosts; \
+    printf '%s %s\n' 'github.com' "$(cut -d' ' -f1-2 /tmp/g2.pub)" >> /etc/ssh/ssh_known_hosts; \
+    rm -f /tmp/g1 /tmp/g1.pub /tmp/g2 /tmp/g2.pub
+
+# ---------------------------------------------------------------------------
+# 4. cloud-init leftovers.  This VM was built from an image and configured on
+#    first boot; every cloud agent in the fleet has these files.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    install -d -m 0755 /etc/cloud/cloud.cfg.d /var/lib/cloud/instance /var/lib/cloud/data \
+            /var/lib/cloud/seed; \
+    printf '%s\n' \
+      '# roles/ci-agent - desativa a rede gerenciada pelo cloud-init depois' \
+      '# do primeiro boot (o netplan e entregue pelo ansible)' \
+      'network: {config: disabled}' \
+      'preserve_hostname: true' \
+      'manage_etc_hosts: false' \
+      'datasource_list: [ OpenStack, None ]' \
+      > /etc/cloud/cloud.cfg.d/99-ci.cfg; \
+    printf '%s\n' 'i-0a91c73de55b2f4a1' > /var/lib/cloud/data/instance-id; \
+    printf '%s\n' \
+      '#cloud-config' \
+      'hostname: ci-runner-07' \
+      'fqdn: ci-runner-07.build.example.net' \
+      'users:' \
+      '  - name: ansible' \
+      '    sudo: ALL=(ALL) NOPASSWD:ALL' \
+      '    ssh_authorized_keys:' \
+      '      - ssh-ed25519 AAAA...CHAVE_DO_ANSIBLE... ansible@control' \
+      'packages: [python3, qemu-guest-agent]' \
+      'runcmd:' \
+      '  - [ systemctl, enable, --now, qemu-guest-agent ]' \
+      > /var/lib/cloud/instance/user-data.txt; \
+    printf '%s\n' \
+      '2026-06-02 03:11:07,441 - stages.py[DEBUG]: Using distro class ubuntu' \
+      '2026-06-02 03:11:08,102 - handlers.py[DEBUG]: finish: init-local/search-OpenStack: SUCCESS' \
+      '2026-06-02 03:11:19,884 - cc_final_message.py[DEBUG]: cloud-init v. 23.4.4 finished at Tue, 02 Jun 2026 03:11:19 +0000. Datasource DataSourceOpenStack. Up 24.31 seconds' \
+      > /var/log/cloud-init.log; \
+    printf '%s\n' \
+      'Cloud-init v. 23.4.4 running "modules:final" at Tue, 02 Jun 2026 03:11:15 +0000.' \
+      'ci-info: no authorized SSH keys fingerprints found for user ansible.' \
+      'Cloud-init v. 23.4.4 finished at Tue, 02 Jun 2026 03:11:19 +0000.' \
+      > /var/log/cloud-init-output.log
+
+# ---------------------------------------------------------------------------
+# 5. Jenkins remote root: workspaces with real git checkouts, the tool
+#    installations the controller pushes, the remoting jar cache and logs.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    install -d -o jenkins -g jenkins -m 0755 \
+        /var/lib/jenkins/workspace /var/lib/jenkins/logs /var/lib/jenkins/tools \
+        /var/lib/jenkins/remoting /var/lib/jenkins/remoting/jarCache \
+        /var/lib/jenkins/remoting/logs /var/lib/jenkins/caches; \
+    printf '%s\n' \
+      'Este diretorio e o "remote root" do agente. O controller copia o' \
+      'remoting.jar para ca no momento da conexao (launch via SSH), por isso' \
+      'nao existe pacote/servico do jenkins instalado nesta maquina.' \
+      > /var/lib/jenkins/LEIA-ME.txt; \
+    install -d -o jenkins -g jenkins -m 0755 \
+        /var/lib/jenkins/remoting/jarCache/A1/ /var/lib/jenkins/remoting/jarCache/7F/; \
+    printf '%s\n' \
+      'Jul 30, 2026 6:02:11 AM hudson.remoting.jnlp.Main$CuiListener status' \
+      'INFO: Trying protocol: JNLP4-connect' \
+      'Jul 30, 2026 6:02:12 AM hudson.remoting.jnlp.Main$CuiListener status' \
+      'INFO: Remote identity confirmed: 3a:11:9f:0c:5d:2b:77:e1:64:80:cc:19:af:2e:0b:d4' \
+      'Aug 14, 2026 11:04:52 PM hudson.remoting.Launcher$CuiListener status' \
+      'WARNING: Connection terminated: java.io.IOException: Unexpected termination of the channel' \
+      'Aug 14, 2026 11:05:22 PM hudson.remoting.jnlp.Main$CuiListener status' \
+      'INFO: Connected' \
+      > /var/lib/jenkins/remoting/logs/remoting.log.0; \
+    cp /var/lib/jenkins/remoting/logs/remoting.log.0 /var/lib/jenkins/remoting/logs/remoting.log.1; \
+    gzip -c /var/lib/jenkins/remoting/logs/remoting.log.0 > /var/lib/jenkins/remoting/logs/remoting.log.2.gz; \
+    chown -R jenkins:jenkins /var/lib/jenkins/remoting
+
+# Real git repositories in the workspaces, with real commits, plus the
+# @tmp/@script directories the pipeline plugin leaves next to them.
+RUN set -eux; \
+    export HOME=/var/lib/jenkins; \
+    git config --global init.defaultBranch main; \
+    git config --global user.name 'Jenkins CI'; \
+    git config --global user.email 'jenkins@example.net'; \
+    git config --global --add safe.directory '*'; \
+    for job in api-service_main web-frontend_PR-142 infra-terraform_main; do \
+        d="/var/lib/jenkins/workspace/$job"; \
+        mkdir -p "$d"; \
+        git init --quiet "$d"; \
+        printf '%s\n' "# $job" 'Repositorio de exemplo do fixture.' > "$d/README.md"; \
+        git -C "$d" add README.md; \
+        git -C "$d" commit --quiet -m 'Initial commit'; \
+        mkdir -p "${d}@tmp" "${d}@script"; \
+    done; \
+    d=/var/lib/jenkins/workspace/api-service_main; \
+    printf '%s\n' \
+      'pipeline {' \
+      '    agent { label "linux && docker && java17" }' \
+      '    options { timeout(time: 40, unit: "MINUTES"); disableConcurrentBuilds() }' \
+      '    environment {' \
+      '        MAVEN_OPTS = "-Xmx2g -Djava.awt.headless=true"' \
+      '        REGISTRY   = "registry.example.net/plataforma"' \
+      '    }' \
+      '    stages {' \
+      '        stage("build")  { steps { sh "mvn -B -T1C clean package" } }' \
+      '        stage("test")   { steps { sh "mvn -B verify" } }' \
+      '        stage("image")  { steps { sh "docker build -t $REGISTRY/api-service:$GIT_COMMIT ." } }' \
+      '        stage("push")   { steps { sh "docker push $REGISTRY/api-service:$GIT_COMMIT" } }' \
+      '    }' \
+      '    post {' \
+      '        always  { junit "target/surefire-reports/*.xml" }' \
+      '        cleanup { sh "docker image prune -f --filter label=job=$JOB_NAME" }' \
+      '    }' \
+      '}' \
+      > "$d/Jenkinsfile"; \
+    printf '%s\n' \
+      'FROM eclipse-temurin:17-jre-jammy' \
+      'WORKDIR /app' \
+      'COPY target/api-service-2.7.1.jar /app/app.jar' \
+      'USER 1000' \
+      'ENTRYPOINT ["java", "-jar", "/app/app.jar"]' \
+      > "$d/Dockerfile"; \
+    printf '%s\n' \
+      '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<project xmlns="http://maven.apache.org/POM/4.0.0">' \
+      '  <modelVersion>4.0.0</modelVersion>' \
+      '  <groupId>net.example.plataforma</groupId>' \
+      '  <artifactId>api-service</artifactId>' \
+      '  <version>2.7.1</version>' \
+      '  <packaging>jar</packaging>' \
+      '  <properties>' \
+      '    <maven.compiler.release>17</maven.compiler.release>' \
+      '    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>' \
+      '  </properties>' \
+      '</project>' \
+      > "$d/pom.xml"; \
+    mkdir -p "$d/src/main/java/net/example/plataforma" "$d/target/classes" \
+             "$d/target/surefire-reports"; \
+    printf '%s\n' \
+      'package net.example.plataforma;' \
+      '' \
+      'public final class Application {' \
+      '    public static void main(String[] args) {' \
+      '        System.out.println("api-service 2.7.1");' \
+      '    }' \
+      '}' \
+      > "$d/src/main/java/net/example/plataforma/Application.java"; \
+    javac -d "$d/target/classes" "$d/src/main/java/net/example/plataforma/Application.java"; \
+    jar --create --file "$d/target/api-service-2.7.1.jar" \
+        --main-class net.example.plataforma.Application -C "$d/target/classes" .; \
+    printf '%s\n' \
+      '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<testsuite name="net.example.plataforma.ApplicationTest" tests="14" failures="0" errors="0" skipped="1" time="3.412"/>' \
+      > "$d/target/surefire-reports/TEST-net.example.plataforma.ApplicationTest.xml"; \
+    git -C "$d" add -A; git -C "$d" commit --quiet -m 'build: empacota 2.7.1'; \
+    printf '%s\n' 'target/' '*.class' '.idea/' > "$d/.gitignore"; \
+    chown -R jenkins:jenkins /var/lib/jenkins/workspace
+
+RUN set -eux; \
+    export HOME=/var/lib/jenkins; \
+    d=/var/lib/jenkins/workspace/web-frontend_PR-142; \
+    printf '%s\n' \
+      '{' \
+      '  "name": "web-frontend",' \
+      '  "version": "5.3.0",' \
+      '  "private": true,' \
+      '  "scripts": {' \
+      '    "build": "vite build",' \
+      '    "test": "vitest run --coverage",' \
+      '    "lint": "eslint src --max-warnings 0"' \
+      '  }' \
+      '}' \
+      > "$d/package.json"; \
+    printf '%s\n' \
+      'registry=https://nexus.example.net/repository/npm-group/' \
+      'always-auth=false' \
+      'fund=false' \
+      'audit=false' \
+      'progress=false' \
+      > "$d/.npmrc"; \
+    mkdir -p "$d/node_modules/.bin" "$d/node_modules/.cache" "$d/dist/assets" "$d/coverage"; \
+    printf '%s\n' 'lockfileVersion 3 (arquivo real tem ~2 MB)' > "$d/package-lock.json"; \
+    printf '%s\n' '(bundle gerado pelo vite - placeholder)' > "$d/dist/assets/index-8f21ba0c.js"; \
+    git -C "$d" add -A; git -C "$d" commit --quiet -m 'feat(carrinho): frete gratis acima de 199'; \
+    d=/var/lib/jenkins/workspace/infra-terraform_main; \
+    mkdir -p "$d/.terraform/providers" "$d/environments/prod"; \
+    printf '%s\n' \
+      'terraform {' \
+      '  required_version = "~> 1.7"' \
+      '  backend "s3" {' \
+      '    bucket = "example-tfstate"' \
+      '    key    = "prod/infra.tfstate"' \
+      '    region = "sa-east-1"' \
+      '  }' \
+      '}' \
+      > "$d/main.tf"; \
+    printf '%s\n' '(cache de providers do terraform - placeholder)' > "$d/.terraform/providers/README"; \
+    git -C "$d" add -A; git -C "$d" commit --quiet -m 'chore: pin do provider aws em 5.62'; \
+    mkdir -p '/var/lib/jenkins/workspace/legacy-etl_main' \
+             '/var/lib/jenkins/workspace/legacy-etl_main@tmp'; \
+    printf '%s\n' \
+      'Job removido do controller em 2026-03 mas o workspace ficou.' \
+      'O workspace-gc.sh so apaga acima de 30 dias sem uso - este esta' \
+      'preso por causa do arquivo de lock abaixo (ver INC-1955).' \
+      > /var/lib/jenkins/workspace/legacy-etl_main/README.orfao; \
+    touch /var/lib/jenkins/workspace/legacy-etl_main/.build.lock; \
+    chown -R jenkins:jenkins /var/lib/jenkins/workspace
+
+# ---------------------------------------------------------------------------
+# 6. The caches.  On a real agent this is most of the disk: the maven local
+#    repo pointed at the internal Nexus, the npm cache, pip's http cache and
+#    ccache with its stats file.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    install -d -o jenkins -g jenkins -m 0755 \
+        /var/lib/jenkins/.m2 /var/lib/jenkins/.m2/repository \
+        /var/lib/jenkins/.npm/_cacache/content-v2 /var/lib/jenkins/.npm/_cacache/index-v5 \
+        /var/lib/jenkins/.cache/pip/http /var/lib/jenkins/.cache/node-gyp \
+        /var/lib/jenkins/.gradle/caches /var/lib/jenkins/.gradle/wrapper/dists \
+        /var/lib/jenkins/.sonar/cache /var/lib/jenkins/.docker; \
+    printf '%s\n' \
+      '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">' \
+      '  <localRepository>/var/lib/jenkins/.m2/repository</localRepository>' \
+      '  <interactiveMode>false</interactiveMode>' \
+      '' \
+      '  <mirrors>' \
+      '    <mirror>' \
+      '      <id>nexus</id>' \
+      '      <name>Nexus interno (proxy do maven central)</name>' \
+      '      <url>https://nexus.example.net/repository/maven-public/</url>' \
+      '      <mirrorOf>*</mirrorOf>' \
+      '    </mirror>' \
+      '  </mirrors>' \
+      '' \
+      '  <servers>' \
+      '    <server>' \
+      '      <id>nexus-releases</id>' \
+      '      <username>${env.NEXUS_USER}</username>' \
+      '      <password>${env.NEXUS_TOKEN}</password>' \
+      '    </server>' \
+      '  </servers>' \
+      '' \
+      '  <profiles>' \
+      '    <profile>' \
+      '      <id>ci</id>' \
+      '      <properties>' \
+      '        <maven.test.failure.ignore>false</maven.test.failure.ignore>' \
+      '        <maven.javadoc.skip>true</maven.javadoc.skip>' \
+      '      </properties>' \
+      '    </profile>' \
+      '  </profiles>' \
+      '  <activeProfiles><activeProfile>ci</activeProfile></activeProfiles>' \
+      '</settings>' \
+      > /var/lib/jenkins/.m2/settings.xml; \
+    for g in org/springframework/spring-core/6.1.10 \
+             org/springframework/boot/spring-boot/3.3.2 \
+             com/fasterxml/jackson/core/jackson-databind/2.17.2 \
+             org/apache/commons/commons-lang3/3.14.0 \
+             org/slf4j/slf4j-api/2.0.13 \
+             junit/junit/4.13.2 \
+             org/postgresql/postgresql/42.7.3; do \
+        mkdir -p "/var/lib/jenkins/.m2/repository/$g"; \
+        art="$(basename "$(dirname "$g")")"; ver="$(basename "$g")"; \
+        printf 'jar do %s %s (placeholder)\n' "$art" "$ver" \
+          > "/var/lib/jenkins/.m2/repository/$g/$art-$ver.jar"; \
+        printf '%s\n' 'nexus=https://nexus.example.net/repository/maven-public/' \
+          > "/var/lib/jenkins/.m2/repository/$g/_remote.repositories"; \
+        printf '#NOTE: This is a Maven Resolver internal implementation file, its format can be changed without prior notice.\n' \
+          > "/var/lib/jenkins/.m2/repository/$g/$art-$ver.jar.lastUpdated"; \
+    done; \
+    printf '%s\n' \
+      'registry=https://nexus.example.net/repository/npm-group/' \
+      'cache=/var/lib/jenkins/.npm' \
+      'fund=false' \
+      'audit=false' \
+      'progress=false' \
+      'save-exact=true' \
+      '//nexus.example.net/repository/npm-group/:_authToken=${NPM_TOKEN}' \
+      > /var/lib/jenkins/.npmrc; \
+    printf '%s\n' \
+      '{' \
+      '  "credHelpers": {' \
+      '    "registry.example.net": "nexus",' \
+      '    "123456789012.dkr.ecr.sa-east-1.amazonaws.com": "ecr-login"' \
+      '  },' \
+      '  "auths": {},' \
+      '  "currentContext": "default"' \
+      '}' \
+      > /var/lib/jenkins/.docker/config.json; \
+    printf '%s\n' \
+      '[user]' \
+      '    name = Jenkins CI' \
+      '    email = jenkins@example.net' \
+      '[init]' \
+      '    defaultBranch = main' \
+      '[advice]' \
+      '    detachedHead = false' \
+      '[url "ssh://git@git.example.net/"]' \
+      '    insteadOf = https://git.example.net/' \
+      '[core]' \
+      '    compression = 9' \
+      '    fsmonitor = false' \
+      '[fetch]' \
+      '    prune = true' \
+      '[gc]' \
+      '    auto = 0' \
+      '[safe]' \
+      '    directory = *' \
+      '[lfs]' \
+      '    concurrenttransfers = 8' \
+      > /var/lib/jenkins/.gitconfig; \
+    chown -R jenkins:jenkins /var/lib/jenkins/.m2 /var/lib/jenkins/.npm \
+        /var/lib/jenkins/.cache /var/lib/jenkins/.gradle /var/lib/jenkins/.sonar \
+        /var/lib/jenkins/.docker /var/lib/jenkins/.npmrc /var/lib/jenkins/.gitconfig
+
+RUN set -eux; \
+    install -d -o jenkins -g jenkins -m 2775 /var/cache/ccache; \
+    printf '%s\n' \
+      'max_size = 20G' \
+      'compression = true' \
+      'compression_level = 1' \
+      'hash_dir = false' \
+      'temporary_dir = /var/tmp/ccache' \
+      'sloppiness = locale,time_macros,include_file_ctime,include_file_mtime' \
+      > /var/cache/ccache/ccache.conf; \
+    chown -R jenkins:jenkins /var/cache/ccache; \
+    printf '%s\n' \
+      'export CCACHE_DIR=/var/cache/ccache' \
+      'export CCACHE_MAXSIZE=20G' \
+      'export CCACHE_UMASK=002' \
+      'export PATH="/usr/lib/ccache:$PATH"' \
+      > /etc/profile.d/ccache.sh; \
+    printf '%s\n' \
+      'export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64' \
+      'export MAVEN_OPTS="-Xmx3g -Djava.awt.headless=true -Dmaven.repo.local=/var/lib/jenkins/.m2/repository"' \
+      'export GRADLE_USER_HOME=/var/lib/jenkins/.gradle' \
+      'export NPM_CONFIG_CACHE=/var/lib/jenkins/.npm' \
+      'export PIP_CACHE_DIR=/var/lib/jenkins/.cache/pip' \
+      'export DOCKER_BUILDKIT=1' \
+      'export COMPOSE_DOCKER_CLI_BUILD=1' \
+      > /etc/profile.d/ci-toolchain.sh; \
+    chmod 0644 /etc/profile.d/ccache.sh /etc/profile.d/ci-toolchain.sh; \
+    install -d -m 0755 /etc/environment.d; \
+    printf '%s\n' \
+      'JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64' \
+      'CCACHE_DIR=/var/cache/ccache' \
+      > /etc/environment.d/90-ci.conf
+
+# ---------------------------------------------------------------------------
+# 7. Tooling that does not come from apt.  Three flavours, all of them normal:
+#    global npm packages, global pip packages, and one thing compiled from
+#    source into /usr/local with the source tree left behind.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    npm install -g --silent --no-fund --no-audit yarn semver; \
+    npm cache clean --force >/dev/null 2>&1 || true; \
+    pip3 install --no-cache-dir --quiet tox pre-commit yq; \
+    ls -1 /usr/local/lib/node_modules; \
+    ls -1 /usr/local/bin | head -20; \
+    printf '%s\n' \
+      '[global]' \
+      'index-url = https://nexus.example.net/repository/pypi-group/simple' \
+      'trusted-host = nexus.example.net' \
+      'timeout = 30' \
+      'retries = 3' \
+      '' \
+      '[install]' \
+      'no-warn-script-location = true' \
+      > /etc/pip.conf
+
+RUN set -eux; \
+    install -d /usr/local/src/buildstamp-1.4; \
+    cd /usr/local/src/buildstamp-1.4; \
+    printf '%s\n' \
+      '/*' \
+      ' * buildstamp - carimba metadados de build (host, data, git sha) num' \
+      ' * arquivo texto que os jobs anexam ao artefato.' \
+      ' * Ferramenta interna: git.example.net/infra/buildstamp' \
+      ' */' \
+      '#include <stdio.h>' \
+      '#include <string.h>' \
+      '#include <time.h>' \
+      '#include <unistd.h>' \
+      '' \
+      '#define BUILDSTAMP_VERSION "1.4"' \
+      '' \
+      'int main(int argc, char **argv)' \
+      '{' \
+      '    char host[256];' \
+      '    time_t now = time(NULL);' \
+      '    struct tm tm;' \
+      '    char stamp[64];' \
+      '' \
+      '    if (argc > 1 && strcmp(argv[1], "--version") == 0) {' \
+      '        printf("buildstamp %s\n", BUILDSTAMP_VERSION);' \
+      '        return 0;' \
+      '    }' \
+      '' \
+      '    if (gethostname(host, sizeof host) != 0)' \
+      '        strcpy(host, "desconhecido");' \
+      '    gmtime_r(&now, &tm);' \
+      '    strftime(stamp, sizeof stamp, "%Y-%m-%dT%H:%M:%SZ", &tm);' \
+      '' \
+      '    printf("agent=%s\n", host);' \
+      '    printf("timestamp=%s\n", stamp);' \
+      '    printf("job=%s\n", argc > 1 ? argv[1] : "-");' \
+      '    return 0;' \
+      '}' \
+      > buildstamp.c; \
+    printf '%s\n' \
+      'PREFIX ?= /usr/local' \
+      'CFLAGS ?= -O2 -Wall -Wextra' \
+      '' \
+      'all: buildstamp' \
+      '' \
+      'buildstamp: buildstamp.o' \
+      '	$(CC) $(LDFLAGS) -o $@ $<' \
+      '' \
+      'buildstamp.o: buildstamp.c' \
+      '	$(CC) $(CFLAGS) -c -o $@ $<' \
+      '' \
+      'install: buildstamp' \
+      '	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/share/man/man1' \
+      '	install -m 0755 buildstamp $(DESTDIR)$(PREFIX)/bin/buildstamp' \
+      '	install -m 0644 buildstamp.1 $(DESTDIR)$(PREFIX)/share/man/man1/buildstamp.1' \
+      '' \
+      'clean:' \
+      '	rm -f buildstamp buildstamp.o' \
+      '' \
+      '.PHONY: all install clean' \
+      > Makefile; \
+    printf '%s\n' \
+      '.TH BUILDSTAMP 1 "2025-08-19" "buildstamp 1.4" "Ferramentas internas"' \
+      '.SH NAME' \
+      'buildstamp \- carimba metadados de build' \
+      '.SH SYNOPSIS' \
+      '.B buildstamp' \
+      '[\fIJOB\fR]' \
+      '.SH DESCRIPTION' \
+      'Imprime host do agente, timestamp UTC e nome do job em formato' \
+      'chave=valor, para ser anexado ao artefato publicado no Nexus.' \
+      '.SH AUTHOR' \
+      'Time de Infra <infra@example.net>' \
+      > buildstamp.1; \
+    CCACHE_DIR=/var/cache/ccache CCACHE_UMASK=002 CC="/usr/lib/ccache/gcc" make >/dev/null; \
+    make clean >/dev/null; \
+    CCACHE_DIR=/var/cache/ccache CCACHE_UMASK=002 CC="/usr/lib/ccache/gcc" make >/dev/null; \
+    CCACHE_DIR=/var/cache/ccache CCACHE_UMASK=002 CC="/usr/lib/ccache/gcc" CFLAGS="-O2 -Wall -DNDEBUG" make -B >/dev/null; \
+    chown -R jenkins:jenkins /var/cache/ccache; \
+    make install >/dev/null; \
+    gzip -f /usr/local/share/man/man1/buildstamp.1; \
+    /usr/local/bin/buildstamp --version; \
+    printf '%s\n' \
+      'buildstamp 1.4' \
+      'origem: git.example.net/infra/buildstamp (tag v1.4)' \
+      'instalado com: make && make install  (PREFIX=/usr/local)' \
+      'em: 2025-08-19 por btavares' \
+      'motivo: nao vale a pena empacotar .deb para 200 linhas de C' \
+      > /usr/local/src/buildstamp-1.4/INSTALL_INFO; \
+    touch -d '2025-08-19 14:22:10' /usr/local/bin/buildstamp /usr/local/src/buildstamp-1.4/INSTALL_INFO
+
+# ---------------------------------------------------------------------------
+# 8. dockerd configuration (the daemon is not started here).
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    install -d -m 0755 /etc/docker /etc/systemd/system/docker.service.d; \
+    printf '%s\n' \
+      '{' \
+      '  "log-driver": "json-file",' \
+      '  "log-opts": { "max-size": "50m", "max-file": "3" },' \
+      '  "storage-driver": "overlay2",' \
+      '  "registry-mirrors": ["https://nexus.example.net"],' \
+      '  "insecure-registries": ["registry.example.net:5000"],' \
+      '  "max-concurrent-downloads": 6,' \
+      '  "max-concurrent-uploads": 6,' \
+      '  "live-restore": true,' \
+      '  "default-address-pools": [' \
+      '    { "base": "172.31.0.0/16", "size": 24 }' \
+      '  ],' \
+      '  "features": { "buildkit": true }' \
+      '}' \
+      > /etc/docker/daemon.json; \
+    printf '%s\n' \
+      '[Service]' \
+      'Environment="HTTP_PROXY=http://proxy.build.example.net:3128"' \
+      'Environment="HTTPS_PROXY=http://proxy.build.example.net:3128"' \
+      'Environment="NO_PROXY=localhost,127.0.0.1,10.30.0.0/16,.example.net"' \
+      > /etc/systemd/system/docker.service.d/http-proxy.conf; \
+    printf '%s\n' \
+      '[Service]' \
+      'LimitNOFILE=1048576' \
+      'LimitNPROC=infinity' \
+      'TasksMax=infinity' \
+      '# builds paralelos derrubavam o daemon no OOM (INC-1877)' \
+      'OOMScoreAdjust=-500' \
+      > /etc/systemd/system/docker.service.d/override.conf; \
+    install -d -m 0755 /etc/systemd/system/multi-user.target.wants; \
+    ln -sf /lib/systemd/system/docker.service /etc/systemd/system/multi-user.target.wants/docker.service; \
+    ln -sf /lib/systemd/system/ssh.service    /etc/systemd/system/multi-user.target.wants/ssh.service; \
+    ln -sf /lib/systemd/system/cron.service   /etc/systemd/system/multi-user.target.wants/cron.service; \
+    ln -sf /lib/systemd/system/prometheus-node-exporter.service \
+           /etc/systemd/system/multi-user.target.wants/prometheus-node-exporter.service; \
+    printf '%s\n' \
+      '[Unit]' \
+      'Description=Jenkins inbound agent (JNLP) - METODO ANTIGO, NAO USAR' \
+      'Documentation=https://wiki.example.net/ci/agentes' \
+      '' \
+      '[Service]' \
+      'User=jenkins' \
+      'WorkingDirectory=/var/lib/jenkins' \
+      'EnvironmentFile=/etc/default/jenkins-agent' \
+      'ExecStart=/usr/bin/java -jar /var/lib/jenkins/agent.jar -jnlpUrl ${JENKINS_URL}/computer/${AGENT_NAME}/jenkins-agent.jnlp -workDir /var/lib/jenkins' \
+      'Restart=always' \
+      '' \
+      '[Install]' \
+      'WantedBy=multi-user.target' \
+      > /etc/systemd/system/jenkins-agent.service; \
+    printf '%s\n' \
+      '# Sobrou da epoca em que o agente conectava via JNLP. Migramos para' \
+      '# "launch via SSH" em 2026-02; a unit segue no disco mas desabilitada.' \
+      'JENKINS_URL=https://jenkins.example.net' \
+      'AGENT_NAME=ci-runner-07' \
+      'JAVA_OPTS=-Xmx256m' \
+      > /etc/default/jenkins-agent; \
+    printf '%s\n' \
+      'apt-cacher-ng do fleet de build' \
+      > /etc/apt/apt.conf.d/00aptproxy.README; \
+    printf '%s\n' \
+      'Acquire::http::Proxy "http://apt-cache.build.example.net:3142";' \
+      'Acquire::https::Proxy "DIRECT";' \
+      > /etc/apt/apt.conf.d/00aptproxy; \
+    rm -f /etc/apt/apt.conf.d/00aptproxy.README
+
+# ---------------------------------------------------------------------------
+# 9. The scripts that keep an agent alive: cleanup, GC, prune, metrics.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# ci-cleanup.sh - roda antes/depois dos builds e no cron da madrugada' \
+      'set -euo pipefail' \
+      'LOG=/var/log/ci/cleanup.log' \
+      'exec >>"$LOG" 2>&1' \
+      'echo "=== $(date -Is) ci-cleanup ==="' \
+      'df -h /var/lib/jenkins /var/lib/docker | tail -n +2' \
+      'find /tmp -maxdepth 1 -mtime +2 -user jenkins -exec rm -rf {} + 2>/dev/null || true' \
+      'find /var/tmp -maxdepth 1 -name "ccache*" -mtime +7 -exec rm -rf {} + 2>/dev/null || true' \
+      'find /var/lib/jenkins/workspace -maxdepth 1 -name "*@tmp" -mtime +7 -exec rm -rf {} + 2>/dev/null || true' \
+      'find /var/lib/jenkins/.m2/repository -name "*.lastUpdated" -mtime +14 -delete 2>/dev/null || true' \
+      'find /var/lib/jenkins/.m2/repository -name "*.part" -delete 2>/dev/null || true' \
+      'su -s /bin/bash jenkins -c "ccache --max-size=20G --cleanup" >/dev/null 2>&1 || true' \
+      'echo "=== $(date -Is) fim ==="' \
+      > /usr/local/bin/ci-cleanup.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# workspace-gc.sh - remove workspaces sem uso ha mais de N dias' \
+      '# Nao mexe em workspace com .build.lock (job pode estar rodando).' \
+      'set -euo pipefail' \
+      'DIAS="${DIAS:-30}"' \
+      'BASE=/var/lib/jenkins/workspace' \
+      'LIVRE_MIN_GB="${LIVRE_MIN_GB:-25}"' \
+      'livre_gb() { df -BG --output=avail "$BASE" | tail -1 | tr -dc "0-9"; }' \
+      'echo "livre antes: $(livre_gb) GB"' \
+      'find "$BASE" -maxdepth 1 -mindepth 1 -type d -atime "+$DIAS" | while read -r ws; do' \
+      '  if [ -e "$ws/.build.lock" ]; then echo "pulando (lock): $ws"; continue; fi' \
+      '  echo "removendo: $ws"' \
+      '  rm -rf -- "$ws" "${ws}@tmp" "${ws}@script"' \
+      'done' \
+      'echo "livre depois: $(livre_gb) GB"' \
+      '[ "$(livre_gb)" -ge "$LIVRE_MIN_GB" ] || echo "ALERTA: disco abaixo de ${LIVRE_MIN_GB}G" >&2' \
+      > /usr/local/bin/workspace-gc.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# docker-prune.sh - o job mais importante de qualquer agente de build' \
+      'set -euo pipefail' \
+      'LOG=/var/log/ci/docker-prune.log' \
+      'exec >>"$LOG" 2>&1' \
+      'echo "=== $(date -Is) docker prune ==="' \
+      'docker system df || exit 0' \
+      'docker container prune -f --filter "until=24h"' \
+      'docker image prune -af --filter "until=168h"' \
+      'docker builder prune -f --keep-storage 20GB' \
+      'docker volume prune -f' \
+      'docker system df' \
+      'echo "=== $(date -Is) fim ==="' \
+      > /usr/local/bin/docker-prune.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# build-metrics.sh - textfile collector do node_exporter' \
+      'set -euo pipefail' \
+      'OUT=/var/lib/prometheus/node-exporter/ci_agent.prom' \
+      'TMP="$(mktemp "$OUT.XXXXXX")"' \
+      '# so os workspaces de verdade: o plugin de pipeline cria @tmp/@script ao lado' \
+      'ws=$(find /var/lib/jenkins/workspace -maxdepth 1 -mindepth 1 -type d -not -name "*@tmp" -not -name "*@script" | wc -l)' \
+      '# ccache --print-stats e o formato estavel (ccache >= 4.0); nao parseie o -s' \
+      'stats=$(CCACHE_DIR=/var/cache/ccache ccache --print-stats 2>/dev/null || true)' \
+      'field() { echo "$stats" | awk -v k="$1" "\$1 == k {print \$2; found=1} END {if (!found) print 0}"; }' \
+      'ccache_size=$(( $(field cache_size_kibibyte) * 1024 ))' \
+      'ccache_hit=$(field direct_cache_hit)' \
+      'ccache_miss=$(field cache_miss)' \
+      '{' \
+      '  echo "# HELP ci_agent_workspaces Numero de workspaces no agente"' \
+      '  echo "# TYPE ci_agent_workspaces gauge"' \
+      '  echo "ci_agent_workspaces $ws"' \
+      '  echo "# HELP ci_agent_ccache_size_bytes Tamanho atual do ccache"' \
+      '  echo "# TYPE ci_agent_ccache_size_bytes gauge"' \
+      '  echo "ci_agent_ccache_size_bytes ${ccache_size:-0}"' \
+      '  echo "# HELP ci_agent_ccache_hits_total Hits diretos do ccache"' \
+      '  echo "# TYPE ci_agent_ccache_hits_total counter"' \
+      '  echo "ci_agent_ccache_hits_total ${ccache_hit:-0}"' \
+      '  echo "# HELP ci_agent_ccache_misses_total Misses do ccache"' \
+      '  echo "# TYPE ci_agent_ccache_misses_total counter"' \
+      '  echo "ci_agent_ccache_misses_total ${ccache_miss:-0}"' \
+      '} > "$TMP"' \
+      'chmod 0644 "$TMP"; mv "$TMP" "$OUT"' \
+      > /usr/local/bin/build-metrics.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# agent-healthcheck.sh - o controller chama isso antes de marcar online' \
+      'set -euo pipefail' \
+      'falhas=0' \
+      'check() { if "$@" >/dev/null 2>&1; then echo "ok   : $*"; else echo "FALHA: $*"; falhas=$((falhas+1)); fi; }' \
+      'check java -version' \
+      'check mvn -v' \
+      'check node --version' \
+      'check python3 --version' \
+      'check git --version' \
+      'check docker version' \
+      'check test -w /var/lib/jenkins/workspace' \
+      'check test -w /var/cache/ccache' \
+      'livre=$(df -BG --output=avail /var/lib/jenkins | tail -1 | tr -dc "0-9")' \
+      'if [ "${livre:-0}" -lt 20 ]; then echo "FALHA: apenas ${livre}G livres"; falhas=$((falhas+1)); fi' \
+      'exit "$falhas"' \
+      > /usr/local/bin/agent-healthcheck.sh; \
+    chmod 0755 /usr/local/bin/ci-cleanup.sh /usr/local/bin/workspace-gc.sh \
+               /usr/local/bin/docker-prune.sh /usr/local/bin/build-metrics.sh \
+               /usr/local/bin/agent-healthcheck.sh; \
+    install -d -m 0755 /var/log/ci; \
+    install -d -m 0755 /var/lib/prometheus/node-exporter 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# 10. cron, logrotate, node_exporter, limits.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    printf '%s\n' \
+      'SHELL=/bin/bash' \
+      'PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin' \
+      'MAILTO=ci-alerts@example.net' \
+      '' \
+      '# limpeza geral de madrugada (fora da janela de build noturno)' \
+      '20 4 * * *    root     /usr/local/bin/ci-cleanup.sh' \
+      '# GC de workspaces aos sabados' \
+      '40 5 * * 6    root     DIAS=30 /usr/local/bin/workspace-gc.sh >> /var/log/ci/workspace-gc.log 2>&1' \
+      '# prune do docker: sem isso o /var/lib/docker enche em ~2 semanas' \
+      '10 3 * * *    root     /usr/local/bin/docker-prune.sh' \
+      '# metricas do agente' \
+      '*/5 * * * *   root     /usr/local/bin/build-metrics.sh' \
+      '' \
+      > /etc/cron.d/ci-agent; \
+    printf '%s\n' \
+      'SHELL=/bin/bash' \
+      'PATH=/usr/local/bin:/usr/bin:/bin' \
+      'MAILTO=""' \
+      '' \
+      '# guarda o resumo do ccache pra acompanhar taxa de acerto' \
+      '0 * * * *     jenkins  ccache -s > /var/lib/jenkins/logs/ccache-stats.txt 2>/dev/null' \
+      '# revalida o cache do sonar 1x por semana' \
+      '30 2 * * 1    jenkins  find /var/lib/jenkins/.sonar/cache -mtime +14 -delete' \
+      > /etc/cron.d/ci-jenkins-user; \
+    chmod 0644 /etc/cron.d/ci-agent /etc/cron.d/ci-jenkins-user; \
+    printf '%s\n' \
+      '/var/log/ci/*.log {' \
+      '    weekly' \
+      '    rotate 8' \
+      '    compress' \
+      '    delaycompress' \
+      '    missingok' \
+      '    notifempty' \
+      '    create 0644 root root' \
+      '}' \
+      > /etc/logrotate.d/ci-agent; \
+    printf '%s\n' \
+      '/var/lib/jenkins/remoting/logs/*.log {' \
+      '    daily' \
+      '    rotate 7' \
+      '    compress' \
+      '    missingok' \
+      '    notifempty' \
+      '    su jenkins jenkins' \
+      '    create 0644 jenkins jenkins' \
+      '}' \
+      > /etc/logrotate.d/jenkins-remoting; \
+    printf '%s\n' \
+      '# managed by ansible: roles/monitoring' \
+      'ARGS="--collector.textfile.directory=/var/lib/prometheus/node-exporter \' \
+      '      --collector.processes --collector.systemd \' \
+      '      --no-collector.wifi --no-collector.infiniband"' \
+      > /etc/default/prometheus-node-exporter; \
+    printf '%s\n' \
+      'jenkins soft nofile 65535' \
+      'jenkins hard nofile 65535' \
+      'jenkins soft nproc  32768' \
+      'jenkins hard nproc  32768' \
+      '# builds de frontend abriam milhares de fds (INC-1802)' \
+      > /etc/security/limits.d/90-jenkins.conf; \
+    printf '%s\n' \
+      '# webpack/vite/jest observam a arvore inteira do projeto' \
+      'fs.inotify.max_user_watches = 524288' \
+      'fs.inotify.max_user_instances = 1024' \
+      '# testcontainers com elasticsearch' \
+      'vm.max_map_count = 262144' \
+      'fs.file-max = 2097152' \
+      'net.ipv4.ip_local_port_range = 10240 65535' \
+      'net.ipv4.tcp_fin_timeout = 15' \
+      'kernel.pid_max = 4194304' \
+      > /etc/sysctl.d/99-ci-agent.conf; \
+    printf '%s\n' \
+      'APT::Periodic::Update-Package-Lists "1";' \
+      'APT::Periodic::Unattended-Upgrade "0";' \
+      '// upgrade automatico DESLIGADO: um docker.io novo no meio do dia' \
+      '// derruba builds. A imagem e reconstruida pelo packer toda semana.' \
+      > /etc/apt/apt.conf.d/20auto-upgrades
+
+# ---------------------------------------------------------------------------
+# 11. Logs with content, and the metric/state files the crons leave behind.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    printf '%s\n' \
+      '=== 2026-08-15T04:20:01-03:00 ci-cleanup ===' \
+      '/dev/vda2       200G  118G   73G  62% /var/lib/jenkins' \
+      '/dev/vdb1       300G  201G   84G  71% /var/lib/docker' \
+      '=== 2026-08-15T04:21:44-03:00 fim ===' \
+      '=== 2026-08-16T04:20:01-03:00 ci-cleanup ===' \
+      '/dev/vda2       200G  121G   70G  64% /var/lib/jenkins' \
+      '/dev/vdb1       300G  219G   66G  77% /var/lib/docker' \
+      '=== 2026-08-16T04:22:02-03:00 fim ===' \
+      '=== 2026-08-17T04:20:01-03:00 ci-cleanup ===' \
+      '/dev/vda2       200G  124G   67G  65% /var/lib/jenkins' \
+      '/dev/vdb1       300G  188G   97G  66% /var/lib/docker' \
+      '=== 2026-08-17T04:22:19-03:00 fim ===' \
+      > /var/log/ci/cleanup.log; \
+    printf '%s\n' \
+      '=== 2026-08-17T03:10:01-03:00 docker prune ===' \
+      'TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE' \
+      'Images          412       18        191.4GB   174.2GB (91%)' \
+      'Containers      22        3         1.1GB     980MB (89%)' \
+      'Local Volumes   57        4         8.3GB     7.9GB (95%)' \
+      'Build Cache     1841      0         44.7GB    44.7GB' \
+      'Total reclaimed space: 61.88GB' \
+      'TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE' \
+      'Images          97        18        44.2GB    22.1GB (50%)' \
+      'Containers      3         3         120MB     0B (0%)' \
+      'Local Volumes   4         4         402MB     0B (0%)' \
+      'Build Cache     220       0         19.8GB    19.8GB' \
+      '=== 2026-08-17T03:14:52-03:00 fim ===' \
+      > /var/log/ci/docker-prune.log; \
+    gzip -c /var/log/ci/docker-prune.log > /var/log/ci/docker-prune.log.2.gz; \
+    cp /var/log/ci/docker-prune.log /var/log/ci/docker-prune.log.1; \
+    printf '%s\n' \
+      'livre antes: 61 GB' \
+      'pulando (lock): /var/lib/jenkins/workspace/legacy-etl_main' \
+      'removendo: /var/lib/jenkins/workspace/mobile-app_PR-88' \
+      'removendo: /var/lib/jenkins/workspace/relatorios_main' \
+      'livre depois: 73 GB' \
+      > /var/log/ci/workspace-gc.log; \
+    printf '%s\n' \
+      'Aug 17 03:10:01 ci-runner-07 CRON[3311]: (root) CMD (/usr/local/bin/docker-prune.sh)' \
+      'Aug 17 04:20:01 ci-runner-07 CRON[3980]: (root) CMD (/usr/local/bin/ci-cleanup.sh)' \
+      'Aug 17 06:17:44 ci-runner-07 dockerd[1122]: time="2026-08-17T06:17:44.118-03:00" level=info msg="Layer sha256:9f21c0 cleaned up"' \
+      'Aug 17 07:02:19 ci-runner-07 kernel: [1882344.10] Out of memory: Killed process 28104 (java) total-vm:8412992kB, anon-rss:6120448kB' \
+      'Aug 17 07:02:19 ci-runner-07 systemd[1]: session-8811.scope: A process of this unit has been killed by the OOM killer.' \
+      'Aug 17 09:41:03 ci-runner-07 dockerd[1122]: time="2026-08-17T09:41:03.552-03:00" level=info msg="Container 4f19ab exited (0)"' \
+      > /var/log/syslog; \
+    cp /var/log/syslog /var/log/syslog.1; \
+    gzip -c /var/log/syslog > /var/log/syslog.2.gz; \
+    printf '%s\n' \
+      'Aug 17 06:00:04 ci-runner-07 sshd[3120]: Accepted publickey for jenkins from 10.30.0.10 port 44120 ssh2: ED25519 SHA256:0pKq7wZx3Vm1LbYn6RtEc9UjHa4gS2fDoI8yXvQmTle' \
+      'Aug 17 06:00:04 ci-runner-07 sshd[3120]: pam_unix(sshd:session): session opened for user jenkins(uid=1000) by (uid=0)' \
+      'Aug 17 08:22:41 ci-runner-07 sudo:  jenkins : TTY=unknown ; PWD=/var/lib/jenkins ; USER=root ; COMMAND=/usr/local/bin/ci-cleanup.sh' \
+      'Aug 17 09:14:02 ci-runner-07 sshd[3455]: Accepted publickey for btavares from 10.20.0.4 port 51002 ssh2: ED25519 SHA256:Wq2eR7yUz5xVb9nMk1oPa4sHd6gJc0lFyX8iZmQvTeR' \
+      > /var/log/auth.log; \
+    su -s /bin/bash jenkins -c 'CCACHE_DIR=/var/cache/ccache ccache -s' \
+      > /var/lib/jenkins/logs/ccache-stats.txt; \
+    chown jenkins:jenkins /var/lib/jenkins/logs/ccache-stats.txt; \
+    /usr/local/bin/build-metrics.sh; \
+    cat /var/lib/prometheus/node-exporter/ci_agent.prom; \
+    printf '%s\n' \
+      'logrotate state -- version 2' \
+      '"/var/log/ci/cleanup.log" 2026-8-16-4:0:1' \
+      '"/var/log/ci/docker-prune.log" 2026-8-16-4:0:1' \
+      '"/var/lib/jenkins/remoting/logs/remoting.log" 2026-8-17-0:0:1' \
+      '"/var/log/syslog" 2026-8-17-0:0:1' \
+      > /var/lib/logrotate/status 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# 12. Disco e rede da VM: /var/lib/docker num disco separado (senao o root
+#     enche em duas semanas) e o netplan que o cloud-init gerou.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    printf '%s\n' \
+      '# /etc/fstab' \
+      'UUID=b81f24aa-90e1-4c77-8f3d-52a91ce7d660 /              ext4  defaults,discard        0 1' \
+      'UUID=2c9a71f4-06bd-4e18-b7a2-4d1e83fa9c05 /boot          ext4  defaults                0 2' \
+      '/dev/vda2                                 /var/lib/jenkins ext4 defaults,noatime       0 2' \
+      '/dev/vdb1                                 /var/lib/docker ext4 defaults,noatime,discard 0 2' \
+      'tmpfs                                     /tmp           tmpfs rw,nosuid,nodev,size=8G 0 0' \
+      > /etc/fstab; \
+    install -d -m 0755 /etc/netplan; \
+    printf '%s\n' \
+      '# This file is generated from information provided by the datasource.' \
+      '# Changes to it will not persist across an instance reboot.' \
+      'network:' \
+      '    version: 2' \
+      '    ethernets:' \
+      '        ens3:' \
+      '            addresses:' \
+      '            - 10.30.1.27/24' \
+      '            routes:' \
+      '            - to: default' \
+      '              via: 10.30.1.1' \
+      '            nameservers:' \
+      '                addresses: [10.30.0.2, 10.30.0.3]' \
+      '                search: [build.example.net, example.net]' \
+      '            mtu: 9000' \
+      > /etc/netplan/50-cloud-init.yaml; \
+    chmod 0600 /etc/netplan/50-cloud-init.yaml
+
+# ---------------------------------------------------------------------------
+# 13. Final touches: admin dotfiles, notes, aged timestamps.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    printf '%s\n' \
+      'alias dps="docker ps --format \"table {{.Names}}\\t{{.Image}}\\t{{.Status}}\""' \
+      'alias ws="cd /var/lib/jenkins/workspace"' \
+      'alias ccs="ccache -s"' \
+      'alias health="/usr/local/bin/agent-healthcheck.sh"' \
+      'export HISTTIMEFORMAT="%F %T "' \
+      > /etc/profile.d/ci-aliases.sh; \
+    chmod 0644 /etc/profile.d/ci-aliases.sh; \
+    printf '%s\n' \
+      '' \
+      '# --- infra ---' \
+      'export HISTTIMEFORMAT="%F %T "' \
+      'alias ll="ls -alF"' \
+      >> /root/.bashrc; \
+    printf '%s\n' \
+      'docker system df' \
+      'docker system prune -af' \
+      'df -h' \
+      'du -sh /var/lib/jenkins/workspace/* | sort -h | tail' \
+      'ccache -s' \
+      'systemctl status docker' \
+      'journalctl -u docker -n 100 --no-pager' \
+      'tail -f /var/log/ci/docker-prune.log' \
+      '/usr/local/bin/agent-healthcheck.sh' \
+      'sudo -u jenkins mvn -B -f /var/lib/jenkins/workspace/api-service_main/pom.xml validate' \
+      > /root/.bash_history; \
+    chmod 0600 /root/.bash_history; \
+    printf '%s\n' \
+      'ci-runner-07 -- notas do agente' \
+      '' \
+      '- fleet: ci-runner-01..08, todos iguais (packer + ansible, repo infra/ci-images)' \
+      '- NAO instalar dependencia a mao: some no proximo rebuild da imagem' \
+      '- disco: /var/lib/docker e disco separado (vdb). Se encher, docker-prune.sh' \
+      '- INC-1802: agente caia como offline em build longo -> ClientAlive no sshd' \
+      '- INC-1877: dockerd morria no OOM -> OOMScoreAdjust no drop-in' \
+      '- INC-1955: workspace legacy-etl_main preso por .build.lock orfao' \
+      '- migracao JNLP -> SSH feita em 2026-02; unit jenkins-agent.service ficou' \
+      '  no disco desabilitada de proposito (rollback rapido)' \
+      > /root/NOTAS-CI.txt; \
+    printf '%s\n' \
+      'ci-runner-07.build.example.net' \
+      'role: ci-agent' \
+      'ansible_groups: build, ci_agents' \
+      'image: ci-base-jammy-20260601 (packer)' \
+      'provisioned: 2026-06-02' \
+      'last_ansible_run: 2026-08-16T23:41:12-03:00' \
+      'executors: 4' \
+      > /etc/ansible-facts.local; \
+    install -d -m 0755 /etc/ansible/facts.d; \
+    printf '%s\n' \
+      '{"role": "ci-agent", "executors": 4, "labels": ["linux", "docker", "java17"], "remote_root": "/var/lib/jenkins"}' \
+      > /etc/ansible/facts.d/ci_agent.fact; \
+    touch -d '2026-06-02 03:11:19' /var/log/cloud-init.log /var/log/cloud-init-output.log \
+          /var/lib/cloud/instance/user-data.txt /etc/cloud/cloud.cfg.d/99-ci.cfg; \
+    touch -d '2026-02-11 15:02:44' /etc/systemd/system/jenkins-agent.service /etc/default/jenkins-agent; \
+    touch -d '2026-03-20 10:15:00' /var/lib/jenkins/workspace/legacy-etl_main/README.orfao \
+          /var/lib/jenkins/workspace/legacy-etl_main/.build.lock; \
+    touch -d '2026-08-16 04:22:02' /var/log/ci/docker-prune.log.1 /var/log/syslog.1; \
+    touch -d '2026-08-15 04:21:44' /var/log/ci/docker-prune.log.2.gz /var/log/syslog.2.gz; \
+    chown -R jenkins:jenkins /var/lib/jenkins; \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*; \
+    /usr/local/bin/agent-healthcheck.sh || true
+
+WORKDIR /var/lib/jenkins
+
+# Sem systemd/dockerd rodando: a imagem representa o disco do agente.
+# Util para testes:  su - jenkins -c '/usr/local/bin/agent-healthcheck.sh'
+CMD ["/bin/bash"]

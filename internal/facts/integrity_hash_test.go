@@ -251,3 +251,83 @@ func TestConffilesDpkg(t *testing.T) {
 		t.Errorf("entrou conffile que ninguém perguntou: %v", out2)
 	}
 }
+
+// A CADEIA DE LINKS DO update-alternatives, que é o mecanismo PADRÃO do Debian
+// e do RHEL para escolher entre implementações:
+//
+//	/usr/bin/java -> /etc/alternatives/java -> /usr/lib/jvm/…/bin/java
+//
+// O dpkg reivindica o alvo final e NUNCA os dois links — eles nascem no
+// postinst, não são empacotados. Sem seguir a cadeia, /usr/bin/java saía como
+// "nenhum pacote reivindica", e em /usr/bin isso é CRÍTICO.
+//
+// Medido num servidor de CI montado por outra pessoa: 101 alternatives na
+// imagem. Todo host com java, python ou editor tem essa forma.
+func TestAlvoFinalSegueACadeia(t *testing.T) {
+	raiz := t.TempDir()
+	mk := func(p string) string {
+		full := filepath.Join(raiz, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return full
+	}
+	if err := os.WriteFile(mk("usr/lib/jvm/java-17/bin/java"), []byte("ELF"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// dois saltos, como o update-alternatives faz
+	if err := os.Symlink("/usr/lib/jvm/java-17/bin/java", mk("etc/alternatives/java")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc/alternatives/java", mk("usr/bin/java")); err != nil {
+		t.Fatal(err)
+	}
+	// link RELATIVO, que resolve contra o diretório do PRÓPRIO link
+	if err := os.Symlink("java", mk("usr/bin/java-runtime")); err != nil {
+		t.Fatal(err)
+	}
+	// e um arquivo comum, que não é link
+	if err := os.WriteFile(mk("usr/bin/normal"), []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := env.Probe(env.Options{Root: raiz})
+	t.Cleanup(func() { e.Close() })
+
+	if got := alvoFinal(e, "/usr/bin/java"); got != "/usr/lib/jvm/java-17/bin/java" {
+		t.Errorf("cadeia de dois saltos: %q", got)
+	}
+	if got := alvoFinal(e, "/usr/bin/java-runtime"); got != "/usr/lib/jvm/java-17/bin/java" {
+		t.Errorf("link relativo resolve contra o diretório do link: %q", got)
+	}
+	if got := alvoFinal(e, "/usr/bin/normal"); got != "" {
+		t.Errorf("arquivo comum não é link, e devolveu %q", got)
+	}
+	if got := alvoFinal(e, "/nao/existe"); got != "" {
+		t.Errorf("caminho inexistente: %q", got)
+	}
+}
+
+// Ciclo de links não pode travar a coleta. O teto existe para isso.
+func TestAlvoFinalNaoTravaEmCiclo(t *testing.T) {
+	raiz := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(raiz, "usr/bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/bin/b", filepath.Join(raiz, "usr/bin/a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/bin/a", filepath.Join(raiz, "usr/bin/b")); err != nil {
+		t.Fatal(err)
+	}
+	e := env.Probe(env.Options{Root: raiz})
+	t.Cleanup(func() { e.Close() })
+
+	feito := make(chan string, 1)
+	go func() { feito <- alvoFinal(e, "/usr/bin/a") }()
+	select {
+	case <-feito: // qualquer resposta serve; o que importa é TERMINAR
+	case <-time.After(5 * time.Second):
+		t.Fatal("ciclo de links travou a resolução")
+	}
+}

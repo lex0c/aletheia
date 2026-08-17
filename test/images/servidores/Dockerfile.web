@@ -1,0 +1,1640 @@
+# ---------------------------------------------------------------------------
+# app-web-03.prod.example.net
+#
+# Debian 12 (bookworm) web application server.
+# nginx TLS terminator/reverse proxy in front of a Python/Flask app served by
+# gunicorn, deployed with a releases/current symlink scheme by a deploy user
+# over SSH.  This is the "tidy" box of the three: recently rebuilt, config
+# management is respected, but it has been serving traffic long enough to have
+# rotated logs, expired-and-renewed certs, cron jobs and backups on disk.
+#
+# Nothing here runs at build time except the tools needed to lay the files
+# down; there is no init system in the image.  systemd units are installed on
+# disk (with their .wants symlinks) exactly as the package/admin would leave
+# them, so unit files and enablement can be inspected.
+#
+#   docker build -f Dockerfile.web -t servidor-web:test .
+# ---------------------------------------------------------------------------
+FROM debian:12
+
+LABEL org.opencontainers.image.title="app-web-03.prod.example.net" \
+      org.opencontainers.image.description="Fixture: Debian 12 nginx + gunicorn application server" \
+      fixture.role="web" \
+      fixture.env="production"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=en_US.UTF-8 \
+    TZ=America/Sao_Paulo
+
+# ---------------------------------------------------------------------------
+# 1. Base packages.
+#    The mix a real web node ends up with: the service itself, the ops tooling
+#    the on-call people expect to find, and the unattended-upgrade machinery.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        nginx \
+        python3 python3-venv python3-pip \
+        openssh-server sudo cron logrotate rsyslog \
+        ca-certificates curl wget jq openssl rsync git \
+        unattended-upgrades apt-listchanges needrestart \
+        fail2ban prometheus-node-exporter chrony \
+        msmtp msmtp-mta bsd-mailx \
+        certbot python3-certbot-nginx \
+        locales tzdata acl bash-completion \
+        procps iproute2 net-tools dnsutils lsof htop ncdu tree less vim-tiny \
+        zstd gzip bzip2 ; \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# 2. Machine identity: locale, timezone, hostname, motd, login banner.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/; s/^# *\(pt_BR.UTF-8 UTF-8\)/\1/' /etc/locale.gen; \
+    locale-gen; \
+    ln -sf /usr/share/zoneinfo/America/Sao_Paulo /etc/localtime; \
+    printf '%s\n' 'America/Sao_Paulo' > /etc/timezone; \
+    printf '%s\n' 'app-web-03' > /etc/hostname; \
+    printf '%s\n' \
+      '127.0.0.1       localhost' \
+      '127.0.1.1       app-web-03.prod.example.net app-web-03' \
+      '' \
+      '10.20.4.13      app-web-03.prod.example.net app-web-03' \
+      '10.20.4.11      app-web-01.prod.example.net app-web-01' \
+      '10.20.4.12      app-web-02.prod.example.net app-web-02' \
+      '10.20.9.10      db-01.prod.example.net db-01' \
+      '10.20.9.11      db-02.prod.example.net db-02' \
+      '10.20.2.5       redis-01.prod.example.net redis-01' \
+      '10.20.0.9       log-collector.prod.example.net log-collector' \
+      '10.20.0.4       bastion.example.net bastion' \
+      '' \
+      '::1     localhost ip6-localhost ip6-loopback' \
+      'ff02::1 ip6-allnodes' \
+      'ff02::2 ip6-allrouters' \
+      > /etc/hosts; \
+    printf '%s\n' \
+      '' \
+      '  app-web-03.prod.example.net  --  PRODUCTION web tier (pool: loja-frontend)' \
+      '' \
+      '  Managed by Ansible (playbooks/webtier.yml). Local changes WILL be reverted.' \
+      '  Deploys:   sudo -u deploy /usr/local/bin/deploy-app.sh <release>' \
+      '  Rollback:  sudo -u deploy /usr/local/bin/rollback-app.sh' \
+      '  Runbook:   https://wiki.example.net/runbooks/webtier' \
+      '  On-call:   #plantao-infra' \
+      '' \
+      > /etc/motd; \
+    printf '%s\n' \
+      '***************************************************************************' \
+      '  Acesso restrito. Este sistema e monitorado e todas as sessoes sao' \
+      '  registradas. Desconecte-se agora caso nao possua autorizacao.' \
+      '' \
+      '  Authorized access only. All activity is logged and monitored.' \
+      '***************************************************************************' \
+      > /etc/issue.net; \
+    cp /etc/issue.net /etc/issue
+
+# ---------------------------------------------------------------------------
+# 3. Accounts.
+#    - app       : system account that owns the code and runs gunicorn, nologin
+#    - deploy    : CI pushes releases here over SSH, has a real shell
+#    - mgomes/lferreira : humans, in sudo group
+#    - bkpsvc    : the backup box pulls with a restricted authorized_keys entry
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    groupadd --system --gid 981 app; \
+    useradd  --system --uid 981 --gid 981 --home-dir /srv/app \
+             --shell /usr/sbin/nologin --comment 'loja app service' app; \
+    usermod -aG app www-data; \
+    groupadd --gid 1500 deploy; \
+    useradd --uid 1500 --gid 1500 --groups app --create-home \
+            --shell /bin/bash --comment 'Deploy automation (GitLab CI)' deploy; \
+    useradd --uid 1001 --create-home --shell /bin/bash --groups sudo,adm,app \
+            --comment 'Marcos Gomes,,,' mgomes; \
+    useradd --uid 1002 --create-home --shell /bin/bash --groups sudo,adm \
+            --comment 'Laura Ferreira,,,' lferreira; \
+    useradd --system --uid 982 --create-home --home-dir /var/lib/bkpsvc \
+            --shell /bin/bash --comment 'backup pull agent' bkpsvc; \
+    passwd -l root; \
+    printf '%s\n' \
+      'Defaults        env_reset' \
+      'Defaults        secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
+      'Defaults        log_input, log_output' \
+      'Defaults        iolog_dir=/var/log/sudo-io/%{seq}' \
+      'Defaults        passwd_timeout=1' \
+      'Defaults        timestamp_timeout=5' \
+      > /etc/sudoers.d/00-defaults-local; \
+    printf '%s\n' \
+      '# deploy user only needs to bounce the app and reload nginx' \
+      'Cmnd_Alias APPCTL = /usr/bin/systemctl start app.service, \' \
+      '                    /usr/bin/systemctl stop app.service, \' \
+      '                    /usr/bin/systemctl restart app.service, \' \
+      '                    /usr/bin/systemctl reload app.service, \' \
+      '                    /usr/bin/systemctl status app.service, \' \
+      '                    /usr/bin/systemctl restart app-worker.service, \' \
+      '                    /usr/bin/systemctl reload nginx.service, \' \
+      '                    /usr/sbin/nginx -t' \
+      'deploy  ALL=(root) NOPASSWD: APPCTL' \
+      > /etc/sudoers.d/20-deploy; \
+    printf '%s\n' \
+      '%sudo   ALL=(ALL:ALL) ALL' \
+      'mgomes  ALL=(app) NOPASSWD: /usr/local/bin/app-shell' \
+      > /etc/sudoers.d/10-admins; \
+    chmod 0440 /etc/sudoers.d/00-defaults-local /etc/sudoers.d/10-admins /etc/sudoers.d/20-deploy; \
+    mkdir -p /var/log/sudo-io; chmod 0700 /var/log/sudo-io; \
+    visudo -c >/dev/null
+
+# ---------------------------------------------------------------------------
+# 4. SSH: hardened via a drop-in (the packaged sshd_config is left alone,
+#    which is what Include-aware Debian 12 admins do), real host keys, the
+#    keys the CI runner and the two admins log in with, and known_hosts.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    mkdir -p /etc/ssh/sshd_config.d /run/sshd; \
+    printf '%s\n' \
+      '# managed by ansible: roles/ssh/templates/10-hardening.conf.j2' \
+      'Protocol 2' \
+      'PermitRootLogin no' \
+      'PasswordAuthentication no' \
+      'KbdInteractiveAuthentication no' \
+      'ChallengeResponseAuthentication no' \
+      'PubkeyAuthentication yes' \
+      'AuthenticationMethods publickey' \
+      'PermitEmptyPasswords no' \
+      'X11Forwarding no' \
+      'AllowAgentForwarding no' \
+      'AllowTcpForwarding yes' \
+      'MaxAuthTries 3' \
+      'MaxSessions 8' \
+      'LoginGraceTime 30' \
+      'ClientAliveInterval 300' \
+      'ClientAliveCountMax 2' \
+      'UseDNS no' \
+      'Banner /etc/issue.net' \
+      'PrintLastLog yes' \
+      'AllowGroups sudo deploy bkpsvc' \
+      'KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512' \
+      'Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com' \
+      'MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com' \
+      'LogLevel VERBOSE' \
+      '' \
+      'Match Group bkpsvc' \
+      '    AllowTcpForwarding no' \
+      '    ForceCommand /usr/local/sbin/rrsync-backup' \
+      > /etc/ssh/sshd_config.d/10-hardening.conf; \
+    ssh-keygen -A; \
+    awk 'BEGIN{print "# jump host + internal git, distributed by config management"}' > /etc/ssh/ssh_known_hosts; \
+    ssh-keygen -q -t ed25519 -N '' -C 'bastion.example.net' -f /tmp/k1; \
+    ssh-keygen -q -t ed25519 -N '' -C 'git.example.net'     -f /tmp/k2; \
+    printf '%s %s\n' 'bastion.example.net,10.20.0.4' "$(cut -d' ' -f1-2 /tmp/k1.pub)" >> /etc/ssh/ssh_known_hosts; \
+    printf '%s %s\n' 'git.example.net,10.20.0.20'   "$(cut -d' ' -f1-2 /tmp/k2.pub)" >> /etc/ssh/ssh_known_hosts; \
+    rm -f /tmp/k1 /tmp/k1.pub /tmp/k2 /tmp/k2.pub; \
+    for u in deploy mgomes lferreira; do \
+        h=$(getent passwd "$u" | cut -d: -f6); \
+        install -d -m 0700 -o "$u" -g "$u" "$h/.ssh"; \
+        ssh-keygen -q -t ed25519 -N '' -C "$u@ci.example.net" -f "/tmp/$u.key"; \
+        install -m 0600 -o "$u" -g "$u" "/tmp/$u.key.pub" "$h/.ssh/authorized_keys"; \
+        rm -f "/tmp/$u.key" "/tmp/$u.key.pub"; \
+    done; \
+    install -d -m 0700 -o bkpsvc -g bkpsvc /var/lib/bkpsvc/.ssh; \
+    ssh-keygen -q -t ed25519 -N '' -C 'backup-01.example.net' -f /tmp/bkp.key; \
+    printf 'command="/usr/local/sbin/rrsync-backup",from="10.20.0.30",no-agent-forwarding,no-port-forwarding,no-pty,no-X11-forwarding %s\n' \
+      "$(cat /tmp/bkp.key.pub)" > /var/lib/bkpsvc/.ssh/authorized_keys; \
+    chown bkpsvc:bkpsvc /var/lib/bkpsvc/.ssh/authorized_keys; \
+    chmod 0600 /var/lib/bkpsvc/.ssh/authorized_keys; \
+    rm -f /tmp/bkp.key /tmp/bkp.key.pub; \
+    install -d -m 0700 /root/.ssh; \
+    printf '%s\n' \
+      '# root login is disabled in sshd_config.d/10-hardening.conf;' \
+      '# key kept for the out-of-band console recovery procedure (RB-114).' \
+      > /root/.ssh/authorized_keys; \
+    chmod 0600 /root/.ssh/authorized_keys
+
+# ---------------------------------------------------------------------------
+# 5. The application itself.
+#    Capistrano-style layout: shared/ holds state that survives deploys,
+#    releases/ holds timestamped checkouts, current -> newest release.
+#    Three releases are kept, matching prune-releases.sh retention.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    install -d -o app -g app -m 0755 /srv/app /srv/app/releases /srv/app/shared; \
+    install -d -o app -g app -m 0750 /srv/app/shared/config; \
+    install -d -o app -g app -m 0755 /srv/app/shared/log /srv/app/shared/tmp \
+            /srv/app/shared/tmp/pids /srv/app/shared/tmp/sockets \
+            /srv/app/shared/uploads /srv/app/repo; \
+    for r in 2026-07-28_141207 2026-08-05_093344 2026-08-12_174451; do \
+        install -d -o app -g app -m 0755 "/srv/app/releases/$r" \
+                "/srv/app/releases/$r/loja" "/srv/app/releases/$r/loja/templates" \
+                "/srv/app/releases/$r/static" "/srv/app/releases/$r/migrations"; \
+    done; \
+    ln -sfn /srv/app/releases/2026-08-12_174451 /srv/app/current; \
+    chown -h app:app /srv/app/current
+
+RUN set -eux; \
+    R=/srv/app/releases/2026-08-12_174451; \
+    printf '%s\n' \
+      'from flask import Flask, jsonify, render_template' \
+      'import os' \
+      '' \
+      'def create_app():' \
+      '    app = Flask(__name__)' \
+      '    app.config["RELEASE"] = os.environ.get("APP_RELEASE", "unknown")' \
+      '' \
+      '    @app.get("/healthz")' \
+      '    def healthz():' \
+      '        return jsonify(status="ok", release=app.config["RELEASE"])' \
+      '' \
+      '    @app.get("/")' \
+      '    def index():' \
+      '        return render_template("index.html", release=app.config["RELEASE"])' \
+      '' \
+      '    return app' \
+      > "$R/loja/__init__.py"; \
+    printf '%s\n' \
+      'from loja import create_app' \
+      '' \
+      'application = create_app()' \
+      'app = application' \
+      > "$R/wsgi.py"; \
+    printf '%s\n' \
+      '<!doctype html>' \
+      '<html lang="pt-BR"><head><meta charset="utf-8"><title>Loja</title></head>' \
+      '<body><h1>Loja</h1><p>release {{ release }}</p></body></html>' \
+      > "$R/loja/templates/index.html"; \
+    printf '%s\n' \
+      'Flask==3.0.3' \
+      'gunicorn==22.0.0' \
+      'psycopg2-binary==2.9.9' \
+      'redis==5.0.4' \
+      'python-json-logger==2.0.7' \
+      > "$R/requirements.txt"; \
+    printf '%s\n' \
+      'import multiprocessing' \
+      '' \
+      'bind = "unix:/srv/app/shared/tmp/sockets/gunicorn.sock"' \
+      'workers = multiprocessing.cpu_count() * 2 + 1' \
+      'worker_class = "gthread"' \
+      'threads = 4' \
+      'timeout = 45' \
+      'graceful_timeout = 30' \
+      'keepalive = 5' \
+      'max_requests = 2000' \
+      'max_requests_jitter = 200' \
+      'pidfile = "/srv/app/shared/tmp/pids/gunicorn.pid"' \
+      'accesslog = "/var/log/app/gunicorn-access.log"' \
+      'errorlog = "/var/log/app/gunicorn-error.log"' \
+      'loglevel = "info"' \
+      'preload_app = True' \
+      > "$R/gunicorn.conf.py"; \
+    printf '%s\n' '9f3c1ab7d2e84c05b6117af2c9d40e7b51aa93c2' > "$R/REVISION"; \
+    printf '%s\n' 'refs/tags/v4.18.2' > "$R/BRANCH"; \
+    printf '%s\n' '2026-08-12T17:44:51-03:00' > "$R/DEPLOYED_AT"; \
+    printf '%s\n' \
+      '"""add index on orders.created_at"""' \
+      'revision = "8b21c0d9f4aa"' \
+      'down_revision = "1f77ac0be901"' \
+      > "$R/migrations/8b21c0d9f4aa_add_orders_created_at_idx.py"; \
+    printf 'body{font-family:system-ui;margin:2rem}\n' > "$R/static/app.css"; \
+    for old in 2026-07-28_141207 2026-08-05_093344; do \
+        cp -a "$R/loja" "$R/wsgi.py" "$R/requirements.txt" "$R/gunicorn.conf.py" \
+              "/srv/app/releases/$old/"; \
+    done; \
+    printf '%s\n' '4a09f7c1b8ee2d5390cc1e2b7f4d8a6613bb02de' > /srv/app/releases/2026-08-05_093344/REVISION; \
+    printf '%s\n' '2026-08-05T09:33:44-03:00' > /srv/app/releases/2026-08-05_093344/DEPLOYED_AT; \
+    printf '%s\n' 'c1180ee5a7b34f0d92771cb6e0aa4d3388fe712a' > /srv/app/releases/2026-07-28_141207/REVISION; \
+    printf '%s\n' '2026-07-28T14:12:07-03:00' > /srv/app/releases/2026-07-28_141207/DEPLOYED_AT; \
+    chown -R app:app /srv/app/releases
+
+# Shared config: environment file with placeholders (real values come from the
+# vault at deploy time), plus the shared/ symlinks every release gets.
+RUN set -eux; \
+    printf '%s\n' \
+      '# /srv/app/shared/config/app.env - rendered by ansible from vault' \
+      '# NAO editar a mao. Alteracoes sao sobrescritas no proximo deploy.' \
+      'APP_ENV=production' \
+      'APP_NAME=loja' \
+      'APP_RELEASE=v4.18.2' \
+      'FLASK_DEBUG=0' \
+      'SECRET_KEY=__RENDERED_FROM_VAULT__' \
+      'DATABASE_URL=postgresql://app_rw:__RENDERED_FROM_VAULT__@db-01.prod.example.net:6432/appdb' \
+      'DATABASE_POOL_SIZE=10' \
+      'REDIS_URL=redis://redis-01.prod.example.net:6379/2' \
+      'SESSION_COOKIE_SECURE=1' \
+      'SENTRY_DSN=__RENDERED_FROM_VAULT__' \
+      'SMTP_HOST=smtp-relay.example.net' \
+      'SMTP_PORT=25' \
+      'UPLOAD_DIR=/srv/app/shared/uploads' \
+      'WEB_CONCURRENCY=9' \
+      > /srv/app/shared/config/app.env; \
+    chown app:app /srv/app/shared/config/app.env; \
+    chmod 0640 /srv/app/shared/config/app.env; \
+    printf '%s\n' \
+      '[loggers]' \
+      'keys=root,gunicorn.error,gunicorn.access' \
+      '' \
+      '[handlers]' \
+      'keys=console,file' \
+      '' \
+      '[formatters]' \
+      'keys=json' \
+      '' \
+      '[logger_root]' \
+      'level=INFO' \
+      'handlers=file' \
+      '' \
+      '[logger_gunicorn.error]' \
+      'level=INFO' \
+      'handlers=file' \
+      'propagate=0' \
+      'qualname=gunicorn.error' \
+      '' \
+      '[logger_gunicorn.access]' \
+      'level=INFO' \
+      'handlers=file' \
+      'propagate=0' \
+      'qualname=gunicorn.access' \
+      '' \
+      '[handler_console]' \
+      'class=StreamHandler' \
+      'formatter=json' \
+      'args=(sys.stdout,)' \
+      '' \
+      '[handler_file]' \
+      'class=logging.handlers.WatchedFileHandler' \
+      'formatter=json' \
+      'args=("/var/log/app/app.log",)' \
+      '' \
+      '[formatter_json]' \
+      'class=pythonjsonlogger.jsonlogger.JsonFormatter' \
+      'format=%(asctime)s %(levelname)s %(name)s %(message)s' \
+      > /srv/app/shared/config/logging.ini; \
+    chown app:app /srv/app/shared/config/logging.ini; \
+    for r in /srv/app/releases/*; do \
+        ln -sfn /srv/app/shared/config/app.env "$r/.env"; \
+        ln -sfn /srv/app/shared/log "$r/log"; \
+        ln -sfn /srv/app/shared/uploads "$r/uploads"; \
+        chown -h app:app "$r/.env" "$r/log" "$r/uploads"; \
+    done
+
+# The virtualenv lives in shared/ so it survives deploys; deploy-app.sh only
+# reinstalls when requirements.txt changes.  Real wheels from PyPI.
+RUN set -eux; \
+    python3 -m venv /srv/app/shared/venv; \
+    /srv/app/shared/venv/bin/pip install --no-cache-dir --quiet --upgrade pip setuptools wheel; \
+    /srv/app/shared/venv/bin/pip install --no-cache-dir --quiet flask gunicorn python-json-logger; \
+    /srv/app/shared/venv/bin/python -m compileall -q /srv/app/releases >/dev/null 2>&1 || true; \
+    /srv/app/shared/venv/bin/pip freeze > /srv/app/shared/config/pip-freeze.txt; \
+    cp /srv/app/current/requirements.txt /srv/app/shared/config/requirements.deployed; \
+    chown -R app:app /srv/app/shared /srv/app/releases; \
+    git init --quiet --bare /srv/app/repo/loja.git; \
+    printf '%s\n' 'https://git.example.net/loja/loja.git' > /srv/app/repo/ORIGIN; \
+    chown -R app:app /srv/app/repo
+
+# ---------------------------------------------------------------------------
+# 6. systemd units on disk (nothing is started - there is no PID 1 systemd).
+#    Includes the enablement symlinks systemctl enable would have created and
+#    the drop-in override for the packaged nginx unit.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    printf '%s\n' \
+      '[Unit]' \
+      'Description=loja gunicorn application server' \
+      'Documentation=https://wiki.example.net/runbooks/webtier' \
+      'After=network-online.target' \
+      'Wants=network-online.target' \
+      'Requires=app.socket' \
+      '' \
+      '[Service]' \
+      'Type=notify' \
+      'User=app' \
+      'Group=app' \
+      'RuntimeDirectory=app' \
+      'WorkingDirectory=/srv/app/current' \
+      'EnvironmentFile=/srv/app/shared/config/app.env' \
+      'ExecStart=/srv/app/shared/venv/bin/gunicorn --config /srv/app/current/gunicorn.conf.py wsgi:application' \
+      'ExecReload=/bin/kill -s HUP $MAINPID' \
+      'KillMode=mixed' \
+      'TimeoutStopSec=45' \
+      'Restart=always' \
+      'RestartSec=3' \
+      'WatchdogSec=60' \
+      'LimitNOFILE=65535' \
+      'NoNewPrivileges=yes' \
+      'PrivateTmp=yes' \
+      'PrivateDevices=yes' \
+      'ProtectSystem=strict' \
+      'ProtectHome=yes' \
+      'ProtectKernelTunables=yes' \
+      'ProtectControlGroups=yes' \
+      'RestrictSUIDSGID=yes' \
+      'ReadWritePaths=/srv/app/shared /var/log/app' \
+      'SyslogIdentifier=loja' \
+      '' \
+      '[Install]' \
+      'WantedBy=multi-user.target' \
+      > /etc/systemd/system/app.service; \
+    printf '%s\n' \
+      '[Unit]' \
+      'Description=loja gunicorn socket' \
+      'PartOf=app.service' \
+      '' \
+      '[Socket]' \
+      'ListenStream=/srv/app/shared/tmp/sockets/gunicorn.sock' \
+      'SocketUser=app' \
+      'SocketGroup=www-data' \
+      'SocketMode=0660' \
+      '' \
+      '[Install]' \
+      'WantedBy=sockets.target' \
+      > /etc/systemd/system/app.socket; \
+    printf '%s\n' \
+      '[Unit]' \
+      'Description=loja background worker (rq)' \
+      'After=app.service' \
+      'PartOf=app.service' \
+      '' \
+      '[Service]' \
+      'Type=simple' \
+      'User=app' \
+      'Group=app' \
+      'WorkingDirectory=/srv/app/current' \
+      'EnvironmentFile=/srv/app/shared/config/app.env' \
+      'ExecStart=/srv/app/shared/venv/bin/python -m loja.worker --queues default,mail,reports' \
+      'Restart=always' \
+      'RestartSec=10' \
+      'NoNewPrivileges=yes' \
+      'PrivateTmp=yes' \
+      'SyslogIdentifier=loja-worker' \
+      '' \
+      '[Install]' \
+      'WantedBy=multi-user.target' \
+      > /etc/systemd/system/app-worker.service; \
+    printf '%s\n' \
+      '[Unit]' \
+      'Description=loja housekeeping (sessoes expiradas, uploads orfaos)' \
+      '' \
+      '[Service]' \
+      'Type=oneshot' \
+      'User=app' \
+      'EnvironmentFile=/srv/app/shared/config/app.env' \
+      'ExecStart=/srv/app/shared/venv/bin/python -m loja.tasks.housekeeping' \
+      'Nice=10' \
+      'IOSchedulingClass=idle' \
+      > /etc/systemd/system/app-housekeeping.service; \
+    printf '%s\n' \
+      '[Unit]' \
+      'Description=Roda o housekeeping da loja de madrugada' \
+      '' \
+      '[Timer]' \
+      'OnCalendar=*-*-* 03:20:00' \
+      'RandomizedDelaySec=600' \
+      'Persistent=true' \
+      '' \
+      '[Install]' \
+      'WantedBy=timers.target' \
+      > /etc/systemd/system/app-housekeeping.timer; \
+    mkdir -p /etc/systemd/system/nginx.service.d /etc/systemd/system/prometheus-node-exporter.service.d; \
+    printf '%s\n' \
+      '[Service]' \
+      'LimitNOFILE=65535' \
+      'OOMScoreAdjust=-500' \
+      'Restart=on-failure' \
+      'RestartSec=2' \
+      > /etc/systemd/system/nginx.service.d/override.conf; \
+    printf '%s\n' \
+      '[Service]' \
+      'Nice=10' \
+      'CPUQuota=25%' \
+      > /etc/systemd/system/prometheus-node-exporter.service.d/override.conf; \
+    mkdir -p /etc/systemd/system/multi-user.target.wants /etc/systemd/system/timers.target.wants \
+             /etc/systemd/system/sockets.target.wants; \
+    ln -sf /etc/systemd/system/app.service        /etc/systemd/system/multi-user.target.wants/app.service; \
+    ln -sf /etc/systemd/system/app-worker.service /etc/systemd/system/multi-user.target.wants/app-worker.service; \
+    ln -sf /etc/systemd/system/app.socket         /etc/systemd/system/sockets.target.wants/app.socket; \
+    ln -sf /etc/systemd/system/app-housekeeping.timer /etc/systemd/system/timers.target.wants/app-housekeeping.timer; \
+    ln -sf /lib/systemd/system/nginx.service      /etc/systemd/system/multi-user.target.wants/nginx.service; \
+    ln -sf /lib/systemd/system/ssh.service        /etc/systemd/system/multi-user.target.wants/ssh.service; \
+    ln -sf /lib/systemd/system/cron.service       /etc/systemd/system/multi-user.target.wants/cron.service; \
+    ln -sf /lib/systemd/system/chrony.service     /etc/systemd/system/multi-user.target.wants/chrony.service 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# 7. nginx: tuned main config, snippets, two vhosts, real (self-signed) TLS
+#    material laid out the way certbot would leave it.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    sed -i 's/^worker_processes .*/worker_processes auto;/' /etc/nginx/nginx.conf; \
+    sed -i 's/^\(\s*\)worker_connections .*/\1worker_connections 4096;/' /etc/nginx/nginx.conf; \
+    sed -i 's/^# server_tokens off;/server_tokens off;/' /etc/nginx/nginx.conf; \
+    sed -i '/^events {/i worker_rlimit_nofile 65535;' /etc/nginx/nginx.conf; \
+    printf '%s\n' \
+      'log_format json_combined escape=json' \
+      "  '{'" \
+      "  '\"time\":\"\$time_iso8601\",'" \
+      "  '\"remote_addr\":\"\$remote_addr\",'" \
+      "  '\"xff\":\"\$http_x_forwarded_for\",'" \
+      "  '\"method\":\"\$request_method\",'" \
+      "  '\"uri\":\"\$request_uri\",'" \
+      "  '\"status\":\$status,'" \
+      "  '\"bytes\":\$body_bytes_sent,'" \
+      "  '\"rt\":\$request_time,'" \
+      "  '\"urt\":\"\$upstream_response_time\",'" \
+      "  '\"ua\":\"\$http_user_agent\",'" \
+      "  '\"host\":\"\$host\"'" \
+      "  '}';" \
+      > /etc/nginx/conf.d/00-log-format.conf; \
+    printf '%s\n' \
+      '# gzip on; ja vem ligado no nginx.conf do pacote - aqui so o ajuste fino' \
+      'gzip_vary on;' \
+      'gzip_proxied any;' \
+      'gzip_comp_level 5;' \
+      'gzip_min_length 512;' \
+      'gzip_types text/plain text/css text/xml application/json application/javascript application/xml+rss image/svg+xml;' \
+      > /etc/nginx/conf.d/10-gzip.conf; \
+    printf '%s\n' \
+      'client_max_body_size 25m;' \
+      'client_body_timeout 20s;' \
+      'client_header_timeout 20s;' \
+      'send_timeout 30s;' \
+      'keepalive_timeout 65s;' \
+      'reset_timedout_connection on;' \
+      'limit_req_zone $binary_remote_addr zone=login:10m rate=5r/s;' \
+      'limit_conn_zone $binary_remote_addr zone=perip:10m;' \
+      'proxy_cache_path /var/cache/nginx/static levels=1:2 keys_zone=static:32m max_size=1g inactive=24h use_temp_path=off;' \
+      > /etc/nginx/conf.d/30-limits.conf; \
+    printf '%s\n' \
+      'ssl_protocols TLSv1.2 TLSv1.3;' \
+      'ssl_prefer_server_ciphers off;' \
+      'ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;' \
+      'ssl_session_timeout 1d;' \
+      'ssl_session_cache shared:MozSSL:10m;' \
+      'ssl_session_tickets off;' \
+      'ssl_stapling on;' \
+      'ssl_stapling_verify on;' \
+      'resolver 10.20.0.2 10.20.0.3 valid=300s;' \
+      'resolver_timeout 5s;' \
+      > /etc/nginx/snippets/ssl-params.conf; \
+    printf '%s\n' \
+      'add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;' \
+      'add_header X-Content-Type-Options "nosniff" always;' \
+      'add_header X-Frame-Options "SAMEORIGIN" always;' \
+      'add_header Referrer-Policy "strict-origin-when-cross-origin" always;' \
+      'add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;' \
+      > /etc/nginx/snippets/security-headers.conf; \
+    printf '%s\n' \
+      'proxy_http_version 1.1;' \
+      'proxy_set_header Host $host;' \
+      'proxy_set_header X-Real-IP $remote_addr;' \
+      'proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;' \
+      'proxy_set_header X-Forwarded-Proto $scheme;' \
+      'proxy_set_header X-Request-Id $request_id;' \
+      'proxy_set_header Connection "";' \
+      'proxy_connect_timeout 5s;' \
+      'proxy_send_timeout 45s;' \
+      'proxy_read_timeout 45s;' \
+      'proxy_next_upstream error timeout http_502 http_503;' \
+      > /etc/nginx/snippets/proxy-app.conf
+
+RUN set -eux; \
+    printf '%s\n' \
+      'upstream loja_app {' \
+      '    server unix:/srv/app/shared/tmp/sockets/gunicorn.sock fail_timeout=10s;' \
+      '    keepalive 32;' \
+      '}' \
+      '' \
+      'server {' \
+      '    listen 80;' \
+      '    listen [::]:80;' \
+      '    server_name loja.example.com www.loja.example.com;' \
+      '' \
+      '    location /.well-known/acme-challenge/ { root /var/www/certbot; }' \
+      '    location / { return 301 https://loja.example.com$request_uri; }' \
+      '}' \
+      '' \
+      'server {' \
+      '    listen 443 ssl http2;' \
+      '    listen [::]:443 ssl http2;' \
+      '    server_name loja.example.com www.loja.example.com;' \
+      '' \
+      '    ssl_certificate     /etc/letsencrypt/live/loja.example.com/fullchain.pem;' \
+      '    ssl_certificate_key /etc/letsencrypt/live/loja.example.com/privkey.pem;' \
+      '    include snippets/ssl-params.conf;' \
+      '    include snippets/security-headers.conf;' \
+      '' \
+      '    access_log /var/log/nginx/loja.access.log json_combined buffer=64k flush=5s;' \
+      '    error_log  /var/log/nginx/loja.error.log warn;' \
+      '' \
+      '    root /srv/app/current;' \
+      '' \
+      '    if (-f /srv/app/shared/tmp/maintenance.on) { return 503; }' \
+      '' \
+      '    location = /favicon.ico { access_log off; log_not_found off; }' \
+      '    location = /robots.txt  { access_log off; log_not_found off; }' \
+      '' \
+      '    location /static/ {' \
+      '        alias /srv/app/current/static/;' \
+      '        expires 30d;' \
+      '        add_header Cache-Control "public, immutable";' \
+      '        access_log off;' \
+      '    }' \
+      '' \
+      '    location /uploads/ {' \
+      '        alias /srv/app/shared/uploads/;' \
+      '        expires 7d;' \
+      '    }' \
+      '' \
+      '    location = /healthz {' \
+      '        access_log off;' \
+      '        include snippets/proxy-app.conf;' \
+      '        proxy_pass http://loja_app;' \
+      '    }' \
+      '' \
+      '    location /login {' \
+      '        limit_req zone=login burst=10 nodelay;' \
+      '        include snippets/proxy-app.conf;' \
+      '        proxy_pass http://loja_app;' \
+      '    }' \
+      '' \
+      '    location / {' \
+      '        limit_conn perip 40;' \
+      '        include snippets/proxy-app.conf;' \
+      '        proxy_pass http://loja_app;' \
+      '    }' \
+      '' \
+      '    error_page 500 502 503 504 /50x.html;' \
+      '    location = /50x.html { root /var/www/errors; internal; }' \
+      '    error_page 404 /404.html;' \
+      '    location = /404.html { root /var/www/errors; internal; }' \
+      '}' \
+      > /etc/nginx/sites-available/loja.example.com.conf; \
+    printf '%s\n' \
+      '# vhost interno: metricas e status, so alcancavel pela rede de gerencia' \
+      '# (o firewall so libera a 8080 para 10.20.0.0/16; o allow/deny abaixo' \
+      '#  e a segunda camada)' \
+      'server {' \
+      '    listen 8080;' \
+      '    server_name status.internal;' \
+      '' \
+      '    allow 10.20.0.0/16;' \
+      '    deny all;' \
+      '' \
+      '    access_log off;' \
+      '' \
+      '    location = /nginx_status {' \
+      '        stub_status;' \
+      '    }' \
+      '' \
+      '    location /metrics {' \
+      '        auth_basic "metrics";' \
+      '        auth_basic_user_file /etc/nginx/.htpasswd;' \
+      '        proxy_pass http://127.0.0.1:9100/metrics;' \
+      '    }' \
+      '}' \
+      > /etc/nginx/sites-available/status.internal.conf; \
+    rm -f /etc/nginx/sites-enabled/default; \
+    ln -sf /etc/nginx/sites-available/loja.example.com.conf /etc/nginx/sites-enabled/loja.example.com.conf; \
+    ln -sf /etc/nginx/sites-available/status.internal.conf  /etc/nginx/sites-enabled/status.internal.conf; \
+    printf '%s\n' 'metrics:'"$(openssl passwd -apr1 changeme)" > /etc/nginx/.htpasswd; \
+    chown root:www-data /etc/nginx/.htpasswd; chmod 0640 /etc/nginx/.htpasswd; \
+    install -d -m 0755 /var/www/errors /var/www/certbot /var/cache/nginx/static; \
+    chown -R www-data:www-data /var/cache/nginx; \
+    printf '%s\n' \
+      '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">' \
+      '<title>Manutencao</title></head><body>' \
+      '<h1>Estamos em manutencao</h1>' \
+      '<p>Voltamos em alguns minutos. (erro 5xx)</p>' \
+      '</body></html>' \
+      > /var/www/errors/50x.html; \
+    printf '%s\n' \
+      '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">' \
+      '<title>Nao encontrado</title></head><body><h1>404</h1></body></html>' \
+      > /var/www/errors/404.html
+
+# TLS material.  Self-signed, but filed exactly where certbot puts real certs
+# (archive/ + live/ symlinks + renewal conf) so tooling that walks that tree
+# behaves normally.
+RUN set -eux; \
+    D=loja.example.com; \
+    install -d -m 0755 /etc/letsencrypt /etc/letsencrypt/live "/etc/letsencrypt/live/$D" \
+            /etc/letsencrypt/archive "/etc/letsencrypt/archive/$D" /etc/letsencrypt/renewal \
+            /etc/letsencrypt/accounts /var/log/letsencrypt; \
+    openssl req -x509 -newkey rsa:2048 -nodes -days 68 -sha256 \
+        -subj "/C=BR/ST=Sao Paulo/L=Sao Paulo/O=Example Comercio Ltda/CN=$D" \
+        -addext "subjectAltName=DNS:$D,DNS:www.$D" \
+        -keyout "/etc/letsencrypt/archive/$D/privkey3.pem" \
+        -out    "/etc/letsencrypt/archive/$D/cert3.pem" 2>/dev/null; \
+    cp "/etc/letsencrypt/archive/$D/cert3.pem" "/etc/letsencrypt/archive/$D/chain3.pem"; \
+    cp "/etc/letsencrypt/archive/$D/cert3.pem" "/etc/letsencrypt/archive/$D/fullchain3.pem"; \
+    for f in cert chain fullchain privkey; do \
+        ln -sf "../../archive/$D/${f}3.pem" "/etc/letsencrypt/live/$D/${f}.pem"; \
+    done; \
+    chmod 0700 /etc/letsencrypt/archive /etc/letsencrypt/live; \
+    chmod 0600 "/etc/letsencrypt/archive/$D/privkey3.pem"; \
+    printf '%s\n' \
+      "cert = /etc/letsencrypt/live/$D/cert.pem" \
+      "privkey = /etc/letsencrypt/live/$D/privkey.pem" \
+      "chain = /etc/letsencrypt/live/$D/chain.pem" \
+      "fullchain = /etc/letsencrypt/live/$D/fullchain.pem" \
+      'archive_dir = /etc/letsencrypt/archive/loja.example.com' \
+      '' \
+      '[renewalparams]' \
+      'account = 3f1c8a55ba2a41b0b0f4f0f6d7e1c9aa' \
+      'authenticator = webroot' \
+      'webroot_path = /var/www/certbot,' \
+      'server = https://acme-v02.api.letsencrypt.org/directory' \
+      'key_type = rsa' \
+      'rsa_key_size = 2048' \
+      'renew_hook = systemctl reload nginx' \
+      '' \
+      '[[webroot_map]]' \
+      "$D = /var/www/certbot" \
+      "www.$D = /var/www/certbot" \
+      > "/etc/letsencrypt/renewal/$D.conf"; \
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -sha256 \
+        -subj "/C=BR/O=Example Comercio Ltda/OU=Infra/CN=app-web-03.prod.example.net" \
+        -keyout /etc/ssl/private/internal-app-web-03.key \
+        -out    /etc/ssl/certs/internal-app-web-03.crt 2>/dev/null; \
+    chmod 0640 /etc/ssl/private/internal-app-web-03.key; \
+    chgrp ssl-cert /etc/ssl/private/internal-app-web-03.key 2>/dev/null || true; \
+    nginx -t
+
+# ---------------------------------------------------------------------------
+# 8. Telemetry.  Two layers, like most shops end up with:
+#    - prometheus-node-exporter from the distro, with a textfile collector dir
+#    - a vendor-style agent unpacked from a tarball into /opt, owning its own
+#      user, config dir under /etc and unit file (not managed by apt)
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    install -d -o prometheus -g prometheus -m 0755 /var/lib/prometheus/node-exporter || \
+      install -d -m 0755 /var/lib/prometheus/node-exporter; \
+    printf '%s\n' \
+      '# managed by ansible: roles/monitoring/templates/node-exporter.default.j2' \
+      'ARGS="--collector.textfile.directory=/var/lib/prometheus/node-exporter \' \
+      '      --collector.systemd \' \
+      '      --collector.processes \' \
+      '      --no-collector.wifi --no-collector.infiniband --no-collector.nfs \' \
+      '      --web.listen-address=10.20.4.13:9100"' \
+      > /etc/default/prometheus-node-exporter; \
+    printf '%s\n' \
+      '# HELP deploy_info Release currently linked at /srv/app/current' \
+      '# TYPE deploy_info gauge' \
+      'deploy_info{release="2026-08-12_174451",revision="9f3c1ab",tag="v4.18.2"} 1' \
+      '# HELP deploy_timestamp_seconds Unix time of the last successful deploy' \
+      '# TYPE deploy_timestamp_seconds gauge' \
+      'deploy_timestamp_seconds 1786603491' \
+      > /var/lib/prometheus/node-exporter/deploy.prom; \
+    printf '%s\n' \
+      '# HELP backup_last_success_timestamp_seconds Last successful app backup' \
+      '# TYPE backup_last_success_timestamp_seconds gauge' \
+      'backup_last_success_timestamp_seconds 1786852812' \
+      '# HELP backup_size_bytes Size of the last app backup archive' \
+      '# TYPE backup_size_bytes gauge' \
+      'backup_size_bytes 41894912' \
+      > /var/lib/prometheus/node-exporter/backup.prom; \
+    printf '%s\n' \
+      '# HELP ssl_cert_expiry_seconds Seconds until the vhost certificate expires' \
+      '# TYPE ssl_cert_expiry_seconds gauge' \
+      'ssl_cert_expiry_seconds{domain="loja.example.com"} 5875200' \
+      > /var/lib/prometheus/node-exporter/ssl.prom
+
+RUN set -eux; \
+    useradd --system --uid 983 --home-dir /opt/telemetry-agent --shell /usr/sbin/nologin \
+            --comment 'telemetry agent' telemetry; \
+    install -d -m 0755 /opt/telemetry-agent /opt/telemetry-agent/bin \
+            /opt/telemetry-agent/conf.d /opt/telemetry-agent/lib \
+            /etc/telemetry-agent /etc/telemetry-agent/conf.d \
+            /var/log/telemetry-agent /var/lib/telemetry-agent; \
+    printf '%s\n' '2.14.3' > /opt/telemetry-agent/VERSION; \
+    printf '%s\n' \
+      'package: telemetry-agent' \
+      'version: 2.14.3' \
+      'arch: linux-amd64' \
+      'method: tarball' \
+      'installed_at: 2026-05-19T22:41:06-03:00' \
+      'installed_by: mgomes' \
+      'source: telemetry-agent-2.14.3.linux-amd64.tar.gz (artifactory.example.net)' \
+      'note: nao existe pacote .deb oficial; atualizar via /usr/local/sbin/upgrade-telemetry-agent' \
+      > /opt/telemetry-agent/install_info; \
+    printf '%s\n' \
+      '#!/usr/bin/env python3' \
+      '"""telemetry-agent - coleta metricas basicas do host e escreve no log."""' \
+      'import argparse, json, os, socket, sys, time' \
+      '' \
+      'def read_loadavg():' \
+      '    with open("/proc/loadavg") as fh:' \
+      '        p = fh.read().split()' \
+      '    return {"load1": float(p[0]), "load5": float(p[1]), "load15": float(p[2])}' \
+      '' \
+      'def read_meminfo():' \
+      '    out = {}' \
+      '    with open("/proc/meminfo") as fh:' \
+      '        for line in fh:' \
+      '            k, _, v = line.partition(":")' \
+      '            if k in ("MemTotal", "MemAvailable"):' \
+      '                out[k] = int(v.split()[0]) * 1024' \
+      '    return out' \
+      '' \
+      'def main():' \
+      '    ap = argparse.ArgumentParser(prog="telemetry-agent")' \
+      '    ap.add_argument("--config", default="/etc/telemetry-agent/agent.yaml")' \
+      '    ap.add_argument("--interval", type=int, default=60)' \
+      '    ap.add_argument("--once", action="store_true")' \
+      '    args = ap.parse_args()' \
+      '    while True:' \
+      '        sample = {"ts": time.time(), "host": socket.gethostname()}' \
+      '        sample.update(read_loadavg())' \
+      '        sample.update(read_meminfo())' \
+      '        print(json.dumps(sample), flush=True)' \
+      '        if args.once:' \
+      '            return 0' \
+      '        time.sleep(args.interval)' \
+      '' \
+      'if __name__ == "__main__":' \
+      '    sys.exit(main())' \
+      > /opt/telemetry-agent/bin/telemetry-agent; \
+    chmod 0755 /opt/telemetry-agent/bin/telemetry-agent; \
+    ln -sf /opt/telemetry-agent/bin/telemetry-agent /usr/local/bin/telemetry-agent; \
+    printf '%s\n' \
+      'api_endpoint: https://ingest.telemetry.example.net/v2' \
+      'api_key_file: /etc/telemetry-agent/api.key' \
+      'hostname: app-web-03.prod.example.net' \
+      'environment: production' \
+      'interval_seconds: 60' \
+      'tags:' \
+      '  - role:web' \
+      '  - team:plataforma' \
+      '  - dc:sp1' \
+      'collectors:' \
+      '  cpu: true' \
+      '  memory: true' \
+      '  disk: true' \
+      '  nginx:' \
+      '    enabled: true' \
+      '    status_url: http://10.20.4.13:8080/nginx_status' \
+      '  process:' \
+      '    enabled: true' \
+      '    match: [gunicorn, nginx]' \
+      'logs:' \
+      '  enabled: true' \
+      '  sources:' \
+      '    - path: /var/log/nginx/loja.access.log' \
+      '      service: loja' \
+      '      sourcetype: nginx' \
+      '    - path: /var/log/app/app.log' \
+      '      service: loja' \
+      '      sourcetype: python-json' \
+      > /etc/telemetry-agent/agent.yaml; \
+    printf '%s\n' '__RENDERED_FROM_VAULT__' > /etc/telemetry-agent/api.key; \
+    chmod 0640 /etc/telemetry-agent/api.key; chown root:telemetry /etc/telemetry-agent/api.key; \
+    chown -R telemetry:telemetry /var/log/telemetry-agent /var/lib/telemetry-agent; \
+    printf '%s\n' \
+      '[Unit]' \
+      'Description=Telemetry Agent 2.14.3' \
+      'Documentation=https://docs.telemetry.example.net/agent' \
+      'After=network-online.target' \
+      '' \
+      '[Service]' \
+      'Type=simple' \
+      'User=telemetry' \
+      'Group=telemetry' \
+      'ExecStart=/opt/telemetry-agent/bin/telemetry-agent --config /etc/telemetry-agent/agent.yaml' \
+      'Restart=always' \
+      'RestartSec=15' \
+      'Nice=5' \
+      'MemoryMax=256M' \
+      'StandardOutput=append:/var/log/telemetry-agent/agent.log' \
+      'StandardError=append:/var/log/telemetry-agent/agent.log' \
+      '' \
+      '[Install]' \
+      'WantedBy=multi-user.target' \
+      > /etc/systemd/system/telemetry-agent.service; \
+    ln -sf /etc/systemd/system/telemetry-agent.service \
+           /etc/systemd/system/multi-user.target.wants/telemetry-agent.service
+
+# ---------------------------------------------------------------------------
+# 9. Operational glue: the scripts the team actually calls, in /usr/local.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# deploy-app.sh - publica uma release ja enviada em /srv/app/releases' \
+      '# uso: deploy-app.sh <release-dir>   (ex: 2026-08-12_174451)' \
+      'set -euo pipefail' \
+      'RELEASE="${1:?informe a release}"' \
+      'APP_ROOT=/srv/app' \
+      'LOG=/var/log/app/deploy.log' \
+      'exec 9>/var/lock/deploy-app.lock' \
+      'flock -n 9 || { echo "outro deploy em andamento"; exit 75; }' \
+      'log() { echo "$(date -Is) $*" | tee -a "$LOG"; }' \
+      'test -d "$APP_ROOT/releases/$RELEASE" || { log "release inexistente"; exit 2; }' \
+      'log "deploy iniciado release=$RELEASE por=${SUDO_USER:-$USER}"' \
+      'if ! cmp -s "$APP_ROOT/releases/$RELEASE/requirements.txt" "$APP_ROOT/shared/config/requirements.deployed"; then' \
+      '  log "requirements mudaram, atualizando virtualenv"' \
+      '  "$APP_ROOT/shared/venv/bin/pip" install --quiet -r "$APP_ROOT/releases/$RELEASE/requirements.txt"' \
+      '  cp "$APP_ROOT/releases/$RELEASE/requirements.txt" "$APP_ROOT/shared/config/requirements.deployed"' \
+      'fi' \
+      '"$APP_ROOT/shared/venv/bin/python" -m compileall -q "$APP_ROOT/releases/$RELEASE" >/dev/null' \
+      'ln -sfn "$APP_ROOT/releases/$RELEASE" "$APP_ROOT/current.new"' \
+      'mv -Tf "$APP_ROOT/current.new" "$APP_ROOT/current"' \
+      'sudo /usr/bin/systemctl reload app.service || sudo /usr/bin/systemctl restart app.service' \
+      'sudo /usr/bin/systemctl restart app-worker.service' \
+      '/usr/local/bin/healthcheck.sh --retries 20 --delay 3' \
+      'sudo /usr/bin/systemctl reload nginx.service' \
+      '/usr/local/sbin/prune-releases.sh' \
+      'printf "deploy_timestamp_seconds %s\\n" "$(date +%s)" > /var/lib/prometheus/node-exporter/deploy.prom.$$' \
+      'mv /var/lib/prometheus/node-exporter/deploy.prom.$$ /var/lib/prometheus/node-exporter/deploy.prom' \
+      'log "deploy concluido release=$RELEASE"' \
+      > /usr/local/bin/deploy-app.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# rollback-app.sh - volta para a release anterior a atual' \
+      'set -euo pipefail' \
+      'APP_ROOT=/srv/app' \
+      'CURRENT="$(basename "$(readlink -f "$APP_ROOT/current")")"' \
+      'PREV="$(ls -1 "$APP_ROOT/releases" | sort | grep -B1 -x "$CURRENT" | head -1)"' \
+      'test -n "$PREV" -a "$PREV" != "$CURRENT" || { echo "nada para onde voltar"; exit 1; }' \
+      'echo "rollback: $CURRENT -> $PREV"' \
+      'exec /usr/local/bin/deploy-app.sh "$PREV"' \
+      > /usr/local/bin/rollback-app.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# healthcheck.sh - bate no /healthz local ate responder 200' \
+      'set -euo pipefail' \
+      'RETRIES=5; DELAY=2; URL="http://127.0.0.1/healthz"' \
+      'while [ $# -gt 0 ]; do' \
+      '  case "$1" in' \
+      '    --retries) RETRIES="$2"; shift 2;;' \
+      '    --delay)   DELAY="$2";   shift 2;;' \
+      '    --url)     URL="$2";     shift 2;;' \
+      '    *) echo "opcao desconhecida: $1" >&2; exit 64;;' \
+      '  esac' \
+      'done' \
+      'for i in $(seq 1 "$RETRIES"); do' \
+      '  code="$(curl -sk -o /dev/null -w "%{http_code}" --max-time 5 -H "Host: loja.example.com" "$URL" || true)"' \
+      '  [ "$code" = "200" ] && { echo "ok ($i tentativa(s))"; exit 0; }' \
+      '  sleep "$DELAY"' \
+      'done' \
+      'echo "healthcheck falhou (ultimo status: ${code:-sem resposta})" >&2' \
+      'exit 1' \
+      > /usr/local/bin/healthcheck.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# maintenance-mode.sh on|off - liga a pagina de manutencao no nginx' \
+      'set -euo pipefail' \
+      'FLAG=/srv/app/shared/tmp/maintenance.on' \
+      'case "${1:-}" in' \
+      '  on)  install -o app -g app -m 0644 /dev/null "$FLAG"; echo "manutencao LIGADA";;' \
+      '  off) rm -f "$FLAG"; echo "manutencao desligada";;' \
+      '  status) test -f "$FLAG" && echo on || echo off;;' \
+      '  *) echo "uso: $0 on|off|status" >&2; exit 64;;' \
+      'esac' \
+      > /usr/local/bin/maintenance-mode.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# app-shell - abre um shell python dentro do virtualenv da release atual' \
+      'set -euo pipefail' \
+      'set -a; . /srv/app/shared/config/app.env; set +a' \
+      'cd /srv/app/current' \
+      'exec /srv/app/shared/venv/bin/python "$@"' \
+      > /usr/local/bin/app-shell; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# ssl-expiry-check.sh - exporta dias restantes do cert para o node_exporter' \
+      'set -euo pipefail' \
+      'OUT=/var/lib/prometheus/node-exporter/ssl.prom' \
+      'TMP="$(mktemp "${OUT}.XXXXXX")"' \
+      'echo "# HELP ssl_cert_expiry_seconds Seconds until the vhost certificate expires" > "$TMP"' \
+      'echo "# TYPE ssl_cert_expiry_seconds gauge" >> "$TMP"' \
+      'for cert in /etc/letsencrypt/live/*/cert.pem; do' \
+      '  dom="$(basename "$(dirname "$cert")")"' \
+      '  end="$(openssl x509 -enddate -noout -in "$cert" | cut -d= -f2)"' \
+      '  secs=$(( $(date -d "$end" +%s) - $(date +%s) ))' \
+      '  echo "ssl_cert_expiry_seconds{domain=\"$dom\"} $secs" >> "$TMP"' \
+      'done' \
+      'chmod 0644 "$TMP"; mv "$TMP" "$OUT"' \
+      > /usr/local/bin/ssl-expiry-check.sh; \
+    chmod 0755 /usr/local/bin/deploy-app.sh /usr/local/bin/rollback-app.sh \
+               /usr/local/bin/healthcheck.sh /usr/local/bin/maintenance-mode.sh \
+               /usr/local/bin/app-shell /usr/local/bin/ssl-expiry-check.sh
+
+RUN set -eux; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# backup-app.sh - dump diario de uploads + config, com retencao de 14 dias' \
+      'set -euo pipefail' \
+      'DEST=/var/backups/app' \
+      'STAMP="$(date +%Y%m%d-%H%M)"' \
+      'LOG=/var/log/backup-app.log' \
+      'RETENTION_DAYS=14' \
+      'exec >>"$LOG" 2>&1' \
+      'echo "=== $(date -Is) inicio ==="' \
+      'install -d -m 0750 "$DEST"' \
+      'tar --warning=no-file-changed -czf "$DEST/uploads-$STAMP.tar.gz" -C /srv/app/shared uploads' \
+      'tar -czf "$DEST/config-$STAMP.tar.gz" -C /srv/app/shared config' \
+      'sha256sum "$DEST/uploads-$STAMP.tar.gz" "$DEST/config-$STAMP.tar.gz" > "$DEST/MANIFEST-$STAMP.sha256"' \
+      'find "$DEST" -type f -mtime "+$RETENTION_DAYS" -print -delete' \
+      'SIZE="$(stat -c %s "$DEST/uploads-$STAMP.tar.gz")"' \
+      '{ echo "# HELP backup_last_success_timestamp_seconds Last successful app backup";' \
+      '  echo "# TYPE backup_last_success_timestamp_seconds gauge";' \
+      '  echo "backup_last_success_timestamp_seconds $(date +%s)";' \
+      '  echo "# HELP backup_size_bytes Size of the last app backup archive";' \
+      '  echo "# TYPE backup_size_bytes gauge";' \
+      '  echo "backup_size_bytes $SIZE"; } > /var/lib/prometheus/node-exporter/backup.prom' \
+      'echo "=== $(date -Is) fim (ok) ==="' \
+      > /usr/local/sbin/backup-app.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# prune-releases.sh - mantem as N releases mais recentes' \
+      'set -euo pipefail' \
+      'KEEP="${KEEP:-3}"' \
+      'cd /srv/app/releases' \
+      'CURRENT="$(basename "$(readlink -f /srv/app/current)")"' \
+      'ls -1 | sort -r | tail -n "+$((KEEP+1))" | while read -r r; do' \
+      '  [ "$r" = "$CURRENT" ] && continue' \
+      '  echo "removendo release antiga: $r"' \
+      '  rm -rf -- "$r"' \
+      'done' \
+      > /usr/local/sbin/prune-releases.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# rrsync-backup - ForceCommand do usuario bkpsvc: so permite rsync de leitura' \
+      'set -euo pipefail' \
+      'case "${SSH_ORIGINAL_COMMAND:-}" in' \
+      '  "rsync --server --sender"*) exec $SSH_ORIGINAL_COMMAND;;' \
+      '  *) logger -t rrsync-backup "comando rejeitado: ${SSH_ORIGINAL_COMMAND:-<vazio>}"' \
+      '     echo "somente rsync de leitura e permitido" >&2; exit 1;;' \
+      'esac' \
+      > /usr/local/sbin/rrsync-backup; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# upgrade-telemetry-agent - troca a versao instalada em /opt (tarball)' \
+      'set -euo pipefail' \
+      'VER="${1:?informe a versao, ex: 2.15.0}"' \
+      'TARBALL="/var/cache/telemetry/telemetry-agent-$VER.linux-amd64.tar.gz"' \
+      'test -f "$TARBALL" || { echo "baixe o tarball do artifactory para $TARBALL"; exit 2; }' \
+      'systemctl stop telemetry-agent.service' \
+      'tar -xzf "$TARBALL" -C /opt' \
+      'ln -sfn "/opt/telemetry-agent-$VER" /opt/telemetry-agent' \
+      'systemctl start telemetry-agent.service' \
+      > /usr/local/sbin/upgrade-telemetry-agent; \
+    chmod 0755 /usr/local/sbin/backup-app.sh /usr/local/sbin/prune-releases.sh \
+               /usr/local/sbin/rrsync-backup /usr/local/sbin/upgrade-telemetry-agent; \
+    install -d -m 0755 /var/cache/telemetry
+
+# A small ops virtualenv outside apt, the way people keep one-off tooling
+# without polluting the system python.
+RUN set -eux; \
+    python3 -m venv /opt/venvs/ops; \
+    /opt/venvs/ops/bin/pip install --no-cache-dir --quiet requests; \
+    ln -sf /opt/venvs/ops/bin/python /usr/local/bin/ops-python; \
+    printf '%s\n' \
+      'virtualenv de ferramentas ad-hoc do time de infra.' \
+      'Criado por: lferreira  (2026-04-02)' \
+      'NAO e usado pela aplicacao - a app usa /srv/app/shared/venv.' \
+      > /opt/venvs/ops/README
+
+# ---------------------------------------------------------------------------
+# 10. cron: /etc/cron.d fragments plus per-user crontabs in the spool.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    printf '%s\n' \
+      'SHELL=/bin/bash' \
+      'PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin' \
+      'MAILTO=infra-alerts@example.net' \
+      '' \
+      '# backup diario dos uploads e da config compartilhada' \
+      '15 2 * * *   root   /usr/local/sbin/backup-app.sh' \
+      '' \
+      > /etc/cron.d/backup-app; \
+    printf '%s\n' \
+      'SHELL=/bin/bash' \
+      'PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin' \
+      'MAILTO=infra-alerts@example.net' \
+      '' \
+      '# renovacao do certificado (o timer do pacote tambem existe; mantido' \
+      '# aqui por causa do incidente INC-2291, quando o timer ficou mascarado)' \
+      '23 3,15 * * *  root  certbot renew --quiet --webroot -w /var/www/certbot --deploy-hook "systemctl reload nginx"' \
+      '*/30 * * * *   root  /usr/local/bin/ssl-expiry-check.sh' \
+      '' \
+      > /etc/cron.d/certbot-renew; \
+    printf '%s\n' \
+      'SHELL=/bin/bash' \
+      'PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin' \
+      'MAILTO=""' \
+      '' \
+      '# limpeza de sessoes e uploads orfaos (o timer systemd faz o mesmo as 03:20;' \
+      '# esta entrada cobre o caso do timer nao rodar apos reboot)' \
+      '40 4 * * *   app   /srv/app/shared/venv/bin/python -m loja.tasks.housekeeping --quiet' \
+      '*/10 * * * * app   /usr/bin/find /srv/app/shared/tmp -type f -name "*.tmp" -mmin +120 -delete' \
+      '' \
+      > /etc/cron.d/app-housekeeping; \
+    printf '%s\n' \
+      'SHELL=/bin/bash' \
+      'PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin' \
+      '' \
+      '# metricas de textfile para o node_exporter' \
+      '*/5 * * * *  root  /usr/bin/find /var/lib/prometheus/node-exporter -name "*.prom.*" -mmin +10 -delete' \
+      '' \
+      > /etc/cron.d/node-exporter-textfile; \
+    chmod 0644 /etc/cron.d/backup-app /etc/cron.d/certbot-renew \
+               /etc/cron.d/app-housekeeping /etc/cron.d/node-exporter-textfile; \
+    printf '%s\n' \
+      '#!/bin/sh' \
+      '# envia os logs rotacionados do dia para o bucket de retencao longa' \
+      'set -eu' \
+      'DEST=/var/backups/logship' \
+      'install -d -m 0750 "$DEST"' \
+      'find /var/log/nginx /var/log/app -name "*.gz" -mtime -1 -exec cp -a {} "$DEST/" \; 2>/dev/null || true' \
+      'exit 0' \
+      > /etc/cron.daily/logship; \
+    chmod 0755 /etc/cron.daily/logship; \
+    install -d -m 1730 -o root -g crontab /var/spool/cron/crontabs; \
+    printf '%s\n' \
+      '# DO NOT EDIT THIS FILE - edit the master and reinstall.' \
+      '# (/tmp/crontab.8Uc3Jd/crontab installed on Tue Jun 16 09:12:44 2026)' \
+      '# (Cron version -- $Id: crontab.c,v 2.13 1994/01/17 03:20:37 vixie Exp $)' \
+      'MAILTO=deploy-bot@example.net' \
+      'PATH=/usr/local/bin:/usr/bin:/bin' \
+      '' \
+      '# aquece o cache de paginas depois do reboot' \
+      '@reboot sleep 90; /usr/local/bin/healthcheck.sh --retries 30 --delay 10' \
+      '' \
+      '# guarda a saida do pip freeze pra auditoria de dependencias' \
+      '5 6 * * 1 /srv/app/shared/venv/bin/pip freeze > /srv/app/shared/config/pip-freeze.txt 2>/dev/null' \
+      > /var/spool/cron/crontabs/deploy; \
+    chown deploy:crontab /var/spool/cron/crontabs/deploy; \
+    chmod 0600 /var/spool/cron/crontabs/deploy; \
+    printf '%s\n' \
+      '# DO NOT EDIT THIS FILE - edit the master and reinstall.' \
+      '# (/tmp/crontab.9Kd1Lm/crontab installed on Thu Mar  5 23:04:11 2026)' \
+      'MAILTO=infra-alerts@example.net' \
+      '' \
+      '# reinicia o gunicorn de madrugada aos domingos (workaround do vazamento' \
+      '# de memoria da lib de PDF - ver INC-2044, remover quando subir a 4.20)' \
+      '30 4 * * 0 /usr/bin/systemctl restart app.service' \
+      > /var/spool/cron/crontabs/root; \
+    chown root:crontab /var/spool/cron/crontabs/root; \
+    chmod 0600 /var/spool/cron/crontabs/root
+
+# ---------------------------------------------------------------------------
+# 11. logrotate policy + logs with content and visible rotation history.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    printf '%s\n' \
+      '/var/log/app/*.log {' \
+      '    daily' \
+      '    rotate 14' \
+      '    missingok' \
+      '    notifempty' \
+      '    compress' \
+      '    delaycompress' \
+      '    copytruncate' \
+      '    dateext' \
+      '    dateformat -%Y%m%d' \
+      '    su app app' \
+      '    create 0640 app app' \
+      '}' \
+      > /etc/logrotate.d/app; \
+    printf '%s\n' \
+      '/var/log/telemetry-agent/*.log {' \
+      '    weekly' \
+      '    rotate 8' \
+      '    missingok' \
+      '    notifempty' \
+      '    compress' \
+      '    create 0640 telemetry telemetry' \
+      '    postrotate' \
+      '        systemctl kill -s HUP telemetry-agent.service >/dev/null 2>&1 || true' \
+      '    endscript' \
+      '}' \
+      > /etc/logrotate.d/telemetry-agent; \
+    printf '%s\n' \
+      '/var/log/backup-app.log /var/log/app/deploy.log {' \
+      '    monthly' \
+      '    rotate 12' \
+      '    missingok' \
+      '    notifempty' \
+      '    compress' \
+      '    create 0640 root adm' \
+      '}' \
+      > /etc/logrotate.d/ops-scripts; \
+    sed -i 's/^\trotate 14$/\trotate 30/' /etc/logrotate.d/nginx || true; \
+    printf '%s\n' \
+      'module(load="imfile")' \
+      '' \
+      'input(type="imfile"' \
+      '      File="/var/log/app/app.log"' \
+      '      Tag="loja"' \
+      '      Severity="info"' \
+      '      Facility="local3")' \
+      '' \
+      'local3.*  @@log-collector.prod.example.net:6514' \
+      '& stop' \
+      > /etc/rsyslog.d/30-app.conf; \
+    printf '%s\n' \
+      '# encaminha tudo para o coletor central (TLS, RELP)' \
+      '*.*  action(type="omfwd" target="log-collector.prod.example.net" port="6514"' \
+      '            protocol="tcp" StreamDriver="gtls" StreamDriverMode="1"' \
+      '            StreamDriverAuthMode="x509/name"' \
+      '            StreamDriverPermittedPeers="log-collector.prod.example.net"' \
+      '            action.resumeRetryCount="-1"' \
+      '            queue.type="linkedList" queue.size="100000"' \
+      '            queue.filename="fwd_collector" queue.saveOnShutdown="on")' \
+      > /etc/rsyslog.d/49-remote.conf
+
+RUN set -eux; \
+    install -d -m 0755 -o app -g adm /var/log/app; \
+    install -d -m 0755 /var/log/unattended-upgrades /var/log/apt; \
+    awk 'BEGIN{ srand(20260817); \
+      split("GET GET GET GET GET POST POST HEAD", m, " "); \
+      split("/ /produtos /produtos/1042 /carrinho /login /healthz /static/app.css /api/v1/pedidos /busca?q=tenis", u, " "); \
+      split("200 200 200 200 200 302 304 404 500 503", s, " "); \
+      for (d = 15; d <= 17; d++) { \
+        for (i = 0; i < 220; i++) { \
+          h = int(rand()*24); mi = int(rand()*60); se = int(rand()*60); \
+          printf "10.20.%d.%d - - [%02d/Aug/2026:%02d:%02d:%02d -0300] \"%s %s HTTP/1.1\" %s %d \"-\" \"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36\" %.3f\n", \
+            int(rand()*4)+1, int(rand()*254)+1, d, h, mi, se, \
+            m[int(rand()*8)+1], u[int(rand()*9)+1], s[int(rand()*10)+1], int(rand()*40000)+180, rand()*1.4; \
+        } \
+      } }' | sort -t: -k2 > /var/log/nginx/access.log; \
+    head -220 /var/log/nginx/access.log > /var/log/nginx/access.log.1; \
+    head -440 /var/log/nginx/access.log | tail -220 > /tmp/acc2; \
+    gzip -c /tmp/acc2 > /var/log/nginx/access.log.2.gz; \
+    gzip -c /tmp/acc2 > /var/log/nginx/access.log.3.gz; \
+    rm -f /tmp/acc2; \
+    awk 'BEGIN{ srand(778); \
+      split("GET GET GET GET POST POST HEAD", m, " "); \
+      split("/ /produtos /produtos/1042 /carrinho /login /healthz /api/v1/pedidos /busca?q=tenis", u, " "); \
+      split("200 200 200 200 200 302 304 404 500 503", s, " "); \
+      for (d = 16; d <= 17; d++) { \
+        for (i = 0; i < 300; i++) { \
+          h = int(rand()*24); mi = int(rand()*60); se = int(rand()*60); \
+          rt = rand()*1.2; \
+          printf "{\"time\":\"2026-08-%02dT%02d:%02d:%02d-03:00\",\"remote_addr\":\"10.20.%d.%d\",\"xff\":\"%s\",\"method\":\"%s\",\"uri\":\"%s\",\"status\":%s,\"bytes\":%d,\"rt\":%.3f,\"urt\":\"%.3f\",\"ua\":\"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36\",\"host\":\"loja.example.com\"}\n", \
+            d, h, mi, se, int(rand()*4)+1, int(rand()*254)+1, \
+            (rand() > 0.5 ? "203.0.113." int(rand()*254) : "-"), \
+            m[int(rand()*7)+1], u[int(rand()*8)+1], s[int(rand()*10)+1], \
+            int(rand()*40000)+180, rt, rt*0.92; \
+        } \
+      } }' | sort > /var/log/nginx/loja.access.log; \
+    head -300 /var/log/nginx/loja.access.log > /var/log/nginx/loja.access.log.1; \
+    gzip -c /var/log/nginx/loja.access.log.1 > /var/log/nginx/loja.access.log.2.gz; \
+    printf '%s\n' \
+      '2026/08/16 04:12:07 [error] 1148#1148: *884213 upstream timed out (110: Connection timed out) while reading response header from upstream, client: 10.20.3.87, server: loja.example.com, request: "GET /api/v1/pedidos?page=8 HTTP/1.1", upstream: "http://unix:/srv/app/shared/tmp/sockets/gunicorn.sock:/api/v1/pedidos?page=8", host: "loja.example.com"' \
+      '2026/08/17 09:33:12 [error] 1149#1149: *912404 upstream timed out (110: Connection timed out) while connecting to upstream, client: 10.20.2.41, server: loja.example.com, request: "POST /api/v1/frete HTTP/1.1", host: "loja.example.com"' \
+      '2026/08/17 11:20:55 [warn] 1149#1149: *913882 a client request body is buffered to a temporary file /var/lib/nginx/body/0000000921, client: 10.20.1.77, server: loja.example.com, request: "POST /produtos/1042/foto HTTP/1.1", host: "loja.example.com"' \
+      > /var/log/nginx/loja.error.log; \
+    printf '%s\n' \
+      '2026/08/16 04:12:07 [error] 1148#1148: *884213 upstream timed out (110: Connection timed out) while reading response header from upstream, client: 10.20.3.87, server: loja.example.com, request: "GET /api/v1/pedidos?page=8 HTTP/1.1", upstream: "http://unix:/srv/app/shared/tmp/sockets/gunicorn.sock:/api/v1/pedidos?page=8", host: "loja.example.com"' \
+      '2026/08/16 04:12:07 [warn] 1148#1148: *884213 an upstream response is buffered to a temporary file /var/lib/nginx/proxy/8/12/0000004128 while reading upstream, client: 10.20.3.87, server: loja.example.com' \
+      '2026/08/16 22:41:55 [error] 1149#1149: *901004 open() "/srv/app/current/static/img/banner-natal.png" failed (2: No such file or directory), client: 10.20.3.14, server: loja.example.com, request: "GET /static/img/banner-natal.png HTTP/1.1", host: "loja.example.com"' \
+      '2026/08/17 03:20:11 [notice] 1102#1102: signal process started' \
+      '2026/08/17 03:20:11 [notice] 1102#1102: reconfiguring' \
+      '2026/08/17 09:02:44 [crit] 1150#1150: *912877 SSL_do_handshake() failed (SSL: error:0A00006C:SSL routines::bad key share) while SSL handshaking, client: 203.0.113.44, server: 0.0.0.0:443' \
+      > /var/log/nginx/error.log; \
+    head -3 /var/log/nginx/error.log > /var/log/nginx/error.log.1; \
+    gzip -c /var/log/nginx/error.log.1 > /var/log/nginx/error.log.2.gz; \
+    chown -R www-data:adm /var/log/nginx; chmod 0640 /var/log/nginx/*
+
+RUN set -eux; \
+    printf '%s\n' \
+      '{"asctime": "2026-08-17 09:14:02,118", "levelname": "INFO", "name": "loja.pedidos", "message": "pedido criado", "pedido_id": 884213, "valor": 349.9, "request_id": "1f0c2b9a"}' \
+      '{"asctime": "2026-08-17 09:14:03,004", "levelname": "INFO", "name": "loja.pagamentos", "message": "cobranca autorizada", "pedido_id": 884213, "gateway": "cielo", "latencia_ms": 812}' \
+      '{"asctime": "2026-08-17 09:21:47,551", "levelname": "WARNING", "name": "loja.estoque", "message": "estoque negativo detectado, ajustando", "sku": "TEN-4471", "saldo": -2}' \
+      '{"asctime": "2026-08-17 09:33:12,900", "levelname": "ERROR", "name": "loja.integracoes.frete", "message": "timeout consultando transportadora", "transportadora": "jadlog", "timeout_s": 5.0, "request_id": "77bd10ac"}' \
+      '{"asctime": "2026-08-17 10:02:55,342", "levelname": "INFO", "name": "loja.tasks.housekeeping", "message": "sessoes expiradas removidas", "removidas": 4188}' \
+      '{"asctime": "2026-08-17 10:47:19,673", "levelname": "INFO", "name": "loja.pedidos", "message": "pedido criado", "pedido_id": 884301, "valor": 89.9, "request_id": "3ab90f12"}' \
+      > /var/log/app/app.log; \
+    cp /var/log/app/app.log /var/log/app/app.log-20260816; \
+    gzip /var/log/app/app.log-20260816; \
+    cp /var/log/app/app.log /tmp/a15; gzip -c /tmp/a15 > /var/log/app/app.log-20260815.gz; rm -f /tmp/a15; \
+    printf '%s\n' \
+      '[2026-08-17 03:20:12 -0300] [1187] [INFO] Handling signal: hup' \
+      '[2026-08-17 03:20:12 -0300] [1187] [INFO] Hang up: Master' \
+      '[2026-08-17 03:20:13 -0300] [1187] [INFO] Listening at: unix:/srv/app/shared/tmp/sockets/gunicorn.sock (1187)' \
+      '[2026-08-17 03:20:13 -0300] [1187] [INFO] Using worker: gthread' \
+      '[2026-08-17 03:20:13 -0300] [24188] [INFO] Booting worker with pid: 24188' \
+      '[2026-08-17 03:20:13 -0300] [24189] [INFO] Booting worker with pid: 24189' \
+      '[2026-08-17 03:20:14 -0300] [24190] [INFO] Booting worker with pid: 24190' \
+      '[2026-08-17 09:33:12 -0300] [24189] [ERROR] Error handling request /api/v1/frete' \
+      '[2026-08-17 09:33:12 -0300] [24189] [ERROR] Traceback (most recent call last):' \
+      '[2026-08-17 09:33:12 -0300] [24189] [ERROR]   File "/srv/app/current/loja/integracoes/frete.py", line 88, in cotar' \
+      '[2026-08-17 09:33:12 -0300] [24189] [ERROR]     resp = self.session.post(url, json=payload, timeout=5.0)' \
+      '[2026-08-17 09:33:12 -0300] [24189] [ERROR] requests.exceptions.ReadTimeout: HTTPSConnectionPool(host="api.jadlog.com.br", port=443): Read timed out. (read timeout=5.0)' \
+      > /var/log/app/gunicorn-error.log; \
+    printf '%s\n' \
+      '2026-08-05T09:35:02-03:00 deploy iniciado release=2026-08-05_093344 por=deploy' \
+      '2026-08-05T09:35:44-03:00 requirements mudaram, atualizando virtualenv' \
+      '2026-08-05T09:36:31-03:00 deploy concluido release=2026-08-05_093344' \
+      '2026-08-12T17:46:10-03:00 deploy iniciado release=2026-08-12_174451 por=deploy' \
+      '2026-08-12T17:46:52-03:00 deploy concluido release=2026-08-12_174451' \
+      '2026-08-13T11:02:19-03:00 deploy iniciado release=2026-08-13_105533 por=deploy' \
+      '2026-08-13T11:03:41-03:00 healthcheck falhou (ultimo status: 502) - rollback automatico' \
+      '2026-08-13T11:04:02-03:00 rollback: 2026-08-13_105533 -> 2026-08-12_174451' \
+      '2026-08-13T11:04:58-03:00 deploy concluido release=2026-08-12_174451' \
+      > /var/log/app/deploy.log; \
+    printf '%s\n' \
+      '=== 2026-08-15T02:15:01-03:00 inicio ===' \
+      '=== 2026-08-15T02:16:44-03:00 fim (ok) ===' \
+      '=== 2026-08-16T02:15:02-03:00 inicio ===' \
+      '=== 2026-08-16T02:17:09-03:00 fim (ok) ===' \
+      '=== 2026-08-17T02:15:01-03:00 inicio ===' \
+      '/var/backups/app/uploads-20260802-0215.tar.gz' \
+      '/var/backups/app/config-20260802-0215.tar.gz' \
+      '=== 2026-08-17T02:16:52-03:00 fim (ok) ===' \
+      > /var/log/backup-app.log; \
+    chown -R app:adm /var/log/app; chmod 0640 /var/log/app/*; \
+    printf '%s\n' \
+      'Aug 17 03:20:11 app-web-03 systemd[1]: Starting app-housekeeping.service - loja housekeeping...' \
+      'Aug 17 03:20:14 app-web-03 loja[24188]: {"levelname": "INFO", "message": "housekeeping ok"}' \
+      'Aug 17 03:20:14 app-web-03 systemd[1]: app-housekeeping.service: Deactivated successfully.' \
+      'Aug 17 06:25:01 app-web-03 CRON[24512]: (root) CMD (/usr/local/bin/ssl-expiry-check.sh)' \
+      'Aug 17 07:00:01 app-web-03 systemd[1]: Starting logrotate.service - Rotate log files...' \
+      'Aug 17 07:00:02 app-web-03 systemd[1]: logrotate.service: Deactivated successfully.' \
+      'Aug 17 09:33:12 app-web-03 loja[24189]: {"levelname": "ERROR", "message": "timeout consultando transportadora"}' \
+      > /var/log/syslog; \
+    gzip -c /var/log/syslog > /var/log/syslog.2.gz; cp /var/log/syslog /var/log/syslog.1; \
+    printf '%s\n' \
+      'Aug 17 08:02:11 app-web-03 sshd[24001]: Accepted publickey for mgomes from 10.20.0.4 port 51422 ssh2: ED25519 SHA256:qz9F1v0Xk2m8s7L4pTn5cUeR3bYw6H0jJdA2sKfQmXo' \
+      'Aug 17 08:02:11 app-web-03 sshd[24001]: pam_unix(sshd:session): session opened for user mgomes(uid=1001) by (uid=0)' \
+      'Aug 17 08:14:39 app-web-03 sudo:   mgomes : TTY=pts/0 ; PWD=/home/mgomes ; USER=root ; COMMAND=/usr/bin/systemctl status app.service' \
+      'Aug 17 08:31:02 app-web-03 sshd[24001]: pam_unix(sshd:session): session closed for user mgomes' \
+      'Aug 17 09:05:44 app-web-03 sshd[24140]: Connection closed by authenticating user root 203.0.113.201 port 44122 [preauth]' \
+      'Aug 17 09:05:47 app-web-03 sshd[24142]: Invalid user admin from 203.0.113.201 port 44190' \
+      'Aug 17 09:05:49 app-web-03 sshd[24144]: Invalid user test from 203.0.113.201 port 44230' \
+      'Aug 17 09:06:02 app-web-03 sshd[24150]: Accepted publickey for deploy from 10.20.7.30 port 39112 ssh2: ED25519 SHA256:8pQx1mVc0LrT4nHbYs2wKfE7dJ3gA9uZ5oI6yXtRlNm' \
+      > /var/log/auth.log; \
+    cp /var/log/auth.log /var/log/auth.log.1; \
+    printf '%s\n' \
+      '2026-08-17 09:05:52,118 fail2ban.filter  [812]: INFO    [sshd] Found 203.0.113.201 - 2026-08-17 09:05:49' \
+      '2026-08-17 09:05:52,214 fail2ban.actions [812]: NOTICE  [sshd] Ban 203.0.113.201' \
+      '2026-08-17 09:15:53,004 fail2ban.actions [812]: NOTICE  [sshd] Unban 203.0.113.201' \
+      > /var/log/fail2ban.log; \
+    printf '%s\n' \
+      '2026-08-17 06:35:12,441 INFO Initial blacklist: ' \
+      '2026-08-17 06:35:12,442 INFO Initial whitelist (not include perl):' \
+      '2026-08-17 06:35:14,891 INFO Packages that will be upgraded: libssl3 openssl' \
+      '2026-08-17 06:35:14,892 INFO Writing dpkg log to /var/log/unattended-upgrades/unattended-upgrades-dpkg.log' \
+      '2026-08-17 06:35:41,203 INFO All upgrades installed' \
+      '2026-08-17 06:35:41,995 WARNING Found /var/run/reboot-required, rebooting: False' \
+      > /var/log/unattended-upgrades/unattended-upgrades.log; \
+    printf '%s\n' \
+      'Start-Date: 2026-08-17  06:35:14' \
+      'Commandline: /usr/bin/unattended-upgrade' \
+      'Upgrade: libssl3:amd64 (3.0.15-1~deb12u1, 3.0.16-1~deb12u1), openssl:amd64 (3.0.15-1~deb12u1, 3.0.16-1~deb12u1)' \
+      'End-Date: 2026-08-17  06:35:41' \
+      '' \
+      'Start-Date: 2026-07-02  21:11:03' \
+      'Commandline: apt-get install -y prometheus-node-exporter' \
+      'Requested-By: mgomes (1001)' \
+      'Install: prometheus-node-exporter:amd64 (1.5.0-1+b3)' \
+      'End-Date: 2026-07-02  21:11:09' \
+      > /var/log/apt/history.log; \
+    printf '%s\n' \
+      'logrotate state -- version 2' \
+      '"/var/log/nginx/access.log" 2026-8-17-0:0:1' \
+      '"/var/log/nginx/error.log" 2026-8-17-0:0:1' \
+      '"/var/log/app/app.log" 2026-8-17-0:0:1' \
+      '"/var/log/app/gunicorn-error.log" 2026-8-17-0:0:1' \
+      '"/var/log/syslog" 2026-8-17-0:0:1' \
+      '"/var/log/telemetry-agent/agent.log" 2026-8-16-0:0:1' \
+      '"/var/log/backup-app.log" 2026-8-1-0:0:1' \
+      > /var/lib/logrotate/status; \
+    printf '%s\n' \
+      '{"ts": 1786968002.11, "host": "app-web-03", "load1": 0.42, "load5": 0.51, "load15": 0.47, "MemTotal": 16768208896, "MemAvailable": 9214050304}' \
+      '{"ts": 1786968062.14, "host": "app-web-03", "load1": 0.55, "load5": 0.53, "load15": 0.48, "MemTotal": 16768208896, "MemAvailable": 9188417536}' \
+      > /var/log/telemetry-agent/agent.log; \
+    chown telemetry:telemetry /var/log/telemetry-agent/agent.log
+
+# ---------------------------------------------------------------------------
+# 12. Backups on disk + the rest of the sysadmin furniture.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    install -d -m 0750 /var/backups/app /var/backups/logship; \
+    for d in 20260811-0215 20260812-0215 20260813-0215 20260814-0215 20260815-0215 20260816-0215 20260817-0215; do \
+        tar -czf "/var/backups/app/uploads-$d.tar.gz" -C /srv/app/shared uploads 2>/dev/null; \
+        tar -czf "/var/backups/app/config-$d.tar.gz"  -C /srv/app/shared config  2>/dev/null; \
+        ( cd /var/backups/app && sha256sum "uploads-$d.tar.gz" "config-$d.tar.gz" > "MANIFEST-$d.sha256" ); \
+    done; \
+    printf '%s\n' \
+      'Backups locais servem apenas para restauracao rapida (RPO 24h).' \
+      'A copia offsite e puxada pelo backup-01 via rsync/ssh como usuario bkpsvc.' \
+      'Restauracao: RB-207 em https://wiki.example.net/runbooks/restore-web' \
+      > /var/backups/app/README.restore; \
+    printf '%s\n' \
+      'net.core.somaxconn = 4096' \
+      'net.core.netdev_max_backlog = 5000' \
+      'net.ipv4.tcp_max_syn_backlog = 8192' \
+      'net.ipv4.tcp_fin_timeout = 15' \
+      'net.ipv4.tcp_tw_reuse = 1' \
+      'net.ipv4.ip_local_port_range = 10240 65535' \
+      'net.ipv4.tcp_slow_start_after_idle = 0' \
+      'vm.swappiness = 10' \
+      'vm.overcommit_memory = 1' \
+      'fs.file-max = 2097152' \
+      > /etc/sysctl.d/99-web-tuning.conf; \
+    printf '%s\n' \
+      'app     soft    nofile  65535' \
+      'app     hard    nofile  65535' \
+      'www-data soft   nofile  65535' \
+      'www-data hard   nofile  65535' \
+      '*       soft    core    0' \
+      > /etc/security/limits.d/90-app.conf; \
+    printf '%s\n' \
+      'defaults' \
+      'auth           off' \
+      'tls            off' \
+      'syslog         LOG_MAIL' \
+      'logfile        /var/log/msmtp.log' \
+      '' \
+      'account        relay' \
+      'host           smtp-relay.example.net' \
+      'port           25' \
+      'from           app-web-03@example.net' \
+      '' \
+      'account default : relay' \
+      > /etc/msmtprc; \
+    chmod 0644 /etc/msmtprc; \
+    printf '%s\n' \
+      'root: infra-alerts@example.net' \
+      'postmaster: root' \
+      'deploy: deploy-bot@example.net' \
+      > /etc/aliases; \
+    printf '%s\n' \
+      'APT::Periodic::Update-Package-Lists "1";' \
+      'APT::Periodic::Download-Upgradeable-Packages "1";' \
+      'APT::Periodic::AutocleanInterval "7";' \
+      'APT::Periodic::Unattended-Upgrade "1";' \
+      > /etc/apt/apt.conf.d/20auto-upgrades; \
+    printf '%s\n' \
+      '// overrides locais - roles/base/templates/52unattended-upgrades-local' \
+      'Unattended-Upgrade::Mail "infra-alerts@example.net";' \
+      'Unattended-Upgrade::MailReport "on-change";' \
+      'Unattended-Upgrade::Automatic-Reboot "false";' \
+      'Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";' \
+      'Unattended-Upgrade::Package-Blacklist {' \
+      '    "nginx";' \
+      '    "nginx-common";' \
+      '};' \
+      > /etc/apt/apt.conf.d/52unattended-upgrades-local; \
+    printf '%s\n' \
+      '[DEFAULT]' \
+      'bantime  = 10m' \
+      'findtime = 10m' \
+      'maxretry = 4' \
+      'backend  = systemd' \
+      'destemail = infra-alerts@example.net' \
+      'sender = fail2ban@app-web-03.example.net' \
+      'ignoreip = 127.0.0.1/8 10.20.0.0/16' \
+      '' \
+      '[sshd]' \
+      'enabled = true' \
+      'mode    = aggressive' \
+      '' \
+      '[nginx-http-auth]' \
+      'enabled = true' \
+      '' \
+      '[nginx-limit-req]' \
+      'enabled  = true' \
+      'maxretry = 20' \
+      'bantime  = 30m' \
+      > /etc/fail2ban/jail.d/local.conf; \
+    printf '%s\n' \
+      'server ntp1.example.net iburst' \
+      'server ntp2.example.net iburst' \
+      'pool 2.debian.pool.ntp.org iburst' \
+      'driftfile /var/lib/chrony/chrony.drift' \
+      'makestep 1.0 3' \
+      'rtcsync' \
+      'logdir /var/log/chrony' \
+      > /etc/chrony/chrony.conf
+
+RUN set -eux; \
+    printf '%s\n' \
+      'export EDITOR=vim' \
+      'export HISTTIMEFORMAT="%F %T "' \
+      'export HISTSIZE=5000' \
+      'export HISTFILESIZE=20000' \
+      'export HISTCONTROL=ignoredups' \
+      'shopt -s histappend 2>/dev/null || true' \
+      > /etc/profile.d/history-timestamps.sh; \
+    printf '%s\n' \
+      'alias applog="tail -f /var/log/app/app.log"' \
+      'alias nglog="tail -f /var/log/nginx/loja.access.log"' \
+      'alias appctl="sudo systemctl status app.service"' \
+      'alias rel="readlink -f /srv/app/current"' \
+      'export APP_ROOT=/srv/app' \
+      > /etc/profile.d/app-env.sh; \
+    chmod 0644 /etc/profile.d/history-timestamps.sh /etc/profile.d/app-env.sh; \
+    printf '%s\n' \
+      '' \
+      '# --- ajustes locais (infra) ---' \
+      'export HISTTIMEFORMAT="%F %T "' \
+      'alias ll="ls -alF"' \
+      'alias vi=vim' \
+      'PS1="\[\e[1;31m\]\u@\h\[\e[0m\]:\w# "' \
+      >> /root/.bashrc; \
+    printf '%s\n' \
+      'systemctl status app.service' \
+      'journalctl -u app.service -n 200 --no-pager' \
+      'tail -f /var/log/app/gunicorn-error.log' \
+      'nginx -t && systemctl reload nginx' \
+      'certbot certificates' \
+      'ss -ltnp' \
+      'df -h' \
+      'du -sh /srv/app/releases/*' \
+      '/usr/local/sbin/prune-releases.sh' \
+      'sudo -u deploy /usr/local/bin/rollback-app.sh' \
+      'systemctl list-timers --all' \
+      > /root/.bash_history; \
+    chmod 0600 /root/.bash_history; \
+    printf '%s\n' \
+      'app-web-03 -- notas rapidas (nao versionado, o de verdade esta no wiki)' \
+      '' \
+      '- pool loja-frontend: web-01/02/03 atras do HAProxy 10.20.1.5' \
+      '- tirar da rotacao: criar /srv/app/shared/tmp/maintenance.on OU pedir drain no LB' \
+      '- INC-2044: vazamento de memoria na lib de PDF -> restart semanal via cron do root' \
+      '- INC-2291: timer do certbot ficou mascarado depois do upgrade -> cron.d redundante' \
+      '- o usuario bkpsvc so aceita rsync --server --sender (ForceCommand)' \
+      > /root/NOTAS-INFRA.txt; \
+    install -d -m 0700 -o mgomes -g mgomes /home/mgomes/bin; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# atalho pessoal: mostra as ultimas requisicoes com status 5xx' \
+      'tail -n 2000 /var/log/nginx/loja.access.log | grep -E " 5[0-9]{2} " | tail -40' \
+      > /home/mgomes/bin/5xx; \
+    chmod 0755 /home/mgomes/bin/5xx; chown mgomes:mgomes /home/mgomes/bin/5xx; \
+    printf '%s\n' \
+      'export PATH="$HOME/bin:$PATH"' \
+      'alias k=kubectl' \
+      >> /home/mgomes/.bashrc; \
+    printf '%s\n' \
+      'app-web-03.prod.example.net' \
+      'role: web' \
+      'ansible_groups: webtier, production, sp1' \
+      'provisioned: 2026-02-11' \
+      'last_ansible_run: 2026-08-16T22:10:04-03:00' \
+      'debian: bookworm 12.7' \
+      > /etc/ansible-facts.local; \
+    install -d -m 0755 /etc/ansible/facts.d; \
+    printf '%s\n' \
+      '{"role": "web", "pool": "loja-frontend", "deploy_user": "deploy", "app_root": "/srv/app"}' \
+      > /etc/ansible/facts.d/webtier.fact; \
+    chmod 0644 /etc/ansible/facts.d/webtier.fact
+
+# Filesystem and network as the provisioning left them.  /srv has its own LV
+# because the uploads directory grows and must not take the root fs down.
+RUN set -eux; \
+    printf '%s\n' \
+      '# /etc/fstab: static file system information.' \
+      '#' \
+      '# <file system>                            <mount point>  <type>  <options>                  <dump> <pass>' \
+      'UUID=6f2c1a90-7b41-4d2e-9c33-0a7e51bd8842  /              ext4    errors=remount-ro          0      1' \
+      'UUID=1a4d09e7-33bc-4f18-9d61-cc20fa17b904  /boot          ext4    defaults                   0      2' \
+      '/dev/mapper/vg0-lv_var                     /var           ext4    defaults,noatime           0      2' \
+      '/dev/mapper/vg0-lv_srv                     /srv           ext4    defaults,noatime,nodev     0      2' \
+      '/dev/mapper/vg0-lv_swap                    none           swap    sw                         0      0' \
+      'tmpfs                                      /tmp           tmpfs   rw,nosuid,nodev,size=2G    0      0' \
+      '10.20.0.40:/exports/uploads                /mnt/uploads   nfs4    rw,noatime,_netdev,soft    0      0' \
+      > /etc/fstab; \
+    install -d -m 0755 /mnt/uploads; \
+    printf '%s\n' \
+      '# gerenciado pelo ansible - roles/base/templates/interfaces.j2' \
+      'source /etc/network/interfaces.d/*' \
+      '' \
+      'auto lo' \
+      'iface lo inet loopback' \
+      '' \
+      'auto ens3' \
+      'iface ens3 inet static' \
+      '    address 10.20.4.13/24' \
+      '    gateway 10.20.4.1' \
+      '    dns-nameservers 10.20.0.2 10.20.0.3' \
+      '    dns-search prod.example.net example.net' \
+      > /etc/network/interfaces; \
+    install -d -m 0755 /etc/network/interfaces.d
+
+# Make the filesystem look lived-in: give the aged files aged timestamps.
+RUN set -eux; \
+    touch -d '2026-02-11 10:04:22' /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_rsa_key /etc/hostname; \
+    touch -d '2026-05-19 22:41:06' /opt/telemetry-agent/install_info /opt/telemetry-agent/VERSION; \
+    touch -d '2026-07-28 14:12:07' /srv/app/releases/2026-07-28_141207; \
+    touch -d '2026-08-05 09:33:44' /srv/app/releases/2026-08-05_093344; \
+    touch -d '2026-08-12 17:44:51' /srv/app/releases/2026-08-12_174451 /srv/app/current; \
+    touch -d '2026-08-16 03:00:01' /var/log/nginx/access.log.1 /var/log/syslog.1; \
+    touch -d '2026-08-15 03:00:01' /var/log/nginx/access.log.2.gz /var/log/syslog.2.gz; \
+    touch -d '2026-08-14 03:00:01' /var/log/nginx/access.log.3.gz; \
+    touch -d '2026-06-16 09:12:44' /var/spool/cron/crontabs/deploy; \
+    touch -d '2026-03-05 23:04:11' /var/spool/cron/crontabs/root; \
+    for d in 11 12 13 14 15 16; do \
+        touch -d "2026-08-$d 02:16:00" /var/backups/app/*-202608$d-0215.*; \
+    done; \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*; \
+    ls -l /srv/app/current/ >/dev/null
+
+WORKDIR /root
+
+# No init system in the image: units are on disk for inspection, nothing is
+# started.  Bring up individual services by hand if a test needs them, e.g.
+#   nginx -t && nginx
+#   su app -s /bin/bash -c '/srv/app/shared/venv/bin/gunicorn ...'
+CMD ["/bin/bash"]

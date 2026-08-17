@@ -1,0 +1,1365 @@
+# ---------------------------------------------------------------------------
+# db-01.prod.example.net
+#
+# Rocky Linux 9 PostgreSQL 16 primary.  This is the OLD box of the three: it
+# started life on CentOS 7 running MySQL, was rebuilt for PostgreSQL 9.6,
+# leapfrogged to 13 on Rocky 8 and was finally pg_upgrade'd to 16 on Rocky 9.
+# Every one of those moves left something behind, and it is all still here:
+# the decommissioned mysql service account, .rpmsave/.rpmnew files, the old
+# 13 data directory pg_upgrade told nobody to delete, a masked unit from a
+# monitoring agent that was replaced, cron jobs that are commented out but
+# not removed, and SELinux still permissive "temporarily" since the upgrade.
+#
+# The PostgreSQL cluster is genuinely initdb'd and briefly started during the
+# build, so the data directory, WAL, archived segments, server logs, roles,
+# tables and statistics are all real.
+#
+#   docker build -f Dockerfile.db -t servidor-db:test .
+# ---------------------------------------------------------------------------
+FROM rockylinux:9
+
+LABEL org.opencontainers.image.title="db-01.prod.example.net" \
+      org.opencontainers.image.description="Fixture: Rocky 9 PostgreSQL 16 primary, migrated from MySQL/9.6/13" \
+      fixture.role="database" \
+      fixture.env="production"
+
+ENV LANG=en_US.UTF-8 \
+    PGDATA=/var/lib/pgsql/data
+
+# ---------------------------------------------------------------------------
+# 1. Packages.  PostgreSQL comes from the AppStream module stream (the way
+#    RHEL-family shops pin a major version), pgbouncer from EPEL.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    dnf -y install dnf-plugins-core epel-release; \
+    dnf -y module enable postgresql:16; \
+    dnf -y install \
+        postgresql-server postgresql-contrib postgresql-upgrade \
+        pgbouncer python3-psycopg2 \
+        chrony rsyslog rsyslog-gnutls logrotate crontabs \
+        openssh-server sudo firewalld policycoreutils policycoreutils-python-utils \
+        tuned sysstat lsof jq bind-utils nmap-ncat rsync tar bzip2 pigz \
+        procps-ng iproute net-tools tmux vim-enhanced less which \
+        postfix s-nail glibc-langpack-en glibc-langpack-pt; \
+    dnf clean all; \
+    rm -rf /var/cache/dnf/*
+
+# ---------------------------------------------------------------------------
+# 2. Identity.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    ln -sf /usr/share/zoneinfo/America/Sao_Paulo /etc/localtime; \
+    printf '%s\n' 'db-01' > /etc/hostname; \
+    printf '%s\n' \
+      '127.0.0.1   localhost localhost.localdomain' \
+      '127.0.1.1   db-01.prod.example.net db-01' \
+      '' \
+      '10.20.9.10  db-01.prod.example.net db-01' \
+      '10.20.9.11  db-02.prod.example.net db-02  # replica streaming' \
+      '10.20.9.12  db-bkp.prod.example.net db-bkp  # replica de backup / delayed' \
+      '10.20.4.11  app-web-01.prod.example.net app-web-01' \
+      '10.20.4.12  app-web-02.prod.example.net app-web-02' \
+      '10.20.4.13  app-web-03.prod.example.net app-web-03' \
+      '10.20.0.4   bastion.example.net bastion' \
+      '10.20.0.30  backup-01.example.net backup-01' \
+      '' \
+      '::1         localhost localhost.localdomain' \
+      > /etc/hosts; \
+    printf '%s\n' \
+      '' \
+      '  db-01.prod.example.net  --  POSTGRESQL 16 PRIMARY  --  NAO REINICIE SEM AVISAR' \
+      '' \
+      '  Replica sincrona:  db-02 (10.20.9.11)   slot: db02_slot' \
+      '  Replica atrasada:  db-bkp (10.20.9.12)  recovery_min_apply_delay = 6h' \
+      '  Backup:            /usr/local/sbin/pg-backup.sh (02:40, retencao 8 dias)' \
+      '  Runbook:           https://wiki.example.net/runbooks/postgres' \
+      '  Failover:          RB-031 (manual, o patroni NUNCA foi implantado aqui)' \
+      '' \
+      '  * Este host veio do CentOS 7 (mysql) -> 9.6 -> 13 -> 16. Sobrou coisa.' \
+      '    Antes de apagar qualquer diretorio antigo, leia /root/MIGRACAO.txt' \
+      '' \
+      > /etc/motd; \
+    printf '%s\n' \
+      'Sistema restrito - acesso monitorado e registrado.' \
+      'Authorized users only. All activity is logged.' \
+      > /etc/issue.net; \
+    printf '%s\n' 'Rocky Linux release 9.4 (Blue Onyx)' > /etc/rocky-release-upgrade
+
+# ---------------------------------------------------------------------------
+# 3. Accounts.  postgres comes from the package; dbadm/rgreco are humans;
+#    mysql survives from the CentOS 7 days and is deliberately kept locked.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    groupadd --gid 1010 dba; \
+    useradd --uid 1010 --gid dba --groups wheel --create-home --shell /bin/bash \
+            --comment 'Rafael Greco (DBA)' rgreco; \
+    useradd --uid 1011 --gid dba --groups wheel --create-home --shell /bin/bash \
+            --comment 'Ana Paula Diniz (DBA)' apdiniz; \
+    useradd --system --uid 27 --shell /sbin/nologin --home-dir /var/lib/mysql \
+            --comment 'MySQL server (DESATIVADO 2021 - nao remover, ver MIGRACAO.txt)' mysql 2>/dev/null || true; \
+    useradd --system --uid 992 --create-home --home-dir /var/lib/bkpsvc \
+            --shell /bin/bash --comment 'pull de backup do backup-01' bkpsvc; \
+    usermod -L mysql; \
+    printf '%s\n' \
+      '%wheel  ALL=(ALL)       ALL' \
+      '' \
+      '# DBAs podem operar o cluster sem virar root' \
+      'Cmnd_Alias PGCTL = /usr/bin/systemctl start postgresql, \' \
+      '                   /usr/bin/systemctl stop postgresql, \' \
+      '                   /usr/bin/systemctl restart postgresql, \' \
+      '                   /usr/bin/systemctl reload postgresql, \' \
+      '                   /usr/bin/systemctl status postgresql, \' \
+      '                   /usr/bin/systemctl restart pgbouncer' \
+      '%dba    ALL=(root)  NOPASSWD: PGCTL' \
+      '%dba    ALL=(postgres) NOPASSWD: ALL' \
+      > /etc/sudoers.d/30-dba; \
+    chmod 0440 /etc/sudoers.d/30-dba; \
+    visudo -c >/dev/null
+
+# ---------------------------------------------------------------------------
+# 4. Real cluster: initdb, minimal bootstrap config, start, create the roles
+#    and schema the application uses, force a few WAL switches so the archive
+#    has real segments in it, then stop cleanly.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    install -d -m 0700 -o postgres -g postgres /var/lib/pgsql/data; \
+    install -d -m 0755 -o postgres -g postgres /run/postgresql /var/lib/pgsql/wal_archive \
+            /var/lib/pgsql/backups /var/lib/pgsql/scripts; \
+    su - postgres -c "/usr/bin/initdb -D /var/lib/pgsql/data --data-checksums -E UTF8 --locale=en_US.UTF-8 --auth-local=peer --auth-host=scram-sha-256" > /var/lib/pgsql/initdb.log 2>&1; \
+    printf '%s\n' \
+      "shared_preload_libraries = 'pg_stat_statements'" \
+      'logging_collector = on' \
+      "log_directory = 'log'" \
+      "log_filename = 'postgresql-%a.log'" \
+      'log_truncate_on_rotation = on' \
+      'log_rotation_age = 1d' \
+      'wal_level = replica' \
+      'archive_mode = on' \
+      "archive_command = 'test ! -f /var/lib/pgsql/wal_archive/%f && cp %p /var/lib/pgsql/wal_archive/%f'" \
+      'max_wal_senders = 10' \
+      'max_replication_slots = 10' \
+      >> /var/lib/pgsql/data/postgresql.conf; \
+    su - postgres -c "/usr/bin/pg_ctl -D /var/lib/pgsql/data -l /var/lib/pgsql/pgstartup.log start -w -t 60"; \
+    P="su - postgres -c"; \
+    $P "psql -q -v ON_ERROR_STOP=1 -c \"CREATE ROLE app_rw LOGIN PASSWORD 'TROCAR_NO_VAULT' CONNECTION LIMIT 120\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -c \"CREATE ROLE app_ro LOGIN PASSWORD 'TROCAR_NO_VAULT' CONNECTION LIMIT 20\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -c \"CREATE ROLE replicator LOGIN REPLICATION PASSWORD 'TROCAR_NO_VAULT'\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -c \"CREATE ROLE monitoring LOGIN PASSWORD 'TROCAR_NO_VAULT' IN ROLE pg_monitor\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -c \"CREATE ROLE dba_role NOLOGIN SUPERUSER\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -c \"GRANT dba_role TO app_rw\"" || true; \
+    $P "psql -q -v ON_ERROR_STOP=1 -c \"REVOKE dba_role FROM app_rw\"" || true; \
+    $P "psql -q -v ON_ERROR_STOP=1 -c \"CREATE DATABASE appdb OWNER app_rw ENCODING 'UTF8'\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -c \"CREATE DATABASE metabase OWNER app_ro ENCODING 'UTF8'\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d postgres -c \"CREATE EXTENSION IF NOT EXISTS pg_stat_statements\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d appdb -c \"CREATE EXTENSION IF NOT EXISTS pg_stat_statements\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d appdb -c \"CREATE EXTENSION IF NOT EXISTS pgcrypto\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d appdb -c \"CREATE SCHEMA loja AUTHORIZATION app_rw\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d appdb -c \"CREATE TABLE loja.clientes (id bigserial PRIMARY KEY, nome text NOT NULL, email text UNIQUE, criado_em timestamptz NOT NULL DEFAULT now())\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d appdb -c \"CREATE TABLE loja.pedidos (id bigserial PRIMARY KEY, cliente_id bigint NOT NULL REFERENCES loja.clientes(id), status text NOT NULL DEFAULT 'novo', valor numeric(12,2) NOT NULL, criado_em timestamptz NOT NULL DEFAULT now())\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d appdb -c \"CREATE INDEX pedidos_criado_em_idx ON loja.pedidos (criado_em DESC)\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d appdb -c \"CREATE INDEX pedidos_cliente_status_idx ON loja.pedidos (cliente_id, status)\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d appdb -c \"INSERT INTO loja.clientes (nome, email) SELECT 'Cliente ' || g, 'cliente' || g || '@example.com' FROM generate_series(1, 5000) g\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d appdb -c \"INSERT INTO loja.pedidos (cliente_id, status, valor, criado_em) SELECT (random()*4999)::int + 1, (ARRAY['novo','pago','enviado','cancelado'])[(random()*3)::int + 1], round((random()*900 + 20)::numeric, 2), now() - (random() * interval '180 days') FROM generate_series(1, 40000)\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d appdb -c \"CREATE TABLE loja.auditoria (id bigserial, tabela text, operacao text, quando timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (id, quando)) PARTITION BY RANGE (quando)\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d appdb -c \"CREATE TABLE loja.auditoria_2026_08 PARTITION OF loja.auditoria FOR VALUES FROM ('2026-08-01') TO ('2026-09-01')\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d appdb -c \"GRANT USAGE ON SCHEMA loja TO app_ro\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d appdb -c \"GRANT SELECT ON ALL TABLES IN SCHEMA loja TO app_ro\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d appdb -c \"ALTER DEFAULT PRIVILEGES IN SCHEMA loja GRANT SELECT ON TABLES TO app_ro\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -d appdb -c \"VACUUM ANALYZE\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -c \"SELECT pg_create_physical_replication_slot('db02_slot')\""; \
+    $P "psql -q -v ON_ERROR_STOP=1 -c \"SELECT pg_create_physical_replication_slot('dbbkp_slot')\""; \
+    $P "psql -q -c \"SELECT pg_switch_wal()\""; \
+    $P "psql -q -d appdb -c \"UPDATE loja.pedidos SET status = 'pago' WHERE status = 'novo' AND id % 7 = 0\""; \
+    $P "psql -q -c \"SELECT pg_switch_wal()\""; \
+    $P "psql -q -c \"CHECKPOINT\""; \
+    $P "psql -q -c \"SELECT pg_switch_wal()\""; \
+    sleep 2; \
+    $P "psql -q -tAc \"SELECT count(*) FROM pg_stat_archiver\"" >/dev/null; \
+    ls -1 /var/lib/pgsql/wal_archive | head -5; \
+    su - postgres -c "/usr/bin/pg_ctl -D /var/lib/pgsql/data stop -m fast -w -t 60"
+
+# ---------------------------------------------------------------------------
+# 5. Production configuration, written after the cluster was populated:
+#    postgresql.conf keeps the packaged content plus include_dir conf.d/,
+#    which is where the DBAs actually keep the tuning.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    install -d -m 0700 -o postgres -g postgres /var/lib/pgsql/data/conf.d; \
+    printf '%s\n' \
+      '' \
+      "include_dir = 'conf.d'" \
+      >> /var/lib/pgsql/data/postgresql.conf; \
+    printf '%s\n' \
+      '# 10-resources.conf - perfil do host: 16 vCPU / 64 GB RAM / NVMe' \
+      '# revisado por rgreco em 2026-04-30 apos o upgrade para o 16' \
+      'max_connections = 200' \
+      'superuser_reserved_connections = 5' \
+      'shared_buffers = 4GB' \
+      'effective_cache_size = 24GB' \
+      'work_mem = 24MB' \
+      'maintenance_work_mem = 1GB' \
+      'huge_pages = try' \
+      'effective_io_concurrency = 200' \
+      'random_page_cost = 1.1' \
+      'max_worker_processes = 16' \
+      'max_parallel_workers = 8' \
+      'max_parallel_workers_per_gather = 4' \
+      'max_parallel_maintenance_workers = 4' \
+      'jit = off' \
+      > /var/lib/pgsql/data/conf.d/10-resources.conf; \
+    printf '%s\n' \
+      '# 20-wal.conf - WAL, checkpoints e archiving' \
+      'wal_level = replica' \
+      'wal_compression = lz4' \
+      'wal_buffers = 16MB' \
+      'min_wal_size = 2GB' \
+      'max_wal_size = 8GB' \
+      'checkpoint_timeout = 15min' \
+      'checkpoint_completion_target = 0.9' \
+      'archive_mode = on' \
+      "archive_command = '/usr/local/sbin/pg-wal-archive.sh %p %f'" \
+      'archive_timeout = 300' \
+      'synchronous_commit = on' \
+      > /var/lib/pgsql/data/conf.d/20-wal.conf; \
+    printf '%s\n' \
+      '# 30-replication.conf' \
+      'max_wal_senders = 10' \
+      'max_replication_slots = 10' \
+      'wal_keep_size = 4GB' \
+      'hot_standby = on' \
+      'hot_standby_feedback = off' \
+      "synchronous_standby_names = 'FIRST 1 (db02)'" \
+      > /var/lib/pgsql/data/conf.d/30-replication.conf; \
+    printf '%s\n' \
+      '# 40-logging.conf - o coletor local alimenta o rsyslog/imfile' \
+      'logging_collector = on' \
+      "log_directory = 'log'" \
+      "log_filename = 'postgresql-%a.log'" \
+      'log_truncate_on_rotation = on' \
+      'log_rotation_age = 1d' \
+      'log_rotation_size = 0' \
+      "log_line_prefix = '%m [%p] %q%u@%d %a %h '" \
+      'log_min_duration_statement = 500ms' \
+      'log_checkpoints = on' \
+      'log_connections = on' \
+      'log_disconnections = on' \
+      'log_lock_waits = on' \
+      'log_temp_files = 10MB' \
+      'log_autovacuum_min_duration = 1000' \
+      "log_timezone = 'America/Sao_Paulo'" \
+      > /var/lib/pgsql/data/conf.d/40-logging.conf; \
+    printf '%s\n' \
+      '# 50-autovacuum.conf - tabelas de pedidos sofrem muito UPDATE' \
+      'autovacuum = on' \
+      'autovacuum_max_workers = 5' \
+      'autovacuum_naptime = 20s' \
+      'autovacuum_vacuum_scale_factor = 0.05' \
+      'autovacuum_analyze_scale_factor = 0.02' \
+      'autovacuum_vacuum_cost_limit = 2000' \
+      'vacuum_cost_delay = 2ms' \
+      > /var/lib/pgsql/data/conf.d/50-autovacuum.conf; \
+    printf '%s\n' \
+      '# 60-extensions.conf' \
+      "shared_preload_libraries = 'pg_stat_statements,auto_explain'" \
+      'pg_stat_statements.max = 10000' \
+      "pg_stat_statements.track = 'top'" \
+      'auto_explain.log_min_duration = 3s' \
+      'auto_explain.log_analyze = off' \
+      'track_io_timing = on' \
+      'track_functions = pl' \
+      > /var/lib/pgsql/data/conf.d/60-extensions.conf; \
+    printf '%s\n' \
+      '# 99-local.conf - ajustes pontuais; SEMPRE deixar um comentario com o motivo' \
+      '# INC-2118: relatorio mensal do financeiro estourava temp file' \
+      'temp_file_limit = 8GB' \
+      '# statement_timeout fica no role app_rw, nao aqui (ALTER ROLE ... SET)' \
+      'idle_in_transaction_session_timeout = 10min' \
+      "timezone = 'America/Sao_Paulo'" \
+      "datestyle = 'iso, dmy'" \
+      "lc_monetary = 'pt_BR.UTF-8'" \
+      > /var/lib/pgsql/data/conf.d/99-local.conf; \
+    chown -R postgres:postgres /var/lib/pgsql/data/conf.d; \
+    chmod 0600 /var/lib/pgsql/data/conf.d/*.conf
+
+RUN set -eux; \
+    printf '%s\n' \
+      '# PostgreSQL Client Authentication Configuration File' \
+      '# gerado pelo ansible: roles/postgres/templates/pg_hba.conf.j2' \
+      '# TYPE  DATABASE        USER            ADDRESS                 METHOD' \
+      '' \
+      'local   all             postgres                                peer' \
+      'local   all             all                                     peer' \
+      '' \
+      '# pgbouncer local' \
+      'host    appdb           app_rw          127.0.0.1/32            scram-sha-256' \
+      'host    appdb           app_ro          127.0.0.1/32            scram-sha-256' \
+      '' \
+      '# tier de aplicacao' \
+      'host    appdb           app_rw          10.20.4.0/24            scram-sha-256' \
+      'host    appdb           app_ro          10.20.4.0/24            scram-sha-256' \
+      'host    metabase        app_ro          10.20.6.20/32           scram-sha-256' \
+      '' \
+      '# monitoramento (exporter local e o zabbix da rede de gerencia)' \
+      'host    all             monitoring      127.0.0.1/32            scram-sha-256' \
+      'host    all             monitoring      10.20.0.0/16            scram-sha-256' \
+      '' \
+      '# replicacao' \
+      'host    replication     replicator      10.20.9.11/32           scram-sha-256' \
+      'host    replication     replicator      10.20.9.12/32           scram-sha-256' \
+      '' \
+      '# DBAs pelo bastion' \
+      'host    all             +dba_role       10.20.0.4/32            scram-sha-256' \
+      '' \
+      '# host    all           all             10.20.7.0/24            md5   # runners antigos do jenkins - removido 2025-11' \
+      'host    all             all             0.0.0.0/0               reject' \
+      > /var/lib/pgsql/data/pg_hba.conf; \
+    printf '%s\n' \
+      '# MAPNAME       SYSTEM-USERNAME         PG-USERNAME' \
+      'dbamap          rgreco                  postgres' \
+      'dbamap          apdiniz                 postgres' \
+      > /var/lib/pgsql/data/pg_ident.conf; \
+    chown postgres:postgres /var/lib/pgsql/data/pg_hba.conf /var/lib/pgsql/data/pg_ident.conf; \
+    chmod 0600 /var/lib/pgsql/data/pg_hba.conf /var/lib/pgsql/data/pg_ident.conf
+
+# ---------------------------------------------------------------------------
+# 6. RHEL service furniture: sysconfig, unit drop-in, the masked leftover unit
+#    from the monitoring agent that was replaced, tmpfiles, limits, sysctl.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    install -d -m 0755 /etc/sysconfig/pgsql /etc/systemd/system/postgresql.service.d \
+            /etc/systemd/system/multi-user.target.wants /etc/sysctl.d /etc/tmpfiles.d \
+            /etc/security/limits.d /etc/selinux /etc/tuned /etc/firewalld/zones \
+            /var/spool/cron; \
+    printf '%s\n' \
+      'PGDATA=/var/lib/pgsql/data' \
+      'PGPORT=5432' \
+      'PG_OOM_ADJUST_FILE=/proc/self/oom_score_adj' \
+      'PG_OOM_ADJUST_VALUE=0' \
+      > /etc/sysconfig/pgsql/postgresql; \
+    printf '%s\n' \
+      '[Service]' \
+      'OOMScoreAdjust=-900' \
+      'LimitNOFILE=65536' \
+      'LimitNPROC=8192' \
+      'TimeoutStartSec=600' \
+      'TimeoutStopSec=900' \
+      'Restart=on-failure' \
+      'RestartSec=10' \
+      '# INC-1974: o systemd matava o postgres durante o recovery longo' \
+      > /etc/systemd/system/postgresql.service.d/override.conf; \
+    ln -sf /usr/lib/systemd/system/postgresql.service /etc/systemd/system/multi-user.target.wants/postgresql.service; \
+    ln -sf /usr/lib/systemd/system/pgbouncer.service  /etc/systemd/system/multi-user.target.wants/pgbouncer.service; \
+    ln -sf /usr/lib/systemd/system/sshd.service       /etc/systemd/system/multi-user.target.wants/sshd.service; \
+    ln -sf /usr/lib/systemd/system/crond.service      /etc/systemd/system/multi-user.target.wants/crond.service; \
+    ln -sf /usr/lib/systemd/system/chronyd.service    /etc/systemd/system/multi-user.target.wants/chronyd.service; \
+    printf '%s\n' \
+      'd /run/postgresql 0755 postgres postgres -' \
+      'd /var/run/pgbouncer 0755 pgbouncer pgbouncer -' \
+      > /etc/tmpfiles.d/postgresql-local.conf; \
+    printf '%s\n' \
+      'postgres soft nofile 65536' \
+      'postgres hard nofile 65536' \
+      'postgres soft nproc  8192' \
+      'postgres hard nproc  8192' \
+      '' \
+      '# memlock ilimitado so faz sentido com huge pages reservadas no boot;' \
+      '# o vm.nr_hugepages abaixo ainda nao foi aplicado neste host, entao as' \
+      '# duas linhas seguem comentadas (INFRA-4521).' \
+      '#postgres soft memlock unlimited' \
+      '#postgres hard memlock unlimited' \
+      > /etc/security/limits.d/30-postgresql.conf; \
+    printf '%s\n' \
+      '# tuning do banco - roles/postgres/templates/sysctl.conf.j2' \
+      'kernel.shmmax = 34359738368' \
+      'kernel.shmall = 8388608' \
+      'vm.swappiness = 1' \
+      'vm.overcommit_memory = 2' \
+      'vm.overcommit_ratio = 90' \
+      'vm.dirty_background_bytes = 67108864' \
+      'vm.dirty_bytes = 536870912' \
+      'vm.nr_hugepages = 2200' \
+      'vm.zone_reclaim_mode = 0' \
+      'net.core.somaxconn = 1024' \
+      'net.ipv4.tcp_keepalive_time = 300' \
+      'net.ipv4.tcp_keepalive_intvl = 30' \
+      'net.ipv4.tcp_keepalive_probes = 5' \
+      > /etc/sysctl.d/30-postgresql.conf; \
+    printf '%s\n' 'throughput-performance' > /etc/tuned/active_profile; \
+    printf '%s\n' 'manual' > /etc/tuned/profile_mode; \
+    install -d -m 0755 /etc/tuned/postgres-db; \
+    printf '%s\n' \
+      '[main]' \
+      'summary=Perfil do time de banco (derivado de throughput-performance)' \
+      'include=throughput-performance' \
+      '' \
+      '[vm]' \
+      'transparent_hugepages=never' \
+      '' \
+      '[sysctl]' \
+      'vm.swappiness=1' \
+      'vm.dirty_ratio=15' \
+      > /etc/tuned/postgres-db/tuned.conf; \
+    printf '%s\n' \
+      '# esta maquina ficou permissiva durante o pg_upgrade (INC-1980) e' \
+      '# NUNCA voltou para enforcing. Ticket INFRA-4412 aberto desde 2024-11.' \
+      'SELINUX=permissive' \
+      'SELINUXTYPE=targeted' \
+      > /etc/selinux/config; \
+    install -d -m 0750 /etc/firewalld/zones; \
+    printf '%s\n' \
+      '<?xml version="1.0" encoding="utf-8"?>' \
+      '<zone>' \
+      '  <short>Internal</short>' \
+      '  <description>Rede interna de producao (10.20.0.0/16)</description>' \
+      '  <service name="ssh"/>' \
+      '  <service name="postgresql"/>' \
+      '  <port protocol="tcp" port="6432"/>' \
+      '  <port protocol="tcp" port="9187"/>' \
+      '  <!-- <port protocol="tcp" port="3306"/> mysql - fechado em 2021 -->' \
+      '  <source address="10.20.0.0/16"/>' \
+      '</zone>' \
+      > /etc/firewalld/zones/internal.xml
+
+# ---------------------------------------------------------------------------
+# 7. pgbouncer in front of the cluster (transaction pooling), from EPEL.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    printf '%s\n' \
+      '[databases]' \
+      'appdb = host=127.0.0.1 port=5432 dbname=appdb pool_size=80' \
+      'appdb_ro = host=10.20.9.11 port=5432 dbname=appdb pool_size=40' \
+      'metabase = host=127.0.0.1 port=5432 dbname=metabase pool_size=10' \
+      '' \
+      '[pgbouncer]' \
+      'listen_addr = 10.20.9.10,127.0.0.1' \
+      'listen_port = 6432' \
+      'unix_socket_dir = /run/pgbouncer' \
+      'auth_type = scram-sha-256' \
+      'auth_file = /etc/pgbouncer/userlist.txt' \
+      'auth_user = monitoring' \
+      'pool_mode = transaction' \
+      'max_client_conn = 2000' \
+      'default_pool_size = 40' \
+      'reserve_pool_size = 10' \
+      'reserve_pool_timeout = 3' \
+      'server_idle_timeout = 120' \
+      'server_lifetime = 900' \
+      'query_wait_timeout = 20' \
+      'ignore_startup_parameters = extra_float_digits' \
+      'admin_users = postgres' \
+      'stats_users = monitoring' \
+      'logfile = /var/log/pgbouncer/pgbouncer.log' \
+      'pidfile = /run/pgbouncer/pgbouncer.pid' \
+      'syslog = 1' \
+      'syslog_facility = local1' \
+      > /etc/pgbouncer/pgbouncer.ini; \
+    printf '%s\n' \
+      '"app_rw" "SCRAM-SHA-256$4096:PLACEHOLDER_RENDERIZADO_PELO_VAULT"' \
+      '"app_ro" "SCRAM-SHA-256$4096:PLACEHOLDER_RENDERIZADO_PELO_VAULT"' \
+      '"monitoring" "SCRAM-SHA-256$4096:PLACEHOLDER_RENDERIZADO_PELO_VAULT"' \
+      > /etc/pgbouncer/userlist.txt; \
+    chown -R pgbouncer:pgbouncer /etc/pgbouncer 2>/dev/null || true; \
+    chmod 0640 /etc/pgbouncer/pgbouncer.ini /etc/pgbouncer/userlist.txt; \
+    install -d -m 0750 -o pgbouncer -g pgbouncer /var/log/pgbouncer 2>/dev/null || install -d -m 0750 /var/log/pgbouncer; \
+    printf '%s\n' \
+      '2026-08-17 09:00:03.117 UTC [1412] LOG stats: 118 xacts/s, 402 queries/s, in 91234 B/s, out 811233 B/s, xact 1841 us, query 512 us, wait 41 us' \
+      '2026-08-17 09:01:03.118 UTC [1412] LOG stats: 121 xacts/s, 418 queries/s, in 93441 B/s, out 829110 B/s, xact 1799 us, query 498 us, wait 38 us' \
+      '2026-08-17 09:02:03.119 UTC [1412] LOG C-0x1f2a10: appdb/app_rw@10.20.4.12:51122 closing because: client close request (age=61s)' \
+      > /var/log/pgbouncer/pgbouncer.log
+
+# ---------------------------------------------------------------------------
+# 8. Backup and WAL archiving tooling.  No pgbackrest/barman package exists in
+#    the repos this box is allowed to use, so the team wrote their own around
+#    pg_basebackup - which is exactly how a lot of shops still do it.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# pg-wal-archive.sh %p %f - archive_command do cluster' \
+      '# Copia atomica para o diretorio local; o backup-01 puxa de la.' \
+      'set -euo pipefail' \
+      'SRC="${1:?caminho do WAL}"' \
+      'NAME="${2:?nome do segmento}"' \
+      'DEST=/var/lib/pgsql/wal_archive' \
+      'test -f "$DEST/$NAME" && exit 0' \
+      'cp -- "$SRC" "$DEST/.$NAME.tmp"' \
+      'sync -- "$DEST/.$NAME.tmp" 2>/dev/null || true' \
+      'mv -- "$DEST/.$NAME.tmp" "$DEST/$NAME"' \
+      'exit 0' \
+      > /usr/local/sbin/pg-wal-archive.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# pg-backup.sh - basebackup diario comprimido + retencao' \
+      'set -euo pipefail' \
+      'DEST=/var/lib/pgsql/backups' \
+      'RETENCAO_DIAS=8' \
+      'STAMP="$(date +%Y%m%d)"' \
+      'LOG=/var/log/pg-backup.log' \
+      'exec >>"$LOG" 2>&1' \
+      'echo "=== $(date -Is) basebackup iniciado ==="' \
+      'test "$(id -un)" = postgres || { echo "rode como postgres"; exit 1; }' \
+      'OUT="$DEST/base-$STAMP"' \
+      'rm -rf -- "$OUT.partial"' \
+      'pg_basebackup --pgdata="$OUT.partial" --format=tar --gzip --compress=6 \' \
+      '  --wal-method=stream --checkpoint=fast --progress --no-password \' \
+      '  --label="diario-$STAMP"' \
+      'mv -- "$OUT.partial" "$OUT"' \
+      'find "$DEST" -maxdepth 1 -name "base-*" -type d -mtime "+$RETENCAO_DIAS" -print -exec rm -rf {} +' \
+      'find /var/lib/pgsql/wal_archive -name "0000*" -mtime "+$RETENCAO_DIAS" -print -delete' \
+      'du -sh "$OUT"' \
+      'echo "=== $(date -Is) basebackup concluido ==="' \
+      > /usr/local/sbin/pg-backup.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# pg-logical-dump.sh - dump logico semanal (facilita restaurar 1 tabela)' \
+      'set -euo pipefail' \
+      'DEST=/var/lib/pgsql/backups/dumps' \
+      'install -d -m 0700 "$DEST"' \
+      'STAMP="$(date +%Y%m%d)"' \
+      'for db in appdb metabase; do' \
+      '  pg_dump --format=custom --compress=6 --file="$DEST/$db-$STAMP.dump" "$db"' \
+      '  pg_dump --schema-only --file="$DEST/$db-$STAMP.schema.sql" "$db"' \
+      'done' \
+      'pg_dumpall --globals-only --file="$DEST/globals-$STAMP.sql"' \
+      'find "$DEST" -name "*.dump" -mtime +35 -delete' \
+      > /usr/local/sbin/pg-logical-dump.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# pg-restore-test.sh - restaura o ultimo dump num cluster descartavel' \
+      '# e conta as linhas das tabelas principais. Roda dia 5 de cada mes.' \
+      'set -euo pipefail' \
+      'SCRATCH=/var/lib/pgsql/restore-test' \
+      'PORT=5499' \
+      'ULTIMO="$(ls -1t /var/lib/pgsql/backups/dumps/appdb-*.dump | head -1)"' \
+      'echo "testando $ULTIMO"' \
+      'rm -rf "$SCRATCH"; initdb -D "$SCRATCH" -E UTF8 >/dev/null' \
+      'pg_ctl -D "$SCRATCH" -o "-p $PORT -c archive_mode=off" -l /tmp/restore-test.log start -w' \
+      'createdb -p "$PORT" appdb_restore' \
+      'pg_restore -p "$PORT" -d appdb_restore --no-owner --jobs 4 "$ULTIMO"' \
+      'psql -p "$PORT" -d appdb_restore -c "SELECT count(*) AS pedidos FROM loja.pedidos"' \
+      'pg_ctl -D "$SCRATCH" stop -m immediate' \
+      'rm -rf "$SCRATCH"' \
+      'echo "restore-test OK em $(date -Is)"' \
+      > /usr/local/sbin/pg-restore-test.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# pg-bloat-report.sh - relatorio semanal de bloat/indices nao usados' \
+      'set -euo pipefail' \
+      'psql -d appdb -X -P pager=off -c "SELECT schemaname, relname, n_dead_tup, last_autovacuum FROM pg_stat_user_tables WHERE n_dead_tup > 10000 ORDER BY n_dead_tup DESC LIMIT 30"' \
+      'psql -d appdb -X -P pager=off -c "SELECT relname, indexrelname, idx_scan FROM pg_stat_user_indexes WHERE idx_scan = 0 ORDER BY relname"' \
+      > /usr/local/sbin/pg-bloat-report.sh; \
+    chmod 0755 /usr/local/sbin/pg-wal-archive.sh /usr/local/sbin/pg-backup.sh \
+               /usr/local/sbin/pg-logical-dump.sh /usr/local/sbin/pg-restore-test.sh \
+               /usr/local/sbin/pg-bloat-report.sh; \
+    install -d -m 0700 -o postgres -g postgres /var/lib/pgsql/backups/dumps
+
+RUN set -eux; \
+    install -d -m 0755 /etc/cron.d /etc/cron.daily /etc/cron.hourly; \
+    printf '%s\n' \
+      'SHELL=/bin/bash' \
+      'PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin' \
+      'MAILTO=dba@example.net' \
+      '' \
+      '# basebackup diario' \
+      '40 2 * * *      postgres  /usr/local/sbin/pg-backup.sh' \
+      '# dump logico aos domingos' \
+      '10 4 * * 0      postgres  /usr/local/sbin/pg-logical-dump.sh' \
+      '# teste de restauracao mensal (auditoria exige evidencia)' \
+      '30 5 5 * *      postgres  /usr/local/sbin/pg-restore-test.sh' \
+      '# relatorio de bloat as segundas' \
+      '0 7 * * 1       postgres  /usr/local/sbin/pg-bloat-report.sh | mail -s "bloat db-01" dba@example.net' \
+      '' \
+      > /etc/cron.d/pg-backup; \
+    printf '%s\n' \
+      'SHELL=/bin/bash' \
+      'PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin' \
+      'MAILTO=""' \
+      '' \
+      '# metricas para o exporter (textfile) e limpeza do archive' \
+      '*/2 * * * *     postgres  /usr/local/bin/pg-metrics-textfile.sh' \
+      '25 * * * *      postgres  /usr/bin/find /var/lib/pgsql/wal_archive -name "*.tmp" -mmin +60 -delete' \
+      '' \
+      '# ANTIGO - substituido pelo autovacuum tunado em 2023, mantido comentado' \
+      '# para consulta (o job travava a tabela de pedidos por ~40min)' \
+      '# 0 3 * * *     postgres  /usr/bin/vacuumdb --all --analyze --full' \
+      '' \
+      > /etc/cron.d/pg-maintenance; \
+    printf '%s\n' \
+      '# MySQL era - desativado em 2021 quando migramos para PostgreSQL.' \
+      '# Mantido comentado ate o desligamento do backup legado (INFRA-2210).' \
+      '#0 1 * * *   root  /usr/local/sbin/mysql-backup.sh --all-databases' \
+      '#30 1 * * 0  root  /usr/local/sbin/mysql-optimize.sh' \
+      > /etc/cron.d/mysql-backup-DESATIVADO; \
+    chmod 0644 /etc/cron.d/pg-backup /etc/cron.d/pg-maintenance /etc/cron.d/mysql-backup-DESATIVADO; \
+    printf '%s\n' \
+      '# DO NOT EDIT THIS FILE - edit the master and reinstall.' \
+      '# (crontab installed on Wed Feb 12 08:41:02 2025)' \
+      'MAILTO=dba@example.net' \
+      '' \
+      '@reboot sleep 120; /usr/local/bin/pg-metrics-textfile.sh' \
+      '15 6 * * * /usr/bin/psql -X -q -c "SELECT pg_stat_statements_reset()" >/dev/null' \
+      > /var/spool/cron/postgres; \
+    chown postgres:postgres /var/spool/cron/postgres; chmod 0600 /var/spool/cron/postgres; \
+    printf '%s\n' \
+      '# DO NOT EDIT THIS FILE - edit the master and reinstall.' \
+      'MAILTO=dba@example.net' \
+      '' \
+      '# checa se a replica ficou para tras e avisa no plantao' \
+      '*/5 * * * * /usr/local/bin/check-replica-lag.sh || true' \
+      > /var/spool/cron/root; \
+    chmod 0600 /var/spool/cron/root
+
+# ---------------------------------------------------------------------------
+# 9. Monitoring: an in-house exporter (python + psycopg2) installed under /opt
+#    outside dnf, its own sysconfig file and unit, plus a nagios-era check
+#    script that predates prometheus and still feeds the old NOC dashboard.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    useradd --system --uid 993 --home-dir /opt/pg-exporter --shell /sbin/nologin \
+            --comment 'exporter de metricas do postgres' pgexport; \
+    install -d -m 0755 /opt/pg-exporter /opt/pg-exporter/bin /etc/pg-exporter \
+            /var/lib/node_exporter/textfile /var/log/pg-exporter; \
+    printf '%s\n' \
+      'name: pg-exporter' \
+      'version: 0.9.4 (interno, repo git.example.net/infra/pg-exporter)' \
+      'method: instalado a mao (make install), fora do dnf' \
+      'installed_at: 2024-03-08' \
+      'installed_by: rgreco' \
+      'nota: substituiu o postgres_exporter oficial porque precisavamos das' \
+      '      metricas de bloat por tabela. Atualizar com git pull + make install.' \
+      > /opt/pg-exporter/INSTALL_INFO; \
+    printf '%s\n' \
+      '#!/usr/bin/env python3' \
+      '"""pg-exporter: expoe metricas do cluster no formato prometheus."""' \
+      'import argparse, os, sys, time' \
+      'from http.server import BaseHTTPRequestHandler, HTTPServer' \
+      '' \
+      'try:' \
+      '    import psycopg2' \
+      'except ImportError:' \
+      '    psycopg2 = None' \
+      '' \
+      'QUERIES = {' \
+      '    "pg_up": "SELECT 1",' \
+      '    "pg_database_size_bytes": "SELECT datname, pg_database_size(datname) FROM pg_database WHERE NOT datistemplate",' \
+      '    "pg_replication_lag_bytes": "SELECT slot_name, COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn), 0) FROM pg_replication_slots",' \
+      '    "pg_stat_user_tables_dead_tup": "SELECT relname, n_dead_tup FROM pg_stat_user_tables",' \
+      '}' \
+      '' \
+      'def collect(dsn):' \
+      '    if psycopg2 is None:' \
+      '        return "pg_up 0\n"' \
+      '    out = []' \
+      '    with psycopg2.connect(dsn) as conn:' \
+      '        with conn.cursor() as cur:' \
+      '            for metric, sql in QUERIES.items():' \
+      '                cur.execute(sql)' \
+      '                for row in cur.fetchall():' \
+      '                    if len(row) == 1:' \
+      '                        out.append("%s %s" % (metric, row[0]))' \
+      '                    else:' \
+      '                        out.append("%s{name=\"%s\"} %s" % (metric, row[0], row[1]))' \
+      '    return "\n".join(out) + "\n"' \
+      '' \
+      'class Handler(BaseHTTPRequestHandler):' \
+      '    dsn = ""' \
+      '    def do_GET(self):' \
+      '        if self.path != "/metrics":' \
+      '            self.send_error(404)' \
+      '            return' \
+      '        body = collect(self.dsn).encode()' \
+      '        self.send_response(200)' \
+      '        self.send_header("Content-Type", "text/plain; version=0.0.4")' \
+      '        self.send_header("Content-Length", str(len(body)))' \
+      '        self.end_headers()' \
+      '        self.wfile.write(body)' \
+      '    def log_message(self, fmt, *args):' \
+      '        sys.stderr.write("%s %s\n" % (time.strftime("%FT%T"), fmt % args))' \
+      '' \
+      'def main():' \
+      '    ap = argparse.ArgumentParser()' \
+      '    ap.add_argument("--listen", default="0.0.0.0:9187")' \
+      '    ap.add_argument("--dsn", default=os.environ.get("DATA_SOURCE_NAME", ""))' \
+      '    ap.add_argument("--dump", action="store_true", help="imprime e sai")' \
+      '    args = ap.parse_args()' \
+      '    if args.dump:' \
+      '        sys.stdout.write(collect(args.dsn))' \
+      '        return 0' \
+      '    host, _, port = args.listen.rpartition(":")' \
+      '    Handler.dsn = args.dsn' \
+      '    HTTPServer((host, int(port)), Handler).serve_forever()' \
+      '' \
+      'if __name__ == "__main__":' \
+      '    sys.exit(main())' \
+      > /opt/pg-exporter/bin/pg-exporter; \
+    chmod 0755 /opt/pg-exporter/bin/pg-exporter; \
+    ln -sf /opt/pg-exporter/bin/pg-exporter /usr/local/bin/pg-exporter; \
+    printf '%s\n' \
+      'DATA_SOURCE_NAME=postgresql://monitoring@127.0.0.1:5432/postgres?sslmode=disable' \
+      'PGPASSFILE=/etc/pg-exporter/pgpass' \
+      'LISTEN=10.20.9.10:9187' \
+      > /etc/sysconfig/pg-exporter; \
+    printf '%s\n' \
+      '127.0.0.1:5432:*:monitoring:TROCAR_NO_VAULT' \
+      > /etc/pg-exporter/pgpass; \
+    chmod 0600 /etc/pg-exporter/pgpass; chown pgexport:pgexport /etc/pg-exporter/pgpass; \
+    printf '%s\n' \
+      '[Unit]' \
+      'Description=pg-exporter (metricas do PostgreSQL para o Prometheus)' \
+      'After=postgresql.service' \
+      'Wants=postgresql.service' \
+      '' \
+      '[Service]' \
+      'Type=simple' \
+      'User=pgexport' \
+      'Group=pgexport' \
+      'EnvironmentFile=/etc/sysconfig/pg-exporter' \
+      'ExecStart=/opt/pg-exporter/bin/pg-exporter --listen ${LISTEN} --dsn ${DATA_SOURCE_NAME}' \
+      'Restart=always' \
+      'RestartSec=20' \
+      'NoNewPrivileges=yes' \
+      'PrivateTmp=yes' \
+      'ProtectSystem=full' \
+      'StandardOutput=append:/var/log/pg-exporter/pg-exporter.log' \
+      'StandardError=append:/var/log/pg-exporter/pg-exporter.log' \
+      '' \
+      '[Install]' \
+      'WantedBy=multi-user.target' \
+      > /etc/systemd/system/pg-exporter.service; \
+    ln -sf /etc/systemd/system/pg-exporter.service /etc/systemd/system/multi-user.target.wants/pg-exporter.service; \
+    chown -R pgexport:pgexport /var/log/pg-exporter /var/lib/node_exporter/textfile; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# pg-metrics-textfile.sh - metricas baratas para o node_exporter' \
+      'set -euo pipefail' \
+      'OUT=/var/lib/node_exporter/textfile/postgres.prom' \
+      'TMP="$(mktemp "$OUT.XXXXXX")"' \
+      '{' \
+      '  echo "# HELP pg_last_backup_timestamp_seconds Ultimo basebackup concluido"' \
+      '  echo "# TYPE pg_last_backup_timestamp_seconds gauge"' \
+      '  ultimo="$(ls -1dt /var/lib/pgsql/backups/base-* 2>/dev/null | head -1)"' \
+      '  if [ -n "$ultimo" ]; then echo "pg_last_backup_timestamp_seconds $(stat -c %Y "$ultimo")"; else echo "pg_last_backup_timestamp_seconds 0"; fi' \
+      '  echo "# HELP pg_wal_archive_files Segmentos no diretorio de archive"' \
+      '  echo "# TYPE pg_wal_archive_files gauge"' \
+      '  echo "pg_wal_archive_files $(find /var/lib/pgsql/wal_archive -type f -name "0000*" | wc -l)"' \
+      '} > "$TMP"' \
+      'chmod 0644 "$TMP"; mv "$TMP" "$OUT"' \
+      > /usr/local/bin/pg-metrics-textfile.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# check-replica-lag.sh - alerta simples de atraso da replica sincrona' \
+      'set -euo pipefail' \
+      'LIMITE_BYTES=$((256 * 1024 * 1024))' \
+      'LAG="$(su - postgres -c "psql -X -tAc \"SELECT COALESCE(max(pg_wal_lsn_diff(sent_lsn, replay_lsn)), 0)::bigint FROM pg_stat_replication\"" 2>/dev/null || echo 0)"' \
+      'if [ "${LAG:-0}" -gt "$LIMITE_BYTES" ]; then' \
+      '  logger -t check-replica-lag -p daemon.err "replica atrasada: $LAG bytes"' \
+      '  echo "replica atrasada: $LAG bytes" | mail -s "[db-01] lag de replicacao" dba@example.net' \
+      'fi' \
+      > /usr/local/bin/check-replica-lag.sh; \
+    chmod 0755 /usr/local/bin/pg-metrics-textfile.sh /usr/local/bin/check-replica-lag.sh; \
+    install -d -m 0755 /usr/lib64/nagios/plugins; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# check_pg_connections - plugin nagios da epoca do NOC antigo.' \
+      '# Ainda coletado pelo zabbix via zabbix_agent (item externo).' \
+      'WARN=${1:-150}; CRIT=${2:-180}' \
+      'N=$(psql -X -tAc "SELECT count(*) FROM pg_stat_activity" 2>/dev/null || echo -1)' \
+      'if [ "$N" -lt 0 ]; then echo "UNKNOWN - sem conexao ao cluster"; exit 3; fi' \
+      'if [ "$N" -ge "$CRIT" ]; then echo "CRITICAL - $N conexoes|conn=$N;$WARN;$CRIT"; exit 2; fi' \
+      'if [ "$N" -ge "$WARN" ]; then echo "WARNING - $N conexoes|conn=$N;$WARN;$CRIT"; exit 1; fi' \
+      'echo "OK - $N conexoes|conn=$N;$WARN;$CRIT"; exit 0' \
+      > /usr/lib64/nagios/plugins/check_pg_connections; \
+    chmod 0755 /usr/lib64/nagios/plugins/check_pg_connections
+
+# ---------------------------------------------------------------------------
+# 10. SSH.  Note the sshd_config.rpmnew that nobody merged after the last
+#     openssh update - a genuine RHEL upgrade artifact.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    ssh-keygen -A; \
+    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin forced-commands-only/' /etc/ssh/sshd_config; \
+    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config; \
+    sed -i 's/^#\?X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config; \
+    printf '%s\n' \
+      '' \
+      '# --- ajustes locais (roles/ssh) - 2025-06-02 ---' \
+      'AllowGroups wheel dba bkpsvc' \
+      'MaxAuthTries 3' \
+      'LoginGraceTime 30' \
+      'ClientAliveInterval 300' \
+      'ClientAliveCountMax 2' \
+      'Banner /etc/issue.net' \
+      'LogLevel VERBOSE' \
+      'AllowAgentForwarding no' \
+      'PermitTunnel no' \
+      >> /etc/ssh/sshd_config; \
+    printf '%s\n' \
+      '# Este arquivo foi entregue pelo pacote openssh-server-8.7p1-38.el9 e' \
+      '# NAO foi mesclado com o /etc/ssh/sshd_config local. Revisar (INFRA-4507).' \
+      'Include /etc/ssh/sshd_config.d/*.conf' \
+      'HostKey /etc/ssh/ssh_host_rsa_key' \
+      'HostKey /etc/ssh/ssh_host_ecdsa_key' \
+      'HostKey /etc/ssh/ssh_host_ed25519_key' \
+      'PermitRootLogin yes' \
+      'PasswordAuthentication yes' \
+      'UsePAM yes' \
+      'X11Forwarding yes' \
+      'Subsystem sftp /usr/libexec/openssh/sftp-server' \
+      > /etc/ssh/sshd_config.rpmnew; \
+    install -d -m 0700 /root/.ssh; \
+    ssh-keygen -q -t ed25519 -N '' -C 'backup-01.example.net' -f /tmp/bkp; \
+    printf 'command="/usr/local/sbin/pg-remote-backup-fetch",from="10.20.0.30",no-pty,no-agent-forwarding,no-port-forwarding,no-X11-forwarding %s\n' \
+      "$(cat /tmp/bkp.pub)" > /root/.ssh/authorized_keys; \
+    chmod 0600 /root/.ssh/authorized_keys; \
+    install -d -m 0700 -o bkpsvc -g bkpsvc /var/lib/bkpsvc/.ssh; \
+    cp /root/.ssh/authorized_keys /var/lib/bkpsvc/.ssh/authorized_keys; \
+    chown bkpsvc:bkpsvc /var/lib/bkpsvc/.ssh/authorized_keys; \
+    chmod 0600 /var/lib/bkpsvc/.ssh/authorized_keys; \
+    rm -f /tmp/bkp /tmp/bkp.pub; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# ForceCommand da chave do backup-01: so entrega os arquivos de backup' \
+      'set -euo pipefail' \
+      'case "${SSH_ORIGINAL_COMMAND:-}" in' \
+      '  "rsync --server --sender"*) exec $SSH_ORIGINAL_COMMAND;;' \
+      '  *) logger -t pg-remote-backup-fetch "recusado: ${SSH_ORIGINAL_COMMAND:-vazio}"; exit 1;;' \
+      'esac' \
+      > /usr/local/sbin/pg-remote-backup-fetch; \
+    chmod 0755 /usr/local/sbin/pg-remote-backup-fetch; \
+    for u in rgreco apdiniz; do \
+        h=$(getent passwd "$u" | cut -d: -f6); \
+        install -d -m 0700 -o "$u" -g dba "$h/.ssh"; \
+        ssh-keygen -q -t ed25519 -N '' -C "$u@notebook" -f "/tmp/$u"; \
+        install -m 0600 -o "$u" -g dba "/tmp/$u.pub" "$h/.ssh/authorized_keys"; \
+        rm -f "/tmp/$u" "/tmp/$u.pub"; \
+    done
+
+# ---------------------------------------------------------------------------
+# 11. postgres user environment: psqlrc, pgpass, history, helper scripts in
+#     ~/scripts the way DBAs really keep them.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    printf '%s\n' \
+      '\set QUIET 1' \
+      '\timing on' \
+      '\pset null (null)' \
+      '\pset linestyle unicode' \
+      '\set PROMPT1 %[%033[1;31m%]%M:%>%[%033[0m%] %/ %# ' \
+      '\set COMP_KEYWORD_CASE upper' \
+      '\set HISTFILE ~/.psql_history- :DBNAME' \
+      '\set HISTSIZE 5000' \
+      '\set VERBOSITY verbose' \
+      '\set ON_ERROR_ROLLBACK interactive' \
+      '\unset QUIET' \
+      > /var/lib/pgsql/.psqlrc; \
+    printf '%s\n' \
+      '# host:port:db:user:senha - renderizado pelo ansible/vault' \
+      '127.0.0.1:5432:*:postgres:TROCAR_NO_VAULT' \
+      '10.20.9.11:5432:replication:replicator:TROCAR_NO_VAULT' \
+      > /var/lib/pgsql/.pgpass; \
+    chmod 0600 /var/lib/pgsql/.pgpass; \
+    printf '%s\n' \
+      'SELECT * FROM pg_stat_replication;' \
+      'SELECT slot_name, active, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) FROM pg_replication_slots;' \
+      'SELECT pid, now()-query_start AS dur, state, left(query,80) FROM pg_stat_activity WHERE state <> :qidle ORDER BY dur DESC;' \
+      'SELECT relname, n_dead_tup, last_autovacuum FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 20;' \
+      'SELECT query, calls, round(mean_exec_time::numeric,2) AS ms FROM pg_stat_statements ORDER BY mean_exec_time DESC LIMIT 20;' \
+      'VACUUM (ANALYZE, VERBOSE) loja.pedidos;' \
+      'SELECT pg_size_pretty(pg_database_size(current_database()));' \
+      'REINDEX INDEX CONCURRENTLY loja.pedidos_criado_em_idx;' \
+      > /var/lib/pgsql/.psql_history; \
+    printf '%s\n' \
+      '' \
+      'export PATH=$PATH:/usr/pgsql-16/bin:/usr/local/sbin' \
+      'export PGDATA=/var/lib/pgsql/data' \
+      'export EDITOR=vim' \
+      'export HISTTIMEFORMAT="%F %T "' \
+      'alias pgl="tail -f /var/lib/pgsql/data/log/postgresql-$(date +%a).log"' \
+      'alias pgconf="vim /var/lib/pgsql/data/conf.d/99-local.conf"' \
+      'alias repl="psql -x -c \"select * from pg_stat_replication\""' \
+      >> /var/lib/pgsql/.bash_profile; \
+    install -d -m 0755 -o postgres -g postgres /var/lib/pgsql/scripts; \
+    printf '%s\n' \
+      '-- kill de sessoes idle in transaction com mais de 30 min' \
+      '-- usado no incidente INC-2118, deixar aqui' \
+      'SELECT pg_terminate_backend(pid), usename, now() - state_change AS parado' \
+      'FROM pg_stat_activity' \
+      "WHERE state = 'idle in transaction'" \
+      "  AND now() - state_change > interval '30 minutes';" \
+      > /var/lib/pgsql/scripts/kill-idle-in-transaction.sql; \
+    printf '%s\n' \
+      '-- top 20 queries por tempo total (pg_stat_statements)' \
+      'SELECT round(total_exec_time::numeric) AS total_ms, calls,' \
+      '       round(mean_exec_time::numeric, 2) AS media_ms, rows,' \
+      '       left(query, 120) AS query' \
+      'FROM pg_stat_statements' \
+      'ORDER BY total_exec_time DESC' \
+      'LIMIT 20;' \
+      > /var/lib/pgsql/scripts/top-queries.sql; \
+    chown -R postgres:postgres /var/lib/pgsql/.psqlrc /var/lib/pgsql/.pgpass \
+          /var/lib/pgsql/.psql_history /var/lib/pgsql/.bash_profile /var/lib/pgsql/scripts
+
+# ---------------------------------------------------------------------------
+# 12. THE LEFTOVERS.  Everything below is dead weight that a real box of this
+#     age carries: the 13 data directory pg_upgrade left behind, its output
+#     directory, the MySQL era, .rpmsave/.rpmnew files, an old repo file, a
+#     masked unit from a retired agent, and a decommissioned agent in /opt.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    install -d -m 0700 -o postgres -g postgres /var/lib/pgsql/13/data /var/lib/pgsql/13/backups; \
+    printf '%s\n' '13' > /var/lib/pgsql/13/data/PG_VERSION; \
+    printf '%s\n' \
+      '# configuracao do cluster 13 (congelada em 2026-04-29, dia do pg_upgrade)' \
+      'max_connections = 300' \
+      'shared_buffers = 3GB' \
+      'effective_cache_size = 20GB' \
+      'work_mem = 16MB' \
+      'wal_level = replica' \
+      "log_line_prefix = '%t [%p] '" \
+      '# vacuum_cost_delay = 20ms  # baixado durante o incidente de 2025-02' \
+      > /var/lib/pgsql/13/data/postgresql.conf; \
+    cp /var/lib/pgsql/data/pg_hba.conf /var/lib/pgsql/13/data/pg_hba.conf; \
+    install -d -m 0700 -o postgres -g postgres /var/lib/pgsql/13/data/global \
+            /var/lib/pgsql/13/data/base /var/lib/pgsql/13/data/pg_wal; \
+    printf '%s\n' 'PG_VERSION 13 - cluster desativado, ver /root/MIGRACAO.txt' \
+      > /var/lib/pgsql/13/data/AVISO-NAO-INICIAR.txt; \
+    install -d -m 0700 -o postgres -g postgres /var/lib/pgsql/pg_upgrade_output.d/20260429T023114.191; \
+    printf '%s\n' \
+      'Performing Consistency Checks' \
+      '-----------------------------' \
+      'Checking cluster versions                                     ok' \
+      'Checking database user is the install user                    ok' \
+      'Checking database connection settings                         ok' \
+      'Checking for prepared transactions                            ok' \
+      'Checking for system-defined composite types in user tables    ok' \
+      'Checking for reg* data types in user tables                   ok' \
+      'Checking for contrib/isn with bigint-passing mismatch         ok' \
+      'Checking for user-defined encoding conversions                ok' \
+      'Checking for user-defined postfix operators                   ok' \
+      'Checking for incompatible polymorphic functions               ok' \
+      'Checking for tables WITH OIDS                                 ok' \
+      'Checking for invalid "sql_identifier" user columns            ok' \
+      'Creating dump of global objects                               ok' \
+      'Creating dump of database schemas                             ok' \
+      'Checking for presence of required libraries                   ok' \
+      'Checking database user is the install user                    ok' \
+      'Checking for prepared transactions                            ok' \
+      'Checking for new cluster tablespace directories               ok' \
+      '' \
+      'If pg_upgrade fails after this point, you must re-initdb the' \
+      'new cluster before continuing.' \
+      '' \
+      'Performing Upgrade' \
+      '------------------' \
+      'Setting locale and encoding for new cluster                   ok' \
+      'Analyzing all rows in the new cluster                         ok' \
+      'Freezing all rows in the new cluster                          ok' \
+      'Deleting files from new pg_xact                               ok' \
+      'Copying old pg_xact to new server                             ok' \
+      'Setting oldest XID for new cluster                            ok' \
+      'Setting next transaction ID and epoch for new cluster         ok' \
+      'Deleting files from new pg_multixact/offsets                  ok' \
+      'Copying old pg_multixact/offsets to new server                ok' \
+      'Setting next multixact ID and offset for new cluster          ok' \
+      'Resetting WAL archives                                        ok' \
+      'Setting frozenxid and minmxid counters in new cluster         ok' \
+      'Restoring global objects in the new cluster                   ok' \
+      'Restoring database schemas in the new cluster                 ok' \
+      'Copying user relation files                                   ok' \
+      'Setting next OID for new cluster                              ok' \
+      'Sync data directory to disk                                   ok' \
+      'Creating script to delete old cluster                         ok' \
+      'Checking for extension updates                                notok' \
+      '' \
+      'Your installation contains extensions that should be updated' \
+      'with the ALTER EXTENSION command.  The file' \
+      '    update_extensions.sql' \
+      'when executed by psql by the database superuser will update' \
+      'these extensions.' \
+      '' \
+      'Upgrade Complete' \
+      '----------------' \
+      'Optimizer statistics are not transferred by pg_upgrade.' \
+      'Once you start the new server, consider running:' \
+      '    /usr/pgsql-16/bin/vacuumdb --all --analyze-in-stages' \
+      '' \
+      'Running this script will delete the old cluster data files:' \
+      '    ./delete_old_cluster.sh' \
+      > /var/lib/pgsql/pg_upgrade_output.d/20260429T023114.191/pg_upgrade_server.log; \
+    printf '%s\n' \
+      'ALTER EXTENSION "pg_stat_statements" UPDATE;' \
+      'ALTER EXTENSION "pgcrypto" UPDATE;' \
+      > /var/lib/pgsql/pg_upgrade_output.d/20260429T023114.191/update_extensions.sql; \
+    printf '%s\n' \
+      '#!/bin/sh' \
+      'rm -rf "/var/lib/pgsql/13/data"' \
+      > /var/lib/pgsql/delete_old_cluster.sh; \
+    chmod 0700 /var/lib/pgsql/delete_old_cluster.sh; \
+    chown -R postgres:postgres /var/lib/pgsql/13 /var/lib/pgsql/pg_upgrade_output.d \
+          /var/lib/pgsql/delete_old_cluster.sh
+
+RUN set -eux; \
+    printf '%s\n' \
+      '[mysqld]' \
+      'datadir=/var/lib/mysql' \
+      'socket=/var/lib/mysql/mysql.sock' \
+      'symbolic-links=0' \
+      'innodb_buffer_pool_size=12G' \
+      'innodb_log_file_size=1G' \
+      'innodb_flush_log_at_trx_commit=2' \
+      'max_connections=500' \
+      'slow_query_log=1' \
+      'slow_query_log_file=/var/log/mysql-slow.log' \
+      'long_query_time=2' \
+      '' \
+      '[mysqld_safe]' \
+      'log-error=/var/log/mariadb/mariadb.log' \
+      'pid-file=/var/run/mariadb/mariadb.pid' \
+      > /etc/my.cnf.rpmsave; \
+    install -d -m 0755 /var/lib/mysql; \
+    printf '%s\n' \
+      'Diretorio mantido apenas para o caso de precisarmos reler algum ibd antigo.' \
+      'Os dados foram migrados para o PostgreSQL em 2021 e o dump final esta em' \
+      '/var/lib/pgsql/backups/legado/mysql-final-20210918.sql.gz' \
+      > /var/lib/mysql/LEIA-ME.txt; \
+    chown -R mysql:mysql /var/lib/mysql 2>/dev/null || true; \
+    install -d -m 0700 -o postgres -g postgres /var/lib/pgsql/backups/legado; \
+    printf '%s\n' \
+      '-- MySQL dump 10.14  Distrib 5.5.68-MariaDB, for Linux (x86_64)' \
+      '-- Host: localhost    Database: loja' \
+      '-- Server version 5.5.68-MariaDB' \
+      '-- (dump final antes da migracao para PostgreSQL - 2021-09-18)' \
+      > /tmp/mysql-final.sql; \
+    gzip -c /tmp/mysql-final.sql > /var/lib/pgsql/backups/legado/mysql-final-20210918.sql.gz; \
+    rm -f /tmp/mysql-final.sql; \
+    chown postgres:postgres /var/lib/pgsql/backups/legado/mysql-final-20210918.sql.gz; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# mysql-backup.sh - NAO USAR. Mantido para referencia do formato antigo.' \
+      '# O servico mysqld foi desabilitado em 2021-09-18 (INFRA-2210).' \
+      'echo "mysqld nao roda mais neste host desde 2021. Veja /root/MIGRACAO.txt" >&2' \
+      'exit 1' \
+      'DEST=/var/backups/mysql' \
+      'mysqldump --defaults-file=/root/.my.cnf --all-databases --single-transaction | gzip > "$DEST/all-$(date +%F).sql.gz"' \
+      > /usr/local/sbin/mysql-backup.sh; \
+    chmod 0644 /usr/local/sbin/mysql-backup.sh; \
+    printf '%s\n' \
+      '#!/bin/bash' \
+      '# pg96-dump.sh - script da epoca do 9.6, o caminho do binario nem existe mais' \
+      'exec /usr/pgsql-9.6/bin/pg_dumpall -U postgres | gzip > /var/backups/pg96/all.sql.gz' \
+      > /usr/local/sbin/pg96-dump.sh; \
+    chmod 0755 /usr/local/sbin/pg96-dump.sh; \
+    touch -d '2019-05-14 03:00:00' /usr/local/sbin/pg96-dump.sh
+
+RUN set -eux; \
+    printf '%s\n' \
+      '[base]' \
+      'name=CentOS-$releasever - Base' \
+      'mirrorlist=http://mirrorlist.centos.org/?release=$releasever&arch=$basearch&repo=os' \
+      'gpgcheck=1' \
+      'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-7' \
+      'enabled=1' \
+      > /etc/yum.repos.d/CentOS-Base.repo.rpmsave; \
+    printf '%s\n' \
+      '[mirror-interno]' \
+      'name=Espelho interno Rocky 9 - $basearch' \
+      'baseurl=https://mirror.example.net/rocky/9/BaseOS/$basearch/os/' \
+      'enabled=1' \
+      'gpgcheck=1' \
+      'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-9' \
+      'priority=1' \
+      '' \
+      '[mirror-interno-appstream]' \
+      'name=Espelho interno Rocky 9 AppStream - $basearch' \
+      'baseurl=https://mirror.example.net/rocky/9/AppStream/$basearch/os/' \
+      'enabled=1' \
+      'gpgcheck=1' \
+      'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-9' \
+      'priority=1' \
+      > /etc/yum.repos.d/mirror-interno.repo; \
+    printf '%s\n' \
+      '' \
+      '# nao deixar o dnf subir a major do postgres sozinho (INC-1974)' \
+      'exclude=postgresql* pgbouncer' \
+      >> /etc/dnf/dnf.conf; \
+    ln -sf /dev/null /etc/systemd/system/nrpe.service; \
+    ln -sf /dev/null /etc/systemd/system/mysqld.service; \
+    install -d -m 0755 /opt/nrpe-legado/bin /opt/nrpe-legado/etc; \
+    printf '%s\n' \
+      'Agente NRPE do NOC antigo. Desligado em 2025-03 quando entrou o prometheus.' \
+      'A unit foi mascarada (/etc/systemd/system/nrpe.service -> /dev/null).' \
+      'Pode ser removido quando o inventario do NOC for atualizado (INFRA-4390).' \
+      > /opt/nrpe-legado/LEIA-ME.txt; \
+    printf '%s\n' \
+      'log_facility=daemon' \
+      'pid_file=/var/run/nrpe/nrpe.pid' \
+      'server_port=5666' \
+      'allowed_hosts=127.0.0.1,10.20.0.50' \
+      'command[check_pgsql]=/usr/lib64/nagios/plugins/check_pg_connections 150 180' \
+      > /opt/nrpe-legado/etc/nrpe.cfg; \
+    printf '%s\n' \
+      'db-01 -- historico das migracoes (ler antes de apagar qualquer coisa)' \
+      '' \
+      '2016  CentOS 7 + MariaDB 5.5   (dados da loja legada)' \
+      '2021  migracao MySQL -> PostgreSQL 9.6' \
+      '      - dump final: /var/lib/pgsql/backups/legado/mysql-final-20210918.sql.gz' \
+      '      - usuario mysql e /var/lib/mysql mantidos de proposito (auditoria pediu)' \
+      '2023  Rocky 8 + PostgreSQL 13 (rebuild da maquina, restore por dump)' \
+      '2026-04-29  pg_upgrade 13 -> 16 (janela das 02:00, 38 min)' \
+      '      - cluster antigo ainda em /var/lib/pgsql/13/data' \
+      '      - delete_old_cluster.sh NAO foi executado: a auditoria pediu para' \
+      '        manter ate o fechamento do trimestre (INFRA-4489). Ja passou.' \
+      '      - SELinux ficou permissive nesse dia (INFRA-4412)' \
+      '' \
+      'Pendencias conhecidas:' \
+      '  - INFRA-4412  voltar SELinux para enforcing' \
+      '  - INFRA-4489  apagar /var/lib/pgsql/13/data' \
+      '  - INFRA-4507  mesclar /etc/ssh/sshd_config.rpmnew' \
+      '  - INFRA-4390  remover /opt/nrpe-legado e a unit mascarada' \
+      > /root/MIGRACAO.txt; \
+    printf '%s\n' \
+      'systemctl status postgresql' \
+      'su - postgres' \
+      'psql -c "select * from pg_stat_replication"' \
+      'tail -f /var/lib/pgsql/data/log/postgresql-Mon.log' \
+      'df -h /var/lib/pgsql' \
+      'du -sh /var/lib/pgsql/13/data' \
+      'cat /root/MIGRACAO.txt' \
+      'systemctl list-unit-files | grep -i mysql' \
+      'getenforce' \
+      'vacuumdb --all --analyze-in-stages' \
+      > /root/.bash_history; \
+    chmod 0600 /root/.bash_history
+
+# ---------------------------------------------------------------------------
+# 13. Logs: rsyslog policy, logrotate, and the usual RHEL log furniture with
+#     content and previous rotations (including sar data and the anaconda
+#     files left by the original kickstart install).
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    printf '%s\n' \
+      'module(load="imfile")' \
+      '' \
+      'input(type="imfile"' \
+      '      File="/var/lib/pgsql/data/log/postgresql-*.log"' \
+      '      Tag="postgres"' \
+      '      Severity="info"' \
+      '      Facility="local0")' \
+      '' \
+      'local0.*  @@log-collector.prod.example.net:6514' \
+      'local1.*  /var/log/pgbouncer/pgbouncer.log' \
+      > /etc/rsyslog.d/10-postgres.conf; \
+    printf '%s\n' \
+      '/var/log/pg-backup.log /var/log/pg-exporter/*.log {' \
+      '    weekly' \
+      '    rotate 12' \
+      '    compress' \
+      '    delaycompress' \
+      '    missingok' \
+      '    notifempty' \
+      '    create 0640 postgres postgres' \
+      '}' \
+      > /etc/logrotate.d/postgres-scripts; \
+    printf '%s\n' \
+      '/var/log/pgbouncer/pgbouncer.log {' \
+      '    daily' \
+      '    rotate 14' \
+      '    compress' \
+      '    missingok' \
+      '    notifempty' \
+      '    create 0640 pgbouncer pgbouncer' \
+      '    postrotate' \
+      '        /usr/bin/systemctl kill -s HUP pgbouncer.service 2>/dev/null || true' \
+      '    endscript' \
+      '}' \
+      > /etc/logrotate.d/pgbouncer-local; \
+    install -d -m 0755 /var/log/sa /var/log/anaconda; \
+    printf '%s\n' \
+      '=== 2026-08-10T02:40:01-03:00 basebackup iniciado ===' \
+      '2.9G    /var/lib/pgsql/backups/base-20260810' \
+      '=== 2026-08-10T02:58:44-03:00 basebackup concluido ===' \
+      '=== 2026-08-11T02:40:02-03:00 basebackup iniciado ===' \
+      '3.0G    /var/lib/pgsql/backups/base-20260811' \
+      '=== 2026-08-11T02:59:12-03:00 basebackup concluido ===' \
+      '=== 2026-08-16T02:40:01-03:00 basebackup iniciado ===' \
+      'pg_basebackup: error: could not get COPY data stream: server closed the connection unexpectedly' \
+      '=== 2026-08-16T02:44:53-03:00 basebackup FALHOU (rc=1) ===' \
+      '=== 2026-08-17T02:40:01-03:00 basebackup iniciado ===' \
+      '3.1G    /var/lib/pgsql/backups/base-20260817' \
+      '=== 2026-08-17T03:01:37-03:00 basebackup concluido ===' \
+      > /var/log/pg-backup.log; \
+    gzip -c /var/log/pg-backup.log > /var/log/pg-backup.log-20260810.gz; \
+    chown postgres:postgres /var/log/pg-backup.log /var/log/pg-backup.log-20260810.gz; \
+    printf '%s\n' \
+      'Aug 17 03:01:37 db-01 pg-backup[28114]: basebackup concluido em 21m36s (3.1G)' \
+      'Aug 17 03:20:02 db-01 systemd[1]: Started Session 8821 of User postgres.' \
+      'Aug 17 04:10:11 db-01 kernel: postgres[19022]: segfault at 0 ip 0000 sp 0000 error 4 (nao reproduzido)' \
+      'Aug 17 06:15:01 db-01 systemd[1]: Starting system activity accounting tool...' \
+      'Aug 17 06:15:01 db-01 systemd[1]: sysstat-collect.service: Deactivated successfully.' \
+      'Aug 17 09:00:03 db-01 pgbouncer[1412]: stats: 118 xacts/s, 402 queries/s' \
+      'Aug 17 09:44:19 db-01 check-replica-lag[29551]: replica atrasada: 402653184 bytes' \
+      > /var/log/messages; \
+    gzip -c /var/log/messages > /var/log/messages-20260810.gz; \
+    cp /var/log/messages /var/log/messages-20260816; \
+    printf '%s\n' \
+      'Aug 17 07:41:02 db-01 sshd[27110]: Accepted publickey for rgreco from 10.20.0.4 port 55210 ssh2: ED25519 SHA256:H2sK9qLm4vTn0bXe7aRcWfYu1jZpQ8dGoI3tMxN6yCk' \
+      'Aug 17 07:41:02 db-01 sshd[27110]: pam_unix(sshd:session): session opened for user rgreco(uid=1010) by (uid=0)' \
+      'Aug 17 07:43:55 db-01 sudo:   rgreco : TTY=pts/1 ; PWD=/home/rgreco ; USER=postgres ; COMMAND=/bin/bash' \
+      'Aug 17 08:02:31 db-01 sshd[27140]: Accepted publickey for bkpsvc from 10.20.0.30 port 41120 ssh2: ED25519 SHA256:Rt7yUq2wEz5xVb9nMk1oPa4sHd6gJc0lFyX8iZmQvTe' \
+      'Aug 17 08:02:31 db-01 sshd[27140]: pam_unix(sshd:session): session opened for user bkpsvc(uid=992) by (uid=0)' \
+      'Aug 17 08:11:44 db-01 sshd[27140]: pam_unix(sshd:session): session closed for user bkpsvc' \
+      > /var/log/secure; \
+    cp /var/log/secure /var/log/secure-20260816; \
+    printf '%s\n' \
+      'Aug 17 02:40:01 db-01 CROND[28110]: (postgres) CMD (/usr/local/sbin/pg-backup.sh)' \
+      'Aug 17 03:00:01 db-01 CROND[28402]: (root) CMD (run-parts /etc/cron.hourly)' \
+      'Aug 17 06:15:01 db-01 CROND[29001]: (root) CMD (/usr/lib64/sa/sa1 1 1)' \
+      'Aug 17 09:00:02 db-01 CROND[29511]: (postgres) CMD (/usr/local/bin/pg-metrics-textfile.sh)' \
+      > /var/log/cron; \
+    printf '%s\n' \
+      '2026-04-29T02:12:04-0300 SUBDEBUG Upgrade: postgresql-server-16.2-1.module+el9.4.0' \
+      '2026-04-29T02:12:44-0300 INFO --- logging initialized ---' \
+      '2026-08-14T21:03:11-0300 SUBDEBUG Upgraded: openssh-server-8.7p1-38.el9.x86_64' \
+      '2026-08-14T21:03:12-0300 INFO warning: /etc/ssh/sshd_config created as /etc/ssh/sshd_config.rpmnew' \
+      > /var/log/dnf.log; \
+    printf '%s\n' \
+      'Jul 18 03:22:41 Installed: mariadb-server-5.5.68-1.el7.x86_64' \
+      'Sep 18 22:41:09 Erased: mariadb-server-5.5.68-1.el7.x86_64' \
+      > /var/log/yum.log; \
+    touch -d '2021-09-18 22:41:09' /var/log/yum.log; \
+    printf '%s\n' \
+      'Kickstart do provisionamento inicial - nao editar (gerado pelo Foreman)' \
+      > /var/log/anaconda/anaconda.log; \
+    printf '%s\n' \
+      '#version=RHEL9' \
+      '# Gerado pelo Foreman em 2023-11-02 (host db-01.prod.example.net)' \
+      'text' \
+      'keyboard --vckeymap=br-abnt2' \
+      'lang pt_BR.UTF-8' \
+      'timezone America/Sao_Paulo --utc' \
+      'network --bootproto=static --ip=10.20.9.10 --netmask=255.255.0.0 --gateway=10.20.0.1 --hostname=db-01.prod.example.net' \
+      'rootpw --iscrypted --lock' \
+      'services --enabled=chronyd,sshd,postgresql' \
+      'ignoredisk --only-use=nvme0n1,nvme1n1' \
+      'bootloader --location=mbr --boot-drive=nvme0n1' \
+      'clearpart --all --initlabel' \
+      'part /boot --fstype=xfs --size=1024 --ondisk=nvme0n1' \
+      'part pv.01 --size=1 --grow --ondisk=nvme0n1' \
+      'volgroup vg_sys pv.01' \
+      'logvol / --fstype=xfs --size=20480 --name=lv_root --vgname=vg_sys' \
+      'logvol /var --fstype=xfs --size=51200 --name=lv_var --vgname=vg_sys' \
+      'logvol /var/lib/pgsql --fstype=xfs --size=1 --grow --name=lv_pgdata --vgname=vg_sys --fsoptions="noatime,nodiratime"' \
+      '%packages' \
+      '@^minimal-environment' \
+      'chrony' \
+      'vim-enhanced' \
+      '%end' \
+      '' \
+      '%post --log=/root/ks-post.log' \
+      'systemctl disable kdump' \
+      '%end' \
+      > /root/anaconda-ks.cfg; \
+    chmod 0600 /root/anaconda-ks.cfg; \
+    printf '%s\n' 'Linux db-01 5.14.0-427.el9.x86_64 #1 SMP PREEMPT_DYNAMIC x86_64' > /root/ks-post.log; \
+    for d in 12 13 14 15 16 17; do \
+        printf 'sar binary data placeholder for day %s\n' "$d" > "/var/log/sa/sa$d"; \
+        printf 'sar text report placeholder for day %s\n' "$d" > "/var/log/sa/sar$d"; \
+    done
+
+# Disco: o layout de LVM que o kickstart criou, com o PGDATA num LV proprio
+# em XFS e noatime - e a entrada do NFS onde o backup-01 monta.
+RUN set -eux; \
+    printf '%s\n' \
+      '#' \
+      '# /etc/fstab' \
+      '# Created by anaconda on Thu Nov  2 04:09:31 2023' \
+      '#' \
+      '/dev/mapper/vg_sys-lv_root  /              xfs     defaults                          0 0' \
+      'UUID=8c41f0b2-19ae-4f7d-9a55-2b6c0e37d114  /boot   xfs  defaults                     0 0' \
+      '/dev/mapper/vg_sys-lv_var   /var           xfs     defaults,noatime                  0 0' \
+      '/dev/mapper/vg_sys-lv_pgdata /var/lib/pgsql xfs    defaults,noatime,nodiratime,nobarrier 0 0' \
+      '/dev/mapper/vg_sys-lv_swap  none           swap    defaults                          0 0' \
+      'tmpfs                       /dev/shm       tmpfs   defaults,size=8G                  0 0' \
+      '10.20.0.30:/srv/backups/db-01 /mnt/backup  nfs     rw,hard,intr,_netdev,noauto       0 0' \
+      > /etc/fstab; \
+    install -d -m 0755 /mnt/backup; \
+    install -d -m 0755 /etc/NetworkManager/system-connections /etc/sysconfig/network-scripts; \
+    printf '%s\n' \
+      '[connection]' \
+      'id=ens192' \
+      'uuid=6b1f0a7c-2d54-4e91-b8a3-77c0e1fa93d2' \
+      'type=ethernet' \
+      'interface-name=ens192' \
+      'autoconnect=true' \
+      '' \
+      '[ethernet]' \
+      'mtu=9000' \
+      '' \
+      '[ipv4]' \
+      'method=manual' \
+      'address1=10.20.9.10/16,10.20.0.1' \
+      'dns=10.20.0.2;10.20.0.3;' \
+      'dns-search=prod.example.net;example.net;' \
+      'may-fail=false' \
+      '' \
+      '[ipv6]' \
+      'method=disabled' \
+      > /etc/NetworkManager/system-connections/ens192.nmconnection; \
+    chmod 0600 /etc/NetworkManager/system-connections/ens192.nmconnection; \
+    printf '%s\n' \
+      '# ifcfg legado do tempo do Rocky 8. O EL9 le a config do keyfile em' \
+      '# /etc/NetworkManager/system-connections/ - este arquivo NAO tem efeito.' \
+      '# Nao apagado para nao mexer em rede de banco sem janela (INFRA-4390).' \
+      'TYPE=Ethernet' \
+      'BOOTPROTO=none' \
+      'NAME=ens192' \
+      'DEVICE=ens192' \
+      'ONBOOT=yes' \
+      'IPADDR=10.20.9.10' \
+      'PREFIX=16' \
+      'GATEWAY=10.20.0.1' \
+      'DNS1=10.20.0.2' \
+      'DNS2=10.20.0.3' \
+      'MTU=9000' \
+      > /etc/sysconfig/network-scripts/ifcfg-ens192; \
+    touch -d '2023-11-02 04:12:40' /etc/sysconfig/network-scripts/ifcfg-ens192
+
+# Fake up the backup directory the way it looks after a week of runs, and
+# age the leftovers so their mtimes tell the migration story.
+RUN set -eux; \
+    for d in 20260810 20260811 20260812 20260813 20260814 20260815 20260817; do \
+        install -d -m 0700 -o postgres -g postgres "/var/lib/pgsql/backups/base-$d"; \
+        printf 'placeholder do base.tar.gz de %s (o arquivo real tem ~3 GB)\n' "$d" \
+          > "/var/lib/pgsql/backups/base-$d/base.tar.gz.README"; \
+        printf 'START WAL LOCATION: 0/3F000028\nLABEL: diario-%s\nSTART TIME: %s\n' "$d" "$d" \
+          > "/var/lib/pgsql/backups/base-$d/backup_label.saved"; \
+    done; \
+    printf '%s\n' \
+      'Este diretorio guarda apenas a copia local (RPO 24h).' \
+      'A copia offsite fica no backup-01 (/srv/backups/db-01) e no S3 (glacier).' \
+      'Restauracao completa: RB-031 no wiki. Teste mensal: pg-restore-test.sh.' \
+      > /var/lib/pgsql/backups/LEIA-ME.txt; \
+    chown -R postgres:postgres /var/lib/pgsql/backups; \
+    touch -d '2021-09-18 22:41:09' /etc/my.cnf.rpmsave /var/lib/mysql/LEIA-ME.txt \
+          /usr/local/sbin/mysql-backup.sh /etc/cron.d/mysql-backup-DESATIVADO; \
+    touch -d '2023-11-02 04:11:56' /root/anaconda-ks.cfg /root/ks-post.log \
+          /etc/yum.repos.d/CentOS-Base.repo.rpmsave; \
+    touch -d '2025-03-11 16:22:40' /opt/nrpe-legado/LEIA-ME.txt /opt/nrpe-legado/etc/nrpe.cfg; \
+    touch -d '2026-04-29 03:04:22' /var/lib/pgsql/13/data/postgresql.conf \
+          /var/lib/pgsql/13/data/PG_VERSION /var/lib/pgsql/delete_old_cluster.sh \
+          /var/lib/pgsql/pg_upgrade_output.d/20260429T023114.191/pg_upgrade_server.log; \
+    touch -d '2026-08-14 21:03:12' /etc/ssh/sshd_config.rpmnew; \
+    for d in 10 11 12 13 14 15; do \
+        touch -d "2026-08-$d 03:00:00" "/var/lib/pgsql/backups/base-202608$d"; \
+    done; \
+    rm -rf /tmp/* /var/tmp/*; \
+    ls -ld /var/lib/pgsql/data /var/lib/pgsql/13/data >/dev/null
+
+WORKDIR /root
+
+# Sem systemd: para levantar o cluster manualmente dentro do container,
+#   mkdir -p /run/postgresql && chown postgres:postgres /run/postgresql
+#   su - postgres -c '/usr/bin/pg_ctl -D /var/lib/pgsql/data start'
+# (a config de producao pede ~4 GB de shared_buffers; ajuste conf.d/10-resources.conf
+#  se o container tiver menos memoria).
+CMD ["/bin/bash"]

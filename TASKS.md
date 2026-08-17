@@ -80,8 +80,9 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 
 ## Fase 11 — collect / analyze / fixtures
 
-- [ ] **11.1** `collect` + `analyze` + `schema_version`
-- [ ] **11.2** redação na camada de saída (relatório, JSONL, checklist, facts)
+- [x] **11.1** `collect` + `analyze` + `schema_version`, com a cobertura HERDADA da coleta
+- [~] **11.2** redação: o argv passou a sair redigido no dump (o environ já saía do
+        coletor); o varrimento do relatório, do JSONL e do checklist continua aberto
 - [ ] **11.3** fixtures por distro + suíte rodando contra todas
 
 ## Fase 12 — `preserve`
@@ -4228,3 +4229,131 @@ escopo, de teto e de formato que não se resolve de passagem.
 
 O que mudou de fato para quem usa: o passo mais irreversível do incidente
 deixou de ser delegado a um `cp` montado à mão com pressa.
+
+---
+
+## Registro — `collect` / `analyze`: a cobertura que atravessa o tempo
+
+Até aqui a ferramenta só respondia na máquina comprometida, ao vivo, com os
+checks que existiam naquele dia. Isso custava três coisas:
+
+```
+tempo no host    a varredura completa gasta segundos no alvo, e cada segundo ali
+                 é ruído na timeline e chance de o implante reagir
+uma chance só    a VM é destruída, o disco é rotacionado, e a pergunta que
+                 aparece no terceiro dia não tem mais onde ser feita
+nenhum acervo    cada host analisado sumia, quando podia virar fixture
+```
+
+Agora `collect` tira o retrato e sai; `analyze` conclui do lado limpo, quantas
+vezes for preciso, com checks mais novos e com a lista de indicadores que só
+apareceu depois.
+
+### A regra que decide tudo
+
+**A análise HERDA a cobertura da coleta. Não pode melhorá-la.**
+
+A tentação é óbvia e o efeito é silencioso: o `analyze` roda numa estação com
+root, com debugfs montado, com base de pacotes — sondar o ambiente local e
+declarar 79/79 sairia como números maiores, veredito melhor, nenhum erro. E
+seria um relatório afirmando ter verificado coisas que ninguém olhou, sobre um
+host que talvez nem exista mais.
+
+Por isso o ambiente da coleta viaja DENTRO do artefato, e o `analyze` não sonda
+a máquina onde roda. O cenário X2 é essa frase executável:
+
+```
+collect  como `nobody`      →  60 checks parciais, motivo registrado
+analyze  como ROOT          →  os MESMOS 60, com o MESMO motivo
+                               "não estamos como root: environ, dono de socket,
+                                /etc/shadow e /root ficam invisíveis"
+RESULT: INCOMPLETE — 0 achados, mas 60 checks não cobriram o que deveriam
+```
+
+O processo que analisa É root — o cenário imprime o próprio uid para provar — e
+a cobertura continua sendo a de quem coletou.
+
+### Medido contra o `scan`
+
+Sobre o host de desenvolvimento, o mesmo conjunto de fatos por dois caminhos:
+
+```
+                 achados   cobertura   veredito   exit
+scan (ao vivo)      20       15/79      CRITICAL    2
+analyze (retrato)   20       15/79      CRITICAL    2      idênticos, um a um
+```
+
+### Quatro decisões que valem mais que o código
+
+**O relatório diz que é um retrato.** Sem o bloco `ANÁLISE DE COLETA`, um
+`analyze` de três dias atrás é visualmente idêntico a um `scan` de agora —
+mesmo cabeçalho, mesmo veredito, mesmo exit code — e o operador leria `RESULT:
+OK` como afirmação sobre este momento. O JSONL ganhou a mesma marca (`replay`
+na linha de cobertura, mais uma linha `analysis`): a agregação de frota precisa
+disso tanto quanto o humano, porque o `ts` das linhas é o da COLETA.
+
+**A janela é ancorada na coleta.** `--since 72h` sobre um retrato de uma semana
+atrás significa "as 72 horas anteriores ao retrato". Ancorar no relógio de quem
+analisa recortaria tudo, e o relatório sairia vazio dizendo que nada aconteceu
+na janela.
+
+**O hash de indicador é lacuna DECLARADA.** IP, caminho, usuário e string casam
+contra fatos que já estão no dump; hash se calcula durante a coleta, e só sobre
+os arquivos que aquela varredura examinou. Uma lista trazida depois casaria
+contra nada e sairia limpa — "não encontrei" onde o certo é "não procurei".
+Agora entra como lacuna de coleta, com o comando que a resolve.
+
+**Capacidade não declarada ≠ capacidade ausente.** Um dump de uma versão que não
+sondava eBPF não pode virar "indisponível" seco, que se lê como "sondei e não
+tinha". Ele diz *a coleta não sondou esta capacidade*. E o inverso — um dump de
+uma versão MAIS NOVA, com uma capacidade que este binário não conhece — sai como
+aviso no cabeçalho: há um eixo que esta análise ignorou.
+
+### A premissa virou teste
+
+O `analyze` só é honesto porque **todo check é função pura sobre `Facts`**. Um
+check que abrisse um arquivo por conta própria passaria a ler o disco de quem
+ANALISA e a atribuir o resultado ao host coletado — um achado sobre a estação do
+respondedor sairia com o hostname do servidor comprometido, e nada na saída
+denunciaria a troca.
+
+Isso era estilo e virou premissa, então virou invariante: `TestChecksNaoTocamNoHost`
+parseia os 30 arquivos do pacote e recusa import de `os`, `os/exec`, `net`,
+`syscall`, `os/user`, além de chamada às funções do `kbpf` que emitem `bpf(2)` —
+o pacote é importado de propósito, mas só pelas tabelas de classificação, que
+são texto. Medido: os checks já eram puros; a única ocorrência de `os.` no
+pacote está dentro de um comentário.
+
+### O dump sai do host
+
+O environ já saía redigido do coletor — só os NOMES das variáveis, valor apenas
+de uma allowlist. Faltava o argv: `mysqldump -pS3cr3t` está na linha de comando
+de qualquer host que faça backup, e o relatório já o redigia enquanto o dump o
+levaria inteiro para o repositório.
+
+A redação acontece na saída, não na coleta: o `Facts` em memória continua com o
+argv completo, porque a execução em curso precisa dele para casar indicador e
+julgar linhagem. Enfraquecer a varredura para proteger um arquivo que ela nem
+escreveu seria o pior dos dois mundos.
+
+### Divergência da SPEC, na direção boa
+
+A SPEC 6 dizia que `analyze` cobriria MENOS que `scan` por construção — sem
+disco vivo, os checks que caminham filesystem não teriam sobre o que rodar. Não
+é o que aconteceu: como a coleta já é baseada em arquivo (é o que faz o modo
+`--root` existir), as entradas desses checks estão no dump. A regra que valeu é
+mais simples e mais forte: **a análise cobre exatamente o que a coleta cobriu**.
+
+### Mutação
+
+Cinco mutantes plantados, cinco mortos: a análise sondando o ambiente local, a
+janela ancorada em `now`, a lacuna de hash não declarada, a linha de análise
+ausente do JSONL, e a redação do argv removida. Mais um sexto no invariante de
+pureza — um `import "os"` num check derruba o teste com o motivo escrito.
+
+### Estado
+
+79 checks, 140 cenários. `scan` e `analyze` compartilham a cauda inteira
+(`emitir`), de propósito: um passo acrescentado a um e esquecido no outro
+produziria dois relatórios diferentes para os mesmos fatos, e a diferença
+apareceria como conclusão, não como bug.

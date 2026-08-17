@@ -46,6 +46,8 @@ COMANDOS
   wtf           overview em ~1s: este host está pegando fogo?
   watch         varre em ciclo e reporta só o que MUDAR: o eixo do tempo
   baseline      captura o estado atual como referência para comparar depois
+  collect       só coleta: tira o retrato do host e sai. Não conclui nada
+  analyze       só analisa: roda os checks sobre um retrato, do lado limpo
   preserve      guarda a evidência antes que ela suma. O ÚNICO que escreve
   checks        catálogo: id, §ref, modo, grupo, requires, falsos positivos
   version       versão e hash deste binário
@@ -91,6 +93,26 @@ FLAGS DE wtf
   --oneline     UMA linha: veredito + alvos. Para triagem de FROTA por ssh
   --budget D    teto de tempo (padrão 2s). O que estourar vira NÃO VERIFICADO
 
+FLAGS DE collect E analyze
+  collect --out F [--root PATH]      escreve o dump ("-" = stdout)
+  analyze DUMP [--ioc F] [--since S] [--only G,G] [--mode M] [--baseline F]
+               [--json F] [-v|-vv]
+
+  Existem para separar o tempo NO HOST do tempo de análise: a coleta é curta, e
+  a análise acontece do lado limpo, quantas vezes for preciso, com checks mais
+  novos e com a lista de indicadores que só apareceu depois.
+
+  A ANÁLISE HERDA A COBERTURA DA COLETA e não pode melhorá-la. Um dump feito sem
+  root continua sem root quando analisado numa estação com root: o que ninguém
+  olhou continua não olhado, e o relatório diz isso.
+
+  O --since do analyze é ancorado no instante da COLETA, não no relógio de quem
+  analisa: "as 72h anteriores ao retrato" é a pergunta que faz sentido.
+
+  Hash de indicador é a única coisa que o analyze não procura sozinho: hash se
+  calcula durante a coleta. Uma lista com hashes sobre um dump que não os
+  calculou vira lacuna DECLARADA, não "nada encontrado".
+
 FLAGS DE preserve
   --out DIR     onde escrever. OBRIGATÓRIO: este comando não escolhe o lugar.
                 O diretório precisa já existir, e nada nele é sobrescrito
@@ -120,6 +142,9 @@ EXIT CODES
   No preserve a escala é a mesma, sobre a coleta: 0 guardou tudo o que foi
   pedido, 1 alguma peça ficou de fora (e está no manifesto), 2 a origem mudou
   durante a cópia, 3 invocação inválida — nada foi escrito.
+
+  O collect não conclui nada: 0 significa que o dump foi escrito, e só. O
+  veredito vem do analyze, na escala de sempre.
 
 LIMITES — leia antes de confiar num resultado limpo
   * "RESULT: OK" significa que nenhum indicador COBERTO disparou. Não é prova
@@ -161,6 +186,10 @@ func main() {
 		os.Exit(runBaseline(os.Args[2:]))
 	case "preserve":
 		os.Exit(runPreserve(os.Args[2:]))
+	case "collect":
+		os.Exit(runCollect(os.Args[2:]))
+	case "analyze":
+		os.Exit(runAnalyze(os.Args[2:]))
 	case "checks":
 		os.Exit(runChecks(os.Args[2:]))
 	case "version":
@@ -258,7 +287,7 @@ func runWtf(args []string) int {
 	}
 
 	if *jsonOut != "" {
-		if code := writeJSONL(*jsonOut, r, f, e, bl, nil); code != 0 {
+		if code := writeJSONL(*jsonOut, r, f, e, bl, nil, nil); code != 0 {
 			return code
 		}
 	}
@@ -337,43 +366,19 @@ func runScan(args []string, wtf bool) int {
 
 	r := check.Run(selected, f, e)
 
-	collectorGaps(r, f)
-
-	bl, code := aplicarBaseline(r, f, e, *base)
-	if code != 0 {
-		return code
-	}
-
-	// A janela é aplicada DEPOIS da baseline: ela conta por severidade o que
-	// removeu, e a baseline é quem decide a severidade final.
-	jn := aplicarJanela(r, janela)
-
-	v := 0
-	if *verbose {
-		v = 1
-	}
-	if *verbose2 {
-		v = 2
-	}
-	// Com --json -, o JSONL é o produto do stdout e o relatório humano vai para
-	// stderr. Misturar os dois no mesmo descritor tornava
-	// `scan --json - > out.jsonl` um arquivo inválido — e é assim que a
+	// A cauda é a MESMA do `analyze`, de propósito: ver `emitir`. A janela é
+	// aplicada depois da baseline — ela conta por severidade o que removeu, e a
+	// baseline é quem decide a severidade final. E com `--json -` o JSONL é o
+	// produto do stdout, com o relatório humano indo para stderr: misturar os
+	// dois tornava `scan --json - > out.jsonl` um arquivo inválido, que é como a
 	// agregação de frota consome a saída.
-	humanOut := io.Writer(os.Stdout)
-	if *jsonOut == "-" {
-		humanOut = os.Stderr
-	}
-	report.Human(humanOut, r, f, e, report.Options{
-		Verbose: v, Baseline: bl, IOC: infoIOC(lista), Janela: jn,
+	return emitir(r, f, e, saida{
+		baseline: *base,
+		janela:   janela,
+		ioc:      lista,
+		jsonOut:  *jsonOut,
+		verbose:  nivel(*verbose, *verbose2),
 	})
-
-	if *jsonOut != "" {
-		if code := writeJSONL(*jsonOut, r, f, e, bl, jn); code != 0 {
-			return code
-		}
-	}
-
-	return r.Exit()
 }
 
 // aplicarJanela recorta o relatório e monta o que precisa ser DITO sobre o
@@ -549,7 +554,7 @@ func collectorGaps(r *check.Report, f *facts.Facts) {
 	}
 }
 
-func writeJSONL(path string, r *check.Report, f *facts.Facts, e *env.Env, bl *report.BaselineInfo, jn *report.JanelaInfo) int {
+func writeJSONL(path string, r *check.Report, f *facts.Facts, e *env.Env, bl *report.BaselineInfo, jn *report.JanelaInfo, an *report.AnaliseInfo) int {
 	w := os.Stdout
 	if path != "-" {
 		fh, err := openJSONOut(path)
@@ -560,7 +565,7 @@ func writeJSONL(path string, r *check.Report, f *facts.Facts, e *env.Env, bl *re
 		defer fh.Close()
 		w = fh
 	}
-	if err := report.JSONL(w, r, f, e, bl, jn); err != nil {
+	if err := report.JSONL(w, r, f, e, bl, jn, an); err != nil {
 		fmt.Fprintf(os.Stderr, "erro ao escrever JSONL: %v\n", err)
 		return 3
 	}

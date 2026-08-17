@@ -54,13 +54,43 @@ type coverageLine struct {
 	CollectorGaps []string `json:"collector_gaps,omitempty"`
 	TrustBroken   []string `json:"trust_broken,omitempty"`
 
+	// Replay marca a cobertura que veio de um dump. Fica na linha de COBERTURA,
+	// e não só na de análise, porque é esta que o agregador consulta para
+	// decidir se um host foi verificado — e "verificado quando?" faz parte da
+	// resposta.
+	Replay bool `json:"replay,omitempty"`
+
 	Verdict string `json:"verdict"`
 	Exit    int    `json:"exit"`
 }
 
+// analiseLine declara que a execução leu um retrato, não um host.
+type analiseLine struct {
+	Host string `json:"host"`
+	TS   string `json:"ts"`
+	Tool string `json:"tool"`
+	ID   string `json:"id"`
+
+	Arquivo     string `json:"from,omitempty"`
+	ColetadoEm  string `json:"collected_at,omitempty"`
+	ColetadoPor string `json:"collected_by,omitempty"`
+	ColetaSHA   string `json:"collector_sha256,omitempty"`
+
+	AnalisadoEm  string `json:"analyzed_at,omitempty"`
+	AnalisadoPor string `json:"analyzed_by,omitempty"`
+
+	Estranhas []string `json:"unknown_caps,omitempty"`
+}
+
 // JSONL escreve uma finding por linha, mais a linha de cobertura.
 // Nunca é afetado pela verbosidade.
-func JSONL(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, bl *BaselineInfo, jn *JanelaInfo) error {
+//
+// O `an` não-nulo diz que estes achados vieram de um DUMP. A automação de frota
+// precisa disso tanto quanto o humano: sem a linha, um replay de um retrato de
+// três dias atrás entra no agregador indistinguível de uma varredura de agora, e
+// o `ts` — que é o da COLETA, e não o da análise — vira uma data que ninguém
+// sabe interpretar.
+func JSONL(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, bl *BaselineInfo, jn *JanelaInfo, an *AnaliseInfo) error {
 	enc := json.NewEncoder(w)
 	host := f.Host.Hostname
 	ts := e.Now.Format("2006-01-02T15:04:05Z")
@@ -113,9 +143,21 @@ func JSONL(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, bl *Baselin
 		}
 	}
 
+	if an != nil {
+		if err := enc.Encode(analiseLine{
+			Host: host, TS: ts, Tool: tool, ID: "analysis",
+			Arquivo: an.Arquivo, ColetadoEm: an.ColetadoEm, ColetadoPor: an.ColetadoPor,
+			ColetaSHA: an.ColetaSHA, AnalisadoEm: an.AnalisadoEm,
+			AnalisadoPor: an.AnalisadoPor, Estranhas: an.Estranhas,
+		}); err != nil {
+			return err
+		}
+	}
+
 	return enc.Encode(coverageLine{
 		Host: host, TS: ts, Tool: tool, ID: "coverage",
-		Total: r.Coverage.Total, Complete: r.Coverage.Complete,
+		Replay: an != nil,
+		Total:  r.Coverage.Total, Complete: r.Coverage.Complete,
 		Partial: r.Coverage.Partial, NotChecked: r.Coverage.NotChecked,
 		CollectorGaps: r.Coverage.CollectorGaps, TrustBroken: r.TrustBroken,
 		Verdict: r.Verdict(), Exit: r.Exit(),

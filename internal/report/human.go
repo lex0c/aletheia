@@ -30,6 +30,32 @@ type Options struct {
 	// indicadores e uma que procurou por dois, de uma lista mal entendida,
 	// terminam iguais no papel se ninguém contar quantos entraram.
 	IOC *IOCInfo
+
+	// Analise diz que este relatório NÃO descreve o host agora: descreve o
+	// retrato que alguém tirou dele, em outro lugar e em outra hora. Nil = a
+	// execução olhou o host de verdade.
+	Analise *AnaliseInfo
+}
+
+// AnaliseInfo é o que o relatório precisa dizer quando os fatos vieram de um
+// dump.
+//
+// Sem este bloco, um `analyze` de três dias atrás é visualmente idêntico a um
+// `scan` de agora — mesmo cabeçalho, mesmo veredito, mesmo exit code. O
+// operador leria "RESULT: OK" e concluiria que o host está limpo NESTE momento,
+// que é uma afirmação que ninguém fez.
+type AnaliseInfo struct {
+	Arquivo     string
+	ColetadoEm  string
+	ColetadoPor string
+	ColetaSHA   string
+
+	AnalisadoPor string
+	AnalisadoEm  string
+
+	// Estranhas são capacidades que o dump declara e este binário não conhece:
+	// a coleta é de uma versão MAIS NOVA, e há um eixo que esta análise ignorou.
+	Estranhas []string
 }
 
 // JanelaInfo é o que o relatório precisa dizer sobre o recorte temporal.
@@ -80,6 +106,7 @@ type BaselineInfo struct {
 // incidente.
 func Human(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, o Options) {
 	writeHeader(w, f, e)
+	writeAnalise(w, o.Analise)
 	writeBaseline(w, o.Baseline)
 	writeJanela(w, o.Janela)
 	writeIOC(w, o.IOC)
@@ -125,6 +152,32 @@ func writeHeader(w io.Writer, f *facts.Facts, e *env.Env) {
 
 	fmt.Fprintf(w, "relógio %s · %s · modo %s · aletheia %s\n",
 		e.Clock, e.Now.Format("2006-01-02T15:04:05Z"), e.Source, nz(e.ToolVersion, "dev"))
+	fmt.Fprintln(w)
+}
+
+// writeAnalise avisa, antes de qualquer achado, que o relatório descreve um
+// RETRATO e não o host de agora.
+//
+// A linha que importa é a última: a cobertura é a da coleta. É ela que impede a
+// leitura errada de um `analyze` rodado numa estação com root sobre um dump
+// feito sem root — os números são os de lá, e melhorá-los aqui seria afirmar
+// que alguém olhou o que ninguém olhou.
+func writeAnalise(w io.Writer, a *AnaliseInfo) {
+	if a == nil {
+		return
+	}
+	fmt.Fprintf(w, "ANÁLISE DE COLETA · %s\n", Safe(a.Arquivo))
+	fmt.Fprintf(w, "  coletado em %s por %s\n",
+		Safe(nz(a.ColetadoEm, "data ilegível no dump")), Safe(nz(a.ColetadoPor, "ferramenta não declarada")))
+	if a.ColetaSHA != "" {
+		fmt.Fprintf(w, "  binário da coleta sha256=%s\n", Safe(a.ColetaSHA))
+	}
+	fmt.Fprintf(w, "  analisado em %s por %s\n", Safe(a.AnalisadoEm), Safe(a.AnalisadoPor))
+	for _, c := range a.Estranhas {
+		fmt.Fprintf(w, "  ⚠ a coleta declarou a capacidade %q, que esta versão não conhece:\n"+
+			"    há um eixo aqui que ESTA análise ignorou — use a versão que coletou\n", Safe(c))
+	}
+	fmt.Fprintln(w, "  nada foi olhado agora: os fatos e a COBERTURA são os da coleta")
 	fmt.Fprintln(w)
 }
 

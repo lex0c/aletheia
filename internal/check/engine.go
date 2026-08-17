@@ -100,6 +100,10 @@ func Run(checks []Check, f *facts.Facts, e *env.Env) *Report {
 
 // RunWith é o Run com limites.
 func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
+	// Um Facts vindo de dump ainda não tem índice, e sem ele as buscas por PID
+	// e por inode voltam a ser lineares dentro de um laço sobre processos.
+	f.Index()
+
 	r := &Report{Coverage: Coverage{Total: len(checks)}}
 
 	for _, c := range checks {

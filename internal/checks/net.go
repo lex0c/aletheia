@@ -47,7 +47,7 @@ var revshell = check.Check{
 			if !ok {
 				continue
 			}
-			sock := socketByInode(f, inode)
+			sock := f.SocketByInode(inode)
 			if sock == nil {
 				continue // socket sumiu entre a leitura dos fds e a da tabela
 			}
@@ -194,15 +194,6 @@ func hasPTY(p *facts.Process) bool {
 		}
 	}
 	return false
-}
-
-func socketByInode(f *facts.Facts, inode uint64) *facts.Socket {
-	for i := range f.Sockets {
-		if f.Sockets[i].Inode == inode {
-			return &f.Sockets[i]
-		}
-	}
-	return nil
 }
 
 func joinPeers(ss []facts.Socket, max int) string {

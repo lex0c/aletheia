@@ -638,3 +638,93 @@ pelo host. Agora roda com `-nic none`. Um cenário de resposta a incidente não
 pode dar saída de rede a implante de teste nenhum.
 
 Total: **46 cenários**, 2 pulados com motivo documentado.
+
+---
+
+## Registro — desempenho em servidor grande
+
+Pergunta que motivou: **aguenta um servidor real — muitos processos, memória,
+rede?** Medido, não estimado.
+
+### O defeito: custo quadrático nos checks
+
+`net.pivot` perguntava "quais sockets são deste processo" para CADA processo, e
+`SocketsOf` varria a tabela inteira toda vez. P×S.
+
+```
+                              antes      depois
+500 proc  ·   2k sockets      4,2ms      0,55ms
+2k proc   ·  16k sockets      136ms      3,8ms
+5k proc   ·  40k sockets      962ms      9,6ms     ← 100×
+2k proc   · 100k sockets     1563ms      13,2ms    ← 118×
+```
+
+O caso de 100 mil conexões — um balanceador comum — gastava **1,5s só de laço**,
+antes da coleta e mais que o orçamento inteiro do `wtf`. `facts.Index()` monta
+as três buscas por chave (socket→PID, inode→socket, PID→processo) uma vez.
+
+`TestCustoNaoEhQuadratico` trava isso com 300ms: 30× de folga sobre o bom, 3× de
+margem sob o ruim.
+
+### A coleta: onde o tempo estava
+
+Medido contra o `/proc` real, por leitor:
+
+```
+readMaps      18,8ms   36% do tempo · 13,6MB  67% de toda a memória
+readStatus     6,4ms
+readFDs        5,0ms
+readNS         2,8ms
+readEnviron    1,8ms
+readExe        0,65ms
+```
+
+`readMaps` lia o arquivo inteiro para a memória e fatiava a string toda — uma
+JVM tem dezenas de milhares de linhas de maps. Passou a percorrer em FLUXO, com
+o laço quente em `[]byte` e conversão para string só quando há achado. O teto de
+linhas deixou de ser cosmético: passando dele, o resto do arquivo não é lido.
+
+```
+memória total da coleta   20,3MB → 8,5MB      (-58%)
+```
+
+O TEMPO de `readMaps`, porém, não se moveu: é o kernel formatando o texto na
+hora da leitura, e otimização de parsing não alcança isso.
+
+### O alívio real: leitura paralela
+
+Cada PID é independente — arquivos diferentes, sem estado compartilhado. A
+agregação continua serial, para a ordem do relatório não depender de qual worker
+terminou primeiro.
+
+O teto é **8 workers**, baixo de propósito: este binário roda em host sob
+incidente, possivelmente já sobrecarregado, e um scanner que satura a CPU
+atrapalha exatamente quem está respondendo. Em VM de 1 vCPU o resultado é
+serial, como antes.
+
+```
+coleta no host (316 proc)    52ms → 13,5ms
+1000 processos              200ms → 50ms
+3000 processos              510ms → 150ms
+```
+
+`go test -race` limpo.
+
+### Números finais, em contêiner
+
+```
+2017 proc ·  12.001 sockets    scan 130ms · wtf 130ms
+8036 proc ·  48.012 sockets    scan 420ms · wtf 410ms
+```
+
+Um servidor de 8 mil processos e 48 mil conexões é varrido em **0,42s** — cinco
+vezes dentro do orçamento do `wtf`.
+
+### Memória
+
+```
+754 KiB retidos para 316 processos  =  2,4 KB por processo
+```
+
+10 mil processos ≈ 24 MB retidos. Cabe em VM pequena junto com o que já roda
+nela — que é o requisito real, já que a ferramenta chega num host em incidente.

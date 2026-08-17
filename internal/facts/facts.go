@@ -36,6 +36,46 @@ type Facts struct {
 	// Partial registra o que a própria coleta não conseguiu ler, por coletor.
 	// Não é o mesmo que "não havia nada": é "não deu para olhar".
 	Partial map[string][]string `json:"partial,omitempty"`
+
+	idx *idx
+}
+
+// idx são as buscas por chave. Sem elas, um check que pergunta "quais sockets
+// são deste processo" para CADA processo custa P×S: num balanceador com 2 mil
+// processos e 100 mil conexões isso mediu 1,5s só de laço — mais que o
+// orçamento inteiro do `wtf`, antes mesmo da coleta.
+//
+// Fica fora do JSON de propósito: é derivado, e um dump carregado reconstrói.
+type idx struct {
+	socketsByPID  map[int][]Socket
+	socketByInode map[uint64]int // inode → posição em f.Sockets
+	procByPID     map[int]int    // pid → posição em f.Processes
+}
+
+// Index constrói as buscas. É idempotente e barato de chamar de novo; quem
+// carrega um dump precisa chamá-lo, e o motor chama por garantia ANTES de
+// qualquer check — o que também garante que a construção preguiçosa lá dentro
+// nunca aconteça com checks concorrentes.
+func (f *Facts) Index() {
+	if f.idx != nil {
+		return
+	}
+	x := &idx{
+		socketsByPID:  make(map[int][]Socket, len(f.Processes)),
+		socketByInode: make(map[uint64]int, len(f.Sockets)),
+		procByPID:     make(map[int]int, len(f.Processes)),
+	}
+	for i := range f.Processes {
+		x.procByPID[f.Processes[i].PID] = i
+	}
+	for i := range f.Sockets {
+		s := &f.Sockets[i]
+		x.socketByInode[s.Inode] = i
+		if s.PID != 0 {
+			x.socketsByPID[s.PID] = append(x.socketsByPID[s.PID], *s)
+		}
+	}
+	f.idx = x
 }
 
 func (f *Facts) partial(collector, reason string) {
@@ -64,26 +104,32 @@ func Collect(e *env.Env) *Facts {
 		f.partial("proc", e.Reason(env.CapProcfs))
 	}
 
+	f.Index()
 	return f
 }
 
-// SocketsOf devolve os sockets pertencentes a um PID.
+// SocketsOf devolve os sockets pertencentes a um PID. O slice é do índice:
+// leia, não modifique.
 func (f *Facts) SocketsOf(pid int) []Socket {
-	var out []Socket
-	for _, s := range f.Sockets {
-		if s.PID == pid {
-			out = append(out, s)
-		}
+	f.Index()
+	return f.idx.socketsByPID[pid]
+}
+
+// SocketByInode devolve o socket daquele inode, ou nil. É como se sai do fd
+// para a conexão (runbook §3.8).
+func (f *Facts) SocketByInode(inode uint64) *Socket {
+	f.Index()
+	if i, ok := f.idx.socketByInode[inode]; ok {
+		return &f.Sockets[i]
 	}
-	return out
+	return nil
 }
 
 // ProcessByPID devolve o processo, ou nil.
 func (f *Facts) ProcessByPID(pid int) *Process {
-	for i := range f.Processes {
-		if f.Processes[i].PID == pid {
-			return &f.Processes[i]
-		}
+	f.Index()
+	if i, ok := f.idx.procByPID[pid]; ok {
+		return &f.Processes[i]
 	}
 	return nil
 }

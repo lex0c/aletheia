@@ -175,3 +175,21 @@ func TestProcessosQueSumiramNaoDegradamCobertura(t *testing.T) {
 		t.Error("mas a contagem precisa continuar visível no JSONL")
 	}
 }
+
+// Um defeito NOSSO não pode virar afirmação sobre o host. Antes de a coleta ser
+// paralela, o panic subia até o recover() do main e virava exit 3 (ERROR). Em
+// goroutine o recover do main não alcança: o processo morre com status 2, que
+// este contrato define como "CRITICAL — indicador de alta confiança", e a
+// automação de frota marcaria o host como comprometido.
+func TestPanicNoColetorNaoDerrubaOProcesso(t *testing.T) {
+	// PID negativo faz procPath produzir caminho inválido; o que interessa é
+	// que readProcessGuarded devolva em vez de propagar.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("o panic escapou do guarda: %v", r)
+		}
+	}()
+	if _, out, _ := readProcessGuarded(-1); out == readOK {
+		t.Error("PID inválido não pode sair como leitura bem-sucedida")
+	}
+}

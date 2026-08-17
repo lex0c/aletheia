@@ -160,6 +160,13 @@ func runWtf(args []string) int {
 
 	e := env.Probe(env.Options{Root: *root, Version: version})
 	defer e.Close()
+	// Mesma recusa do scan: --root que não abre é ERRO de invocação, não host
+	// suspeito. Sem isto o wtf saía 1 (WARNING) para um caminho digitado
+	// errado, e a triagem de frota ordena por exit code.
+	if e.Source == env.SourceImage && !e.Has(env.CapFilesystem) {
+		fmt.Fprintf(os.Stderr, "não foi possível abrir --root com raiz travada: %v\n", e.RootErr)
+		return 3
+	}
 	f := facts.Collect(e)
 
 	selected := check.Select(check.Selection{Wtf: true})
@@ -181,7 +188,7 @@ func runWtf(args []string) int {
 	if *oneline {
 		report.Oneline(out, r)
 	} else {
-		report.Wtf(out, r, f, e, elapsed)
+		report.Wtf(out, r, f, e, elapsed, len(check.All()))
 	}
 
 	if *jsonOut != "" {

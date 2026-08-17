@@ -21,6 +21,17 @@ func sock(inode uint64, pid int, dir facts.Direction, scope facts.Scope, peer st
 	}
 }
 
+// sockFDs liga o processo aos sockets pelo DESCRITOR, que é como o kernel de
+// fato relaciona os dois. O índice é construído por aí — e é o que faz um
+// socket herdado por fork aparecer nos DOIS processos.
+func sockFDs(inodes ...uint64) []facts.FD {
+	var out []facts.FD
+	for i, in := range inodes {
+		out = append(out, facts.FD{N: 10 + i, Socket: true, SocketInode: in})
+	}
+	return out
+}
+
 func stdio(inode uint64) []facts.FD {
 	var out []facts.FD
 	for n := 0; n < 3; n++ {
@@ -117,7 +128,8 @@ func TestRevshellRegistraPTYComoInterativo(t *testing.T) {
 // socket para o backend interno.
 func TestPivotNaoDisparaEmProxyReverso(t *testing.T) {
 	f := &facts.Facts{
-		Processes: []facts.Process{{PID: 900, Comm: "nginx", Exe: "/usr/sbin/nginx"}},
+		Processes: []facts.Process{{PID: 900, Comm: "nginx", Exe: "/usr/sbin/nginx",
+			FDs: sockFDs(1, 2)}},
 		Sockets: []facts.Socket{
 			sock(1, 900, facts.DirIn, facts.ScopePublic, "203.0.113.9"), // cliente
 			sock(2, 900, facts.DirOut, facts.ScopePrivate, "10.0.0.9"),  // backend
@@ -131,7 +143,8 @@ func TestPivotNaoDisparaEmProxyReverso(t *testing.T) {
 
 func TestPivotDisparaComSaidaNosDoisLados(t *testing.T) {
 	f := &facts.Facts{
-		Processes: []facts.Process{{PID: 3311, Comm: "node", Exe: "/usr/bin/node"}},
+		Processes: []facts.Process{{PID: 3311, Comm: "node", Exe: "/usr/bin/node",
+			FDs: sockFDs(1, 2, 3)}},
 		Sockets: []facts.Socket{
 			sock(1, 3311, facts.DirOut, facts.ScopePublic, "51.91.190.241"), // operador
 			sock(2, 3311, facts.DirOut, facts.ScopePrivate, "10.0.0.9"),     // alvo interno
@@ -152,8 +165,12 @@ func TestPivotDisparaComSaidaNosDoisLados(t *testing.T) {
 
 func TestPivotExigeOsDoisLados(t *testing.T) {
 	só := func(ss ...facts.Socket) *facts.Facts {
+		inodes := make([]uint64, 0, len(ss))
+		for _, s := range ss {
+			inodes = append(inodes, s.Inode)
+		}
 		return &facts.Facts{
-			Processes: []facts.Process{{PID: 1, Comm: "x"}},
+			Processes: []facts.Process{{PID: 1, Comm: "x", FDs: sockFDs(inodes...)}},
 			Sockets:   ss,
 		}
 	}
@@ -166,6 +183,37 @@ func TestPivotExigeOsDoisLados(t *testing.T) {
 		if r := pivot.Run(pivot, f, testEnv()); len(r.Findings) != 0 {
 			t.Errorf("%s não é pivô", nome)
 		}
+	}
+}
+
+// Um socket herdado por fork pertence aos DOIS processos. Modelar um dono só —
+// o último a escrever no join — fazia um pivô cujo filho ficou com uma das
+// pernas não disparar em ninguém.
+func TestSocketHerdadoPorForkApareceNosDoisProcessos(t *testing.T) {
+	ext := sock(1, 100, facts.DirOut, facts.ScopePublic, "51.91.190.241")
+	int1 := sock(2, 100, facts.DirOut, facts.ScopePrivate, "10.0.0.9")
+	f := &facts.Facts{
+		Processes: []facts.Process{
+			{PID: 100, Comm: "pai", Exe: "/tmp/.x", FDs: sockFDs(1, 2)},
+			{PID: 101, PPID: 100, Comm: "filho", Exe: "/tmp/.x", FDs: sockFDs(1, 2)},
+		},
+		Sockets: []facts.Socket{ext, int1},
+	}
+	r := pivot.Run(pivot, f, testEnv())
+	if len(r.Findings) != 2 {
+		t.Fatalf("achados = %d, quer 2: os dois processos detêm as duas pernas", len(r.Findings))
+	}
+}
+
+// E dup2 do mesmo socket sobre vários descritores não pode contar como vários
+// sockets: seria inventar conexão que não existe.
+func TestDupDoMesmoSocketNaoDuplica(t *testing.T) {
+	f := &facts.Facts{
+		Processes: []facts.Process{{PID: 10, Comm: "x", FDs: sockFDs(7, 7, 7)}},
+		Sockets:   []facts.Socket{sock(7, 10, facts.DirOut, facts.ScopePublic, "1.2.3.4")},
+	}
+	if n := len(f.SocketsOf(10)); n != 1 {
+		t.Errorf("SocketsOf devolveu %d sockets para três fds do mesmo, quer 1", n)
 	}
 }
 

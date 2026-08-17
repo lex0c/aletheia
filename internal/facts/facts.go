@@ -69,10 +69,28 @@ func (f *Facts) Index() {
 		x.procByPID[f.Processes[i].PID] = i
 	}
 	for i := range f.Sockets {
-		s := &f.Sockets[i]
-		x.socketByInode[s.Inode] = i
-		if s.PID != 0 {
-			x.socketsByPID[s.PID] = append(x.socketsByPID[s.PID], *s)
+		x.socketByInode[f.Sockets[i].Inode] = i
+	}
+	// A relação socket→processo é de MUITOS para muitos: um fork herda o fd, e
+	// pai e filho passam a deter o mesmo socket. Construir o índice a partir do
+	// campo Socket.PID daria um dono só — o último a escrever no join — e um
+	// pivô cujo filho ficou com uma das pernas não dispararia em ninguém.
+	//
+	// Construir do lado do PROCESSO resolve: cada dono enxerga o que realmente
+	// tem aberto.
+	for i := range f.Processes {
+		p := &f.Processes[i]
+		visto := map[uint64]bool{}
+		for _, fd := range p.FDs {
+			if !fd.Socket || visto[fd.SocketInode] {
+				continue // dup2 do mesmo socket não conta duas vezes
+			}
+			si, ok := x.socketByInode[fd.SocketInode]
+			if !ok {
+				continue
+			}
+			visto[fd.SocketInode] = true
+			x.socketsByPID[p.PID] = append(x.socketsByPID[p.PID], f.Sockets[si])
 		}
 	}
 	f.idx = x

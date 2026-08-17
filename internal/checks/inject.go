@@ -51,9 +51,10 @@ var mapsRWXAnon = check.Check{
 			if p.Self || p.Vanished {
 				continue
 			}
+			// Conta a lacuna, mas NÃO descarta: um maps lido pela metade pode
+			// já ter revelado a região rwx, e achado é achado.
 			if p.MapsDenied {
 				denied++
-				continue
 			}
 			var anon []string
 			for _, m := range p.MapsRWX {

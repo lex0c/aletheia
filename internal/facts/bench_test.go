@@ -43,7 +43,7 @@ func benchReader(b *testing.B, fn func(*Process)) {
 
 func BenchmarkReadMaps(b *testing.B)    { benchReader(b, readMaps) }
 func BenchmarkReadFDs(b *testing.B)     { benchReader(b, readFDs) }
-func BenchmarkReadStatus(b *testing.B)  { benchReader(b, readStatus) }
+func BenchmarkReadStatus(b *testing.B)  { benchReader(b, func(p *Process) { _ = readStatus(p) }) }
 func BenchmarkReadEnviron(b *testing.B) { benchReader(b, readEnviron) }
 func BenchmarkReadNS(b *testing.B)      { benchReader(b, readNS) }
 func BenchmarkReadExe(b *testing.B)     { benchReader(b, readExe) }

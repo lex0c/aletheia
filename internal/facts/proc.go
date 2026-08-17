@@ -3,6 +3,7 @@ package facts
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"os"
 	"sort"
 	"strconv"
@@ -185,8 +186,9 @@ func collectProcesses(f *Facts, e *env.Env) {
 	workers := e.Workers(maxCollectWorkers)
 
 	type slot struct {
-		p       *Process
-		outcome readOutcome
+		p        *Process
+		outcome  readOutcome
+		panicked string
 	}
 	slots := make([]slot, len(pids))
 	var next atomic.Int64
@@ -200,7 +202,7 @@ func collectProcesses(f *Facts, e *env.Env) {
 				if i >= len(pids) {
 					return
 				}
-				slots[i].p, slots[i].outcome = readProcess(pids[i])
+				slots[i].p, slots[i].outcome, slots[i].panicked = readProcessGuarded(pids[i])
 			}
 		}()
 	}
@@ -209,8 +211,13 @@ func collectProcesses(f *Facts, e *env.Env) {
 	// A agregação volta a ser serial: a ordem do relatório não pode depender de
 	// qual worker terminou primeiro.
 	var denied, deniedMaps, deniedNS, gone, hidden, listed int
+	var panics []string
 	for i := range slots {
 		listed++
+		if slots[i].panicked != "" {
+			panics = append(panics, "pid "+strconv.Itoa(pids[i])+": "+slots[i].panicked)
+			continue
+		}
 		p, outcome := slots[i].p, slots[i].outcome
 		switch outcome {
 		case readGone:
@@ -267,6 +274,12 @@ func collectProcesses(f *Facts, e *env.Env) {
 	if deniedNS > 0 {
 		f.partial("proc", strconv.Itoa(deniedNS)+" processos com /proc/<pid>/ns/* ilegível "+
 			"(sem permissão): namespace próprio não pôde ser avaliado neles")
+	}
+	if len(panics) > 0 {
+		// Defeito da ferramenta é lacuna de cobertura, não achado sobre o host.
+		f.partial("proc", strconv.Itoa(len(panics))+" PIDs derrubaram o coletor "+
+			"(DEFEITO DA FERRAMENTA, não do host): "+strings.Join(panics, " · ")+
+			" — esses processos NÃO foram avaliados por check nenhum")
 	}
 	if hidden > 0 {
 		f.partial("proc", strconv.Itoa(hidden)+" de "+strconv.Itoa(listed)+
@@ -347,6 +360,26 @@ const (
 	readDenied
 )
 
+// readProcessGuarded isola a falha de UM pid.
+//
+// Não é zelo genérico: antes de a coleta ser paralela, um panic aqui subia até
+// o recover() do main e virava exit 3 (ERROR). Em goroutine, o recover do main
+// NÃO alcança — o processo morre com status 2, que o contrato desta ferramenta
+// define como "CRITICAL: indicador de alta confiança". Um defeito NOSSO faria a
+// automação de frota marcar o host como comprometido.
+//
+// É a mesma correção que o runGuarded fez para os checks, no lugar onde a
+// paralelização a desfez.
+func readProcessGuarded(pid int) (p *Process, out readOutcome, panicked string) {
+	defer func() {
+		if r := recover(); r != nil {
+			p, out, panicked = nil, readDenied, fmt.Sprint(r)
+		}
+	}()
+	p, out = readProcess(pid)
+	return p, out, ""
+}
+
 func readProcess(pid int) (*Process, readOutcome) {
 	p := &Process{PID: pid, NS: map[string]string{}}
 
@@ -377,7 +410,15 @@ func readProcess(pid int) (*Process, readOutcome) {
 		p.startTicks, _ = strconv.ParseInt(rest[19], 10, 64) // campo 22
 	}
 
-	readStatus(p)
+	// Status lido pela METADE deixa UID e EUID em zero, e zero é root: o
+	// processo passaria a ser pulado por proc.caps_unexpected como se fosse
+	// root legítimo. Sem a identidade, não afirmamos nada sobre este PID.
+	if err := readStatus(p); err != nil {
+		if os.IsNotExist(err) {
+			return nil, readGone
+		}
+		return nil, readDenied
+	}
 	readExe(p)
 	readCwd(p)
 	readCmdline(p)
@@ -395,10 +436,10 @@ func readProcess(pid int) (*Process, readOutcome) {
 // O status vem com cerca de 60 linhas e as quatro que interessam estão nas
 // primeiras vinte: ler o resto é trabalho jogado fora, multiplicado por
 // processo.
-func readStatus(p *Process) {
+func readStatus(p *Process) error {
 	fh, err := os.Open(procPath(p.PID, "status"))
 	if err != nil {
-		return
+		return err
 	}
 	defer fh.Close()
 
@@ -446,6 +487,9 @@ func readStatus(p *Process) {
 			p.CapEff, _ = strconv.ParseUint(v, 16, 64)
 		}
 	}
+	// sc.Scan() devolve false tanto no fim do arquivo quanto em ERRO. Sem
+	// consultar sc.Err(), ler metade é indistinguível de ler tudo.
+	return sc.Err()
 }
 
 func readExe(p *Process) {
@@ -728,6 +772,12 @@ func readMaps(p *Process) {
 		}
 		oddSeen[ps] = true
 		p.MapsOdd = append(p.MapsOdd, ps)
+	}
+	// Mesmo motivo do readStatus: metade do maps lida sem rwx não é "não há
+	// rwx". O que já foi encontrado continua valendo — achado é achado —, mas
+	// o processo passa a contar como não avaliado.
+	if sc.Err() != nil {
+		p.MapsDenied = true
 	}
 }
 

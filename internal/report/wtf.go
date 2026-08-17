@@ -22,19 +22,32 @@ const maxWtfLinhas = 8
 // Não é "scan compacto". A densidade de exibição fica parecida; o que muda é a
 // COBERTURA — um punhado de checks decisivos contra o catálogo inteiro. O
 // rodapé existe para que ninguém confunda os dois.
-func Wtf(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, elapsed time.Duration) {
+// catalogo é o total de checks registrados. Serve para o rodapé só mandar rodar
+// o `scan` quando ele REALMENTE acrescenta — mandar o operador repetir trabalho
+// que não muda nada é o mesmo tipo de mentira que a ferramenta evita nos
+// achados.
+func Wtf(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, elapsed time.Duration, catalogo int) {
 	writeWtfHeader(w, f, e)
+
+	sobra := catalogo - r.Coverage.Total
 
 	if len(r.Findings) == 0 {
 		fmt.Fprintf(w, "✓ nenhum indicador decisivo em %d checks (%s)\n", r.Coverage.Total, dur(elapsed))
-		fmt.Fprintln(w, "  isto NÃO significa host limpo (runbook §35.8). Para o resto: aletheia scan")
+		fmt.Fprintln(w, "  isto NÃO significa host limpo (runbook §35.8)."+maisChecks(sobra))
 		fmt.Fprintln(w)
 	} else {
 		writeWtfFindings(w, r)
 	}
 
 	writeWtfGaps(w, r)
-	writeWtfResult(w, r, elapsed)
+	writeWtfResult(w, r, elapsed, sobra)
+}
+
+func maisChecks(sobra int) string {
+	if sobra <= 0 {
+		return ""
+	}
+	return " Para o resto: aletheia scan (+" + strconv.Itoa(sobra) + " checks)"
 }
 
 func writeWtfHeader(w io.Writer, f *facts.Facts, e *env.Env) {
@@ -74,7 +87,7 @@ func contagens(f *facts.Facts) string {
 		switch {
 		case s.State == "ESTAB":
 			estab++
-		case s.State == "LISTEN" && s.LocalIP != "" && !isLoopbackIP(s.LocalIP):
+		case s.Dir == facts.DirListen && facts.IsExposedLocal(s.LocalIP):
 			pub++
 		}
 	}
@@ -82,19 +95,22 @@ func contagens(f *facts.Facts) string {
 		len(f.Processes), estab, pub)
 }
 
-func isLoopbackIP(ip string) bool {
-	return strings.HasPrefix(ip, "127.") || ip == "::1"
-}
-
 func writeWtfFindings(w io.Writer, r *check.Report) {
+	// O denominador conta só o que SERIA impresso: usar len(r.Findings) incluiria
+	// os INFO, que nunca aparecem, e a linha prometeria achados inexistentes.
+	total := 0
+	for _, fd := range r.Findings {
+		if fd.Sev != check.SevInfo {
+			total++
+		}
+	}
 	n := 0
 	for _, fd := range r.Findings {
 		if fd.Sev == check.SevInfo {
 			continue
 		}
 		if n >= maxWtfLinhas {
-			fmt.Fprintf(w, "   … e mais %d achados — `aletheia scan -v`\n\n",
-				len(r.Findings)-n)
+			fmt.Fprintf(w, "   … e mais %d achados — `aletheia scan -v`\n\n", total-n)
 			return
 		}
 		n++
@@ -166,9 +182,16 @@ func partialReasons(c check.Coverage) []string {
 
 // writeWtfResult é obrigatório e sempre diz que isto NÃO foi varredura. É o
 // comando com maior risco de ser lido como "host limpo".
-func writeWtfResult(w io.Writer, r *check.Report, elapsed time.Duration) {
-	fmt.Fprintf(w, "RESULT: %s — %d checks em %s. Isto NÃO é varredura: rode `aletheia scan`\n",
-		r.Verdict(), r.Coverage.Total, dur(elapsed))
+func writeWtfResult(w io.Writer, r *check.Report, elapsed time.Duration, sobra int) {
+	fmt.Fprintf(w, "RESULT: %s — %d checks em %s.", r.Verdict(), r.Coverage.Total, dur(elapsed))
+	if sobra > 0 {
+		fmt.Fprintf(w, " Isto NÃO é varredura: rode `aletheia scan` (+%d checks)", sobra)
+	} else {
+		// Enquanto o catálogo couber inteiro no orçamento, mandar rodar o scan
+		// seria pedir para repetir exatamente o mesmo trabalho.
+		fmt.Fprint(w, " Triagem rápida, não varredura de disco nem de persistência")
+	}
+	fmt.Fprintln(w)
 }
 
 // Oneline é uma linha por host, para triagem de FROTA (SPEC 6.1). Com dezenas

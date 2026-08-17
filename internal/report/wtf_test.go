@@ -24,7 +24,7 @@ func renderWtf(r *check.Report, f *facts.Facts) string {
 	if f == nil {
 		f = &facts.Facts{}
 	}
-	Wtf(&b, r, f, wtfEnv(), 57*time.Millisecond)
+	Wtf(&b, r, f, wtfEnv(), 57*time.Millisecond, r.Coverage.Total)
 	return b.String()
 }
 
@@ -40,8 +40,8 @@ func TestWtfNuncaPodeSerLidoComoVarredura(t *testing.T) {
 	}
 	for nome, r := range casos {
 		out := renderWtf(r, nil)
-		if !strings.Contains(out, "NÃO é varredura") {
-			t.Errorf("%s: o rodapé precisa dizer que isto não foi varredura:\n%s", nome, out)
+		if !strings.Contains(out, "não varredura") && !strings.Contains(out, "NÃO é varredura") {
+			t.Errorf("%s: o rodapé precisa negar que isto foi varredura:\n%s", nome, out)
 		}
 	}
 	// Sem achado, o texto precisa dizer o contrário do que a tela sugere.
@@ -99,14 +99,18 @@ func TestWtfContagensSaemDaMesmaColeta(t *testing.T) {
 	f := &facts.Facts{
 		Processes: make([]facts.Process, 3),
 		Sockets: []facts.Socket{
-			{State: "ESTAB", LocalIP: "10.0.0.5"},
-			{State: "ESTAB", LocalIP: "10.0.0.5"},
-			{State: "LISTEN", LocalIP: "0.0.0.0"},
-			{State: "LISTEN", LocalIP: "127.0.0.1"}, // loopback não conta
+			{Proto: "tcp", State: "ESTAB", Dir: facts.DirOut, LocalIP: "10.0.0.5"},
+			{Proto: "tcp", State: "ESTAB", Dir: facts.DirIn, LocalIP: "10.0.0.5"},
+			// 0.0.0.0 é TODAS as interfaces: o caso mais exposto que existe.
+			{Proto: "tcp", State: "LISTEN", Dir: facts.DirListen, LocalIP: "0.0.0.0"},
+			{Proto: "tcp", State: "LISTEN", Dir: facts.DirListen, LocalIP: "127.0.0.1"},
+			// UDP ligado a uma porta não tem estado LISTEN, e mesmo assim está
+			// escutando. Contar só por State esconderia todo serviço UDP.
+			{Proto: "udp", State: "CLOSE", Dir: facts.DirListen, LocalIP: "0.0.0.0"},
 		},
 	}
 	out := renderWtf(&check.Report{Coverage: check.Coverage{Total: 1, Complete: 1}}, f)
-	if !strings.Contains(out, "3 proc · 2 estab · 1 listen fora de loopback") {
+	if !strings.Contains(out, "3 proc · 2 estab · 2 listen fora de loopback") {
 		t.Errorf("o enquadramento saiu errado:\n%s", out)
 	}
 }
@@ -200,5 +204,44 @@ func TestOnelineEscapaControleDeTerminal(t *testing.T) {
 	}
 	if strings.Contains(oneline(r), "\x1b") {
 		t.Error("ESC cru na linha de frota")
+	}
+}
+
+// O rodapé não pode mandar o operador repetir trabalho. Enquanto o catálogo
+// inteiro couber no orçamento do wtf, "rode aletheia scan" é uma instrução que
+// não muda nada — o mesmo tipo de afirmação vazia que a ferramenta recusa nos
+// achados.
+func TestRodapeSoMandaRodarScanQuandoEleAcrescenta(t *testing.T) {
+	rel := func(catalogo int) string {
+		var b bytes.Buffer
+		r := &check.Report{Coverage: check.Coverage{Total: 10, Complete: 10}}
+		Wtf(&b, r, &facts.Facts{}, wtfEnv(), 57*time.Millisecond, catalogo)
+		return b.String()
+	}
+
+	// wtf == catálogo: não sugere nada.
+	if out := rel(10); strings.Contains(out, "rode `aletheia scan`") {
+		t.Errorf("sugeriu scan sem ter o que acrescentar:\n%s", out)
+	}
+	// catálogo maior: sugere, dizendo QUANTOS checks a mais.
+	out := rel(47)
+	if !strings.Contains(out, "rode `aletheia scan` (+37 checks)") {
+		t.Errorf("faltou dizer quanto o scan acrescenta:\n%s", out)
+	}
+}
+
+// A contagem do corte não pode incluir INFO: eles nunca são impressos, e a
+// linha prometeria achados que o operador não encontraria em lugar nenhum.
+func TestContagemDoCorteIgnoraInfo(t *testing.T) {
+	r := &check.Report{Coverage: check.Coverage{Total: 10, Complete: 10}}
+	for i := 0; i < maxWtfLinhas+3; i++ {
+		r.Findings = append(r.Findings, check.Finding{
+			ID: "x.y", Sev: check.SevWarn, Subject: "pid=" + strconv.Itoa(i), Title: "t"})
+	}
+	for i := 0; i < 5; i++ {
+		r.Findings = append(r.Findings, check.Finding{ID: "z.w", Sev: check.SevInfo, Title: "i"})
+	}
+	if out := renderWtf(r, nil); !strings.Contains(out, "e mais 3 achados") {
+		t.Errorf("a contagem incluiu achados INFO, que nunca aparecem:\n%s", out)
 	}
 }

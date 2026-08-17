@@ -35,6 +35,9 @@ var revshell = check.Check{
 			"essa forma, por design — descartados aqui pela DIREÇÃO: neles o socket é " +
 			"de ENTRADA, num reverse shell é de SAÍDA",
 		"sem root o dono do socket é invisível, e o achado não pode ser formado",
+		"LIMITE de fonte: são lidas as tabelas TCP e UDP. Implante que usa UDP " +
+			"com sendto() sem connect() não expõe o destino em /proc/net/udp — a " +
+			"porta local aparece, o peer não. Socket RAW e unix não são lidos",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
@@ -117,6 +120,8 @@ var pivot = check.Check{
 		"agente que reporta para fora E consulta serviço interno — monitoração, " +
 			"coletor de log, backup para nuvem. São poucos e você os conhece pelo nome",
 		"proxy reverso NÃO cai aqui: nele o tráfego externo é de ENTRADA",
+		"LIMITE de fonte: TCP e UDP. Um pivô que fale por socket RAW ou por " +
+			"protocolo fora dessas duas tabelas não aparece aqui",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result

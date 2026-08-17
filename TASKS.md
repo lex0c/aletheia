@@ -776,3 +776,89 @@ de processos pela metade quebra correlação: pivô e reverse shell dependem de
 cruzar processo com socket, e cruzar com metade produz conclusão ERRADA, não
 conclusão parcial. Coleta é tudo ou nada, e o que o operador recebe quando ela
 demora é o tempo real impresso no RESULT.
+
+---
+
+## Registro — segunda revisão de código
+
+Sete commits desde a primeira revisão. Oito problemas; o mais grave foi uma
+regressão introduzida pela própria paralelização.
+
+### 1 · CRÍTICO — panic no coletor virava exit 2, que significa "host comprometido"
+
+Antes de a coleta ser paralela, um panic subia até o `recover()` do `main` e
+virava exit 3 (ERROR). Em goroutine o recover do main **não alcança**:
+
+```
+panic em goroutine        → exit 2
+panic na goroutine main   → recuperado → exit 3
+```
+
+Exit 2 é `CRITICAL — indicador de alta confiança` neste contrato. Um defeito
+NOSSO faria a automação de frota marcar o host como comprometido. É a mesma
+correção que o `runGuarded` fez para os checks, desfeita sem querer pela
+paralelização e refeita agora com `readProcessGuarded` — e o PID que derruba o
+coletor vira lacuna declarada, dizendo em voz alta que o defeito é da
+ferramenta.
+
+### 2 · ALTO — UDP não era lido, e nada declarava isso
+
+`/proc/net/tcp{,6}` só. C2 por DNS e beacon por UDP eram invisíveis **e** os
+checks de rede reportavam cobertura COMPLETA. Exatamente a mentira que a
+ferramenta existe para não contar.
+
+Agora lê `udp{,6}`. UDP não tem LISTEN nem handshake, então a direção sai de
+outra pergunta: sem peer é bind (equivalente funcional de listener), com peer o
+processo chamou `connect()`. Conferido contra o `ss` do host: 6 TCP estab + 2
+UDP conectados = 8; 5 binds UDP fora de loopback = 5. Bate exato.
+
+O limite que sobra está declarado nos dois checks: `sendto()` sem `connect()`
+não expõe o destino, e socket RAW e unix não são lidos.
+
+### 3 · ALTO — `sc.Err()` nunca consultado: leitura pela metade virava fato completo
+
+`sc.Scan()` devolve false tanto no fim do arquivo quanto em erro. Processo que
+morresse no meio da leitura produzia:
+
+```
+maps parcial      proc.maps_rwx_anon dizia limpo, com cobertura completa
+status parcial    UID e EUID em zero — e zero é ROOT: o processo passava a ser
+                  pulado por proc.caps_unexpected como root legítimo
+```
+
+Status incompleto agora invalida o processo inteiro (sem identidade não se
+afirma nada sobre ele); maps incompleto marca o processo como não avaliado
+**sem descartar** o que já foi encontrado — achado é achado.
+
+### 4 · MÉDIO — socket com vários donos: o join sobrescrevia
+
+`s.PID, s.Comm = p.PID, p.Comm` num laço sobre processos: o último ganhava. Mas
+a relação é de muitos para muitos — fork herda o fd. Cenário de falha: pai com
+as duas pernas faz fork, o filho fecha uma; o join dá a externa a um e a interna
+a outro, e **`net.pivot` não dispara em ninguém**.
+
+O índice passou a ser construído do lado do PROCESSO, pelos descritores — que é
+como o kernel de fato relaciona os dois. Dedup por inode, para `dup2` do mesmo
+socket não virar duas conexões.
+
+### 5 · MÉDIO — `wtf --root` quebrado saía 1 em vez de 3
+
+`scan` recusava com ERROR; `wtf` seguia e saía WARNING. Na triagem de frota
+ordenada por exit code, um caminho digitado errado aparecia como host que
+precisa de atenção.
+
+### 6 · O rodapé afirmava algo que não era verdade
+
+Os 10 checks têm `Wtf: true`, então `wtf` e `scan` rodam o mesmo conjunto — e o
+rodapé mandava rodar `scan`, que não acrescentaria nada. Agora o texto depende
+do tamanho do catálogo: sugere o `scan` dizendo **quantos checks a mais**, e
+quando não há nenhum, não sugere. Se corrige sozinho quando a fase 4 chegar.
+
+### 7 e 8 · contagem do corte e duas definições de loopback
+
+A linha "e mais N achados" contava INFO, que nunca são impressos. E havia duas
+respostas para "isto é loopback?" em pacotes diferentes — que precisam ser
+DIFERENTES, e agora estão separadas com o motivo escrito: como peer, `0.0.0.0`
+é "endereço nenhum"; como endereço local de escuta, é TODAS as interfaces, o
+caso mais exposto que existe. Unificar as duas inverteria uma delas e esconderia
+todo listener público.

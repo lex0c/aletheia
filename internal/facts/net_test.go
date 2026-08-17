@@ -105,3 +105,41 @@ func TestDirecaoSaiDaTabelaDeListen(t *testing.T) {
 		}
 	}
 }
+
+// UDP não tem LISTEN nem handshake. Contar escuta pelo ESTADO esconderia todo
+// serviço UDP do host — e um C2 por DNS mora exatamente aí.
+func TestUDPSemPeerEhEscutaComPeerEhSaida(t *testing.T) {
+	body := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n" +
+		"   0: 00000000:0035 00000000:0000 07 0:0 0:0 0 1000 0 501 2 0 0\n" + // bind :53
+		"   1: 0100007F:C350 0100007F:0035 01 0:0 0:0 0 1000 0 502 2 0 0\n" // connect() para :53
+
+	socks := parseTCPTable(body, "udp")
+	if len(socks) != 2 {
+		t.Fatalf("parseTCPTable devolveu %d, quer 2", len(socks))
+	}
+	// Sem peer, o rem_address zerado NÃO pode virar "0.0.0.0:0" como destino.
+	if socks[0].PeerIP != "" {
+		t.Errorf("socket UDP sem destino ganhou peer %q", socks[0].Peer())
+	}
+	if socks[1].PeerIP != "127.0.0.1" || socks[1].PeerPort != 53 {
+		t.Errorf("peer do UDP conectado = %q", socks[1].Peer())
+	}
+}
+
+// A pergunta espelhada: como PEER, 0.0.0.0 é "endereço nenhum"; como endereço
+// LOCAL de escuta, é TODAS as interfaces — o caso mais exposto que existe.
+// Inverter uma delas esconderia todo listener público.
+func TestExposicaoLocalEhOOpostoDoEscopoDePeer(t *testing.T) {
+	if scopeOf("0.0.0.0") != ScopeLoopback {
+		t.Error("como peer, 0.0.0.0 não é destino externo")
+	}
+	casos := map[string]bool{
+		"0.0.0.0": true, "::": true, "10.0.0.5": true, "51.91.190.241": true,
+		"127.0.0.1": false, "::1": false,
+	}
+	for ip, quer := range casos {
+		if got := IsExposedLocal(ip); got != quer {
+			t.Errorf("IsExposedLocal(%q) = %v, quer %v", ip, got, quer)
+		}
+	}
+}

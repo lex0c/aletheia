@@ -97,12 +97,17 @@ func collectSockets(f *Facts, e *env.Env) {
 	for _, src := range []struct{ path, proto string }{
 		{"/proc/net/tcp", "tcp"},
 		{"/proc/net/tcp6", "tcp6"},
+		// UDP não é opcional: C2 por DNS e beacon por UDP não aparecem em
+		// tabela de TCP nenhuma, e ler só TCP fazia os checks de rede
+		// reportarem cobertura COMPLETA tendo ignorado metade da pilha.
+		{"/proc/net/udp", "udp"},
+		{"/proc/net/udp6", "udp6"},
 	} {
 		body, ok := readTrim(src.path)
 		if !ok {
-			// tcp6 ausente é normal em host sem IPv6; tcp ausente não é.
-			if src.proto == "tcp" {
-				f.partial("net", src.path+" ilegível: nenhuma conexão foi avaliada")
+			// A variante v6 ausente é normal em host sem IPv6; a v4 não é.
+			if src.proto == "tcp" || src.proto == "udp" {
+				f.partial("net", src.path+" ilegível: nenhuma conexão desse protocolo foi avaliada")
 			}
 			continue
 		}
@@ -120,6 +125,19 @@ func collectSockets(f *Facts, e *env.Env) {
 	for i := range socks {
 		s := &socks[i]
 		switch {
+		case isUDP(s.Proto):
+			// UDP não tem LISTEN nem handshake, então a comparação com a tabela
+			// de escuta não se aplica. Sem peer, o socket está só ligado a uma
+			// porta — é o equivalente funcional de um listener. Com peer, o
+			// processo chamou connect().
+			//
+			// LIMITE, e ele importa: implante que usa sendto() sem connect()
+			// NÃO expõe o destino aqui. A porta local aparece, o peer não.
+			if s.PeerIP == "" {
+				s.Dir = DirListen
+			} else {
+				s.Dir = DirOut
+			}
 		case s.State == "LISTEN":
 			s.Dir = DirListen
 		case listening[s.LocalPort]:
@@ -196,7 +214,9 @@ func parseTCPTable(body, proto string) []Socket {
 			LocalIP: lip, LocalPort: lport,
 			Inode: inode, UID: uid,
 		}
-		if state != "LISTEN" {
+		// Peer zerado significa socket sem destino: LISTEN em TCP, e UDP
+		// apenas ligado a uma porta.
+		if state != "LISTEN" && !(rport == 0 && isUnspecifiedIP(rip)) {
 			s.PeerIP, s.PeerPort = rip, rport
 		}
 		out = append(out, s)
@@ -251,6 +271,30 @@ func scopeOf(s string) Scope {
 	default:
 		return ScopePublic
 	}
+}
+
+func isUDP(proto string) bool { return strings.HasPrefix(proto, "udp") }
+
+// isUnspecifiedIP reconhece 0.0.0.0 e :: — "endereço nenhum".
+func isUnspecifiedIP(s string) bool {
+	ip := net.ParseIP(s)
+	return ip != nil && ip.IsUnspecified()
+}
+
+// IsExposedLocal diz se um endereço LOCAL de escuta está exposto para fora da
+// máquina.
+//
+// É a pergunta espelhada do scopeOf, e a resposta para 0.0.0.0 é OPOSTA: como
+// peer, "endereço nenhum" não é destino externo; como endereço local de escuta,
+// 0.0.0.0 significa TODAS as interfaces — o caso mais exposto que existe.
+// Manter as duas perguntas em funções separadas é o que impede alguém de
+// "unificar" as duas e inverter uma delas.
+func IsExposedLocal(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return ip != ""
+	}
+	return !parsed.IsLoopback()
 }
 
 func isCGNAT(ip net.IP) bool {

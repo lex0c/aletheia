@@ -114,6 +114,10 @@ var shellStartup = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+		// Montado UMA vez. Construí-lo dentro do laço de linhas custava uma
+		// passada sobre toda a propriedade por LINHA de arquivo de shell.
+		semDono := caminhosSemDono(f)
+
 		for i := range f.Triggers {
 			t := &f.Triggers[i]
 			if t.Kind != "shell" {
@@ -126,11 +130,12 @@ var shellStartup = check.Check{
 			// 14.04 renderam quinze acusações. O que os separa de um script
 			// acrescentado é a mesma pergunta de sempre: veio de um pacote?
 			//
-			// LIMITE conhecido: isto não vê MODIFICAÇÃO de arquivo empacotado.
-			// Um invasor que acrescenta uma linha ao /etc/cron.daily/apt
-			// mantém o dono de pacote e escapa deste ramo. Detectar isso exige
-			// comparar hash com o pacote, que é outro check e não existe ainda.
-			donoDoGatilho := temDonoDePacote(f, t.File)
+			// E a isenção exige PROVA de que o arquivo está intacto, não só que
+			// ele tenha dono. Um invasor que acrescenta uma linha ao
+			// /etc/cron.daily/apt mantém o dono de pacote — o que muda é o
+			// conteúdo, e a fase 7 compara isso com o hash que o próprio
+			// gerenciador guarda. Sem hash disponível não há isenção.
+			donoDoGatilho := entregueIntactoPeloPacote(f, t.File)
 
 			for _, ln := range t.Lines {
 				motivo, sev, ok := execSuspect(linhaExecutavel(ln.Text))
@@ -140,15 +145,14 @@ var shellStartup = check.Check{
 				if !ok {
 					// O PADRÃO DE CONTEÚDO NÃO É A ÚNICA ENTRADA.
 					//
-					// XorDDoS põe `/lib/libudev.so` num script de cron.hourly e
-					// num init.d; HiddenWasp põe `/lib/libselinux.so` no
-					// rc.local. Nenhum baixa nada, nenhum tem pipe para shell, e
-					// os dois caminhos parecem de sistema — `execSuspect` passa
-					// batido nos dois, com razão.
+					// O Outlaw põe o binário em ~/.configrc e o chama do
+					// crontab e do shell de login. A linha não baixa nada e não
+					// tem pipe para shell — só executa um caminho — e o
+					// `execSuspect` passa batido, com razão.
 					//
-					// O que denuncia é a pergunta sobre o ALVO, e ela é a mesma
-					// que este check já citava nos falsos positivos sem usar.
-					motivo, sev, ok = alvoSemDono(f, ln.Text)
+					// O que denuncia é a pergunta sobre o ALVO: nenhum pacote
+					// entregou aquilo que a linha de inicialização executa.
+					motivo, sev, ok = alvoSemDono(f, semDono, ln.Text)
 					if !ok {
 						continue
 					}
@@ -270,6 +274,10 @@ var triggerExec = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+		// Montado UMA vez. Construí-lo dentro do laço de linhas custava uma
+		// passada sobre toda a propriedade por LINHA de gatilho.
+		semDono := caminhosSemDono(f)
+
 		for i := range f.Triggers {
 			t := &f.Triggers[i]
 			switch t.Kind {
@@ -285,11 +293,12 @@ var triggerExec = check.Check{
 			// 14.04 renderam quinze acusações. O que os separa de um script
 			// acrescentado é a mesma pergunta de sempre: veio de um pacote?
 			//
-			// LIMITE conhecido: isto não vê MODIFICAÇÃO de arquivo empacotado.
-			// Um invasor que acrescenta uma linha ao /etc/cron.daily/apt
-			// mantém o dono de pacote e escapa deste ramo. Detectar isso exige
-			// comparar hash com o pacote, que é outro check e não existe ainda.
-			donoDoGatilho := temDonoDePacote(f, t.File)
+			// E a isenção exige PROVA de que o arquivo está intacto, não só que
+			// ele tenha dono. Um invasor que acrescenta uma linha ao
+			// /etc/cron.daily/apt mantém o dono de pacote — o que muda é o
+			// conteúdo, e a fase 7 compara isso com o hash que o próprio
+			// gerenciador guarda. Sem hash disponível não há isenção.
+			donoDoGatilho := entregueIntactoPeloPacote(f, t.File)
 
 			for _, ln := range t.Lines {
 				motivo, sev, ok := execSuspect(linhaExecutavel(ln.Text))
@@ -307,7 +316,7 @@ var triggerExec = check.Check{
 					//
 					// O que denuncia é a pergunta sobre o ALVO, e ela é a mesma
 					// que este check já citava nos falsos positivos sem usar.
-					motivo, sev, ok = alvoSemDono(f, ln.Text)
+					motivo, sev, ok = alvoSemDono(f, semDono, ln.Text)
 					if !ok {
 						continue
 					}
@@ -599,14 +608,13 @@ func alvoDoTrigger(t *facts.Trigger) string {
 // alvoSemDono responde a pergunta de propriedade sobre o programa que a linha
 // executa. É a entrada estrutural do gatilho: não olha o conteúdo do comando,
 // olha de onde veio o binário.
-func alvoSemDono(f *facts.Facts, linha string) (string, check.Severity, bool) {
+func alvoSemDono(f *facts.Facts, semDono map[string]bool, linha string) (string, check.Severity, bool) {
 	alvo := facts.PrimeiroCaminhoAbsoluto(linha)
 	// /etc fora: é o território da configuração local, e ali "sem dono de
 	// pacote" é a norma e não sinal.
 	if alvo == "" || strings.HasPrefix(alvo, "/etc/") {
 		return "", 0, false
 	}
-	semDono := caminhosSemDono(f)
 	if !semDono[alvo] {
 		return "", 0, false
 	}
@@ -627,10 +635,32 @@ func alvoSemDono(f *facts.Facts, linha string) (string, check.Severity, bool) {
 // temDonoDePacote responde se o pacote reivindica o arquivo. Falso quando a
 // base não pôde ser consultada — e aí o ramo de conteúdo continua valendo, que
 // é o comportamento seguro.
-func temDonoDePacote(f *facts.Facts, p string) bool {
+// entregueIntactoPeloPacote é a única condição que autoriza CALAR sobre um
+// arquivo — e ela exige PROVA, não só procedência.
+//
+// A versão anterior perguntava apenas "tem dono de pacote?", e isso silenciou um
+// backdoor de manual: `curl | sh` acrescentado ao /etc/bash.bashrc, que é
+// entregue pelo base-files. O dono continua certo depois da edição; é o
+// CONTEÚDO que muda, e era exatamente esse o limite escrito ali — "isto não vê
+// modificação de arquivo empacotado".
+//
+// Com a fase 7 a prova existe. Quando ela não existir — base ilegível, arquivo
+// sem hash declarado —, a resposta é NÃO suprimir: a ausência de prova não é
+// prova de integridade, e o comportamento seguro é o de antes desta exceção.
+func entregueIntactoPeloPacote(f *facts.Facts, p string) bool {
+	var temDono bool
 	for i := range f.Ownership {
 		if f.Ownership[i].Path == p {
-			return f.Ownership[i].Owned
+			temDono = f.Ownership[i].Owned
+			break
+		}
+	}
+	if !temDono {
+		return false
+	}
+	for _, ok := range f.HashOK {
+		if ok == p {
+			return true
 		}
 	}
 	return false

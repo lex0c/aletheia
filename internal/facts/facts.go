@@ -51,6 +51,7 @@ type Facts struct {
 	PkgEstranho   []ReivindicacaoEstranha `json:"pkg_odd_claims,omitempty"`
 	HashDiff      []HashDivergente        `json:"hash_mismatch,omitempty"`
 	Timestomps    []Timestomp             `json:"timestomps,omitempty"`
+	HashOK        []string                `json:"hash_verified,omitempty"`
 	MetaAcesso    []ArquivoMeta           `json:"access_meta,omitempty"`
 	Cross         CrossView               `json:"cross_view"`
 

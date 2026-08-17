@@ -43,9 +43,12 @@ var suidInesperado = check.Check{
 			"cada um pelo nome",
 		"compilação local em /usr/local a partir de fonte que instala setuid " +
 			"(alguns pacotes de rede fazem isso) cai aqui e é legítima",
-		"LIMITE de escopo: a varredura fica no dispositivo da raiz e nas árvores " +
-			"onde binário mora. SUID em montagem de rede ou em volume externo NÃO " +
-			"é examinado, e isso está declarado na cobertura",
+		"LIMITE de escopo, e ele tem três partes. A varredura não atravessa " +
+			"montagem: montagem de rede e volume externo ficam fora, e isso é " +
+			"declarado quando acontece. Ela não desce em árvore de dependência " +
+			"e cache (node_modules, .cache, .git, site-packages e semelhantes), " +
+			"que é o que a torna viável num home de desenvolvedor. E dentro de " +
+			"/home e /root ela desce no máximo cinco níveis",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result

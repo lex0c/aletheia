@@ -20,6 +20,17 @@ build:
 test:
 	go test ./...
 
+# race roda o detector de corrida ONDE ELE FALTAVA.
+#
+# `go test -race ./...` não alcança a suíte de cenários, que exige a tag de
+# build — e foi exatamente ali que uma corrida se escondeu: os subtestes usam
+# t.Parallel() e um mapa global era montado de forma preguiçosa. Rodar o
+# detector só no que já estava coberto dá a sensação de cobertura sem a
+# cobertura.
+race:
+	go test -race ./...
+	go test -race -tags scenarios -count=1 -timeout 15m ./test/...
+
 lint:
 	gofmt -l . | tee /dev/stderr | grep -q . && { echo "arquivos não formatados"; exit 1; } || true
 	go vet ./...

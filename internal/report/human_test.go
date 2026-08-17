@@ -453,3 +453,27 @@ func TestDedupeDoBlocoIgnoraComentario(t *testing.T) {
 		t.Errorf("o mesmo comando apareceu %d vezes", n)
 	}
 }
+
+// Quando o primeiro comando de um achado já apareceu, ele precisa contribuir
+// com o PRÓXIMO distinto — não ficar de fora. O passo que se perdia era
+// justamente o `gcore`, que é o único jeito de preservar a memória.
+func TestAcoesNaoPerdemComandoDistinto(t *testing.T) {
+	r := &check.Report{Findings: []check.Finding{
+		{ID: "a", Sev: check.SevCritical, Subject: "pid=10", Irreversible: true,
+			NextSteps: []string{`sudo cp /proc/10/exe "$IR/pid-10.bin"`}},
+		{ID: "b", Sev: check.SevCritical, Subject: "pid=10", Irreversible: true,
+			NextSteps: []string{
+				`sudo cp /proc/10/exe "$IR/pid-10.bin"`,
+				`sudo gcore -o "$IR/pid-10.core" 10`,
+			}},
+	}}
+	var b strings.Builder
+	Human(&b, r, testFacts(), testEnv(), Options{})
+	out := b.String()
+	if !strings.Contains(out, "gcore") {
+		t.Errorf("o comando distinto do segundo achado se perdeu:\n%s", out)
+	}
+	if strings.Count(out, "cp /proc/10/exe") != 1 {
+		t.Errorf("o comando repetido precisa aparecer UMA vez:\n%s", out)
+	}
+}

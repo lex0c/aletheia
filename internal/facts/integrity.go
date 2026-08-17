@@ -2,6 +2,7 @@ package facts
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"crypto/md5"
 	"crypto/sha1"
@@ -11,6 +12,7 @@ import (
 	"hash"
 	"io"
 	"io/fs"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -129,7 +131,17 @@ func verificarHashes(f *Facts, e *env.Env, donos map[string]string) {
 	// na lista, o `wtf` no host saltou de 1,1s para 3,3s — e o contrato do
 	// subcomando é responder em torno de um segundo. Hashear é I/O mais CPU,
 	// que é exatamente o que reparte bem.
-	type tarefa struct{ caminho, pkg string }
+	// O tamanho entra na tarefa em vez de ser consultado depois.
+	//
+	// A primeira versão chamava `tamanhoDe` dentro do comparador do sort — uma
+	// syscall por COMPARAÇÃO, O(n log n) delas — e mais uma por arquivo no
+	// laço. Pior que o custo: um comparador que faz I/O não define ordem
+	// consistente se um arquivo sumir no meio, e ordenação com comparador
+	// inconsistente não tem resultado definido.
+	type tarefa struct {
+		caminho, pkg string
+		tam          int64
+	}
 	fila := make([]tarefa, 0, len(donos))
 	var semHash []string
 	for caminho, pkg := range donos {
@@ -144,19 +156,33 @@ func verificarHashes(f *Facts, e *env.Env, donos map[string]string) {
 			// que é o que separa "não achei" de "não consegui olhar".
 			continue
 		}
+		// SYMLINK não tem conteúdo próprio, e comparar o hash do alvo com o que
+		// a base declara para o link daria divergência em todo caminho ligado —
+		// /bin/sh, /sbin/modprobe e os `*-restore` do iptables são todos links.
+		//
+		// Não é lacuna: o que importa é o arquivo apontado, e ele é candidato
+		// por si quando alguém o executa ou o carrega.
+		if fi, err := e.Lstat(caminho); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
 		if _, ok := esperados[caminho]; !ok {
 			// O pacote reivindica o arquivo e NÃO declara hash para ele. Precisa
 			// aparecer como lacuna, não como "confere".
 			semHash = append(semHash, caminho)
 			continue
 		}
-		fila = append(fila, tarefa{caminho, pkg})
+		fila = append(fila, tarefa{caminho: caminho, pkg: pkg, tam: tamanhoDe(e, caminho)})
 	}
 
 	// Os menores primeiro: sob o teto de bytes, isso maximiza quantos arquivos
-	// cabem antes do corte.
+	// cabem antes do corte. O desempate por caminho torna a ordem determinística
+	// — sem ele, dois arquivos do mesmo tamanho trocam de lugar entre execuções
+	// e o corte do orçamento cai em arquivos diferentes.
 	sort.Slice(fila, func(i, j int) bool {
-		return tamanhoDe(e, fila[i].caminho) < tamanhoDe(e, fila[j].caminho)
+		if fila[i].tam != fila[j].tam {
+			return fila[i].tam < fila[j].tam
+		}
+		return fila[i].caminho < fila[j].caminho
 	})
 
 	var mu sync.Mutex
@@ -174,13 +200,14 @@ func verificarHashes(f *Facts, e *env.Env, donos map[string]string) {
 					return
 				}
 				t := fila[i]
-				if atomic.LoadInt64(&gastos) > maxHashTotal {
+				// Soma ANTES de decidir: verificar e depois somar deixaria N
+				// trabalhadores passarem juntos pelo teto.
+				if atomic.AddInt64(&gastos, t.tam) > maxHashTotal {
 					mu.Lock()
 					semHash = append(semHash, t.caminho)
 					mu.Unlock()
 					continue
 				}
-				atomic.AddInt64(&gastos, tamanhoDe(e, t.caminho))
 				ref := esperados[t.caminho]
 				obtido, err := hashDoArquivo(e, t.caminho, ref.algo)
 				mu.Lock()
@@ -192,6 +219,12 @@ func verificarHashes(f *Facts, e *env.Env, donos map[string]string) {
 						Path: t.caminho, Pacote: t.pkg, Algo: ref.algo,
 						Esperado: ref.hash, Obtido: obtido, Config: ref.conf,
 					})
+				default:
+					// CONFERIU. Guardar isto não é simetria decorativa: é o que
+					// permite a outros checks SUPRIMIREM um achado com prova.
+					// Sem a lista, "tem dono de pacote" viraria licença para
+					// calar sobre um arquivo que ninguém verificou.
+					f.HashOK = append(f.HashOK, t.caminho)
 				}
 				mu.Unlock()
 			}
@@ -202,6 +235,7 @@ func verificarHashes(f *Facts, e *env.Env, donos map[string]string) {
 	// Ordem estável: sem isso o relatório muda de forma entre execuções
 	// idênticas, e a agregação de frota vê diferença onde não há.
 	sort.Slice(f.HashDiff, func(i, j int) bool { return f.HashDiff[i].Path < f.HashDiff[j].Path })
+	sort.Strings(f.HashOK)
 	sort.Strings(semHash)
 
 	if len(semHash) > 0 {
@@ -282,11 +316,21 @@ type hashRef struct {
 func hashesDpkg(e *env.Env, porPacote map[string][]string) map[string]hashRef {
 	out := map[string]hashRef{}
 	for pkg, caminhos := range porPacote {
-		quer := map[string]string{} // forma no arquivo -> caminho perguntado
+		// LISTA, e não valor único. É a TERCEIRA vez que este defeito aparece
+		// nesta base — já corrigido nos dois lados da pergunta de propriedade e
+		// deixado aqui.
+		//
+		// Sob usrmerge, /bin/sh e /usr/bin/sh são o mesmo arquivo e geram as
+		// MESMAS chaves. Guardando um caminho só, a segunda inserção
+		// sobrescreve a primeira e um dos dois fica sem hash — 274 arquivos num
+		// host real, entre eles /bin/sh, /bin/kill e /bin/true, todos saindo
+		// como "não pude comparar".
+		quer := map[string][]string{} // forma no arquivo -> caminhos perguntados
 		cache := map[string]string{}
 		for _, c := range caminhos {
 			for _, v := range formasResolvidas(e, c, cache) {
-				quer[strings.TrimPrefix(v, "/")] = c
+				k := strings.TrimPrefix(v, "/")
+				quer[k] = append(quer[k], c)
 			}
 		}
 		// O nome do arquivo de hash acompanha o do .list, inclusive o sufixo de
@@ -302,7 +346,7 @@ func hashesDpkg(e *env.Env, porPacote map[string][]string) map[string]hashRef {
 			if !ok {
 				continue
 			}
-			if alvo, ok := quer[caminho]; ok {
+			for _, alvo := range quer[caminho] {
 				out[alvo] = hashRef{hash: h, algo: "md5"}
 			}
 		}
@@ -315,12 +359,14 @@ func hashesDpkg(e *env.Env, porPacote map[string][]string) map[string]hashRef {
 // todo arquivo.
 func hashesApk(e *env.Env, porPacote map[string][]string) map[string]hashRef {
 	out := map[string]hashRef{}
-	quer := map[string]string{}
+	// Lista pelo mesmo motivo do backend do dpkg: duas grafias do mesmo arquivo
+	// colidem sob usrmerge, e guardar um valor só perde uma delas.
+	quer := map[string][]string{}
 	cache := map[string]string{}
 	for _, caminhos := range porPacote {
 		for _, c := range caminhos {
 			for _, v := range formasResolvidas(e, c, cache) {
-				quer[v] = c
+				quer[v] = append(quer[v], c)
 			}
 		}
 	}
@@ -344,15 +390,17 @@ func hashesApk(e *env.Env, porPacote map[string][]string) map[string]hashRef {
 		case 'R':
 			ultimo = dir + "/" + ln[2:]
 		case 'Z':
-			alvo, ok := quer[ultimo]
-			if !ok || !strings.HasPrefix(ln[2:], "Q1") {
+			alvos := quer[ultimo]
+			if len(alvos) == 0 || !strings.HasPrefix(ln[2:], "Q1") {
 				continue
 			}
 			bruto, err := base64.StdEncoding.DecodeString(ln[4:])
 			if err != nil {
 				continue
 			}
-			out[alvo] = hashRef{hash: hex.EncodeToString(bruto), algo: "sha1"}
+			for _, alvo := range alvos {
+				out[alvo] = hashRef{hash: hex.EncodeToString(bruto), algo: "sha1"}
+			}
 		}
 	}
 	return out
@@ -363,18 +411,22 @@ func hashesApk(e *env.Env, porPacote map[string][]string) map[string]hashRef {
 func hashesPacman(e *env.Env, porPacote map[string][]string) map[string]hashRef {
 	out := map[string]hashRef{}
 	for pkg, caminhos := range porPacote {
-		quer := map[string]string{}
+		// Lista, pelo mesmo motivo dos outros dois backends.
+		quer := map[string][]string{}
 		cache := map[string]string{}
 		for _, c := range caminhos {
 			for _, v := range formasResolvidas(e, c, cache) {
-				quer[strings.TrimPrefix(v, "/")] = c
+				k := strings.TrimPrefix(v, "/")
+				quer[k] = append(quer[k], c)
 			}
 		}
 		b, err := e.ReadFile("/var/lib/pacman/local/" + pkg + "/mtree")
 		if err != nil {
 			continue
 		}
-		zr, err := gzip.NewReader(strings.NewReader(string(b)))
+		// bytes.NewReader e não strings.NewReader(string(b)): a conversão
+		// copiaria o arquivo inteiro só para lê-lo, e são centenas deles.
+		zr, err := gzip.NewReader(bytes.NewReader(b))
 		if err != nil {
 			continue
 		}
@@ -387,13 +439,15 @@ func hashesPacman(e *env.Env, porPacote map[string][]string) map[string]hashRef 
 			}
 			campos := strings.Fields(ln)
 			caminho := desescapaMtree(strings.TrimPrefix(campos[0], "./"))
-			alvo, ok := quer[caminho]
-			if !ok {
+			alvos := quer[caminho]
+			if len(alvos) == 0 {
 				continue
 			}
 			for _, c := range campos[1:] {
 				if h, ok := strings.CutPrefix(c, "sha256digest="); ok {
-					out[alvo] = hashRef{hash: h, algo: "sha256"}
+					for _, alvo := range alvos {
+						out[alvo] = hashRef{hash: h, algo: "sha256"}
+					}
 					break
 				}
 			}
@@ -509,6 +563,8 @@ func conffilesDpkg(e *env.Env, out map[string]hashRef, donos map[string]string) 
 		if _, interessa := donos[caminho]; !interessa {
 			continue
 		}
+		// Aqui não há colisão: o status lista o caminho exato, e /etc não tem
+		// grafia alternativa sob usrmerge.
 		// O terceiro campo, quando existe, marca o conffile como obsoleto — o
 		// hash continua valendo para comparação.
 		out[caminho] = hashRef{hash: campos[1], algo: "md5", conf: true}
@@ -547,4 +603,41 @@ func tamanhoDe(e *env.Env, p string) int64 {
 		return 0
 	}
 	return fi.Size()
+}
+
+// modulosRelevantes são os módulos CARREGADOS ou configurados para carregar.
+//
+// É o mesmo recorte que a ferramenta usa em todo lugar: o que está fazendo
+// alguma coisa. Um .ko parado na árvore não roda até alguém carregá-lo, e a
+// pergunta de propriedade sobre ele continua sendo feita de graça.
+//
+// Em modo image não há /proc/modules, então sobra o que está configurado — que
+// é justamente o que se procura num rootfs desligado.
+func modulosRelevantes(f *Facts) map[string]bool {
+	nomes := map[string]bool{}
+	for _, m := range f.Cross.ModProc {
+		nomes[normalizaModulo(m)] = true
+	}
+	for i := range f.Modules {
+		nomes[normalizaModulo(f.Modules[i].Module)] = true
+	}
+	if len(nomes) == 0 {
+		return nil
+	}
+
+	out := map[string]bool{}
+	for _, p := range f.ModuleFiles {
+		base := p
+		if i := strings.LastIndex(base, "/"); i >= 0 {
+			base = base[i+1:]
+		}
+		// Tira a extensão e a compressão: `foo.ko`, `foo.ko.xz`, `foo.ko.zst`.
+		if i := strings.Index(base, ".ko"); i > 0 {
+			base = base[:i]
+		}
+		if nomes[normalizaModulo(base)] {
+			out[p] = true
+		}
+	}
+	return out
 }

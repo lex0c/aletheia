@@ -33,6 +33,19 @@ const (
 	// que houve foi parar antes.
 	maxSuidDirs  = 40000
 	maxSuidDepth = 12
+
+	// Profundidade menor sob HOME, e a razão é onde o custo mora.
+	//
+	// As árvores de sistema são pequenas e valem por inteiro. O home de uma
+	// estação de trabalho tem centenas de milhares de diretórios de código e
+	// dependência — 270 mil numa medição real, contra 40 mil de teto —, e sem
+	// um limite a varredura truncava por CONTAGEM, que é o pior corte possível:
+	// cai num lugar diferente a cada host e não diz onde parou.
+	//
+	// O limite de profundidade é declarado e igual em toda máquina. Cobre os
+	// lugares onde uma retenção de root de fato fica — ~/bin, ~/.config/x,
+	// ~/.local/bin —, e o que fica de fora é dito em voz alta.
+	maxSuidDepthHome = 5
 )
 
 // suidRaizes são as árvores onde binário executável mora. É deliberadamente uma
@@ -45,6 +58,25 @@ var suidRaizes = []string{
 	"/bin", "/sbin", "/lib", "/lib64",
 	"/usr", "/opt", "/srv", "/root", "/home",
 	"/var/tmp", "/var/www", "/var/lib", "/tmp", "/dev/shm", "/etc",
+}
+
+// pularPorNome são diretórios que não se percorre EM PROFUNDIDADE ALGUMA:
+// dependência de projeto, cache de gerenciador e árvore de build.
+//
+// Sem eles a varredura afogava. Num home de desenvolvedor são 270 mil
+// diretórios, o teto de 40 mil estourava, e o resultado era uma varredura
+// arbitrariamente truncada em 15% — o pior dos dois mundos, porque um corte por
+// contagem não diz ONDE parou.
+//
+// Pular árvore NOMEADA é melhor que truncar: a exclusão é conhecida, está
+// escrita e é a mesma em todo host, enquanto o teto por contagem cai num lugar
+// diferente a cada máquina.
+var pularPorNome = map[string]bool{
+	"node_modules": true, ".git": true, ".cache": true, ".npm": true,
+	".cargo": true, ".rustup": true, ".gradle": true, ".m2": true,
+	"site-packages": true, "venv": true, ".venv": true, "__pycache__": true,
+	".pnpm-store": true, ".yarn": true, "vendor": true, ".terraform": true,
+	".mozilla": true,
 }
 
 // suidPular são árvores dentro das raízes que só geram custo. /usr/share é
@@ -76,15 +108,22 @@ type SuidFile struct {
 }
 
 func collectSuid(f *Facts, e *env.Env) {
-	// A varredura fica no mesmo DISPOSITIVO da raiz, como o `-xdev` do find.
+	// A varredura não ATRAVESSA montagem, como o `-xdev` do find: um NFS ou um
+	// volume de rede transforma meio segundo em minutos, e o que se acha ali é
+	// de OUTRO host.
 	//
-	// Sem isso, um NFS montado ou um volume de rede transforma uma varredura de
-	// meio segundo em minutos, e o que se acha ali é do OUTRO host — não é
-	// persistência nesta máquina.
-	dev, temDev := dispositivoDe(e, "/")
-
+	// Mas a baseline é POR RAIZ, não a do "/". Comparar tudo contra o
+	// dispositivo do "/" fazia a varredura parar na porta de toda árvore que
+	// tem filesystem próprio — e as duas mais comuns são justamente as que
+	// importam: /home em partição separada (a norma em servidor) e /tmp em
+	// tmpfs (o padrão do systemd). Nesses hosts, SUID em home de usuário ou em
+	// subdiretório de /tmp nunca seria encontrado.
+	//
+	// Com a baseline por raiz, cada árvore listada é percorrida inteira, e o
+	// que continua fora é só o que estiver montado DENTRO dela.
 	visitados := 0
 	truncado := false
+	profundoDemais := false
 	var outroFS []string
 	for _, raiz := range suidRaizes {
 		// Raiz que é SYMLINK não entra.
@@ -98,12 +137,22 @@ func collectSuid(f *Facts, e *env.Env) {
 		if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
 			continue
 		}
-		varrerSuid(f, e, raiz, 0, dev, temDev, &visitados, &truncado, &outroFS)
+		dev, temDev := dispositivoDeInfo(fi)
+		teto := maxSuidDepth
+		if raiz == "/home" || raiz == "/root" {
+			teto = maxSuidDepthHome
+		}
+		varrerSuid(f, e, raiz, 0, teto, dev, temDev, &visitados, &truncado, &profundoDemais, &outroFS)
 	}
 
 	if truncado {
 		f.denyPersist("suid", "a varredura de SUID parou em "+
 			strconv.Itoa(maxSuidDirs)+" diretórios: o excedente NÃO foi examinado")
+	}
+	if profundoDemais {
+		f.denyPersist("suid", "a varredura de SUID desceu no máximo "+
+			strconv.Itoa(maxSuidDepthHome)+" níveis dentro de /home e /root: "+
+			"SUID mais fundo que isso NÃO foi procurado")
 	}
 	// A lacuna de escopo só vale se algo foi REALMENTE pulado.
 	//
@@ -121,10 +170,18 @@ func collectSuid(f *Facts, e *env.Env) {
 	}
 }
 
-func varrerSuid(f *Facts, e *env.Env, dir string, prof int, dev uint64, temDev bool,
-	visitados *int, truncado *bool, outroFS *[]string) {
+func varrerSuid(f *Facts, e *env.Env, dir string, prof, teto int, dev uint64, temDev bool,
+	visitados *int, truncado, profundoDemais *bool, outroFS *[]string) {
 
-	if prof > maxSuidDepth || *truncado || suidPular[dir] {
+	if prof > teto {
+		// A lacuna só vale se algo foi REALMENTE cortado. Declará-la sempre que
+		// /home existe deixaria todo servidor permanentemente degradado por uma
+		// escolha de escopo que nunca chegou a excluir nada — e um parcial que
+		// nunca sai gasta o sinal de cobertura.
+		*profundoDemais = true
+		return
+	}
+	if *truncado || suidPular[dir] {
 		return
 	}
 	if *visitados >= maxSuidDirs {
@@ -162,7 +219,7 @@ func varrerSuid(f *Facts, e *env.Env, dir string, prof int, dev uint64, temDev b
 					continue
 				}
 			}
-			varrerSuid(f, e, p, prof+1, dev, temDev, visitados, truncado, outroFS)
+			varrerSuid(f, e, p, prof+1, teto, dev, temDev, visitados, truncado, profundoDemais, outroFS)
 			continue
 		}
 		if !fi.Mode().IsRegular() {
@@ -195,16 +252,6 @@ func DirGravavelPorTodos(p string) bool {
 		}
 	}
 	return false
-}
-
-// dispositivoDe devolve o número do dispositivo do caminho, para a varredura
-// não sair do filesystem da raiz.
-func dispositivoDe(e *env.Env, p string) (uint64, bool) {
-	fi, err := e.Stat(p)
-	if err != nil {
-		return 0, false
-	}
-	return dispositivoDeInfo(fi)
 }
 
 // dispositivoDeInfo extrai o número do dispositivo. Falhar aqui não é erro: em

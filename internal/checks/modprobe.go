@@ -59,11 +59,15 @@ var modprobeInstall = check.Check{
 			if soChamaModprobe(m.Cmd) {
 				continue
 			}
-			// E o arquivo entregue POR PACOTE não é achado. O driver TrueScale
-			// da Intel encadeia carga chamando um script em /usr/lib/rdma, vem
-			// em /lib/modprobe.d/truescale.conf, e é legítimo — foi o falso
-			// positivo que apareceu no primeiro host real testado.
-			if temDonoDePacote(f, m.File) {
+			// E o arquivo entregue INTACTO por um pacote não é achado. O driver
+			// TrueScale da Intel encadeia carga chamando um script em
+			// /usr/lib/rdma, vem em /lib/modprobe.d/truescale.conf, e é legítimo
+			// — foi o falso positivo do primeiro host real testado.
+			//
+			// "Intacto" e não só "com dono": editar o arquivo de um pacote
+			// mantém a procedência e muda o conteúdo, que é justamente a forma
+			// que interessa aqui.
+			if entregueIntactoPeloPacote(f, m.File) {
 				continue
 			}
 

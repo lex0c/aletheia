@@ -75,7 +75,10 @@ var escutaSemDono = check.Check{
 				continue
 			}
 			p := f.ProcessByPID(s.PID)
-			if p == nil || p.Self || p.Exe == "" || !semDono[p.Exe] {
+			// Vanished entra na guarda como em todo outro check: um processo que
+			// sumiu no meio da coleta tem exe possivelmente obsoleto, e acusá-lo
+			// é achado de corrida, não de rede.
+			if p == nil || p.Self || p.Vanished || p.Exe == "" || !semDono[p.Exe] {
 				continue
 			}
 
@@ -164,7 +167,10 @@ var saidaSemDono = check.Check{
 				continue
 			}
 			p := f.ProcessByPID(s.PID)
-			if p == nil || p.Self || p.Exe == "" || !semDono[p.Exe] {
+			// Vanished entra na guarda como em todo outro check: um processo que
+			// sumiu no meio da coleta tem exe possivelmente obsoleto, e acusá-lo
+			// é achado de corrida, não de rede.
+			if p == nil || p.Self || p.Vanished || p.Exe == "" || !semDono[p.Exe] {
 				continue
 			}
 			visto[s.PID] = true

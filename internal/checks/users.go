@@ -375,7 +375,7 @@ func regraAmpla(texto string) bool {
 	// A especificação de comando é o que vem depois do último `=` ou dos
 	// dois-pontos do NOPASSWD.
 	corte := texto
-	if i := strings.LastIndex(strings.ToUpper(texto), "NOPASSWD:"); i >= 0 {
+	if i := indiceSemCaixa(texto, "NOPASSWD:"); i >= 0 {
 		corte = texto[i+len("NOPASSWD:"):]
 	} else if i := strings.LastIndex(texto, "="); i >= 0 {
 		corte = texto[i+1:]
@@ -400,4 +400,21 @@ func campoInicial(texto string) string {
 		return alvo
 	}
 	return fs[0]
+}
+
+// indiceSemCaixa acha a última ocorrência ignorando maiúsculas, devolvendo o
+// índice na string ORIGINAL.
+//
+// A versão anterior indexava `strings.ToUpper(texto)` e fatiava `texto`. Em
+// ASCII os dois coincidem, mas ToUpper muda o tamanho em bytes de alguns
+// caracteres (o `ı` turco vira `I`, de dois bytes para um) — e aí o corte cai
+// no lugar errado e a severidade sai trocada. É improvável num sudoers e é
+// barato de não deixar acontecer.
+func indiceSemCaixa(texto, alvo string) int {
+	for i := len(texto) - len(alvo); i >= 0; i-- {
+		if strings.EqualFold(texto[i:i+len(alvo)], alvo) {
+			return i
+		}
+	}
+	return -1
 }

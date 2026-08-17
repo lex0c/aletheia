@@ -1,8 +1,6 @@
 package checks
 
 import (
-	"strings"
-
 	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
@@ -113,14 +111,14 @@ func reivindicacaoComPoder(f *facts.Facts, p string) string {
 	}
 	for i := range f.Units {
 		for _, ex := range f.Units[i].Exec {
-			if strings.HasPrefix(ex.Cmd, p) {
+			if primeiroCaminho(ex.Cmd) == p {
 				return "e uma unit de systemd (" + f.Units[i].Name + ") executa este " +
 					"arquivo: a linha na base está escondendo um alvo de persistência"
 			}
 		}
 	}
 	for i := range f.Cron {
-		if strings.HasPrefix(f.Cron[i].Cmd, p) {
+		if primeiroCaminho(f.Cron[i].Cmd) == p {
 			return "e um agendamento (" + f.Cron[i].File + ") executa este arquivo: " +
 				"a linha na base está escondendo um alvo de persistência"
 		}

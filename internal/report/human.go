@@ -197,7 +197,12 @@ func writeNextSteps(w io.Writer, r *check.Report) {
 				chave = strings.TrimSpace(chave[:i])
 			}
 			if vistos[chave] {
-				break
+				// `continue`, não `break`: o achado ainda pode contribuir com um
+				// comando DIFERENTE mais adiante na lista dele. Interromper aqui
+				// fazia um achado cujo primeiro passo já apareceu não contribuir
+				// com nada — e o passo perdido costuma ser o `gcore`, que é o
+				// único jeito de preservar a memória antes de matar.
+				continue
 			}
 			vistos[chave] = true
 			cmds = append(cmds, ns)

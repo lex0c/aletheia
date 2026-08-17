@@ -159,20 +159,6 @@ func TestCenarios(t *testing.T) {
 
 func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 	t.Helper()
-	// Um ID inexistente em Forbid NUNCA dispara, e o cenário passa sem provar
-	// nada. É a mesma armadilha que a ferramenta existe para evitar — "não
-	// apareceu" indistinguível de "não foi procurado" — desta vez na suíte.
-	for _, id := range append(append([]string{}, sc.Forbid...), sc.UntestableChecks...) {
-		if !idsDeCheck()[id] {
-			t.Fatalf("cenário %q cita o check %q, que não existe: um Forbid com ID "+
-				"errado passa calado e não prova nada", sc.Desc, id)
-		}
-	}
-	for _, e := range sc.Expect {
-		if !idsDeCheck()[e.ID] {
-			t.Fatalf("cenário %q espera o check %q, que não existe", sc.Desc, e.ID)
-		}
-	}
 	r = r.semArtefatoDoRig()
 
 	for _, e := range sc.Expect {
@@ -600,15 +586,42 @@ func sanitizeName(s string) string {
 	return r.Replace(s)
 }
 
-// idsDeCheck é o catálogo real, para recusar cenário que cita check inexistente.
-var idsDeCheckCache map[string]bool
-
-func idsDeCheck() map[string]bool {
-	if idsDeCheckCache == nil {
-		idsDeCheckCache = map[string]bool{}
-		for _, c := range check.All() {
-			idsDeCheckCache[c.ID] = true
+// TestCenarioNaoCitaCheckInexistente é SERIAL e roda sobre TODOS os cenários,
+// inclusive os pulados. As duas coisas têm motivo.
+//
+// Serial: a versão anterior validava dentro de `assertScenario`, que roda em
+// subteste com `t.Parallel()`, e montava um mapa global de forma preguiçosa —
+// uma corrida de dados que o `-race` não pegou porque a suíte de cenários exige
+// a tag de build e não entra no `go test -race ./internal/...`.
+//
+// Sobre os pulados: `UntestableChecks` só existe em cenário que NÃO executa, e
+// validar dentro da execução nunca alcançava justamente esse campo. Um ID
+// errado ali faria um check parecer coberto sem nunca ter sido demonstrado, que
+// é a mesma armadilha que a ferramenta existe para evitar — "não apareceu"
+// indistinguível de "não foi procurado", desta vez dentro da suíte.
+func TestCenarioNaoCitaCheckInexistente(t *testing.T) {
+	ids := map[string]bool{}
+	for _, c := range check.All() {
+		ids[c.ID] = true
+	}
+	for _, sc := range scenario.All() {
+		for _, id := range sc.Forbid {
+			if !ids[id] {
+				t.Errorf("cenário %q proíbe %q, que não existe: um Forbid com ID "+
+					"errado passa calado e não prova nada", sc.ID, id)
+			}
+		}
+		for _, id := range sc.UntestableChecks {
+			if !ids[id] {
+				t.Errorf("cenário %q declara %q impossível, e ele não existe: "+
+					"o check apareceria como coberto sem nunca ter sido demonstrado",
+					sc.ID, id)
+			}
+		}
+		for _, e := range sc.Expect {
+			if !ids[e.ID] {
+				t.Errorf("cenário %q espera %q, que não existe", sc.ID, e.ID)
+			}
 		}
 	}
-	return idsDeCheckCache
 }

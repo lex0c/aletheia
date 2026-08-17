@@ -264,8 +264,22 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 	for i := range f.Modules {
 		add(f.Modules[i].File, "config de módulo")
 	}
+	// Só os módulos CARREGADOS ou configurados para carregar.
+	//
+	// A árvore de um kernel moderno tem doze mil arquivos. Perguntar por todos
+	// custa doze mil `Lstat` e trinta mil entradas de mapa por varredura, para
+	// responder sobre arquivos que não estão rodando nem agendados — o mesmo
+	// recorte que esta ferramenta aplica em todo lugar diz que o que interessa
+	// é o que faz alguma coisa.
+	//
+	// E não se perde o caso que importa: um módulo plantado só age depois de
+	// carregado, e para carregar no boot ele precisa estar configurado — o que
+	// o traz de volta para esta lista.
+	relevantes := modulosRelevantes(f)
 	for _, ko := range f.ModuleFiles {
-		add(ko, "módulo de kernel")
+		if relevantes[ko] {
+			add(ko, "módulo de kernel")
+		}
 	}
 	// SUID é o caso em que a pergunta de propriedade vale MAIS: o conjunto
 	// legítimo de binários com setuid é pequeno, conhecido e vem todo de

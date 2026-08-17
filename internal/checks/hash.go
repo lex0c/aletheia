@@ -189,6 +189,10 @@ var dataFalsificada = check.Check{
 
 // arquivoComPoder diz se o arquivo faz algum trabalho — tem privilégio ou está
 // persistido. É o que separa extração de tarball de falsificação deliberada.
+//
+// A comparação é pelo PRIMEIRO TOKEN e não por prefixo: prefixo faria
+// `/usr/local/bin/foo` casar com um comando que executa `/usr/local/bin/foobar`,
+// e a diferença entre os dois é um arquivo diferente.
 func arquivoComPoder(f *facts.Facts, p string) string {
 	for i := range f.Suid {
 		if f.Suid[i].Path == p {
@@ -198,14 +202,14 @@ func arquivoComPoder(f *facts.Facts, p string) string {
 	}
 	for i := range f.Units {
 		for _, ex := range f.Units[i].Exec {
-			if strings.HasPrefix(ex.Cmd, p) {
+			if primeiroCaminho(ex.Cmd) == p {
 				return "e a unit " + f.Units[i].Name + " o executa: a data foi mexida " +
 					"num alvo de persistência"
 			}
 		}
 	}
 	for i := range f.Cron {
-		if strings.HasPrefix(f.Cron[i].Cmd, p) {
+		if primeiroCaminho(f.Cron[i].Cmd) == p {
 			return "e o agendamento em " + f.Cron[i].File + " o executa: a data foi " +
 				"mexida num alvo de persistência"
 		}

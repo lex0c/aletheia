@@ -2971,3 +2971,60 @@ exatamente o defeito que a ferramenta testada existe para não cometer.
 ### Estado
 
 67 checks, 94 cenários, 138 execuções — 14 delas em VM com kernel próprio.
+
+---
+
+## Registro — trap de shell e credencial em arquivo
+
+Duas lacunas do mapa, e as duas custaram pouco porque a estrutura já existia.
+
+### Trap: uma linha no classificador que já era usado
+
+`trap` associa comando a evento do shell. Num arquivo de INICIALIZAÇÃO isso é
+persistência — vale para toda sessão da conta, e o comando não aparece em lista
+de processo, nem em cron, nem em unit.
+
+```
+DEBUG   roda ANTES DE CADA COMANDO: execução contínua, e registrador do que
+        se digita
+EXIT    roda ao encerrar a sessão, quando ninguém está olhando
+ERR     roda a cada comando que falha
+```
+
+Duas exclusões que o teste trava: `trap - INT` apenas RESTAURA o padrão e não
+executa nada, e `trap` no meio de outra palavra — `/usr/bin/mytrap` — não arma
+armadilha nenhuma.
+
+### Credencial: inventário, e um único juízo objetivo
+
+É o que um invasor procura PRIMEIRO, e o que define até onde ele vai. Mas a
+ferramenta não sabe quais credenciais são esperadas — **todo servidor de
+aplicação tem credencial de aplicação**, é assim que ele funciona.
+
+Então o achado é inventário, e o único juízo é a permissão:
+
+```
+0644   o segredo deixou de depender da conta dona, e qualquer processo do
+       host o alcança                                              → AVISO
+0600   é o desenho normal                                          → inventário
+```
+
+O conteúdo NÃO é lido, deliberadamente: carregar segredo para dentro da memória
+da ferramenta, e daí para dentro de um relatório que vai para um ticket, cria
+exposição em vez de reduzir.
+
+### O falso positivo que apareceu no primeiro host
+
+`~/.ssh/config` em 0644, acusado de credencial exposta. Ele é CONFIGURAÇÃO —
+aponta para chave e destino, não contém nenhum dos dois — e 0644 é o modo normal
+dele.
+
+O critério ficou estreito: **o arquivo tem que CONTER credencial, não apontar
+para uma.** `.aws/config` saiu pelo mesmo motivo, e onde este host se conecta já
+é respondido pelo `known_hosts`. Há teste travando isso.
+
+### Estado
+
+68 checks, 95 cenários, 140 execuções. Quatro das seis lacunas do `ATTACK.md`
+fechadas; restam arquivo oculto em diretório temporário e conta criada na janela
+do incidente.

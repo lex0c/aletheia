@@ -78,6 +78,32 @@ func init() {
 		Exit: -1,
 	})
 	Register(Scenario{
+		ID:   "E6-credencial-em-arquivo",
+		Desc: "credencial de nuvem e segredo de aplicação: até onde este host alcança",
+		// É o que um invasor procura PRIMEIRO depois de entrar, e o que define
+		// até onde ele vai a partir daqui. Uma chave de nuvem vale mais que
+		// qualquer implante: com ela não é preciso voltar ao host.
+		//
+		// O cenário planta as duas metades de propósito. A permissão é a única
+		// coisa objetiva que a ferramenta pode dizer, e é ela que separa o
+		// inventário do aviso:
+		//
+		//	0644  o segredo deixou de depender da conta dona
+		//	0600  é o desenho normal, e entra como inventário
+		//
+		// Se as duas saíssem iguais, o check viraria "todo servidor de aplicação
+		// tem um problema" — e todo servidor de aplicação tem credencial.
+		Images: matriz,
+		Plant:  credenciaisEmArquivo,
+		Expect: []Expect{
+			{ID: "cred.secret_file", Sev: "WARN", Subject: "/root/.aws/credentials"},
+			{ID: "cred.secret_file", Evidence: "LEGÍVEL por grupo ou por outros"},
+			{ID: "cred.secret_file", Sev: "MANUAL", Subject: "/srv/app/.env"},
+		},
+		Exit: 1,
+	})
+
+	Register(Scenario{
 		ID:   "E4-auditoria-desligada",
 		Desc: "auditoria instalada e neutralizada com `-e 0`: a trilha some sem o arquivo sumir",
 		// A pergunta que vem ANTES de todas numa resposta a incidente: este host
@@ -173,4 +199,15 @@ db01.interno.corp,10.0.0.31 ssh-rsa AAAAB3NzaC1yc2EAAAADAQABExemploDoBanco
 |1|F1E2D3C4B5A6978877665544332211AABBCCDD=|AABBCCDDEEFF00112233445566778899AA= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExemploEmbaralhado
 FIM
 chmod 600 /root/.ssh/known_hosts
+`
+
+// credenciaisEmArquivo planta as duas permissões, que é o que separa aviso de
+// inventário.
+const credenciaisEmArquivo = `
+mkdir -p /root/.aws /srv/app
+printf '[default]\naws_access_key_id=AKIAEXEMPLO\naws_secret_access_key=exemplo\n' > /root/.aws/credentials
+chmod 644 /root/.aws/credentials
+
+printf 'DB_PASSWORD=exemplo\nAPI_TOKEN=exemplo\n' > /srv/app/.env
+chmod 600 /srv/app/.env
 `

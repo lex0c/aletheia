@@ -313,6 +313,9 @@ func execSuspect(cmd string) (string, check.Severity, bool) {
 		return "usa /dev/tcp: shell reverso embutido, sem binário externo (runbook §3.16)",
 			check.SevCritical, true
 	}
+	if motivo, ok := trapDeShell(low); ok {
+		return motivo, check.SevCritical, true
+	}
 
 	// Interpretador com código EM LINHA que decodifica a si mesmo.
 	//
@@ -435,4 +438,57 @@ func ofuscaPayload(low string) bool {
 		}
 	}
 	return false
+}
+
+// trapDeShell reconhece a persistência por armadilha de sinal.
+//
+// `trap` associa um comando a um evento do shell, e num arquivo de
+// INICIALIZAÇÃO isso é persistência: a linha vale para toda sessão daquela
+// conta, e o comando não aparece em lista de processo, nem em cron, nem em
+// unit.
+//
+//	DEBUG   roda ANTES DE CADA COMANDO. É o mais forte: dá execução contínua e
+//	        serve de registrador do que o usuário digita
+//	EXIT    roda ao encerrar a sessão, quando ninguém está olhando
+//	ERR     roda a cada comando que falha
+//
+// O uso legítimo de `trap` é em SCRIPT — limpar arquivo temporário ao sair. Num
+// arquivo de rc de shell interativo ele quase não tem razão de existir, e é
+// por isso que o classificador só o vê onde vê: nas linhas de gatilho.
+func trapDeShell(low string) (string, bool) {
+	i := strings.Index(low, "trap ")
+	if i != 0 && (i < 0 || !ehInicioDeComando(low, i)) {
+		return "", false
+	}
+	resto := low[i+len("trap "):]
+	// `trap` sem comando (ex.: `trap - INT`) apenas RESTAURA o padrão: não
+	// executa nada, e acusá-lo seria acusar limpeza de armadilha.
+	if strings.HasPrefix(strings.TrimSpace(resto), "-") {
+		return "", false
+	}
+	for _, ev := range []string{"debug", "exit", "err"} {
+		if !strings.Contains(resto, ev) {
+			continue
+		}
+		motivo := "arma um `trap` de shell em " + strings.ToUpper(ev) +
+			": o comando roda "
+		switch ev {
+		case "debug":
+			motivo += "ANTES DE CADA COMANDO da sessão, e serve tanto de execução " +
+				"contínua quanto de registrador do que se digita"
+		case "exit":
+			motivo += "ao encerrar a sessão, quando ninguém está olhando"
+		default:
+			motivo += "a cada comando que falhar"
+		}
+		return motivo + " — e não aparece em processo, cron nem unit", true
+	}
+	return "", false
+}
+
+// ehInicioDeComando evita casar `trap` no meio de outra palavra ou dentro de um
+// caminho: `/usr/bin/mytrap ` não arma armadilha nenhuma.
+func ehInicioDeComando(low string, i int) bool {
+	c := low[i-1]
+	return c == ' ' || c == '\t' || c == ';' || c == '&' || c == '|'
 }

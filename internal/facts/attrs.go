@@ -31,14 +31,12 @@ type AtributoInode struct {
 	Path     string `json:"path"`
 	Imutavel bool   `json:"immutable,omitempty"`
 	SoAnexa  bool   `json:"append_only,omitempty"`
-	SemDump  bool   `json:"no_dump,omitempty"`
 	Flags    uint32 `json:"flags"`
 }
 
 const (
 	flImutavel = 0x00000010 // FS_IMMUTABLE_FL
 	flSoAnexa  = 0x00000020 // FS_APPEND_FL
-	flSemDump  = 0x00000040 // FS_NODUMP_FL
 )
 
 // ioctlGetFlags é o número do FS_IOC_GETFLAGS, e ele DEPENDE DA ARQUITETURA.
@@ -83,9 +81,8 @@ func coletarAtributos(f *Facts, e *env.Env) {
 			Flags:    flags,
 			Imutavel: flags&flImutavel != 0,
 			SoAnexa:  flags&flSoAnexa != 0,
-			SemDump:  flags&flSemDump != 0,
 		}
-		if !a.Imutavel && !a.SoAnexa && !a.SemDump {
+		if !a.Imutavel && !a.SoAnexa {
 			continue
 		}
 		f.Atributos = append(f.Atributos, a)

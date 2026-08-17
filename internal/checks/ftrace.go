@@ -79,8 +79,16 @@ var hookDeEnumeracao = check.Check{
 			var simbolos, donos []string
 			vistoDono := map[string]bool{}
 			porBPF := true
+			var multiplos bool
 			for _, h := range hs {
-				simbolos = append(simbolos, h.Simbolo)
+				rot := h.Simbolo
+				if h.Contagem > 1 {
+					// Mais de um interceptador na MESMA função: ou há duas
+					// ferramentas observando, ou alguém se pendurou depois.
+					rot += "(" + strconv.Itoa(h.Contagem) + "×)"
+					multiplos = true
+				}
+				simbolos = append(simbolos, rot)
 				dono := h.Modulo
 				if dono == "" {
 					dono = h.Callback
@@ -118,6 +126,12 @@ var hookDeEnumeracao = check.Check{
 			} else {
 				ev = append(ev, "o callback NÃO é trampolim de eBPF: interceptação de "+
 					"enumeração vinda de módulo é a forma do rootkit")
+			}
+
+			if multiplos {
+				ev = append(ev, "e há função com MAIS DE UM interceptador: ou são "+
+					"duas ferramentas observando, ou alguém se pendurou depois da "+
+					"primeira")
 			}
 
 			fd := self.F(sev, motivo, "", ev...)

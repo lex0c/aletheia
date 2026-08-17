@@ -190,7 +190,13 @@ func lerKnownHosts(f *Facts, e *env.Env, p string) {
 	if err != nil {
 		return
 	}
-	for _, ln := range strings.Split(string(b), "\n") {
+	lerKnownHostsTexto(f, p, string(b))
+}
+
+// lerKnownHostsTexto é o parser separado da leitura, para poder ser exercitado
+// sem disco. O formato é o que decide, não de onde o texto veio.
+func lerKnownHostsTexto(f *Facts, p, texto string) {
+	for _, ln := range strings.Split(texto, "\n") {
 		ln = strings.TrimSpace(ln)
 		if ln == "" || strings.HasPrefix(ln, "#") {
 			continue

@@ -2694,3 +2694,80 @@ viraria "todo host que usa SSH tem um problema".
 
 63 checks, 84 cenários, 128 execuções. `make race` limpo. Zero achado em Debian
 12, Alpine 3.20 e Ubuntu 14.04.
+
+---
+
+## Registro — auditoria da própria cobertura de teste
+
+A pergunta foi "os cenários exercitam as implementações novas?". A resposta
+honesta era **parcialmente**, e as lacunas importavam.
+
+### Dado coletado que ninguém lia
+
+Nove campos. O mesmo defeito do `f.Sudoers`, em escala menor — e um deles era
+**implementação incompleta de uma afirmação minha**:
+
+> a tabela de montagem dá SIGNIFICADO a achados de outros checks
+
+Eu liguei `nosuid` no check de privilégio e **nunca liguei `noexec`** no de
+caminho, que é o simétrico exato. Um processo rodando de um diretório montado
+com noexec significa que ele começou antes da montagem ou foi iniciado de uma
+cópia em outro lugar — as duas coisas o operador precisa saber.
+
+O `Vazio` do histórico virou sinal ao cruzar com o wtmp: arquivo zerado numa
+conta que TEM entrada registrada é `> ~/.bash_history`, a forma mais banal de
+apagar rastro — não deixa link, não muda o rc, e some do olhar de quem só
+verifica se o arquivo existe.
+
+O `nodump` saiu: não trava nada e não é sinal.
+
+### Caminhos sem cenário
+
+```
+exclusão de chave de HOST     NÃO exercitada — e se quebrar, TODO host
+                              com SSH vira achado
+3 das 4 formas de desligar    NÃO exercitadas
+histórico
+PEM, PKCS#8, EC               NÃO exercitados — só o OpenSSH novo
+```
+
+O primeiro é o falso positivo de maior alcance possível neste check, e não
+havia nada impedindo o retorno.
+
+### Nenhum dos falsos positivos corrigidos tinha teste
+
+Quatro foram encontrados rodando em máquinas reais, corrigidos, e **nada
+travava a volta**:
+
+```
+/boot/efi           partição EFI de toda máquina UEFI
+truescale.conf      driver Intel empacotado
+lightdm-settings    Manjaro empacota em /usr/local
+/sbin/initctl       diversão do dpkg na imagem do Ubuntu
+```
+
+Nenhum é alcançável por cenário de contêiner: dependem de UEFI, de driver
+Intel, de empacotamento do Manjaro e da imagem do Ubuntu. O nível certo é teste
+unitário — com o dado que a máquina real produziu, não uma invenção próxima.
+Sem isso o teste protege a versão simplificada do problema em vez do problema.
+
+### E dois testes meus eram decorativos
+
+O de partição chamava a função auxiliar em vez do check: quem apagasse a
+chamada dela passaria com o teste verde. O de diversão verificava que uma lista
+vazia não produz achado — verdade trivial que não exercita diversão nenhuma.
+
+Os dois foram refeitos, e os dois foram VERIFICADOS revertendo a correção:
+
+```
+sem o corte de particionamento    "partição EFI: achado = true, quer false"
+sem a exclusão de chave de host   as duas chaves do sshd viram aviso
+```
+
+Teste de regressão que não falha na regressão é decoração.
+
+### Estado
+
+63 checks, 84 cenários, 128 execuções, e a imagem limpa agora prova os quinze
+checks acrescentados depois dela. Zero achado em Debian 12, Alpine 3.20 e
+Ubuntu 14.04.

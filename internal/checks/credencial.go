@@ -209,6 +209,10 @@ var historicoDesligado = check.Check{
 			"arquivo vazio ali é o normal e não aparece aqui",
 		"imagem de contêiner costuma vir com HISTFILE desabilitado para não " +
 			"gravar camada, e isso é do construtor da imagem",
+		"HISTÓRICO VAZIO tem explicação inocente frequente: quem entra por " +
+			"script ou por sessão não interativa nunca digita nada. Por isso o " +
+			"vazio só vira achado quando a conta TEM entrada registrada, e ainda " +
+			"assim como aviso",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
@@ -237,6 +241,41 @@ var historicoDesligado = check.Check{
 				"o que já foi digitado NÃO está aqui: procure em wtmp, no journal e " +
 					"no que a auditoria tiver (runbook §13)",
 				"o ctime do link data a decisão de apagar o rastro (runbook §9)",
+			}
+			r.Findings = append(r.Findings, fd)
+		}
+
+		// HISTÓRICO ZERADO numa conta que ENTROU.
+		//
+		// O arquivo vazio sozinho não diz nada: conta nova é assim, e quem entra
+		// por script nunca digita. O que dá sinal é o cruzamento com o wtmp — a
+		// conta tem entradas registradas E o histórico dela está zerado.
+		//
+		// É a forma mais banal de apagar rastro: `> ~/.bash_history`. Não deixa
+		// link, não muda o rc, e some do olhar de quem só verifica se o arquivo
+		// existe.
+		entrou := map[string]bool{}
+		for i := range f.Logins {
+			if l := &f.Logins[i]; !l.Falhou && l.Tipo == facts.TipoLoginUsuario {
+				entrou[l.User] = true
+			}
+		}
+		for i := range f.Historicos {
+			h := &f.Historicos[i]
+			if !h.Vazio || h.Desviado != "" || !entrou[h.User] {
+				continue
+			}
+			fd := self.F(check.SevWarn, h.Path, "",
+				h.Path+" está vazio, e a conta "+h.User+" tem entrada registrada",
+				"arquivo vazio sozinho não diz nada — conta nova é assim. O que dá "+
+					"sinal é a conta ter ENTRADO e o histórico dela estar zerado",
+				"`> ~/.bash_history` é a forma mais banal de apagar rastro: não "+
+					"deixa link, não muda o rc, e some do olhar de quem só verifica "+
+					"se o arquivo existe",
+			)
+			fd.NextSteps = []string{
+				"o que foi digitado não está aqui: procure no journal e na auditoria " +
+					"(runbook §13)",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

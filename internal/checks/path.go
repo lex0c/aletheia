@@ -66,6 +66,19 @@ var suspiciousPath = check.Check{
 			if p.Cwd != "" {
 				ev = append(ev, "cwd="+p.Cwd)
 			}
+			// O FILESYSTEM pode já ter impedido isto, e a diferença muda a
+			// urgência sem mudar o fato.
+			//
+			// É o simétrico do `nosuid` no check de privilégio: lá o bit é
+			// inerte, aqui o binário não executaria daquele caminho. Um processo
+			// EM EXECUÇÃO num diretório noexec significa que ou ele foi iniciado
+			// antes da montagem, ou alguém copiou para outro lugar para rodar —
+			// e as duas coisas o operador precisa saber.
+			if m := f.MontagemDe(p.Exe); m != nil && m.NoExec {
+				ev = append(ev, "e "+m.Ponto+" está montado com `noexec`: dali não "+
+					"se executa — este processo começou antes da montagem, ou foi "+
+					"iniciado a partir de uma cópia em outro lugar")
+			}
 			if len(p.Argv) > 0 {
 				ev = append(ev, "argv="+strings.Join(p.Argv, " "))
 			}

@@ -98,6 +98,17 @@ func init() {
 			"correlate.persistence_redundant", "integrity.no_package_owner",
 			"priv.uid_zero", "priv.no_password", "priv.service_account_shell",
 			"priv.root_equivalent_group",
+			// Os checks acrescentados depois. Sem entrarem aqui, um contêiner
+			// limpo deixaria de ser a prova de que eles não falam sozinhos — que
+			// é o uso principal deste cenário.
+			"persist.suid_unowned", "persist.modprobe_install",
+			"persist.unit_socket_unowned", "integrity.pkgdb_tampered",
+			"integrity.pkg_file_modified", "integrity.timestomp",
+			"integrity.immutable_flag", "priv.sudo_nopasswd",
+			"net.egress_unowned", "net.listener_unowned",
+			"kernel.mount_over_system", "kernel.ftrace_hook",
+			"auth.bruteforce_success", "antiforense.shell_history",
+			"cred.ssh_private_key",
 		},
 		Exit: 0,
 	})
@@ -325,6 +336,17 @@ func init() {
 			"correlate.persistence_redundant", "integrity.no_package_owner",
 			"priv.uid_zero", "priv.no_password", "priv.service_account_shell",
 			"priv.root_equivalent_group",
+			// Os checks acrescentados depois. Sem entrarem aqui, um contêiner
+			// limpo deixaria de ser a prova de que eles não falam sozinhos — que
+			// é o uso principal deste cenário.
+			"persist.suid_unowned", "persist.modprobe_install",
+			"persist.unit_socket_unowned", "integrity.pkgdb_tampered",
+			"integrity.pkg_file_modified", "integrity.timestomp",
+			"integrity.immutable_flag", "priv.sudo_nopasswd",
+			"net.egress_unowned", "net.listener_unowned",
+			"kernel.mount_over_system", "kernel.ftrace_hook",
+			"auth.bruteforce_success", "antiforense.shell_history",
+			"cred.ssh_private_key",
 		},
 		Exit: 0,
 	})

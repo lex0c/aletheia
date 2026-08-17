@@ -204,9 +204,27 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 		out[p] = append(out[p], onde)
 	}
 
+	// Quantos processos de CONTÊINER saíram da pergunta. Não é zero calado: o
+	// número vai para o relatório, porque "não perguntei sobre trinta binários"
+	// é informação e não pode virar silêncio.
+	var deContainer int
 	for i := range f.Processes {
 		p := &f.Processes[i]
 		if p.Self || p.Vanished || p.Exe == "" || p.ExeDeleted || p.ExeMemfd {
+			continue
+		}
+		// Processo de CONTÊINER não entra na pergunta de propriedade do HOST.
+		//
+		// O exe dele é um caminho dentro da camada de imagem, e nenhum pacote
+		// do host o reivindica — corretamente, porque nenhum o entregou. Um
+		// servidor com trinta contêineres produzia trinta avisos por isso.
+		//
+		// A exclusão vale só quando estamos NO host: de dentro de um contêiner
+		// todo processo visível é do mesmo contêiner, e excluir excluiria tudo.
+		// E o que sobra desta escolha não é silêncio — é o check de fronteira
+		// (proc.container_boundary), que faz a pergunta CERTA sobre eles.
+		if p.Container != "" && !f.Host.EmContainer {
+			deContainer++
 			continue
 		}
 		add(p.Exe, "processo pid="+strconv.Itoa(p.PID))
@@ -257,6 +275,12 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 	// Só entra o que EXISTE e é arquivo regular. Isso descarta `cd /srv/app`
 	// (diretório) e `npm ci` (não é caminho absoluto), que são o ruído natural
 	// de linha de script.
+	if deContainer > 0 {
+		f.denyPersist("pkg", "propriedade de pacote NÃO foi perguntada sobre "+
+			strconv.Itoa(deContainer)+" processo(s) de contêiner: o binário deles "+
+			"vem de camada de imagem, e a base de pacotes do host nunca o entregou. "+
+			"Quem olha para eles é proc.container_boundary")
+	}
 	for i := range f.Triggers {
 		t := &f.Triggers[i]
 		for _, ln := range t.Lines {

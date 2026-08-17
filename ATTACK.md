@@ -43,6 +43,7 @@ Três rótulos, e o do meio é o que mais informa:
 |---|---|---|
 | T1548.001 Setuid/Setgid | coberto | `persist.suid_unowned` — inclui capability em xattr, que um `find -perm -4000` não vê |
 | T1548.003 Sudo | coberto | `priv.sudo_nopasswd` |
+| T1611 Escape de contêiner | parcial | `proc.container_boundary` — vê conteúdo de imagem executado FORA do contêiner, que é o rastro do escape; a exploração em si não |
 | T1055 Injeção em processo | parcial | `proc.maps_rwx_anon`, `proc.tracer` — vê a forma na memória e o rastreador, não a injeção em si |
 | T1068 Exploração | fora de escopo | um retrato não vê exploração; vê o resultado dela |
 
@@ -149,6 +150,17 @@ hooks de inicialização de interpretador**:
 Fechada por `persist.interpreter_hook` e pelos cenários L1–L4. O `BASH_ENV` é o
 mais silencioso da família: nenhum perfil é tocado, nenhuma unit é editada, e
 todo script que o cron dispara passa a executar o hook antes da primeira linha.
+
+Uma segunda veio da mesma leitura, por outro caminho — **T1611, escape de
+contêiner**. Ela não estava no mapa, e ao medir o que a ferramenta dizia sobre
+um host com contêineres apareceu um falso positivo grande: todo processo de
+contêiner virava aviso do §24, porque o host vê o exe dele dentro da camada de
+imagem e nenhum pacote a reivindica. Trinta contêineres, trinta avisos.
+
+A base de pacotes está CERTA em não reivindicar — ela nunca entregou aquilo. A
+pergunta é que estava errada, e trocá-la fechou a técnica em vez de só calar o
+ruído: `proc.container_boundary` acusa conteúdo de imagem executado FORA do
+contêiner, que é o rastro que um escape deixa.
 
 O resto das quinze com artefato já tinha check — a checagem por nome de arquivo
 que fiz primeiro dizia que PAM estava descoberto, e a tabela acima mostra

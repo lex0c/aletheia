@@ -90,11 +90,16 @@ type Process struct {
 	MapsDenied bool `json:"maps_denied,omitempty"`
 	NSDenied   bool `json:"ns_denied,omitempty"`
 
-	Cgroup  string            `json:"cgroup,omitempty"`
-	NS      map[string]string `json:"ns,omitempty"`
-	FDs     []FD              `json:"fds,omitempty"`
-	MapsRWX []string          `json:"maps_rwx,omitempty"` // regiões graváveis E executáveis
-	MapsOdd []string          `json:"maps_odd,omitempty"` // path fora dos diretórios de biblioteca
+	Cgroup string `json:"cgroup,omitempty"`
+	// Container é o runtime que criou este processo — docker, kubernetes,
+	// podman —, derivado do cgroup. Vazio significa processo do HOST, e a
+	// diferença muda qual pergunta faz sentido sobre o binário dele.
+	Container   string            `json:"container,omitempty"`
+	ContainerID string            `json:"container_id,omitempty"`
+	NS          map[string]string `json:"ns,omitempty"`
+	FDs         []FD              `json:"fds,omitempty"`
+	MapsRWX     []string          `json:"maps_rwx,omitempty"` // regiões graváveis E executáveis
+	MapsOdd     []string          `json:"maps_odd,omitempty"` // path fora dos diretórios de biblioteca
 
 	// MapsLibs é TODA biblioteca carregada, inclusive as de diretório normal.
 	// É a única fonte que torna uma biblioteca candidata à pergunta de

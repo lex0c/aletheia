@@ -183,6 +183,10 @@ func Collect(e *env.Env) *Facts {
 		// Depois dos processos: o dono de cada socket sai do join com os fds
 		// que o coletor de processo já leu.
 		collectSockets(f, e)
+		// Depois dos processos e ANTES de qualquer pergunta de propriedade: é
+		// a classificação que decide se "que pacote entregou este binário?" faz
+		// sentido para aquele processo.
+		classificaContainers(f)
 		// Depois dos processos: a comparação precisa da lista para saber o que
 		// está VISÍVEL.
 		collectCrossView(f, e)

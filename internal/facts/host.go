@@ -15,6 +15,10 @@ type Host struct {
 	Kernel   string `json:"kernel"`
 	OS       string `json:"os"`
 	Virt     string `json:"virt,omitempty"`
+	// EmContainer diz que a PRÓPRIA ferramenta está dentro de um contêiner.
+	// De lá, todo processo visível é do mesmo contêiner e a distinção
+	// "contêiner x host" não significa nada.
+	EmContainer bool `json:"in_container,omitempty"`
 
 	// Load com o número de CPUs junto: "load 8.02" é catastrófico em 2 cpu e
 	// normal em 16. Sem o contexto, o alerta vira ruído — justamente no sinal

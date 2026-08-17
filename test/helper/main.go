@@ -212,6 +212,53 @@ func main() {
 		}
 		fh.Close()
 
+	case "utmp":
+		// helper utmp /var/log/btmp 7 root 203.0.113.9 25
+		//
+		// Escreve registros no formato utmp: tipo, usuário, origem e quantos.
+		// Existe porque plantar entrada de login de verdade exigiria sshd e
+		// sessão — e o que está sob teste é a LEITURA do formato e o cruzamento
+		// entre os dois arquivos, não o daemon que os escreve.
+		need(7)
+		var tipo, n int
+		fmt.Sscanf(os.Args[3], "%d", &tipo)
+		fmt.Sscanf(os.Args[6], "%d", &n)
+		fh, err := os.OpenFile(os.Args[2], os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		die(err)
+		for i := 0; i < n; i++ {
+			r := make([]byte, 384)
+			r[0], r[1] = byte(tipo), byte(tipo>>8)
+			put32(r[4:], uint32(1000+i))
+			copy(r[8:40], "pts/0")
+			copy(r[44:76], os.Args[4])
+			copy(r[76:332], os.Args[5])
+			put32(r[340:], uint32(time.Now().Unix()))
+			_, err := fh.Write(r)
+			die(err)
+		}
+		die(fh.Close())
+
+	case "ftrace":
+		// helper ftrace /caminho/enabled_functions __x64_sys_getdents64 rootkit
+		//
+		// Escreve uma linha no formato do `enabled_functions`. O arquivo real
+		// vive em /sys e não é gravável — o cenário monta um tmpfs por cima
+		// para exercitar o parser e a decisão contra conteúdo realista.
+		need(5)
+		linha := fmt.Sprintf("%s (1) R   D   M \ttramp: ftrace_regs_caller+0x0/0x65 (%s_hook+0x0/0x20)",
+			os.Args[3], os.Args[4])
+		if os.Args[4] != "bpf" {
+			linha += " [" + os.Args[4] + "]"
+		} else {
+			linha = fmt.Sprintf("%s (1) R   D   M \ttramp: ftrace_regs_caller+0x0/0x65 (bpf_trampoline_6442516084+0x0/0xee)",
+				os.Args[3])
+		}
+		fh, err := os.OpenFile(os.Args[2], os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		die(err)
+		_, err = fh.WriteString(linha + "\n")
+		die(err)
+		die(fh.Close())
+
 	case "rwx":
 		die(mapRWX())
 		hold()

@@ -124,6 +124,17 @@ var suidInesperado = check.Check{
 					f.Pkg.Kind+") — e o conjunto legítimo de setuid é pequeno, "+
 					"conhecido, e vem todo de pacote")
 			}
+			// O FILESYSTEM pode tornar o achado inerte, e isso muda a urgência
+			// sem mudar o fato. É a mesma distinção que o rc.local sem bit de
+			// execução já fazia: inerte HOJE, e um remount o ativa.
+			if m := f.MontagemDe(s.Path); m != nil && m.NoSuid && (s.Setuid || s.Setgid) {
+				if sev == check.SevCritical {
+					sev = check.SevWarn
+				}
+				ev = append(ev, "MAS "+m.Ponto+" está montado com `nosuid`: o bit é "+
+					"INERTE hoje — um `mount -o remount,suid` o ativa, e o arquivo "+
+					"continua ali esperando por isso")
+			}
 			ev = append(ev, "uid="+strconv.Itoa(s.UID)+" gid="+strconv.Itoa(s.GID)+
 				" tamanho="+strconv.FormatInt(s.Size, 10))
 			if s.ModUTC != "" {
@@ -147,6 +158,7 @@ var suidInesperado = check.Check{
 		// diferentes.
 		r.Partial = append(r.Partial, f.PersistDenied["suid"]...)
 		r.Partial = append(r.Partial, f.PersistDenied["pkg"]...)
+		r.Partial = append(r.Partial, f.PersistDenied["mounts"]...)
 		return r
 	},
 }

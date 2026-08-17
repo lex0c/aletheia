@@ -2435,3 +2435,106 @@ projeto. Aqui não quebraria nada: só mentiria.
 
 56 checks, 78 cenários, 118 execuções. Zero achado em Debian 12, Alpine 3.20 e
 Ubuntu 14.04.
+
+---
+
+## Registro — as três fontes anotadas
+
+### Montagem: dá SIGNIFICADO ao que outros checks já achavam
+
+A tabela de montagem quase não produz achado próprio. O valor dela é modificar
+o peso do que já existe:
+
+```
+/tmp montado com nosuid → o bit setuid de um arquivo ali é INERTE hoje,
+                          e um `mount -o remount,suid` o ativa
+```
+
+É a mesma distinção que o check de rc.local já fazia com o bit de execução:
+inerte agora, e o ctime data a ativação.
+
+O sinal próprio veio depois, e ele é bom: **montagem por cima de diretório de
+sistema**. Esconde o conteúdo real sem tocar em arquivo nenhum, não precisa de
+módulo nem de preload, e some no reboot sem deixar rastro.
+
+Primeira medição no host: `/boot/efi` acusado. É a partição EFI de toda máquina
+UEFI — eu estava chamando **particionamento** de ocultação. A técnica tem forma
+própria: ou é BIND, ou é filesystem de MEMÓRIA. Montar disco de verdade em ponto
+de montagem de verdade é operação.
+
+### Login: a ferramenta mandava olhar e nunca olhava
+
+O wtmp aparecia em dezenas de evidências — *"confira contra o wtmp"*, *"compare
+com o horário de trabalho"*. Mandar o operador a uma fonte é útil; ir até ela é
+melhor, e o formato nunca justificou a omissão: registro binário de 384 bytes,
+igual em 32 e 64 bits porque os campos de tempo são int32 de propósito.
+
+O achado que valeu a pena é o CRUZAMENTO, e nenhuma das duas metades o dá:
+
+```
+btmp cheio de falhas     ruído de internet, todo host exposto tem
+wtmp com uma entrada     o host funcionando
+as duas na MESMA origem  como o invasor chegou, com hora e endereço
+```
+
+E o btmp é 0600 de root: sem privilégio, "nenhuma força bruta" viraria igual a
+"não olhei as tentativas". A lacuna é declarada.
+
+Um remendo meu que precisou sair: o filtro de origem descartava o registro de
+BOOT procurando `"MANJARO"` na string, porque o campo de origem dele carrega a
+versão do kernel. Funcionava num host e em nenhum outro — quem separa boot de
+login é o TIPO do registro.
+
+### ftrace: diz COMO o kernel estaria mentindo
+
+Os checks de visão cruzada dizem que o kernel PODE estar mentindo. Este diz de
+quê — e sem isso o operador sabe que há ocultação e não sabe do quê, o que não
+orienta resposta nenhuma.
+
+O check não lista todo hook: um host com bpftrace tem dezenas, todos legítimos.
+Ele olha o ALVO, e interceptar uma função de ENUMERAÇÃO tem um propósito só:
+
+```
+getdents64      esconder ARQUIVO de quem lista
+tcp4_seq_show   esconder CONEXÃO de quem lê /proc/net
+kill            canal de comando por sinal, sem abrir porta
+```
+
+O discriminador é o CALLBACK: trampolim de eBPF é ferramenta de observação
+(aviso); módulo nomeado interceptando enumeração é rootkit (crítico).
+
+### A decisão difícil deste bloco
+
+A primeira versão declarava lacuna sempre que `enabled_functions` não fosse
+lido. Isso quebrou **38 cenários**: em contêiner o runtime mascara /sys/kernel,
+e toda varredura em contêiner passaria a ser incompleta para sempre.
+
+Era uma decisão de produto disfarçada de detalhe, e as duas saídas eram ruins:
+
+```
+declarar sempre    RESULT: OK deixa de existir em contêiner — e com ele morre
+                   a única forma que a suíte tem de afirmar "limpo sai OK",
+                   que é como ela pega falso positivo
+não declarar       falsa garantia, que é o oposto da razão de a ferramenta
+                   existir
+```
+
+A saída foi a distinção que eu não estava fazendo: **ausente e ilegível não são
+a mesma coisa**.
+
+```
+existe e não abre   o host TEM a interface e falta privilégio → LACUNA, e a
+                    ação é rodar como root
+não existe          não há interface de tracing neste namespace. Contêiner não
+                    tem kernel próprio → nada a examinar, do mesmo jeito que
+                    não há unit para examinar num host sem systemd
+```
+
+O risco que sobra — kernel do host interceptado, varredura de dentro do
+contêiner cega — é exatamente o que os checks de visão cruzada já declaram: se
+o kernel mente, todas as fontes que dependem dele mentem juntas.
+
+### Estado
+
+60 checks, 81 cenários, 122 execuções. `make race` limpo. Zero achado em Debian
+12, Alpine 3.20, Ubuntu 14.04, CentOS 7 e Rocky 9.

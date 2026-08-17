@@ -53,6 +53,9 @@ type Facts struct {
 	Timestomps    []Timestomp             `json:"timestomps,omitempty"`
 	HashOK        []string                `json:"hash_verified,omitempty"`
 	Atributos     []AtributoInode         `json:"inode_attrs,omitempty"`
+	Mounts        []Montagem              `json:"mounts,omitempty"`
+	Logins        []Login                 `json:"logins,omitempty"`
+	Ftrace        []HookFtrace            `json:"ftrace_hooks,omitempty"`
 	MetaAcesso    []ArquivoMeta           `json:"access_meta,omitempty"`
 	Cross         CrossView               `json:"cross_view"`
 
@@ -149,6 +152,9 @@ func Collect(e *env.Env) *Facts {
 	}
 
 	collectHost(f, e)
+	// Antes de tudo que interpreta caminho: a tabela de montagem diz se o bit
+	// setuid de um arquivo é inerte e se algo executa de um diretório.
+	collectMounts(f, e)
 
 	if e.Has(env.CapProcfs) {
 		collectProcesses(f, e)
@@ -158,6 +164,9 @@ func Collect(e *env.Env) *Facts {
 		// Depois dos processos: a comparação precisa da lista para saber o que
 		// está VISÍVEL.
 		collectCrossView(f, e)
+		// Junto do cross-view: aqueles dizem que o kernel pode estar mentindo,
+		// e este diz COMO.
+		collectFtrace(f, e)
 	} else {
 		f.partial("proc", e.Reason(env.CapProcfs))
 	}

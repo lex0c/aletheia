@@ -3978,3 +3978,68 @@ por isso que a leitura de `AF_PACKET` existe.
 ### Estado
 
 79 checks, 132 cenários. `make verify`, `make race` e a suíte inteira limpos.
+
+---
+
+## Registro — o que a medição de cobertura da suíte apontou
+
+Duas perguntas medidas em vez de opinadas: quantos checks têm prova de
+SILÊNCIO, e que modo de execução nunca foi exercitado contra dado realista.
+
+### 65 de 79 tinham prova de silêncio
+
+A negativa vale tanto quanto a afirmativa — um check que só foi visto disparar
+não foi visto CALAR —, e a conta estava em 65. Subiu para 72, e as que faltavam
+foram fechadas contra dado REAL em vez de plantio:
+
+```
+antiforense.log_rotation_gap   o servidor de web tem rotação de verdade:
+                               .1, .2.gz, .3.gz com mtime antigo
+path.hidden_exec               diretório oculto de build em /tmp, sem executável
+priv.account_no_shadow         contas bem formadas, em passwd E em shadow
+net.packet_socket              servidor de produção não tem socket de captura
+persist.kernel_helper          guest de VM com core_pattern, modprobe e
+                               uevent_helper como a distribuição entrega
+```
+
+Sobraram sete, e nenhuma é descuido: quatro são INVENTÁRIOS (login, known_hosts,
+credencial, eBPF), que falam por desenho; `cross.bpf_hidden` é impossibilidade
+declarada; `kernel.taint_unexplained` só teria negativa com um módulo carregado
+que assuma a marca, e o caso está travado por teste unitário com os dados de um
+host nvidia real; e o `proc.container_boundary` **emite um INFO de escopo de
+propósito** quando roda dentro de contêiner — proibi-lo seria proibir a
+ferramenta de declarar o próprio alcance.
+
+### O modo imagem só tinha plantio sintético
+
+Era a lacuna maior. Os três servidores de referência agora rodam também como
+ROOTFS DESLIGADO, que é o caminho da §35.6 — quando o userland do alvo não é
+confiável, monta-se o disco e varre-se de fora.
+
+E a medição deu a propriedade que valia travar:
+
+```
+                ao vivo          como imagem
+servidor-web    11 avisos        11 avisos · cobertura 34/79
+servidor-db      6 avisos         6 avisos · cobertura 27/79
+servidor-build   9 avisos         9 avisos · cobertura 34/79
+```
+
+**Os mesmos achados de disco; o que muda é a cobertura**, e ela é declarada —
+trinta checks viram NÃO VERIFICADO porque não há processo numa imagem montada.
+O par 84/85 já provava isso para um plantio meu; agora está provado contra três
+máquinas de produção que outra pessoa montou.
+
+### E um defeito do harness que só o Rocky expôs
+
+O rootfs exportado carrega os modos ORIGINAIS — é isso que faz o modo imagem
+valer. A consequência aparecia na limpeza: o Rocky tem diretório sem escrita
+para o dono, o `RemoveAll` do `TempDir` falhava ali, e o teste passava com o
+framework falhando DEPOIS, com uma mensagem que não parece asserção. O harness
+agora afrouxa os modos no `Cleanup` — depois da varredura, que precisava
+vê-los intactos, e antes da remoção.
+
+### Estado
+
+79 checks, 135 cenários, 72 com prova de silêncio. `make verify`, `make race` e
+a suíte inteira limpos.

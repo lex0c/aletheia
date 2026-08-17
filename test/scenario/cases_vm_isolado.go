@@ -57,7 +57,10 @@ func init() {
 			mount -t tmpfs tmpfs /sys/fs
 			mkdir -p /sys/fs/selinux
 			echo 0 > /sys/fs/selinux/enforce`,
-		Forbid: []string{"antiforense.mac_downgraded"},
+		// E os helpers do kernel em valor de FÁBRICA: este guest tem
+		// core_pattern, modprobe e uevent_helper como a distribuição os
+		// entrega, e nenhum deles pode virar achado.
+		Forbid: []string{"antiforense.mac_downgraded", "persist.kernel_helper"},
 		Exit:   -1,
 		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
 		MaxWarn: SemAvisos,

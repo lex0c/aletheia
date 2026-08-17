@@ -290,6 +290,16 @@ func runLive(t *testing.T, bin, img string, sc scenario.Scenario) result {
 func runImage(t *testing.T, bin, img string, sc scenario.Scenario) result {
 	t.Helper()
 	dir := t.TempDir()
+	// O rootfs exportado carrega os modos ORIGINAIS, e é isso que faz o modo
+	// imagem valer: o scan precisa ver a permissão como ela é no disco do alvo.
+	//
+	// A consequência aparece na limpeza: um rootfs de Rocky tem diretório sem
+	// escrita para o dono, e o `RemoveAll` do TempDir falha ali — o teste passa
+	// e o framework falha DEPOIS, com uma mensagem que não parece asserção.
+	//
+	// A ordem importa: o Cleanup é LIFO, então este afrouxa os modos ANTES da
+	// remoção — e depois da varredura, que é o que precisava vê-los intactos.
+	t.Cleanup(func() { _ = exec.Command("chmod", "-R", "u+rwX", dir).Run() })
 
 	name := "aletheia-scn-" + sanitizeName(sc.ID+"-"+img)
 	_ = exec.Command("docker", "rm", "-f", name).Run()

@@ -309,6 +309,10 @@ var sudoSemSenha = check.Check{
 			"praticamente toda imagem de nuvem, e isso é de fábrica",
 		"regra restrita a UM comando é desenho comum de menor privilégio, e sai " +
 			"com severidade menor do que a que concede ALL",
+		"conceder ALL como OUTRA CONTA não é root, e sai como aviso: " +
+			"`%dba ALL=(postgres) NOPASSWD: ALL` é como um time de DBA recebe o " +
+			"serviço que administra, e um servidor de banco real produziu " +
+			"exatamente essa linha",
 		"sem root o /etc/sudoers é ilegível, e a ausência de achado passa a ser " +
 			"desconhecimento em vez de resposta — a cobertura diz qual dos dois",
 	},
@@ -324,9 +328,11 @@ var sudoSemSenha = check.Check{
 			}
 
 			quem := campoInicial(s.Text)
-			// ALL como especificação de comando é root inteiro; um comando
-			// nomeado é menor privilégio, que é desenho e não achado.
+			// ALL como especificação de comando concede QUALQUER comando; e o
+			// runas diz como QUEM. As duas perguntas são diferentes, e confundi-las
+			// custou um crítico contra um servidor de banco limpo.
 			amplo := regraAmpla(s.Text)
+			comoRoot, runas := viraRoot(s.Text)
 			sev := check.SevWarn
 			ev := []string{
 				s.File + ":" + strconv.Itoa(s.Line) + " — " + s.Text,
@@ -335,11 +341,19 @@ var sudoSemSenha = check.Check{
 				ev = append(ev, "`!authenticate` desliga a pergunta de senha para o "+
 					"alvo inteiro, e quase ninguém procura por essa forma")
 			}
-			if amplo {
+			switch {
+			case amplo && comoRoot:
 				sev = check.SevCritical
-				ev = append(ev, "e a especificação de comando é ALL: é root inteiro, "+
-					"sem responder nada")
-			} else {
+				ev = append(ev, "e a especificação de comando é ALL, como "+runas+
+					": é root inteiro, sem responder nada")
+			case amplo:
+				// Conceder TUDO como outra conta não é root, e dizer que é seria
+				// afirmar o que a regra não diz. Continua valendo olhar — quem
+				// usa vira aquela conta sem senha —, mas é aviso.
+				ev = append(ev, "a especificação de comando é ALL, mas como "+runas+
+					" — NÃO como root: quem usa a regra vira aquela conta sem "+
+					"responder nada, que é como se entrega um serviço a um time")
+			default:
 				ev = append(ev, "restrita a comando nomeado — é desenho de menor "+
 					"privilégio, e vale conferir só se ninguém reconhecer a regra")
 			}
@@ -367,6 +381,42 @@ var sudoSemSenha = check.Check{
 		r.Partial = append(r.Partial, f.PersistDenied["users"]...)
 		return r
 	},
+}
+
+// viraRoot lê o RUNAS da regra — o `(...)` depois do `=` — e diz se ela leva a
+// root, junto do texto para a evidência citar.
+//
+// Foi a metade que faltava, e a falta produziu um CRÍTICO contra um servidor de
+// banco perfeitamente normal:
+//
+//	%dba    ALL=(postgres) NOPASSWD: ALL
+//
+// A ferramenta dizia "é root inteiro". Não é: vira `postgres`, que é como um
+// time de DBA recebe o serviço que administra. Root sem senha e serviço sem
+// senha são achados diferentes, e chamá-los de iguais gasta o crítico — que é a
+// severidade que faz a frota parar.
+//
+// Ausência de runas é root: é o padrão do sudo, e escrever `ALL=NOPASSWD: ALL`
+// concede root do mesmo jeito.
+func viraRoot(texto string) (bool, string) {
+	i := strings.Index(texto, "(")
+	j := strings.Index(texto, ")")
+	if i < 0 || j < i {
+		return true, "root (padrão do sudo, sem runas declarado)"
+	}
+	dentro := texto[i+1 : j]
+	// O runas tem duas metades: usuários antes do `:`, grupos depois. Root
+	// entra pela primeira.
+	usuarios, _, _ := strings.Cut(dentro, ":")
+	for _, campo := range strings.FieldsFunc(usuarios, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	}) {
+		c := strings.TrimSpace(campo)
+		if c == "root" || c == "ALL" || c == "#0" {
+			return true, c
+		}
+	}
+	return false, strings.TrimSpace(dentro)
 }
 
 // regraAmpla diz se a regra concede QUALQUER comando. É o que separa "root

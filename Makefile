@@ -7,7 +7,7 @@ GOFLAGS := -trimpath
 # LD_PRELOAD e a binário de sistema trojanizado (SPEC 4).
 export CGO_ENABLED = 0
 
-.PHONY: all build helper vm-image test lint verify clean dist scenarios images vm-kernels arches
+.PHONY: all build helper vm-image test lint verify clean dist scenarios images fixtures vm-kernels arches
 
 all: verify
 
@@ -97,6 +97,22 @@ arches:
 
 scenarios: build helper arches vm-image
 	go test -tags scenarios -v -timeout 10m ./test/...
+
+# fixtures constrói os três SERVIDORES DE REFERÊNCIA.
+#
+# Eles são o material do experimento que mais achou defeito nesta base: três
+# máquinas de produção realistas montadas por quem NÃO conhecia a ferramenta —
+# web, banco e agente de build —, com o acúmulo que uma máquina de dois anos
+# tem. É contra elas que se mede falso positivo, porque nenhuma foi escrita
+# olhando para o que os checks procuram.
+#
+# Separado de `images` porque é caro: o de banco roda initdb, cria 40 mil linhas
+# e arquiva WAL de verdade. Sem eles, os cenários correspondentes são PULADOS
+# com o comando na mensagem.
+fixtures:
+	cd test/images/servidores && for h in web db build; do \
+		docker build -f Dockerfile.$$h -t servidor-$$h:test . || exit 1; \
+	done
 
 # images pré-baixa a matriz, para o primeiro `make scenarios` não medir download.
 images:

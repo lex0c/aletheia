@@ -3817,3 +3817,82 @@ vírgula de volta para espaço.
 
 78 checks, 126 cenários, 27 orçamentos de ruído declarados. `make verify`,
 `make race` e a suíte inteira limpos.
+
+---
+
+## Registro — os três servidores de referência viraram suíte
+
+Correção de rumo minha, e ela vale registrar: eu ia mandar um agente montar
+servidores de produção realistas para medir falso positivo. Eles **já
+existiam** — `test/images/servidores/`, três Dockerfiles de 50 a 80 KB com um
+NOTAS.md de 18 KB, commitados junto com a correção do `update-alternatives`.
+
+O experimento tinha sido feito e o material tinha ficado. O que não tinha
+ficado era o hábito: as três máquinas nunca entraram na suíte, então **nenhum
+check criado depois daquele dia foi medido contra elas** — o que inclui a fase
+8 inteira, o socket de captura, o `--ioc` e o `--since`.
+
+### A segunda medição achou o segundo defeito
+
+```
+servidor-web    0 críticos · 11 avisos · cobertura 78/78
+servidor-db     1 CRÍTICO  ·  5 avisos · cobertura 70/78
+servidor-build  0 críticos ·  9 avisos · cobertura 78/78
+```
+
+O crítico:
+
+```
+⛔ %dba  regra de sudo que escala sem pedir senha                    §7.9
+   · /etc/sudoers.d/30-dba:11 — %dba    ALL=(postgres) NOPASSWD: ALL
+   · e a especificação de comando é ALL: é root inteiro, sem responder nada
+```
+
+**E não é root inteiro.** O `runas` é `(postgres)`: quem usa a regra vira o dono
+do banco sem senha, que é exatamente como um time de DBA recebe o serviço que
+administra. O check lia a especificação de COMANDO e ignorava a de USUÁRIO —
+duas perguntas diferentes que ele tratava como uma.
+
+O custo do engano é o pior possível: crítico faz a frota parar, e este saía
+contra um servidor de banco perfeitamente normal. Root sem senha e serviço sem
+senha são achados diferentes, e chamá-los de iguais gasta a severidade que
+existe para o primeiro.
+
+A correção lê o runas e separa os três casos, com a regra do sudo junto —
+ausência de runas É root, porque é o padrão:
+
+```
+(root) / (ALL) / sem runas + comando ALL   crítico: root inteiro
+(postgres) + comando ALL                   aviso: vira aquela conta, não root
+comando nomeado                            aviso: menor privilégio, é desenho
+```
+
+### E agora eles são regressão, não experimento
+
+Os três viraram cenário (`T1`, `T2`, `T3`) com `make fixtures` para construí-los
+e pulo declarado quando faltam. Cada um trava duas negativas:
+
+```
+Exit: 1     nenhum crítico — host de produção limpo não faz a frota parar
+MaxWarn     11 · 6 · 9, medidos: se um check novo acrescentar ruído aqui, a
+            suíte quebra e alguém decide se ele vale a atenção que custa
+```
+
+O que sobra de aviso é verdade em todos: venv e agente de telemetria que não vêm
+de pacote, housekeeping de poucos em poucos minutos, chave privada e token de
+registro no agente de CI, grupo docker com membro. A ferramenta diz as quatro
+coisas e as quatro estão certas — o teto existe para a quinta não entrar sem
+alguém decidir.
+
+### O que este bloco ensina sobre o método
+
+O experimento de fixture externa achou defeito nas **duas** vezes em que foi
+feito, e nas duas o defeito era invisível para a matriz de contêineres — porque
+a matriz é limpa demais e os cenários próprios são plantados por quem escreveu
+os checks. A conclusão prática não é "montar mais fixtures": é **não deixar as
+que existem fora da suíte**.
+
+### Estado
+
+78 checks, 129 cenários, 30 orçamentos de ruído declarados. `make verify`,
+`make race` e a suíte inteira limpos.

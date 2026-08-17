@@ -213,3 +213,59 @@ func TestSudoPegaNaoAutentica(t *testing.T) {
 		t.Fatalf("achados = %v", r.Findings)
 	}
 }
+
+// O RUNAS decide se a regra é root ou não, e confundir as duas coisas custou um
+// CRÍTICO contra um servidor de banco perfeitamente normal.
+//
+// A linha veio da fixture de um PostgreSQL de produção montada por quem não
+// conhecia esta ferramenta — que é o único jeito de descobrir um falso positivo
+// destes.
+func TestSudoRunasSeparaRootDeContaDeServico(t *testing.T) {
+	f := &facts.Facts{Sudoers: []facts.SudoRule{
+		{File: "/etc/sudoers.d/30-dba", Line: 11, Text: "%dba    ALL=(postgres) NOPASSWD: ALL"},
+		{File: "/etc/sudoers.d/30-dba", Line: 10, Text: "%dba    ALL=(root)  NOPASSWD: PGCTL"},
+		{File: "/etc/sudoers.d/90-x", Line: 1, Text: "sysadm ALL=(ALL) NOPASSWD:ALL"},
+		{File: "/etc/sudoers.d/90-x", Line: 2, Text: "auto ALL=NOPASSWD: ALL"},
+	}}
+	r := sudoSemSenha.Run(sudoSemSenha, f, testEnv())
+	if len(r.Findings) != 4 {
+		t.Fatalf("achados = %d", len(r.Findings))
+	}
+
+	porTexto := map[string]check.Finding{}
+	for _, fd := range r.Findings {
+		porTexto[fd.Evidence[0]] = fd
+	}
+	casos := []struct {
+		contem string
+		sev    check.Severity
+		frase  string
+	}{
+		// ALL como postgres: vira o dono do banco sem senha. NÃO é root.
+		{"(postgres) NOPASSWD: ALL", check.SevWarn, "NÃO como root"},
+		// ALL como runas inclui root.
+		{"(ALL) NOPASSWD:ALL", check.SevCritical, "é root inteiro"},
+		// Sem runas declarado, o padrão do sudo É root.
+		{"auto ALL=NOPASSWD: ALL", check.SevCritical, "padrão do sudo"},
+		// Comando nomeado continua sendo aviso, mesmo como root.
+		{"NOPASSWD: PGCTL", check.SevWarn, "restrita a comando nomeado"},
+	}
+	for _, c := range casos {
+		var achou bool
+		for txt, fd := range porTexto {
+			if !strings.Contains(txt, c.contem) {
+				continue
+			}
+			achou = true
+			if fd.Sev != c.sev {
+				t.Errorf("%q: sev = %v, queria %v", c.contem, fd.Sev, c.sev)
+			}
+			if !strings.Contains(strings.Join(fd.Evidence, " | "), c.frase) {
+				t.Errorf("%q: a evidência precisa dizer %q: %v", c.contem, c.frase, fd.Evidence)
+			}
+		}
+		if !achou {
+			t.Errorf("nenhum achado para %q", c.contem)
+		}
+	}
+}

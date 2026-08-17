@@ -657,10 +657,18 @@ func TestCenarioNaoCitaCheckInexistente(t *testing.T) {
 // "não encontrei" e "não consegui olhar" não podem sair iguais.
 func exigeImagemLocal(t *testing.T, img string) {
 	t.Helper()
-	if !strings.HasPrefix(img, "aletheia-") {
+	// As imagens construídas aqui — as de serviços e as de servidor de
+	// referência — não vêm de registro público: sem elas o cenário é PULADO com
+	// o comando na mensagem, nunca passa em silêncio.
+	local := strings.HasPrefix(img, "aletheia-") || strings.HasPrefix(img, "servidor-")
+	if !local {
 		return
 	}
+	alvo := "make images"
+	if strings.HasPrefix(img, "servidor-") {
+		alvo = "make fixtures"
+	}
 	if err := exec.Command("docker", "image", "inspect", img).Run(); err != nil {
-		t.Skipf("imagem %s ausente — rode `make images` (precisa de rede)", img)
+		t.Skipf("imagem %s ausente — rode `%s` (precisa de rede)", img, alvo)
 	}
 }

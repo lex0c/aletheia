@@ -3500,3 +3500,39 @@ inteira limpos. O `P8` monta a forma completa do BPFDoor numa VM — socket
 AF_PACKET com filtro eBPF e descritor fechado, sem porta aberta nenhuma — e o
 `P9` prova a metade negativa em debian e alpine: o mesmo socket, sem programa,
 não vira acusação.
+
+### E a varredura como root, que era o passo que faltava
+
+A atribuição funcionou contra a população real:
+
+```
+◆ net.packet_socket  pid=898  NetworkManager   packet:ARP em wlp61s0 · raw6:ICMPv6
+◆ net.packet_socket  pid=978  wpa_supplicant   packet:TDLS · packet:EAPOL (802.1X)
+```
+
+Cobertura 5/5, zero parciais — os mesmos quatro sockets que saíam como "dono
+não identificado" sem privilégio agora têm nome, e o nome é exatamente o que a
+seção prevê: gerenciador de rede.
+
+E ela expôs um defeito que nenhuma varredura sem root podia mostrar, porque sem
+root o dono do socket é invisível e o check nem chega a disparar: o
+`net.listener_unowned` saiu **duas vezes com texto idêntico** — mesmo pid,
+mesmo endereço, mesma porta.
+
+```
+5315: 00000000:14E9 …  uid 1000  inode 9955174
+5315: 00000000:14E9 …  uid 1000  inode 9955173     ← o mesmo processo
+5315: 00000000:14E9 …  uid  969  inode 14596       ← avahi, com dono de pacote
+```
+
+O mdns do `adb` mantém DOIS sockets na mesma porta (SO_REUSEPORT), e o check
+emitia um achado por socket. Duas linhas iguais não são dois fatos — e no JSONL
+que a frota agrega elas contavam duas escutas onde há uma.
+
+O agrupamento agora é por ESCUTA (pid + endereço + protocolo), e a contagem não
+some: ela vira evidência, porque vários descritores dividindo uma porta diz algo
+sobre a forma do serviço. Dois testes travam as duas direções — a mesma porta
+não duplica, e portas diferentes do mesmo processo não se fundem —, e o segundo
+existe porque a correção óbvia (agrupar por pid) esconderia a segunda escuta.
+
+O `net.egress_unowned` já agrupava por pid e não tinha o defeito.

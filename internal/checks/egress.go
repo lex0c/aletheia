@@ -69,6 +69,27 @@ var escutaSemDono = check.Check{
 			return r
 		}
 
+		// Agrupado por ESCUTA, não por socket.
+		//
+		// Um processo pode ter vários sockets na MESMA porta: é o que
+		// SO_REUSEPORT permite, e o mdns do `adb` faz exatamente isso. Um
+		// achado por socket produzia duas linhas com texto idêntico — mesmo
+		// pid, mesmo endereço, mesma porta —, e duas linhas iguais não são dois
+		// fatos: são o mesmo fato contado duas vezes, no relatório e no JSONL
+		// que a frota agrega.
+		//
+		// O número de sockets não some: ele vira evidência, porque vários
+		// descritores dividindo uma escuta é informação sobre a forma do
+		// serviço.
+		type escuta struct {
+			pid   int
+			local string
+			proto string
+		}
+		porEscuta := map[escuta]int{}
+		primeiro := map[escuta]*facts.Socket{}
+		var ordem []escuta
+
 		for i := range f.Sockets {
 			s := &f.Sockets[i]
 			if s.Dir != facts.DirListen || !facts.IsExposedLocal(s.LocalIP) || s.PID == 0 {
@@ -81,6 +102,20 @@ var escutaSemDono = check.Check{
 			if p == nil || p.Self || p.Vanished || p.Exe == "" || !semDono[p.Exe] {
 				continue
 			}
+			k := escuta{s.PID, s.Local(), s.Proto}
+			if _, visto := porEscuta[k]; !visto {
+				ordem = append(ordem, k)
+				primeiro[k] = s
+			}
+			porEscuta[k]++
+		}
+
+		for _, k := range ordem {
+			s := primeiro[k]
+			p := f.ProcessByPID(s.PID)
+			if p == nil {
+				continue
+			}
 
 			sev, nota := pesoDoCaminho(p.Exe)
 			ev := []string{
@@ -90,6 +125,11 @@ var escutaSemDono = check.Check{
 					f.Pkg.Kind + ")",
 				nota,
 				"o endereço não é de loopback: a porta está aberta para fora",
+			}
+			if n := porEscuta[k]; n > 1 {
+				ev = append(ev, strconv.Itoa(n)+" sockets deste processo na MESMA "+
+					"porta (SO_REUSEPORT): é um serviço dividindo a escuta, e conta "+
+					"como uma escuta só")
 			}
 			if nome, ok := portasDeServico[s.LocalPort]; ok {
 				// Ocupar a porta de um serviço conhecido com outro binário é a

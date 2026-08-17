@@ -109,3 +109,52 @@ func TestRedeNaoCalaQuandoNaoPodePerguntar(t *testing.T) {
 		t.Fatal("sem a base de pacotes a lacuna precisa ser declarada, não engolida")
 	}
 }
+
+// SO_REUSEPORT: o MESMO processo com dois sockets na mesma porta.
+//
+// Medido num desktop real, com root: o mdns do `adb` mantém dois sockets em
+// 0.0.0.0:5353, e o check emitia um achado por SOCKET — duas linhas com texto
+// idêntico, mesmo pid, mesmo endereço, mesma porta. Duas linhas iguais não são
+// dois fatos, e no JSONL que a frota agrega elas contavam duas escutas onde há
+// uma.
+//
+// O número não some: ele vira evidência, porque vários descritores dividindo
+// uma escuta diz algo sobre a forma do serviço.
+func TestEscutaNaMesmaPortaNaoDuplica(t *testing.T) {
+	escuta := func(inode uint64) facts.Socket {
+		return facts.Socket{
+			Proto: "udp", State: "", Dir: facts.DirListen,
+			LocalIP: "0.0.0.0", LocalPort: 5353, Inode: inode, PID: 7,
+		}
+	}
+	f := factsDeRede("/opt/sdk/adb", false, escuta(9955173))
+	f.Sockets = append(f.Sockets, escuta(9955174))
+
+	r := escutaSemDono.Run(escutaSemDono, f, testEnv())
+	if len(r.Findings) != 1 {
+		t.Fatalf("dois sockets na mesma escuta são UM achado, veio %d: %v",
+			len(r.Findings), r.Findings)
+	}
+	junto := strings.Join(r.Findings[0].Evidence, " | ")
+	if !strings.Contains(junto, "2 sockets deste processo na MESMA porta") {
+		t.Errorf("a contagem precisa aparecer como evidência: %q", junto)
+	}
+}
+
+// E a outra direção continua valendo: portas DIFERENTES do mesmo processo são
+// escutas diferentes, e agrupar por pid teria escondido a segunda.
+func TestEscutasEmPortasDiferentesNaoSeFundem(t *testing.T) {
+	escuta := func(porta int, inode uint64) facts.Socket {
+		return facts.Socket{
+			Proto: "tcp", Dir: facts.DirListen,
+			LocalIP: "0.0.0.0", LocalPort: porta, Inode: inode, PID: 7,
+		}
+	}
+	f := factsDeRede("/opt/app/server", false, escuta(8080, 1))
+	f.Sockets = append(f.Sockets, escuta(9090, 2))
+
+	r := escutaSemDono.Run(escutaSemDono, f, testEnv())
+	if len(r.Findings) != 2 {
+		t.Fatalf("duas portas são dois achados, veio %d: %v", len(r.Findings), r.Findings)
+	}
+}

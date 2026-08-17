@@ -269,27 +269,40 @@ func cruzarModulos(f *Facts) {
 		return
 	}
 
-	// O sysfs usa "_" onde o /proc/modules às vezes usa "-", e lista módulos
-	// embutidos no kernel que nunca aparecem em /proc/modules. Comparar sem
-	// normalizar produziria dezenas de divergências falsas.
+	f.Cross.ModDiff = DiferencaDeModulos(f.Cross.ModProc, f.Cross.ModSys)
+}
+
+// DiferencaDeModulos compara as duas listas e devolve as divergências.
+//
+// Está separada da leitura porque é a DECISÃO, e a leitura é do /proc de
+// verdade — sem a separação, a regra que decide se um rootkit de kernel é
+// acusado só podia ser exercitada bootando uma VM.
+//
+// Duas regras, e as duas nasceram de ruído medido:
+//
+//	NORMALIZAR   o sysfs usa "_" onde o /proc/modules às vezes usa "-".
+//	             Comparar cru produziria dezenas de divergências falsas
+//	UMA DIREÇÃO  presente no sysfs e ausente do /proc/modules é módulo
+//	             EMBUTIDO no kernel, que é a maioria deles. O contrário —
+//	             carregado e sem entrada no sysfs — é a forma do LKM que se
+//	             esconde, e é a única que vira achado
+func DiferencaDeModulos(emProc, emSys []string) []string {
 	proc := map[string]bool{}
-	for _, m := range f.Cross.ModProc {
+	for _, m := range emProc {
 		proc[normalizaModulo(m)] = true
 	}
 	sys := map[string]bool{}
-	for _, m := range f.Cross.ModSys {
+	for _, m := range emSys {
 		sys[normalizaModulo(m)] = true
 	}
-	// Só a direção que importa: presente no sysfs e AUSENTE do /proc/modules é
-	// ruído (módulo embutido). O contrário — carregado e sem entrada no sysfs —
-	// é a forma do LKM que se esconde.
+	var out []string
 	for m := range proc {
 		if !sys[m] {
-			f.Cross.ModDiff = append(f.Cross.ModDiff,
-				m+" está em /proc/modules e NÃO em /sys/module")
+			out = append(out, m+" está em /proc/modules e NÃO em /sys/module")
 		}
 	}
-	sort.Strings(f.Cross.ModDiff)
+	sort.Strings(out)
+	return out
 }
 
 // tgidDe devolve o grupo de threads a que o PID pertence. Quando difere do

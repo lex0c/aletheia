@@ -36,11 +36,11 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 
 ## Fase 4 — persistência (§7)  ▸ maior economia de tempo manual
 
-- [ ] **4.1** `facts/systemd` — **baseado em arquivo**: units, timers, `.socket`, `.path`, `*.wants/`, drop-ins
+- [x] **4.1** `facts/systemd` — **baseado em arquivo**: units, timers, `.socket`, `.path`, `*.wants/`, drop-ins
 - [ ] **4.2** cron, `at`, anacron — incluindo extração do intervalo `*/N`
 - [ ] **4.3** SSH — `authorized_keys`, `sshd_config` efetivo, `AuthorizedKeysCommand`, `.ssh/rc`
 - [ ] **4.4** shell startup — lista exata + diff contra `/etc/skel` (contexto, não achado) + `BASH_ENV`
-- [ ] **4.5** loader — `ld.so.preload`, `ld.so.conf.d`, `/etc/environment`
+- [x] **4.5** loader — `ld.so.preload`, `ld.so.conf.d`, `/etc/environment`
 - [ ] **4.6** `rc.local`/`init.d`/generators, PAM, udev, MOTD, hooks de pacote
 - [ ] **4.7** CA plantada, `/etc/hosts`, resolver, git hooks, `auto_prepend_file`, metadata de nuvem
 - [ ] **4.8** supervisores (pm2, supervisord) e containers (`docker diff`, restart policy)
@@ -862,3 +862,418 @@ DIFERENTES, e agora estão separadas com o motivo escrito: como peer, `0.0.0.0`
 é "endereço nenhum"; como endereço local de escuta, é TODAS as interfaces, o
 caso mais exposto que existe. Unificar as duas inverteria uma delas e esconderia
 todo listener público.
+
+---
+
+## Registro — fase 4, primeira fatia (4.1 e 4.5)
+
+Seis checks novos, 16 no total. E uma mudança de natureza: este é o primeiro
+coletor **baseado em arquivo**.
+
+### Por que isso importa mais que os seis checks
+
+Tudo que veio antes lê `/proc`, que só existe em host vivo — e num host com
+rootkit o `/proc` é justamente o que mente. Persistência é lida do disco, então
+a mesma análise roda sobre uma imagem montada com `--root`, onde o kernel é o
+**do analista** (runbook §35.6):
+
+```
+ao vivo    16/16 · 4 críticos · 3 avisos · exit 2
+em imagem   6/16 · 3 críticos · 1 aviso  · exit 2
+            os 10 de processo saem NÃO VERIFICADOS: "não se aplica ao modo image"
+```
+
+O cenário `61` existe para provar exatamente isso — não a detecção, que o `60`
+já provou, mas que a análise **sobrevive ao host**.
+
+Nada aqui chama `systemctl`. Um binário do host comprometido responde o que o
+atacante quiser, e a §7.2 existe porque a unit no disco é a verdade que o
+`systemctl list` pode esconder.
+
+### O código morto da primeira revisão saiu do papel
+
+`persist.ld_preload_global` já estava na lista de `trustBreakers` do motor desde
+a fase 1, sem nenhum check que o disparasse. Agora dispara, e o relatório passa
+a imprimir:
+
+```
+CONFIANÇA REBAIXADA — achados vindos de binário do host não valem como prova:
+  · /etc/ld.so.preload presente: o loader injeta biblioteca em todo processo dinâmico
+```
+
+O cenário `60` trava isso com `ExpectOutput`.
+
+### Detalhes de parsing que decidem o achado
+
+```
+continuação com "\"      cortar ali perde o ARGUMENTO, que é onde o payload mora
+"ExecStart=" vazio       RESETA a lista: é assim que um drop-in SUBSTITUI o
+                         comando. Guardar os dois mostraria um comando que não
+                         roda mais
+prefixo -, @, +, !       o systemd aceita, e eles não podem esconder o caminho
+                         do binário de quem classifica
+home do passwd DO ALVO   nunca do host do analista — mesma armadilha do
+                         /etc/hostname que vazou na fase 1
+```
+
+O `calendarInterval` NÃO é um parser de `OnCalendar`. Ele extrai só o campo com
+`*/N`, que é como se escreve "a cada N". Implementar o formato inteiro para
+responder "isto é frequente?" seria trocar um sinal por um gerador de falsos
+positivos.
+
+### Um erro de modelagem que os cenários pegaram
+
+Declarei `Optional: CapSystemd` nos três checks de unit. Resultado: **toda**
+varredura de Alpine ou de contêiner saía com cobertura degradada, porque o host
+não tem systemd — e 13/16 quebrou metade dos cenários de uma vez.
+
+A modelagem certa é não declarar nada: host sem systemd não tem persistência por
+unit para encontrar, então o check cobriu tudo que havia, que é nada. Alegar
+lacuna ali é o mesmo gritar-lobo que a distinção entre "processo que terminou" e
+"processo que não pude ler" existe para evitar.
+
+A lacuna de VERDADE continua declarada, e vem do coletor: systemd **presente**
+com nenhuma unit legível.
+
+### O que falta da fase 4
+
+```
+4.2  cron, at, anacron — incluindo o intervalo */N
+4.3  SSH: authorized_keys, sshd_config efetivo, AuthorizedKeysCommand, .ssh/rc
+4.4  shell startup + BASH_ENV
+4.6  rc.local, init.d, generators, PAM, udev, MOTD, hooks de pacote
+4.7  CA plantada, /etc/hosts, resolver, git hooks, auto_prepend_file, metadata
+4.8  supervisores (pm2, supervisord) e containers
+```
+
+O coletor de arquivo e o modo imagem já estão de pé, então o resto é
+acrescentar leitura e check — sem decisão de arquitetura nova pela frente.
+
+---
+
+## Registro — os cenários eram de MECANISMO, não de adversário
+
+Pergunta que motivou: **os cenários são realistas? do invasor simples ao
+sofisticado?** A resposta era não, e medi em vez de argumentar.
+
+Os 50 cenários testavam UMA forma cada: planta um mecanismo, afirma um check.
+Isso é a base certa e não é a mesma coisa que um incidente — um comprometimento
+real deixa cinco a dez artefatos ao mesmo tempo, no mesmo processo, com relação
+causal entre eles.
+
+### Montar o primeiro composto expôs quatro defeitos
+
+A forma que a §5.10 descreve para a família GSocket, inteira: binário em
+`~/.config/htop/defunct`, processo renomeado para `[kworker/1:2]`, saída para
+relay em 443 sem listener, prefixo `GS_`/`GSOCKET_` no environ.
+
+```
+1  o bloco de ação repetia `cp /proc/20/exe` TRÊS vezes — um por check que
+   disparou no mesmo pid. O bloco existe para ser a lista curta do que fazer
+   agora, e virava parede. Deduplicado por comando
+2  quatro achados sobre o MESMO processo, sem correlação: a ferramenta conta
+   quatro fatos soltos onde há uma história. Ainda em aberto
+3  GS_* e GSOCKET_* eram COLETADOS e nunca reportados. A §5.10 chama isso de
+   "o atalho mais barato do runbook inteiro" — virou proc.env_tool_marker
+4  proc.ld_preload_env estava na lista de trustBreakers do motor desde a fase 1
+   sem check que o disparasse: o SEGUNDO trustBreaker morto. Agora existe
+```
+
+Nenhum teste de mecanismo acharia esses quatro. Só apareceram porque o composto
+tem a forma de um incidente.
+
+### O eixo que faltava inteiro: sofisticação
+
+Tudo que eu plantava era barulhento — binário `.x` em `/tmp`, unit chamada
+`updater.service` com `curl|bash`. Nunca medi o que um adversário CUIDADOSO
+produz. Medindo:
+
+```
+                                 barulhento    competente
+achados                          4 críticos    1 aviso
+```
+
+O competente usa `/usr/local/sbin/systemd-netlinkd`, sem `exec -a`, saída para
+443 sem dup2 sobre 0/1/2, beacon de hora em hora, persistência por drop-in com
+comando de aparência inocente.
+
+**O único check que sobrevive é o do drop-in** — e ele sobrevive porque foi
+construído sobre a FORMA (alguém acrescentou execução a uma unit alheia) e não
+sobre o conteúdo do comando. É a lição de projeto mais cara da sessão, e ela
+confirma a regra que já vinha sendo seguida em `correlate.revshell` e
+`net.pivot`.
+
+O que falta para fechar o resto NÃO são checks errados — são checks que ainda
+não existem:
+
+```
+3.2       saída para IP público sem processo conhecido
+fase 7    integridade: binário em /usr/local/sbin sem dono de pacote
+fase 10   amostragem em janela: beacon de 1h é invisível no retrato (§2.7)
+```
+
+### O cenário 71 documenta o ponto cego, e quebra quando ele fechar
+
+`71-adversario-competente` afirma `Exit: 1`. Quando qualquer um dos checks acima
+chegar, o exit vira 2 e o cenário QUEBRA — de propósito. É assim que um ponto
+cego deixa de ser esquecível: ele passa a ter um teste que anuncia a própria
+morte.
+
+---
+
+## Registro — correlação por sujeito e famílias de ferramenta
+
+### Correlação: uma história, não quatro fatos
+
+O composto do gsocket expunha o defeito: quatro checks disparavam no mesmo pid e
+o relatório contava quatro fatos soltos. `Report.Correlate()` separa as duas
+leituras, que são diferentes e ambas necessárias:
+
+```
+por ALVO   o mesmo pid visto por checks distintos → a forma de um incidente
+por ID     o mesmo check em muitos alvos → "8× exe em local suspeito"
+```
+
+O corte é em **dois checks distintos**, não em dois achados: o mesmo check
+disparando duas vezes no mesmo alvo é repetição, não correlação — agrupar isso
+prometeria uma história que não existe. E cada achado sai uma vez só, num lado
+ou no outro.
+
+```
+⛔ pid=19        4 sinais no mesmo alvo
+     · reverse shell: fd 0, 1 e 2 no mesmo socket                    §17
+     · variável de ambiente que identifica a família da ferramenta   §5.10
+     · processo de userspace disfarçado de thread de kernel          §3.5
+     · processo executando de diretório onde nada se instala         §8
+```
+
+É decisão de EXIBIÇÃO: o JSONL não muda, senão a agregação de frota passaria a
+depender de como o relatório foi renderizado (SPEC 7.1).
+
+### Famílias: o critério de entrada é o que importa
+
+```
+só ferramenta PÚBLICA com variável DOCUMENTADA. Nada de hash, nada de nome
+de amostra — isso é catálogo de antivírus, envelhece em semanas, e esta
+ferramenta não tem como mantê-lo
+
+e cada entrada precisa dizer o que o nome MUDA na resposta. Um nome que não
+redireciona a investigação não paga a linha que ocupa
+```
+
+```
+GSOCKET_ · GS_    CRITICAL   relay sem IP fixo: bloquear IP não resolve (§18.1)
+NGROK_            WARN       túnel de INGRESSO: procurar listener (§2) não acha
+TUNNEL_TOKEN      WARN       idem, cloudflared
+CLOUDFLARED_      WARN       idem
+RCLONE_CONFIG     WARN       exfiltração sai de "improvável" e vira "presumir" (§37)
+```
+
+Todas são ferramentas LEGÍTIMAS de uso duplo, e a severidade separa "isto nunca
+é legítimo em servidor" de "a capacidade está presente e mudou o escopo".
+Capacidade não é prova de uso.
+
+### E um defeito que a heurística nova trouxe — pego por cenário
+
+A variável é HERDADA, então toda a árvore de filhos virava achado. Passei a
+reportar só a RAIZ da herança... e o cenário 70 quebrou.
+
+Causa: **`sh -c` faz `exec` no último comando**, então a própria aletheia vira o
+pai do que foi plantado na mesma sessão — e como ela herdou a variável, a
+supressão apagava o achado inteiro. Enxergar e não dizer é o pior resultado
+possível.
+
+Duas correções, e a segunda é a que vale:
+
+```
+1  a própria ferramenta nunca conta como origem (pai.Self)
+2  rede de segurança: se a família foi VISTA e nenhum achado saiu, ele sai
+   assim mesmo, dizendo que a raiz não pôde ser isolada
+```
+
+A segunda é um invariante, não um remendo: **supressão por herança não pode
+zerar um achado que existe**. A primeira sozinha corrigiria este caso e deixaria
+a classe inteira em aberto.
+
+---
+
+## Registro — catálogo de famílias de ferramenta
+
+Pergunta: **a CLI reconhece ferramentas conhecidas?** Reconhecia por uma rota
+só. A §5.10 lista cinco, e a de variável de ambiente é a de menor alcance —
+a maioria dos implantes não usa env, usa arquivo de config.
+
+### Três rotas, uma tabela
+
+`internal/tools` fica em pacote PRÓPRIO porque é consumido dos dois lados: o
+coletor procura os artefatos em disco, o check decide o que fazer com o achado.
+Se o check fosse ao filesystem sozinho, a suíte inteira deixaria de rodar sem
+um host de verdade.
+
+```
+Env    prefixo de variável no environ (§3.6)      só processo vivo
+Paths  config e estado em disco (§7)              funciona em IMAGEM MONTADA
+Bins   nome do executável, em processo E em Exec= de unit
+```
+
+A rota de disco é a de maior alcance, e a única que atravessa a §35.6 — ler de
+fora quando o userland do alvo não é confiável. A rota de unit pega a ferramenta
+que **não está rodando agora mas roda no próximo boot**.
+
+### O catálogo, e por que ele é estreito
+
+```
+GSocket / gs-netcat   ALTO   relay sem IP fixo: bloquear IP não resolve (§18.1)
+XMRig                 ALTO   oportunista, mas a rota de entrada serve para outro
+ngrok                 MÉDIO  túnel de INGRESSO: procurar listener (§2) não acha
+cloudflared           MÉDIO  idem
+frp                   MÉDIO  proxy reverso que atravessa NAT
+Tailscale             MÉDIO  rede paralela que o firewall de borda não vê
+rclone                MÉDIO  exfiltração sai de "improvável" e vira "presumir" (§37)
+RMM (AnyDesk/…)       MÉDIO  sessão interativa com cara de software corporativo
+```
+
+Só ferramenta PÚBLICA com caminho ou variável DOCUMENTADOS. Nada de hash, nada
+de nome de amostra: isso é catálogo de antivírus, envelhece em semanas, e uma
+ferramenta de IR que depende de assinatura atualizada mente em silêncio quando a
+assinatura ficou velha. Nome de projeto e caminho de config são estáveis por
+anos — é a diferença entre catalogar SAMPLES e catalogar FERRAMENTAS.
+
+Nenhuma delas é malware. Todas têm uso legítimo, e a severidade separa "não há
+por que isto estar num servidor" de "a capacidade está presente e mudou o
+escopo". Capacidade não é prova de uso.
+
+Invariantes travados por teste: sem rota não entra, sem nota não entra (um nome
+que não redireciona a investigação não paga a linha), binário não pode colidir
+entre famílias, e nome genérico (`sh`, `nc`, `curl`, `python`) é recusado.
+
+### O limite, e ele é o ponto
+
+Reconhecer pelo NOME é trivial de burlar — renomear o binário derrota as três
+rotas. Por isso o catálogo NÃO é a detecção primária: é o acelerador. Quem pega
+o implante renomeado é o check ESTRUTURAL, que olha a forma:
+
+```
+correlate.revshell     fd 0,1,2 no mesmo socket
+net.pivot              saída externa + saída interna
+proc.kthread_disguise  cmdline vazio com exe existente
+persist.unit_dropin    alguém acrescentou execução a unit alheia
+```
+
+O cenário `71-adversario-competente` prova isso: lá o binário se chama
+`systemd-netlinkd`, `tool.binary` e `tool.artifact` estão no Forbid, e o que
+sobrevive é o check de forma. Confundir as duas coisas levaria a "melhorar" a
+ferramenta engordando a lista de nomes — a estratégia que envelhece pior.
+
+### Três defeitos que rodar contra o desktop pegou
+
+```
+9 CRÍTICOS do Firefox   LD_PRELOAD=libmozsandbox.so é o sandbox dele. Pior:
+                        ld_preload_env é trustBreaker, então TODA varredura de
+                        desktop imprimiria "CONFIANÇA REBAIXADA"
+```
+
+Três correções, e as duas primeiras são gerais:
+
+```
+1  confiança só é rebaixada por achado CRÍTICO, não por suspeita
+2  a raiz da herança vira o achado; os filhos viram contagem (9 → 1)
+3  severidade pelo LUGAR da lib: nome relativo ou diretório de sistema é AVISO
+   (instrumentação legítima), caminho gravável é CRÍTICO (é onde o atacante
+   escreve)
+```
+
+E o `grouped()` do relatório passou a agrupar por ID **e severidade**: juntar um
+crítico com um aviso do mesmo check imprimia `⛔ 2×`, com o cabeçalho dizendo 1
+e a linha dizendo 2. Quem lê acredita na linha.
+
+Sobra um caso declarado, não corrigido: o Android SDK faz preload de lib própria
+a partir do home, e sai como CRÍTICO. Estruturalmente É a forma de um implante —
+a regra está certa, e a classe está declarada nos falsos positivos.
+
+---
+
+## Registro — terceira revisão de código
+
+Sete achados sobre o trabalho não commitado. O primeiro é a sina central da
+ferramenta, e os outros dois de peso são a MESMA regra escapando em dois
+lugares.
+
+### 1 · Checks de persistência declaravam cobertura completa sem enxergar /root
+
+```
+como root      ⛔ 1  ⚠ 1  ·  20/20   (unit em /root/.config/systemd/user + rclone)
+como uid 1000  ⛔ 0  ⚠ 0  ·   7/20   ← os 7 de persistência saíam COMPLETOS
+```
+
+O veredito geral só não mentia porque os outros 13 checks (de `/proc`) declaram
+`Optional: CapRoot` e puxavam para INCOMPLETE. **Sorte, não desenho** — em modo
+imagem não existe check de `/proc`, e a mesma cegueira imprimiria `7/7 · OK`.
+
+A correção NÃO foi `Optional: CapRoot` nos checks de arquivo: em modo imagem o
+analista não é root e mesmo assim lê tudo, então isso degradaria à toa. O
+coletor passou a registrar a negativa ESPECÍFICA, por categoria:
+
+```
+lookup()   separa três desfechos: existe · não existe · NÃO PUDE OLHAR
+           só o terceiro degrada cobertura
+```
+
+```
+antes  completos 7 · parciais 0
+depois completos 3 · parciais 17
+       persist: 1 diretórios de unit de usuário ilegíveis: /root/.config/systemd/user
+       persist: 13 caminhos de ferramenta não puderam ser lidos: /root/.config/gsocket · …
+```
+
+### 2 e 3 · A mesma regra, escapando duas vezes
+
+```
+tool.binary   cortava em 6 ocorrências sem dizer quantas havia
+wtf           o teto de linhas valia só para os avulsos; os grupos
+              correlacionados eram ilimitados, e o comando existe para caber
+              numa tela
+```
+
+"Nunca corte silencioso" é regra que o resto do código aplica sem exceção
+(`maxUnits`, `maxMapLines`, `maxFDs`, os partials do coletor). Escapou nos dois
+lugares novos.
+
+### 4 · Achado sumindo do relatório
+
+`Correlate()` marcava o ALVO como agrupado e montava o resto por alvo. Um achado
+que compartilhava o alvo sem ter entrado no grupo — um INFO — não saía no grupo
+nem no resto: **sumia**. Passou a marcar por POSIÇÃO, e o teste afirma que
+grupos + resto = total.
+
+### 5 e 7 · Continuação perdida e duas implementações de agrupamento
+
+Unit cujo arquivo termina em `\` perdia a última linha em silêncio (agora marca
+`Truncated`). E existiam duas funções de agrupamento com semânticas diferentes —
+`Report.Grouped()` por ID, `report.grouped()` por ID+severidade. Divergiram em
+silêncio; virou uma só, `check.GroupByIDSev`.
+
+### 6 · `Environment=` de unit
+
+Era lacuna, não defeito: uma unit com `Environment=LD_PRELOAD=/tmp/x.so` é a
+rota da §7.8 que ninguém associa a execução de código. Agora é coletada e
+alimenta a MESMA lista do `/etc/environment` — um check só, uma leitura só.
+
+### E o fix do nº 1 trouxe um falso positivo, pego pelos cenários
+
+Três cenários quebraram: `cobertura 15/20` num Alpine limpo rodando como root.
+
+Causa: o Alpine usa `/dev/null` como home de conta de sistema, e
+`/dev/null/.config/...` devolve **ENOTDIR** — que `os.IsNotExist` não reconhece.
+Todo host Alpine passaria a reportar lacuna falsa.
+
+```
+ENOTDIR = um componente do caminho não é diretório = o caminho NÃO PODE existir
+```
+
+Não é "não pude olhar". É a mesma classe de gritar-lobo que a distinção entre
+"processo terminou" e "processo ilegível" existe para evitar — e foi a terceira
+vez nesta sessão que ela apareceu por um caminho diferente.
+
+Correção dupla: `lookup` trata ENOTDIR como inexistente, e `homeDirs` descarta
+home que não é diretório.

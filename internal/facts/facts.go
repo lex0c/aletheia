@@ -28,6 +28,17 @@ type Facts struct {
 	Processes []Process `json:"processes,omitempty"`
 	Sockets   []Socket  `json:"sockets,omitempty"`
 
+	// Persistência vem de ARQUIVO, então existe também em modo image — onde o
+	// kernel é o do analista e ocultamento por rootkit não acontece (§35.6).
+	Loader        Loader         `json:"loader"`
+	Units         []Unit         `json:"units,omitempty"`
+	ToolArtifacts []ToolArtifact `json:"tool_artifacts,omitempty"`
+
+	// PersistDenied é o que a coleta de persistência não pôde LER, por
+	// categoria. Não é o mesmo que "não havia nada" — e sem root, /root e o
+	// home dos outros usuários caem todos aqui.
+	PersistDenied map[string][]string `json:"persist_denied,omitempty"`
+
 	// ProcessesGone conta os PIDs que estavam em /proc e sumiram antes de serem
 	// lidos. NÃO é lacuna de cobertura — o processo não existe mais para
 	// ninguém. Fica registrado porque um número alto é rotatividade anormal.
@@ -120,6 +131,12 @@ func Collect(e *env.Env) *Facts {
 		collectSockets(f, e)
 	} else {
 		f.partial("proc", e.Reason(env.CapProcfs))
+	}
+
+	if e.Has(env.CapFilesystem) {
+		collectPersist(f, e)
+	} else {
+		f.partial("persist", e.Reason(env.CapFilesystem))
 	}
 
 	f.Index()

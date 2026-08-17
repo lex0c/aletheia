@@ -67,6 +67,21 @@ func (e *Env) ReadDir(p string) ([]fs.DirEntry, error) {
 	return f.ReadDir(-1)
 }
 
+// ReadDirNames lista os nomes de um diretório, ou nada. Existe porque a metade
+// dos usos aqui só quer os nomes e trata "diretório ausente" como resposta
+// legítima — persistência é feita de diretórios que costumam não existir.
+func (e *Env) ReadDirNames(p string) []string {
+	ents, err := e.ReadDir(p)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(ents))
+	for _, ent := range ents {
+		out = append(out, ent.Name())
+	}
+	return out
+}
+
 // IsDir é o predicado usado pelos probes de capacidade.
 func (e *Env) IsDir(p string) bool {
 	fi, err := e.Stat(p)

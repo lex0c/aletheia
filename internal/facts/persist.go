@@ -1,0 +1,606 @@
+package facts
+
+import (
+	"errors"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/lex0c/aletheia/internal/env"
+	"github.com/lex0c/aletheia/internal/tools"
+)
+
+// Coleta de persistência (runbook §7).
+//
+// Este é o primeiro coletor BASEADO EM ARQUIVO, e a diferença não é de estilo.
+// Tudo que veio antes lê /proc, que só existe em host vivo; daqui em diante a
+// mesma análise roda sobre uma imagem montada com --root — onde o kernel é o
+// DO ANALISTA e ocultamento por rootkit não acontece (runbook §35.6). É a
+// resposta para "o host mente": leia o disco de fora.
+//
+// A outra decisão que atravessa o arquivo: nada aqui chama `systemctl`. Um
+// binário do host comprometido responde o que o atacante quiser, e a §7.2
+// existe justamente porque a unit no disco é a verdade que o `systemctl list`
+// pode esconder. Ler o arquivo custa mais código e vale o custo.
+
+const (
+	// Teto de units lidas. Host grande tem ~400; o teto existe para que um
+	// diretório envenenado com milhares de arquivos não trave a coleta — e
+	// estourá-lo vira cobertura parcial declarada, nunca corte silencioso.
+	maxUnits = 3000
+)
+
+// Loader é o que o linker dinâmico injeta em TODO processo dinâmico
+// (runbook §7.8). É o rootkit de userland mais comum, e cabe em três arquivos.
+type Loader struct {
+	// PreloadExists: /etc/ld.so.preload normalmente NÃO existe. A existência
+	// já é o achado.
+	PreloadExists bool     `json:"preload_exists,omitempty"`
+	PreloadLibs   []string `json:"preload_libs,omitempty"`
+	PreloadErr    string   `json:"preload_err,omitempty"`
+
+	// SearchDirs são os diretórios de busca declarados em ld.so.conf{,.d}.
+	// Um deles gravável é a versão persistente do mesmo truque.
+	SearchDirs []LoaderDir `json:"search_dirs,omitempty"`
+
+	// EnvVars são definições de LD_PRELOAD/LD_LIBRARY_PATH em arquivo lido pelo
+	// PAM a cada sessão — mesmo efeito, num arquivo que ninguém associa a
+	// execução de código.
+	EnvVars []EnvSetting `json:"env_vars,omitempty"`
+}
+
+type LoaderDir struct {
+	Dir    string `json:"dir"`
+	From   string `json:"from"` // arquivo que declarou
+	Exists bool   `json:"exists,omitempty"`
+}
+
+type EnvSetting struct {
+	File  string `json:"file"`
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// Unit é uma unit de systemd lida do ARQUIVO (runbook §7.2).
+type Unit struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Kind string `json:"kind"` // service | timer | socket | path | mount | …
+
+	// Scope separa unit de sistema de unit de USUÁRIO: a segunda roda no login
+	// e é o esconderijo da §7.3.
+	Scope string `json:"scope"` // system | user
+
+	// Vendor marca a unit que veio de pacote (/usr/lib, /lib) contra a que
+	// alguém escreveu (/etc, /run). A de /etc tem PRECEDÊNCIA e pode
+	// sobrescrever uma legítima de mesmo nome.
+	Vendor bool `json:"vendor,omitempty"`
+
+	// DropInFor != "" quando este arquivo é um drop-in: ele ALTERA outra unit
+	// sem tocar no arquivo dela, e `cat` na unit original não mostra nada.
+	DropInFor string `json:"dropin_for,omitempty"`
+
+	// EnabledBy lista os *.wants/ e *.requires/ que apontam para esta unit —
+	// é o que responde "isto vai rodar?" sem chamar systemctl.
+	EnabledBy []string `json:"enabled_by,omitempty"`
+
+	Exec     []ExecLine `json:"exec,omitempty"`
+	Restart  string     `json:"restart,omitempty"`
+	User     string     `json:"user,omitempty"`
+	WantedBy []string   `json:"wanted_by,omitempty"`
+
+	// Gatilhos, por tipo de unit.
+	OnCalendar      []string `json:"on_calendar,omitempty"`
+	OnUnitActiveSec string   `json:"on_unit_active_sec,omitempty"`
+	OnBootSec       string   `json:"on_boot_sec,omitempty"`
+	Listen          []string `json:"listen,omitempty"`
+	WatchPaths      []string `json:"watch_paths,omitempty"`
+
+	// Environment= da unit. Vai para o mesmo lugar que /etc/environment: é a
+	// rota da §7.8 que ninguém associa a execução de código.
+	Environment []EnvSetting `json:"environment,omitempty"`
+
+	ModUTC string `json:"mod_utc,omitempty"`
+
+	// Truncated diz que o arquivo não foi lido por inteiro.
+	Truncated string `json:"truncated,omitempty"`
+}
+
+// ExecLine guarda a diretiva junto com o valor: ExecStartPre num drop-in é
+// persistência quase perfeita, e perder qual diretiva era apaga o achado.
+type ExecLine struct {
+	Key string `json:"key"` // ExecStart | ExecStartPre | …
+	Cmd string `json:"cmd"`
+}
+
+// Enabled diz se algo aponta para esta unit.
+func (u Unit) Enabled() bool { return len(u.EnabledBy) > 0 }
+
+// unitDirs são as árvores de unit, na ordem de precedência do systemd. As de
+// /etc e /run vencem as de /usr — e é por isso que o atacante escreve nelas.
+var unitDirs = []struct {
+	dir    string
+	scope  string
+	vendor bool
+}{
+	{"/etc/systemd/system", "system", false},
+	{"/run/systemd/system", "system", false},
+	{"/usr/lib/systemd/system", "system", true},
+	{"/lib/systemd/system", "system", true},
+	{"/usr/local/lib/systemd/system", "system", false},
+	{"/etc/systemd/user", "user", false},
+	{"/usr/lib/systemd/user", "user", true},
+}
+
+func collectPersist(f *Facts, e *env.Env) {
+	collectLoader(f, e)
+	collectUnits(f, e)
+	collectToolArtifacts(f, e)
+
+	// Environment= de unit tem o MESMO efeito do /etc/environment, e por isso
+	// alimenta a mesma lista: um check só, uma leitura só.
+	for i := range f.Units {
+		for _, s := range f.Units[i].Environment {
+			switch s.Key {
+			case "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT":
+				f.Loader.EnvVars = append(f.Loader.EnvVars, s)
+			}
+		}
+	}
+}
+
+// denyPersist registra o que a coleta de persistência não conseguiu LER. É
+// separado do partial genérico porque os checks precisam saber a categoria: uma
+// negativa em caminho de ferramenta não degrada o check de unit.
+func (f *Facts) denyPersist(cat, motivo string) {
+	if f.PersistDenied == nil {
+		f.PersistDenied = map[string][]string{}
+	}
+	f.PersistDenied[cat] = append(f.PersistDenied[cat], motivo)
+	f.partial("persist", motivo)
+}
+
+// ToolArtifact é a presença em DISCO de uma ferramenta conhecida (runbook
+// §5.10, rota "nome de config").
+//
+// Vale mais que a rota de variável de ambiente por dois motivos: a maioria dos
+// implantes usa arquivo de config e não env, e disco é legível em IMAGEM
+// MONTADA — onde o kernel é o do analista e ocultamento não acontece (§35.6).
+type ToolArtifact struct {
+	Family string `json:"family"`
+	Path   string `json:"path"`
+	IsDir  bool   `json:"is_dir,omitempty"`
+}
+
+func collectToolArtifacts(f *Facts, e *env.Env) {
+	homes := homeDirs(e)
+	visto := map[string]bool{}
+	var negados []string
+
+	for _, fam := range tools.All {
+		for _, pat := range fam.Paths {
+			for _, p := range expandHome(pat, homes) {
+				if visto[p] {
+					continue
+				}
+				existe, negado := lookup(e, p)
+				if negado {
+					// "não pude olhar" não é "não existe". Sem esta distinção,
+					// uma varredura sem root reporta cobertura completa tendo
+					// ficado cega para /root e para o home dos outros.
+					visto[p] = true
+					negados = append(negados, p)
+					continue
+				}
+				if !existe {
+					continue
+				}
+				visto[p] = true
+				f.ToolArtifacts = append(f.ToolArtifacts, ToolArtifact{
+					Family: fam.Name, Path: p, IsDir: e.IsDir(p),
+				})
+			}
+		}
+	}
+	if len(negados) > 0 {
+		f.denyPersist("artifact", strconv.Itoa(len(negados))+
+			" caminhos de ferramenta conhecida não puderam ser lidos (permissão): "+
+			resumoCaminhos(negados))
+	}
+	sort.Slice(f.ToolArtifacts, func(i, j int) bool {
+		return f.ToolArtifacts[i].Path < f.ToolArtifacts[j].Path
+	})
+}
+
+// lookup separa os três desfechos de um caminho: existe, não existe, e "não
+// pude olhar". O terceiro é o único que degrada cobertura.
+func lookup(e *env.Env, p string) (existe, negado bool) {
+	_, err := e.Lstat(p)
+	switch {
+	case err == nil:
+		return true, false
+	case os.IsNotExist(err), errors.Is(err, syscall.ENOTDIR):
+		// ENOTDIR precisa contar como "não existe", e não como "não pude
+		// olhar": um componente do caminho que não é diretório significa que o
+		// caminho não pode existir. O Alpine usa /dev/null como home de conta
+		// de sistema, então /dev/null/.config/... cai aqui — e tratar isso
+		// como negativa fazia TODO host Alpine reportar lacuna falsa.
+		return false, false
+	default:
+		return false, true
+	}
+}
+
+func resumoCaminhos(ps []string) string {
+	if len(ps) <= 3 {
+		return strings.Join(ps, " · ")
+	}
+	return strings.Join(ps[:3], " · ") + " · … (+" + strconv.Itoa(len(ps)-3) + ")"
+}
+
+// expandHome troca "~" por cada home do passwd DO ALVO. Caminho absoluto passa
+// direto.
+func expandHome(pat string, homes []string) []string {
+	rest, temTil := strings.CutPrefix(pat, "~")
+	if !temTil {
+		return []string{pat}
+	}
+	out := make([]string, 0, len(homes))
+	for _, h := range homes {
+		out = append(out, strings.TrimSuffix(h, "/")+rest)
+	}
+	return out
+}
+
+// --- linker dinâmico (runbook §7.8) ---
+
+func collectLoader(f *Facts, e *env.Env) {
+	l := &f.Loader
+
+	switch b, err := e.ReadFile("/etc/ld.so.preload"); {
+	case err == nil:
+		l.PreloadExists = true
+		for _, ln := range strings.Split(string(b), "\n") {
+			if ln = strings.TrimSpace(ln); ln != "" && !strings.HasPrefix(ln, "#") {
+				l.PreloadLibs = append(l.PreloadLibs, ln)
+			}
+		}
+	case isNotExist(err):
+		// O caso normal. Ausência aqui é a resposta esperada.
+	default:
+		// Existe e não pudemos ler: isso NÃO é "não existe".
+		l.PreloadExists = true
+		l.PreloadErr = err.Error()
+		f.denyPersist("loader", "/etc/ld.so.preload existe e não pôde ser lido: "+err.Error())
+	}
+
+	confs := []string{"/etc/ld.so.conf"}
+	if ents, err := e.ReadDir("/etc/ld.so.conf.d"); err == nil {
+		for _, ent := range ents {
+			if !ent.IsDir() {
+				confs = append(confs, "/etc/ld.so.conf.d/"+ent.Name())
+			}
+		}
+	}
+	for _, c := range confs {
+		b, err := e.ReadFile(c)
+		if err != nil {
+			continue
+		}
+		for _, ln := range strings.Split(string(b), "\n") {
+			ln = strings.TrimSpace(ln)
+			if ln == "" || strings.HasPrefix(ln, "#") || strings.HasPrefix(ln, "include") {
+				continue
+			}
+			l.SearchDirs = append(l.SearchDirs, LoaderDir{
+				Dir: ln, From: c, Exists: e.IsDir(ln),
+			})
+		}
+	}
+
+	// Lidos pelo PAM a cada sessão.
+	for _, p := range []string{"/etc/environment", "/etc/security/pam_env.conf"} {
+		b, err := e.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		for _, ln := range strings.Split(string(b), "\n") {
+			ln = strings.TrimSpace(ln)
+			if ln == "" || strings.HasPrefix(ln, "#") {
+				continue
+			}
+			for _, k := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"} {
+				if v, ok := envAssign(ln, k); ok {
+					l.EnvVars = append(l.EnvVars, EnvSetting{File: p, Key: k, Value: v})
+				}
+			}
+		}
+	}
+}
+
+// envAssign reconhece as formas que esses arquivos aceitam: "K=v", "K v",
+// "export K=v" e o formato do pam_env ("K DEFAULT=v").
+func envAssign(line, key string) (string, bool) {
+	s := strings.TrimPrefix(strings.TrimSpace(line), "export ")
+	if !strings.HasPrefix(s, key) {
+		return "", false
+	}
+	rest := strings.TrimSpace(s[len(key):])
+	switch {
+	case strings.HasPrefix(rest, "="):
+		return strings.Trim(strings.TrimSpace(rest[1:]), `"'`), true
+	case strings.HasPrefix(rest, "DEFAULT="), strings.HasPrefix(rest, "OVERRIDE="):
+		_, v, _ := strings.Cut(rest, "=")
+		return strings.Trim(strings.TrimSpace(v), `"'`), true
+	}
+	return "", false
+}
+
+// --- systemd (runbook §7.2, §7.3) ---
+
+func collectUnits(f *Facts, e *env.Env) {
+	// wants é o mapa "quem aponta para quem": responde se a unit vai rodar,
+	// sem perguntar ao systemctl do host.
+	wants := map[string][]string{}
+	var units []Unit
+	truncated := false
+
+	for _, d := range unitDirs {
+		ents, err := e.ReadDir(d.dir)
+		if err != nil {
+			continue
+		}
+		for _, ent := range ents {
+			name := ent.Name()
+			full := d.dir + "/" + name
+
+			// *.wants/ e *.requires/ contêm os symlinks que HABILITAM.
+			if ent.IsDir() {
+				switch {
+				case strings.HasSuffix(name, ".wants"), strings.HasSuffix(name, ".requires"):
+					for _, ln := range e.ReadDirNames(full) {
+						wants[ln] = append(wants[ln], full+"/"+ln)
+					}
+				case strings.HasSuffix(name, ".d"):
+					// drop-ins: alteram a unit sem tocar no arquivo dela
+					target := strings.TrimSuffix(name, ".d")
+					for _, c := range e.ReadDirNames(full) {
+						if !strings.HasSuffix(c, ".conf") {
+							continue
+						}
+						if len(units) >= maxUnits {
+							truncated = true
+							break
+						}
+						u := parseUnitFile(e, full+"/"+c, d.scope, d.vendor)
+						u.Name = target
+						u.DropInFor = target
+						u.Kind = kindOf(target)
+						units = append(units, u)
+					}
+				}
+				continue
+			}
+			if !isUnitName(name) {
+				continue
+			}
+			if len(units) >= maxUnits {
+				truncated = true
+				continue
+			}
+			u := parseUnitFile(e, full, d.scope, d.vendor)
+			u.Name = name
+			u.Kind = kindOf(name)
+			units = append(units, u)
+		}
+	}
+
+	// Unit de usuário mora no home, fora das árvores acima (runbook §7.3).
+	homes := homeDirs(e)
+	if len(homes) == 0 {
+		f.denyPersist("unit", "/etc/passwd ilegível ou vazio: nenhum home foi "+
+			"vasculhado, e unit de usuário é o esconderijo da §7.3")
+	}
+	var negados []string
+	for _, home := range homes {
+		dir := home + "/.config/systemd/user"
+		if _, negado := lookup(e, dir); negado {
+			negados = append(negados, dir)
+			continue
+		}
+		for _, name := range e.ReadDirNames(dir) {
+			if !isUnitName(name) || len(units) >= maxUnits {
+				truncated = truncated || len(units) >= maxUnits
+				continue
+			}
+			u := parseUnitFile(e, dir+"/"+name, "user", false)
+			u.Name = name
+			u.Kind = kindOf(name)
+			units = append(units, u)
+		}
+	}
+
+	if len(negados) > 0 {
+		f.denyPersist("unit", strconv.Itoa(len(negados))+
+			" diretórios de unit de usuário ilegíveis (permissão): "+resumoCaminhos(negados))
+	}
+
+	for i := range units {
+		units[i].EnabledBy = wants[units[i].Name]
+	}
+	sort.Slice(units, func(i, j int) bool {
+		if units[i].Name != units[j].Name {
+			return units[i].Name < units[j].Name
+		}
+		return units[i].Path < units[j].Path
+	})
+	f.Units = units
+
+	if truncated {
+		f.partial("persist", "mais de "+strconv.Itoa(maxUnits)+
+			" units encontradas; o excedente NÃO foi lido")
+	}
+	if len(units) == 0 && e.Has(env.CapSystemd) {
+		f.partial("persist", "systemd presente e nenhuma unit foi legível: "+
+			"os checks de unit não avaliaram nada")
+	}
+}
+
+// isNotExist trata a ausência como resposta, não como falha: a maioria dos
+// caminhos de persistência normalmente NÃO existe, e é a existência que informa.
+func isNotExist(err error) bool { return os.IsNotExist(err) }
+
+func isUnitName(n string) bool {
+	for _, s := range []string{".service", ".timer", ".socket", ".path", ".mount", ".target"} {
+		if strings.HasSuffix(n, s) {
+			return true
+		}
+	}
+	return false
+}
+
+func kindOf(n string) string {
+	if i := strings.LastIndexByte(n, '.'); i >= 0 {
+		return n[i+1:]
+	}
+	return ""
+}
+
+// parseUnitFile lê o formato INI do systemd. Chave REPETIDA é normal
+// (ExecStart= pode aparecer várias vezes) e continuação com "\" também.
+func parseUnitFile(e *env.Env, path, scope string, vendor bool) Unit {
+	u := Unit{Path: path, Scope: scope, Vendor: vendor}
+	if fi, err := e.Lstat(path); err == nil {
+		u.ModUTC = fi.ModTime().UTC().Format(time.RFC3339)
+	}
+	b, err := e.ReadFile(path)
+	if err != nil {
+		return u
+	}
+
+	var pending string
+	for _, raw := range strings.Split(string(b), "\n") {
+		ln := strings.TrimSpace(raw)
+		if pending != "" {
+			ln, pending = pending+" "+ln, ""
+		}
+		if strings.HasSuffix(ln, `\`) {
+			pending = strings.TrimSpace(strings.TrimSuffix(ln, `\`))
+			continue
+		}
+		if ln == "" || strings.HasPrefix(ln, "#") || strings.HasPrefix(ln, ";") ||
+			strings.HasPrefix(ln, "[") {
+			continue
+		}
+		k, v, ok := strings.Cut(ln, "=")
+		if !ok {
+			continue
+		}
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+
+		switch {
+		case strings.HasPrefix(k, "Exec"):
+			// "ExecStart=" vazio RESETA a lista — é assim que um drop-in
+			// substitui o comando da unit original.
+			if v == "" {
+				u.Exec = nil
+				continue
+			}
+			u.Exec = append(u.Exec, ExecLine{Key: k, Cmd: v})
+		case k == "Restart":
+			u.Restart = v
+		case k == "User":
+			u.User = v
+		case k == "WantedBy", k == "RequiredBy":
+			u.WantedBy = append(u.WantedBy, strings.Fields(v)...)
+		case k == "OnCalendar":
+			u.OnCalendar = append(u.OnCalendar, v)
+		case k == "OnUnitActiveSec", k == "OnUnitInactiveSec":
+			u.OnUnitActiveSec = v
+		case k == "OnBootSec", k == "OnStartupSec":
+			u.OnBootSec = v
+		case strings.HasPrefix(k, "Listen"):
+			u.Listen = append(u.Listen, v)
+		case k == "PathExists", k == "PathChanged", k == "PathModified",
+			k == "PathExistsGlob", k == "DirectoryNotEmpty":
+			u.WatchPaths = append(u.WatchPaths, v)
+		case k == "Environment":
+			// Environment=LD_PRELOAD=… numa unit é a rota da §7.8 que ninguém
+			// associa a execução de código: entra no mesmo lugar que o
+			// /etc/environment, para o check de preload enxergar.
+			for _, as := range camposComAspas(v) {
+				kk, vv, ok := strings.Cut(as, "=")
+				if !ok {
+					continue
+				}
+				u.Environment = append(u.Environment, EnvSetting{
+					File: path, Key: kk, Value: strings.Trim(vv, `"'`),
+				})
+			}
+		}
+	}
+	// Continuação aberta no fim do arquivo: a última linha some se ela for
+	// descartada, e é onde o comando costuma estar.
+	if pending != "" {
+		u.Truncated = "última linha termina em continuação e ficou incompleta"
+	}
+	return u
+}
+
+// camposComAspas divide respeitando aspas: Environment="A=1" "B=2 3".
+func camposComAspas(s string) []string {
+	var out []string
+	var cur strings.Builder
+	var aspa rune
+	for _, r := range s {
+		switch {
+		case aspa != 0 && r == aspa:
+			aspa = 0
+		case aspa == 0 && (r == '"' || r == '\''):
+			aspa = r
+		case aspa == 0 && (r == ' ' || r == '\t'):
+			if cur.Len() > 0 {
+				out = append(out, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if cur.Len() > 0 {
+		out = append(out, cur.String())
+	}
+	return out
+}
+
+// homeDirs devolve os diretórios pessoais, do passwd do ALVO — nunca do host
+// do analista.
+func homeDirs(e *env.Env) []string {
+	b, err := e.ReadFile("/etc/passwd")
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, ln := range strings.Split(string(b), "\n") {
+		fs := strings.Split(ln, ":")
+		if len(fs) < 6 {
+			continue
+		}
+		h := fs[5]
+		if h == "" || h == "/" || h == "/nonexistent" || seen[h] {
+			continue
+		}
+		seen[h] = true
+		// Conta de sistema aponta o home para lugar que não é home: /dev/null,
+		// /bin, /sbin. Sondar ali é trabalho jogado fora e ruído garantido.
+		if !e.IsDir(h) {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}

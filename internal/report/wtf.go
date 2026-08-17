@@ -96,23 +96,43 @@ func contagens(f *facts.Facts) string {
 }
 
 func writeWtfFindings(w io.Writer, r *check.Report) {
+	// Alvo com mais de um sinal vira UMA linha com a contagem. Numa tela só, é
+	// a diferença entre "por onde começo" e uma lista para rolar.
+	grupos, resto := r.Correlate()
+
+	// O teto vale para as DUAS listas somadas: são a mesma tela. Contar só os
+	// avulsos deixava vinte alvos correlacionados imprimirem vinte linhas, e o
+	// comando existe para caber numa tela.
+	linhas := 0
+	for _, g := range grupos {
+		if linhas >= maxWtfLinhas {
+			break
+		}
+		linhas++
+		fmt.Fprintln(w, pad(fmt.Sprintf("%s %-12s %d sinais: %s",
+			g.Sev().Mark(), Safe(g.Subject), len(g.Findings),
+			Safe(resumoTitulos(g))), 72)+"§"+strings.Join(g.Refs(), " §"))
+	}
+
 	// O denominador conta só o que SERIA impresso: usar len(r.Findings) incluiria
 	// os INFO, que nunca aparecem, e a linha prometeria achados inexistentes.
 	total := 0
-	for _, fd := range r.Findings {
+	for _, fd := range resto {
 		if fd.Sev != check.SevInfo {
 			total++
 		}
 	}
 	n := 0
-	for _, fd := range r.Findings {
+	for _, fd := range resto {
 		if fd.Sev == check.SevInfo {
 			continue
 		}
-		if n >= maxWtfLinhas {
-			fmt.Fprintf(w, "   … e mais %d achados — `aletheia scan -v`\n\n", total-n)
+		if linhas >= maxWtfLinhas {
+			fmt.Fprintf(w, "   … e mais %d achados — `aletheia scan -v`\n\n",
+				(total-n)+(len(grupos)-min(len(grupos), linhas)))
 			return
 		}
+		linhas++
 		n++
 
 		fmt.Fprintln(w, pad(fmt.Sprintf("%s %-12s %s",
@@ -140,6 +160,24 @@ func writeWtfFindings(w io.Writer, r *check.Report) {
 		}
 	}
 	fmt.Fprintln(w)
+}
+
+// resumoTitulos encurta os títulos para caber na linha: no wtf o que decide é
+// QUANTOS sinais e de que natureza, não a redação de cada um.
+func resumoTitulos(g check.SubjectGroup) string {
+	var out []string
+	for i, fd := range g.Findings {
+		if i >= 3 {
+			out = append(out, "…")
+			break
+		}
+		t := fd.Title
+		if i := strings.IndexAny(t, ":,"); i > 0 {
+			t = t[:i]
+		}
+		out = append(out, t)
+	}
+	return strings.Join(out, " · ")
 }
 
 // writeWtfGaps cabe em UMA linha, e é a linha que impede a tela inteira de ser
@@ -261,6 +299,13 @@ func clip(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func dur(d time.Duration) string {

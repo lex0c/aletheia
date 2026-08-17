@@ -379,3 +379,54 @@ func TestCabecalhoMostraCotaDeCPU(t *testing.T) {
 		t.Errorf("host sem cota não pode exibir cota: %q", cab)
 	}
 }
+
+// Num implante de verdade três checks disparam no MESMO pid, e cada um
+// contribui o mesmo `cp /proc/N/exe`. O bloco de ação existe para ser a lista
+// curta do que fazer agora — repetir a linha o transforma numa parede.
+func TestBlocoDeAcaoNaoRepeteOMesmoComando(t *testing.T) {
+	mk := func(id string) check.Finding {
+		fd := f(id, "17", "pid=20", check.SevCritical)
+		fd.Irreversible = true
+		fd.NextSteps = []string{"NÃO mate antes de preservar", `sudo cp /proc/20/exe "$IR/pid-20.bin"`}
+		return fd
+	}
+	r := &check.Report{
+		Findings: []check.Finding{mk("correlate.revshell"), mk("proc.kthread_disguise"),
+			mk("proc.suspicious_path")},
+		Coverage: check.Coverage{Total: 3, Complete: 3},
+	}
+	out := render(r, 0)
+	if n := strings.Count(out, "cp /proc/20/exe"); n != 1 {
+		t.Errorf("o mesmo comando apareceu %d vezes:\n%s", n, out)
+	}
+}
+
+// A correlação precisa aparecer no relatório, não só no modelo: é ela que
+// transforma quatro fatos soltos numa história. E cada achado aparece uma vez
+// só — correlacionado OU na compactação por ID, nunca nos dois.
+func TestRelatorioMostraAlvoCorrelacionado(t *testing.T) {
+	mk := func(id, subj string, sev check.Severity) check.Finding {
+		return f(id, "17", subj, sev)
+	}
+	r := &check.Report{
+		Findings: []check.Finding{
+			mk("correlate.revshell", "pid=19", check.SevCritical),
+			mk("proc.env_tool_marker", "pid=19", check.SevCritical),
+			mk("proc.suspicious_path", "pid=19", check.SevWarn),
+			mk("proc.suspicious_path", "pid=77", check.SevWarn),
+		},
+		Coverage: check.Coverage{Total: 4, Complete: 4},
+	}
+	out := render(r, 0)
+
+	if !strings.Contains(out, "3 sinais no mesmo alvo") {
+		t.Errorf("o alvo correlacionado não apareceu:\n%s", out)
+	}
+	// pid=19 aparece uma vez como cabeçalho do grupo; pid=77 uma vez solto.
+	if n := strings.Count(out, "pid=19"); n != 1 {
+		t.Errorf("pid=19 apareceu %d vezes: cada achado sai uma vez só\n%s", n, out)
+	}
+	if !strings.Contains(out, "pid=77") {
+		t.Errorf("o alvo com um sinal só precisa continuar aparecendo:\n%s", out)
+	}
+}

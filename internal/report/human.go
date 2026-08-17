@@ -82,7 +82,26 @@ func writeCompact(w io.Writer, r *check.Report) {
 		return
 	}
 
-	for _, g := range r.Grouped() {
+	// O mesmo alvo visto por checks diferentes vem PRIMEIRO e junto: é a forma
+	// de um incidente, e listá-lo solto contaria quatro fatos onde há uma
+	// história.
+	grupos, resto := r.Correlate()
+	for _, g := range grupos {
+		fmt.Fprintf(w, "%s %-13s %d sinais no mesmo alvo\n",
+			g.Sev().Mark(), Safe(g.Subject), len(g.Findings))
+		for _, fd := range g.Findings {
+			line := "     · " + Safe(fd.Title)
+			if fd.Downgraded {
+				line += " ⚠rebaixado"
+			}
+			fmt.Fprintln(w, pad(line, 76)+"§"+Safe(fd.Ref))
+		}
+	}
+	if len(grupos) > 0 && len(resto) > 0 {
+		fmt.Fprintln(w)
+	}
+
+	for _, g := range check.GroupByIDSev(resto) {
 		first := g.First()
 		if first.Sev == check.SevInfo {
 			continue
@@ -103,6 +122,9 @@ func writeCompact(w io.Writer, r *check.Report) {
 	fmt.Fprintln(w)
 }
 
+// grouped compacta por ID: "8× exe em local suspeito" no lugar de oito linhas.
+// É a outra metade da leitura — o mesmo check em muitos alvos, contra muitos
+// checks no mesmo alvo.
 func writeVerbose(w io.Writer, r *check.Report, o Options) {
 	var lastSev check.Severity = -1
 	for _, fd := range r.Findings {
@@ -155,19 +177,28 @@ func writeNextSteps(w io.Writer, r *check.Report) {
 	// não por casar o texto do comando: acoplar por string faz uma reescrita
 	// inocente silenciar o passo que não pode ser pulado, com todos os testes
 	// continuando verdes.
-	irr := r.Irreversible()
-	for i, fd := range irr {
-		if i >= 3 {
-			fmt.Fprintf(w, "     (…e mais %d achados exigindo preservação — veja -v)\n", len(irr)-3)
-			break
-		}
+	// Deduplicado por COMANDO, não por achado: num implante de verdade, três
+	// checks disparam no mesmo PID e cada um contribui o mesmo `cp /proc/N/exe`.
+	// Repetir a linha três vezes transforma uma lista de ações numa parede — e
+	// o bloco existe justamente para ser a lista curta do que fazer AGORA.
+	var cmds []string
+	vistos := map[string]bool{}
+	for _, fd := range r.Irreversible() {
 		for _, ns := range fd.NextSteps {
-			if strings.HasPrefix(ns, "sudo ") {
-				fmt.Fprintf(w, "  %d. %s   ← irreversível se pulado\n", n, Safe(ns))
-				n++
+			if strings.HasPrefix(ns, "sudo ") && !vistos[ns] {
+				vistos[ns] = true
+				cmds = append(cmds, ns)
 				break
 			}
 		}
+	}
+	for i, c := range cmds {
+		if i >= 3 {
+			fmt.Fprintf(w, "     (…e mais %d comandos de preservação — veja -v)\n", len(cmds)-3)
+			break
+		}
+		fmt.Fprintf(w, "  %d. %s   ← irreversível se pulado\n", n, Safe(c))
+		n++
 	}
 	fmt.Fprintf(w, "  %d. isolar na camada de REDE, não no host (runbook §18)\n", n)
 	fmt.Fprintf(w, "  %d. remover persistência ANTES de matar (runbook §19)\n", n+1)

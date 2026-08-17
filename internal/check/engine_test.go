@@ -323,3 +323,101 @@ func TestSemPrazoNadaEhCortado(t *testing.T) {
 			r.Coverage.Complete, r.Coverage.Total, len(r.Coverage.NotChecked))
 	}
 }
+
+// Um comprometimento real dispara vários checks no MESMO pid. Listá-los soltos
+// conta quatro fatos onde há uma história — e é a história que o operador
+// precisa para decidir; os fatos soltos ele teria com grep.
+func TestCorrelatePorAlvo(t *testing.T) {
+	fd := func(id, subj string, sev Severity) Finding {
+		return Finding{ID: id, Ref: "1", Title: "t de " + id, Subject: subj, Sev: sev}
+	}
+	r := &Report{Findings: []Finding{
+		fd("correlate.revshell", "pid=19", SevCritical),
+		fd("proc.suspicious_path", "pid=19", SevWarn),
+		fd("proc.env_tool_marker", "pid=19", SevCritical),
+		fd("proc.suspicious_path", "pid=77", SevWarn), // sozinho: não correlaciona
+		fd("persist.timer_frequent", "beacon.timer", SevWarn),
+	}}
+
+	grupos, resto := r.Correlate()
+	if len(grupos) != 1 || grupos[0].Subject != "pid=19" {
+		t.Fatalf("grupos = %+v", grupos)
+	}
+	if len(grupos[0].Findings) != 3 {
+		t.Errorf("sinais = %d, quer 3", len(grupos[0].Findings))
+	}
+	// A severidade do grupo é a MAIOR: um implante com dois críticos e um aviso
+	// é um crítico.
+	if grupos[0].Sev() != SevCritical {
+		t.Errorf("Sev = %s, quer CRITICAL", grupos[0].Sev())
+	}
+	// Cada achado aparece exatamente UMA vez entre grupos e resto.
+	if len(resto) != 2 {
+		t.Errorf("resto = %d, quer 2 (os dois alvos com um sinal só)", len(resto))
+	}
+}
+
+// O mesmo check disparando duas vezes no mesmo alvo é repetição, não
+// correlação: agrupar isso prometeria uma história que não existe.
+func TestCorrelateExigeChecksDISTINTOS(t *testing.T) {
+	r := &Report{Findings: []Finding{
+		{ID: "proc.x", Subject: "pid=1", Sev: SevWarn},
+		{ID: "proc.x", Subject: "pid=1", Sev: SevWarn},
+	}}
+	if grupos, _ := r.Correlate(); len(grupos) != 0 {
+		t.Errorf("dois achados do MESMO check não são correlação: %+v", grupos)
+	}
+}
+
+func TestCorrelateIgnoraAlvoVazio(t *testing.T) {
+	r := &Report{Findings: []Finding{
+		{ID: "a.b", Subject: "", Sev: SevWarn},
+		{ID: "c.d", Subject: "", Sev: SevWarn},
+	}}
+	grupos, resto := r.Correlate()
+	if len(grupos) != 0 {
+		t.Error("achado sem alvo não pode ser correlacionado com outro sem alvo")
+	}
+	if len(resto) != 2 {
+		t.Errorf("resto = %d, quer 2", len(resto))
+	}
+}
+
+// Um achado que NÃO entrou em grupo nenhum tem de sair no resto — inclusive
+// INFO. Marcar por ALVO em vez de por posição descartava do resto qualquer
+// achado que compartilhasse o alvo sem ter entrado no grupo, e ele sumia do
+// relatório inteiro.
+func TestCorrelateNaoPerdeAchadoDeAlvoAgrupado(t *testing.T) {
+	r := &Report{Findings: []Finding{
+		{ID: "a.b", Subject: "pid=1", Sev: SevCritical},
+		{ID: "c.d", Subject: "pid=1", Sev: SevWarn},
+		{ID: "e.f", Subject: "pid=1", Sev: SevInfo}, // mesmo alvo, fora do grupo
+	}}
+	grupos, resto := r.Correlate()
+	if len(grupos) != 1 || len(grupos[0].Findings) != 2 {
+		t.Fatalf("grupos = %+v", grupos)
+	}
+	if len(resto) != 1 || resto[0].ID != "e.f" {
+		t.Errorf("o INFO precisa sobrar para o resto, não sumir: %+v", resto)
+	}
+	// Nenhum achado pode aparecer duas vezes nem desaparecer.
+	if len(grupos[0].Findings)+len(resto) != len(r.Findings) {
+		t.Error("a soma de grupos e resto tem de ser o total")
+	}
+}
+
+// Agrupar só por ID juntava um crítico e um aviso do mesmo check, e a linha
+// imprimia a marca do primeiro valendo pelos dois.
+func TestGroupedSeparaPorSeveridade(t *testing.T) {
+	gs := GroupByIDSev([]Finding{
+		{ID: "x.y", Sev: SevCritical, Subject: "a"},
+		{ID: "x.y", Sev: SevWarn, Subject: "b"},
+		{ID: "x.y", Sev: SevWarn, Subject: "c"},
+	})
+	if len(gs) != 2 {
+		t.Fatalf("grupos = %d, quer 2", len(gs))
+	}
+	if gs[0].N() != 1 || gs[1].N() != 2 {
+		t.Errorf("tamanhos = %d e %d", gs[0].N(), gs[1].N())
+	}
+}

@@ -245,3 +245,27 @@ func TestContagemDoCorteIgnoraInfo(t *testing.T) {
 		t.Errorf("a contagem incluiu achados INFO, que nunca aparecem:\n%s", out)
 	}
 }
+
+// O wtf promete UMA TELA. Contar só os avulsos deixava vinte alvos
+// correlacionados imprimirem vinte linhas.
+func TestWtfLimitaGruposEAvulsosJuntos(t *testing.T) {
+	r := &check.Report{Coverage: check.Coverage{Total: 1, Complete: 1}}
+	// 12 alvos correlacionados (2 sinais cada) + 5 avulsos
+	for i := 0; i < 12; i++ {
+		s := "pid=" + strconv.Itoa(i)
+		r.Findings = append(r.Findings,
+			check.Finding{ID: "a.b", Subject: s, Sev: check.SevCritical, Title: "t"},
+			check.Finding{ID: "c.d", Subject: s, Sev: check.SevWarn, Title: "t"})
+	}
+	for i := 0; i < 5; i++ {
+		r.Findings = append(r.Findings, check.Finding{
+			ID: "e.f", Subject: "x" + strconv.Itoa(i), Sev: check.SevWarn, Title: "t"})
+	}
+	out := renderWtf(r, nil)
+	if n := strings.Count(out, "sinais:"); n > maxWtfLinhas {
+		t.Errorf("%d linhas de grupo, teto é %d:\n%s", n, maxWtfLinhas, out)
+	}
+	if !strings.Contains(out, "e mais") {
+		t.Errorf("o que ficou de fora precisa ser contado:\n%s", out)
+	}
+}

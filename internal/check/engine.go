@@ -182,6 +182,14 @@ func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 // confiável.
 func (r *Report) applyTrustDowngrade() {
 	for _, f := range r.Findings {
+		// Só achado CRÍTICO quebra a confiança. O mesmo check pode disparar em
+		// injeção legítima — o sandbox do Firefox usa LD_PRELOAD, e nove
+		// processos dele fariam toda varredura de desktop imprimir "confiança
+		// rebaixada". Rebaixar tudo por suspeita é a mesma perda de sinal que
+		// gritar lobo.
+		if f.Sev != SevCritical {
+			continue
+		}
 		if reason, ok := trustBreakers[f.ID]; ok {
 			r.TrustBroken = append(r.TrustBroken, reason)
 		}
@@ -294,18 +302,131 @@ func (g Group) Subjects(max int) string {
 	return strings.Join(ss, ", ")
 }
 
-func (r *Report) Grouped() []Group {
-	var order []string
-	byID := map[string][]Finding{}
-	for _, f := range r.Findings {
-		if _, ok := byID[f.ID]; !ok {
-			order = append(order, f.ID)
+// Grouped compacta por ID E SEVERIDADE.
+//
+// A severidade entra na chave porque agrupar só por ID juntava um crítico e um
+// aviso do mesmo check e imprimia a marca do primeiro valendo pelos dois: o
+// cabeçalho dizia "1 crítico" e a linha dizia "⛔ 2×". Quem lê acredita na linha.
+func (r *Report) Grouped() []Group { return GroupByIDSev(r.Findings) }
+
+// GroupByIDSev é a única implementação de agrupamento. Existia uma cópia no
+// pacote de relatório com semântica diferente, e as duas divergiram em silêncio.
+func GroupByIDSev(fs []Finding) []Group {
+	type chave struct {
+		id  string
+		sev Severity
+	}
+	var order []chave
+	por := map[chave][]Finding{}
+	for _, f := range fs {
+		k := chave{f.ID, f.Sev}
+		if _, ok := por[k]; !ok {
+			order = append(order, k)
 		}
-		byID[f.ID] = append(byID[f.ID], f)
+		por[k] = append(por[k], f)
 	}
 	out := make([]Group, 0, len(order))
-	for _, id := range order {
-		out = append(out, Group{Findings: byID[id]})
+	for _, k := range order {
+		out = append(out, Group{Findings: por[k]})
 	}
 	return out
+}
+
+// SubjectGroup são os achados que apontam para o MESMO alvo — o mesmo pid, o
+// mesmo arquivo.
+type SubjectGroup struct {
+	Subject  string
+	Findings []Finding
+}
+
+// Sev é a maior severidade do grupo: um implante com três avisos e um crítico
+// é um crítico.
+func (g SubjectGroup) Sev() Severity {
+	s := SevInfo
+	for _, f := range g.Findings {
+		if f.Sev > s {
+			s = f.Sev
+		}
+	}
+	return s
+}
+
+// Refs devolve as seções do runbook envolvidas, sem repetir.
+func (g SubjectGroup) Refs() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, f := range g.Findings {
+		if f.Ref != "" && !seen[f.Ref] {
+			seen[f.Ref] = true
+			out = append(out, f.Ref)
+		}
+	}
+	return out
+}
+
+// Correlate separa os achados em duas leituras:
+//
+//	grupos    o mesmo ALVO visto por checks diferentes — "um implante com
+//	          quatro sinais", que é a forma de um incidente de verdade
+//	resto     todo o resto, para a compactação por ID de sempre
+//
+// Existe porque um comprometimento real dispara vários checks no mesmo pid, e
+// listá-los soltos conta quatro fatos onde há UMA história. O operador precisa
+// da história para decidir; os fatos soltos ele já teria com grep.
+//
+// O corte é em DOIS checks distintos, não em dois achados: o mesmo check
+// disparando duas vezes no mesmo alvo é repetição, não correlação.
+//
+// Isto é decisão de EXIBIÇÃO. O JSONL nunca é afetado, senão a agregação de
+// frota passaria a depender de como o relatório foi renderizado (SPEC 7.1).
+func (r *Report) Correlate() ([]SubjectGroup, []Finding) {
+	porAlvo := map[string][]Finding{}
+	posDoAlvo := map[string][]int{}
+	var ordem []string
+	for i, f := range r.Findings {
+		if f.Subject == "" || f.Sev == SevInfo {
+			continue
+		}
+		if _, ok := porAlvo[f.Subject]; !ok {
+			ordem = append(ordem, f.Subject)
+		}
+		porAlvo[f.Subject] = append(porAlvo[f.Subject], f)
+		posDoAlvo[f.Subject] = append(posDoAlvo[f.Subject], i)
+	}
+
+	// agrupado é marcado por POSIÇÃO, não por alvo. Marcar por alvo descartava
+	// do resto qualquer achado que compartilhasse o alvo sem ter entrado no
+	// grupo — um INFO, por exemplo, sumia do relatório inteiro.
+	agrupado := map[int]bool{}
+	var grupos []SubjectGroup
+	for _, subj := range ordem {
+		fs := porAlvo[subj]
+		ids := map[string]bool{}
+		for _, f := range fs {
+			ids[f.ID] = true
+		}
+		if len(ids) < 2 {
+			continue
+		}
+		for _, i := range posDoAlvo[subj] {
+			agrupado[i] = true
+		}
+		grupos = append(grupos, SubjectGroup{Subject: subj, Findings: fs})
+	}
+
+	// Mais severo primeiro; empatando, quem tem mais sinais.
+	sort.SliceStable(grupos, func(i, j int) bool {
+		if a, b := grupos[i].Sev(), grupos[j].Sev(); a != b {
+			return a > b
+		}
+		return len(grupos[i].Findings) > len(grupos[j].Findings)
+	})
+
+	var resto []Finding
+	for i, f := range r.Findings {
+		if !agrupado[i] {
+			resto = append(resto, f)
+		}
+	}
+	return grupos, resto
 }

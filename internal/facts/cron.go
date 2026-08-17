@@ -173,11 +173,27 @@ func parseCronFile(e *env.Env, path, kind, user string) []CronEntry {
 		ent.IntervalSec = cronInterval(sched)
 
 		if comUsuario {
-			u, cmd, ok := strings.Cut(strings.TrimSpace(rest), " ")
-			if !ok {
+			// O separador é QUALQUER branco, e a distinção não é teórica: o
+			// /etc/crontab que o pacote `cron` instala no Debian usa TAB entre
+			// o usuário e o comando.
+			//
+			//	17 *  * * *  root<TAB>cd / && run-parts --report /etc/cron.hourly
+			//
+			// Cortando só em espaço, o usuário virava "root\tcd" e o comando
+			// virava "/ && run-parts …" — cujo primeiro token é `/`. O diretório
+			// raiz entrava na pergunta de propriedade, nenhum pacote reivindica
+			// `/`, e todo servidor Debian de fábrica com cron instalado saía com
+			// um aviso e exit code 1.
+			//
+			// O comentário desta função já dizia que confundir os dois faz o
+			// nome do usuário virar o começo do comando. Era exatamente isso, e
+			// nenhum contêiner da matriz tem cron instalado para mostrar.
+			r := strings.TrimSpace(rest)
+			i := strings.IndexAny(r, " \t")
+			if i < 0 {
 				continue
 			}
-			ent.User, ent.Cmd = u, strings.TrimSpace(cmd)
+			ent.User, ent.Cmd = r[:i], strings.TrimSpace(r[i+1:])
 		} else {
 			ent.Cmd = strings.TrimSpace(rest)
 		}

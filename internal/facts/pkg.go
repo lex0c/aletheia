@@ -183,7 +183,22 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 		// vinte e uma acusações de "nenhum pacote reivindica". Nenhum pacote
 		// reivindica mesmo: não há arquivo. Unit apontando para binário ausente
 		// é unit QUEBRADA, que é outra conversa e outra severidade.
-		if _, err := e.Lstat(p); err != nil {
+		fi, err := e.Lstat(p)
+		if err != nil {
+			return
+		}
+		// E não pode ser DIRETÓRIO. Linha de agendamento e de unit cita caminho
+		// que não é executável o tempo todo — `cd /srv/app`, `--report
+		// /etc/cron.hourly`, `WorkingDirectory=` —, e perguntar quem empacotou
+		// um diretório não tem resposta útil: nenhum pacote reivindica `/`.
+		//
+		// O ramo dos gatilhos, mais abaixo, já descartava diretório e explicava
+		// por quê. Era a mesma decisão, tomada uma vez e aplicada num lugar só.
+		//
+		// O corte é em DIRETÓRIO e não em "não-regular" de propósito: /bin/sh é
+		// link simbólico em quase toda distribuição, e exigir arquivo regular
+		// aqui jogaria fora binário de verdade.
+		if fi.IsDir() {
 			return
 		}
 		out[p] = append(out[p], onde)

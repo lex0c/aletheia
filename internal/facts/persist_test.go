@@ -212,3 +212,72 @@ func TestHomeQueNaoEhDiretorioNaoViraLacuna(t *testing.T) {
 		t.Errorf("home legível não pode gerar lacuna de startup: %v", f.PersistDenied["startup"])
 	}
 }
+
+// Sob usrmerge /lib é link para usr/lib, e /lib/systemd/system é o MESMO
+// diretório que /usr/lib/systemd/system. Os dois estão na lista porque em
+// distribuição sem usrmerge são árvores diferentes — mas em Debian 12, Fedora e
+// Arch ler as duas coletava cada unit de sistema duas vezes.
+//
+// O sintoma no cenário com serviços de verdade foi "2× ssh.socket" onde havia
+// um socket só: um fato virando dois achados, inflando a contagem de avisos que
+// a frota lê.
+func TestUnitsNaoDuplicamSobUsrMerge(t *testing.T) {
+	raiz := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(raiz, "usr/lib/systemd/system"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(raiz, "usr/lib/systemd/system/a.service"),
+		[]byte("[Service]\nExecStart=/usr/bin/a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// o link RELATIVO, do jeito que a distribuição o cria
+	if err := os.Symlink("usr/lib", filepath.Join(raiz, "lib")); err != nil {
+		t.Fatal(err)
+	}
+
+	e := env.Probe(env.Options{Root: raiz})
+	t.Cleanup(func() { e.Close() })
+	f := Collect(e)
+
+	var n int
+	for i := range f.Units {
+		if f.Units[i].Name == "a.service" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("a mesma unit foi coletada %d vezes: /lib e /usr/lib são o mesmo diretório", n)
+	}
+}
+
+// E a dedução não pode ir longe demais: sem usrmerge as duas árvores são
+// DIFERENTES, e ler só uma perderia metade das units num host antigo — que é
+// exatamente onde a ferramenta precisa funcionar.
+func TestUnitsLeAsDuasArvoresSemUsrMerge(t *testing.T) {
+	raiz := t.TempDir()
+	for _, d := range []string{"usr/lib/systemd/system", "lib/systemd/system"} {
+		if err := os.MkdirAll(filepath.Join(raiz, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(raiz, "usr/lib/systemd/system/a.service"),
+		[]byte("[Service]\nExecStart=/usr/bin/a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(raiz, "lib/systemd/system/b.service"),
+		[]byte("[Service]\nExecStart=/usr/bin/b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	e := env.Probe(env.Options{Root: raiz})
+	t.Cleanup(func() { e.Close() })
+	f := Collect(e)
+
+	vistos := map[string]bool{}
+	for i := range f.Units {
+		vistos[f.Units[i].Name] = true
+	}
+	if !vistos["a.service"] || !vistos["b.service"] {
+		t.Errorf("as duas árvores separadas têm que ser lidas: %v", vistos)
+	}
+}

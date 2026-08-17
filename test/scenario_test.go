@@ -145,6 +145,7 @@ func TestCenarios(t *testing.T) {
 		for _, img := range sc.Images {
 			t.Run(sc.ID+"/"+sanitizeName(img), func(t *testing.T) {
 				t.Parallel()
+				exigeImagemLocal(t, img)
 				var r result
 				if sc.Mode == scenario.Image {
 					r = runImage(t, bin, img, sc)
@@ -630,5 +631,22 @@ func TestCenarioNaoCitaCheckInexistente(t *testing.T) {
 				t.Errorf("cenário %q espera %q, que não existe", sc.ID, e.ID)
 			}
 		}
+	}
+}
+
+// exigeImagemLocal pula com motivo quando uma imagem CONSTRUÍDA aqui não existe.
+//
+// As da matriz vêm do registro e o docker as busca sozinho. As de `aletheia-*`
+// são construídas por `make images` e precisam de rede no build — num ambiente
+// sem rede, o cenário tem que dizer que NÃO OLHOU, e não falhar com erro de
+// docker nem passar calado. É a mesma regra que a ferramenta aplica a si mesma:
+// "não encontrei" e "não consegui olhar" não podem sair iguais.
+func exigeImagemLocal(t *testing.T, img string) {
+	t.Helper()
+	if !strings.HasPrefix(img, "aletheia-") {
+		return
+	}
+	if err := exec.Command("docker", "image", "inspect", img).Run(); err != nil {
+		t.Skipf("imagem %s ausente — rode `make images` (precisa de rede)", img)
 	}
 }

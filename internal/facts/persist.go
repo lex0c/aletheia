@@ -366,7 +366,29 @@ func collectUnits(f *Facts, e *env.Env) {
 	var units []Unit
 	truncated := false
 
+	// Diretório já visitado NÃO se lê de novo, e a chave é a identidade do
+	// inode — não o caminho.
+	//
+	// Sob usrmerge /lib é link para usr/lib, e /lib/systemd/system e
+	// /usr/lib/systemd/system são LITERALMENTE o mesmo diretório. Os dois estão
+	// na lista de propósito: em distribuição sem usrmerge — ubuntu 14.04,
+	// centos 7 — eles são diferentes e as duas árvores precisam ser lidas. Em
+	// Debian 12 o resultado era toda unit de sistema coletada DUAS VEZES:
+	// f.Units com o dobro do tamanho e todo check que emite por unit gerando
+	// achado duplicado. Apareceu como "2× ssh.socket" onde havia um socket só.
+	//
+	// A comparação é por (dev, ino) e não por tabela de caminhos porque a fusão
+	// varia entre distribuições — o Arch funde de um jeito, o Debian de outro, e
+	// tabela erra. Dois caminhos no mesmo inode são o mesmo diretório em
+	// qualquer arranjo.
+	vistos := map[[2]uint64]bool{}
 	for _, d := range unitDirs {
+		if id, ok := idDeDiretorio(e, d.dir); ok {
+			if vistos[id] {
+				continue
+			}
+			vistos[id] = true
+		}
 		ents, err := e.ReadDir(d.dir)
 		if err != nil {
 			continue

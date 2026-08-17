@@ -549,3 +549,21 @@ func emArvoreTemporaria(p string) bool {
 	}
 	return false
 }
+
+// idDeDiretorio identifica um diretório pelo par (dev, ino).
+//
+// É como se responde "estes dois caminhos são o mesmo diretório?" sem tabela de
+// equivalência: sob usrmerge /lib/systemd/system e /usr/lib/systemd/system caem
+// no mesmo inode, e a fusão varia entre distribuições. O Stat segue link de
+// propósito — o que interessa é ONDE o caminho chega, não se ele é um link.
+func idDeDiretorio(e *env.Env, dir string) ([2]uint64, bool) {
+	fi, err := e.Stat(dir)
+	if err != nil || !fi.IsDir() {
+		return [2]uint64{}, false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return [2]uint64{}, false
+	}
+	return [2]uint64{uint64(st.Dev), uint64(st.Ino)}, true
+}

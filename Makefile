@@ -101,6 +101,7 @@ scenarios: build helper arches vm-image
 # images pré-baixa a matriz, para o primeiro `make scenarios` não medir download.
 images:
 	for i in debian:12 rockylinux:9 alpine:3.20; do docker pull $$i; done
+	docker build -t aletheia-servicos:test test/images/servicos
 
 clean:
 	rm -rf dist

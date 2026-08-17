@@ -169,6 +169,11 @@ func collectProcesses(f *Facts, e *env.Env) {
 			pids = append(pids, pid)
 		}
 	}
+	// O que o readdir LISTOU, independente de termos conseguido ler. É um
+	// conjunto diferente de f.Processes, e a diferença é permissão — usar a
+	// lista de processos lidos como "o que está visível" faria a comparação
+	// cruzada acusar de OCULTO todo processo alheio que não pudemos abrir.
+	f.PidsListados = pids
 
 	// A leitura de cada PID é INDEPENDENTE das outras: são arquivos diferentes,
 	// sem estado compartilhado. Ler em paralelo é o único alívio real para um

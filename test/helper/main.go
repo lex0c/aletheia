@@ -67,6 +67,16 @@ const usage = `helper — monta situações para a suíte de cenários
       inicia um filho sob PTRACE_TRACEME e o mantém traçado. A relação pai/filho
       é o que satisfaz ptrace_scope=1, que é o padrão da maioria das distros.
 
+  helper pty <uid> <programa> [args...]
+      abre um pseudoterminal, larga o privilégio para <uid> e executa o
+      programa com o terminal em fd 0, 1 e 2. É a forma de uma sessão
+      interativa — que é o que uma conta de serviço nunca deveria ter (§3.2).
+
+  helper spawn <programa> [args...]
+      inicia um FILHO e o mantém. Serve para montar linhagem: um processo com
+      nome de daemon gerando um shell é a cadeia da §3.2, e ela não existe
+      sem pai e filho de verdade.
+
   helper rwx
       mapeia uma região ANÔNIMA gravável e executável e a mantém. É a assinatura
       que o malfind procura (runbook §3.10) — sem escrever código nela: só a forma.
@@ -145,6 +155,18 @@ func main() {
 
 	case "trace":
 		die(traceChild())
+		hold()
+
+	case "pty":
+		need(4)
+		uid, err := strconv.Atoi(os.Args[2])
+		die(err)
+		die(sessaoComPTY(uid, os.Args[3], os.Args[4:]))
+
+	case "spawn":
+		need(3)
+		cmd := exec.Command(os.Args[2], os.Args[3:]...)
+		die(cmd.Start())
 		hold()
 
 	case "rwx":
@@ -343,6 +365,53 @@ func mapRWX() error {
 
 // rwx é global para o mapeamento não ser recolhido antes da varredura.
 var rwx []byte
+
+// sessaoComPTY monta o que o kernel considera uma sessão interativa: um
+// pseudoterminal em fd 0, 1 e 2. Sem terminal de verdade o check não teria o
+// que ver — e um terminal falso não é testável.
+//
+// Os números de ioctl vêm do asm-generic e valem para x86, arm e arm64, que são
+// as arquiteturas que o helper constrói.
+func sessaoComPTY(uid int, prog string, args []string) error {
+	const (
+		tiocsptlck = 0x40045431 // destrava o escravo
+		tiocgptn   = 0x80045430 // devolve o número do escravo
+	)
+	mestre, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	var zero int32
+	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, mestre.Fd(),
+		tiocsptlck, uintptr(unsafe.Pointer(&zero))); e != 0 {
+		return fmt.Errorf("destravar pty: %w", e)
+	}
+	var n int32
+	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, mestre.Fd(),
+		tiocgptn, uintptr(unsafe.Pointer(&n))); e != 0 {
+		return fmt.Errorf("número do pty: %w", e)
+	}
+	escravo, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", n), os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	keep(mestre, escravo)
+
+	for fd := 0; fd < 3; fd++ {
+		if err := syscall.Dup3(int(escravo.Fd()), fd, 0); err != nil {
+			return err
+		}
+	}
+	// O privilégio é largado ANTES do exec: o processo resultante roda com a
+	// identidade da conta de serviço, que é o ponto do cenário.
+	if err := syscall.Setresgid(uid, uid, uid); err != nil {
+		return err
+	}
+	if err := syscall.Setresuid(uid, uid, uid); err != nil {
+		return err
+	}
+	return syscall.Exec(prog, append([]string{prog}, args...), os.Environ())
+}
 
 func need(n int) {
 	if len(os.Args) < n {

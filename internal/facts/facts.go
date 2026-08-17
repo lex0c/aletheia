@@ -46,6 +46,11 @@ type Facts struct {
 	Grupos        []Grupo        `json:"groups,omitempty"`
 	Sudoers       []SudoRule     `json:"sudoers,omitempty"`
 	MetaAcesso    []ArquivoMeta  `json:"access_meta,omitempty"`
+	Cross         CrossView      `json:"cross_view"`
+
+	// PidsListados é o que o readdir de /proc devolveu — NÃO o que foi lido
+	// com sucesso. A comparação cruzada depende dessa distinção.
+	PidsListados []int `json:"-"`
 
 	// PersistDenied é o que a coleta de persistência não pôde LER, por
 	// categoria. Não é o mesmo que "não havia nada" — e sem root, /root e o
@@ -142,6 +147,9 @@ func Collect(e *env.Env) *Facts {
 		// Depois dos processos: o dono de cada socket sai do join com os fds
 		// que o coletor de processo já leu.
 		collectSockets(f, e)
+		// Depois dos processos: a comparação precisa da lista para saber o que
+		// está VISÍVEL.
+		collectCrossView(f, e)
 	} else {
 		f.partial("proc", e.Reason(env.CapProcfs))
 	}

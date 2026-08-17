@@ -1631,3 +1631,99 @@ Falta, e está medido: varredura de filesystem (§8 — implante largado e não
 executado é invisível), anti-forense (fase 6), egress (3.2), amostragem em
 janela (fase 10) e `--since` (fase 5) — a ferramenta ainda nunca pergunta
 QUANDO.
+
+---
+
+## Registro — árvore de processos e visões cruzadas
+
+Vindo de `heuristicas.md`: dos 20 checks do MVP daquele documento, faltavam a
+linhagem (itens 4 e 5) e a comparação entre fontes (item 20) — que o próprio
+documento chama de o recurso mais interessante.
+
+### Linhagem: o processo isolado quase nunca é o sinal
+
+`curl` sozinho é rotina. `curl` filho de `sh` filho de `nginx` é
+pós-exploração de aplicação web, e a diferença está inteira na LINHAGEM. Dois
+checks, com a mesma regra por trás: **um daemon de rede não abre shell — ele
+responde requisição.**
+
+```
+proc.shell_from_service    nginx → sh → curl, com a cadeia inteira na evidência
+proc.service_account_pty   PTY não é malicioso; o sinal é QUEM o tem
+```
+
+O segundo precisou de um helper novo que monta uma sessão interativa de
+verdade: abre pseudoterminal, larga privilégio e executa o shell com o terminal
+em fd 0, 1 e 2. E o cenário precisa de `SYS_PTRACE` — ler `/proc/<pid>/fd` de
+processo com credencial diferente exige essa capability, e sem ela a ferramenta
+declara a lacuna em vez de dizer que não há PTY.
+
+### Cross-view: a pergunta que nenhum outro check faz
+
+Os 43 checks anteriores perguntam *"isto que estou vendo é suspeito?"*. Estes
+três perguntam **"o que estou vendo é TUDO que existe?"**.
+
+```
+cross.hidden_pid     PID que responde a stat e não aparece na listagem
+cross.thread_count   status declara N threads, o diretório de tarefas mostra M
+cross.module_view    módulo em /proc/modules e ausente de /sys/module
+```
+
+Tudo NATIVO. Comparar `ps` com `/proc` acrescentaria uma fonte e um risco ao
+mesmo tempo — o binário do host é justamente o que pode estar adulterado.
+
+Duas vias para PID oculto, e elas não valem o mesmo:
+
+```
+ppid       um processo VISÍVEL declara um pai que não aparece. Um stat resolve
+           sem corrida: se o pai existe, a LISTAGEM mentiu → CRÍTICO
+sondagem   PID que responde a stat sem estar na listagem. Pode pegar processo
+           nascido entre as duas leituras → AVISO
+```
+
+Custo medido antes de escolher o teto: 65 mil sondagens = 124ms; 262 mil =
+516ms. Ficou em 65536, com o alcance real DECLARADO na evidência — sem dizer
+até onde sondou, "nenhum PID oculto" não significa nada.
+
+### Três enganos meus, todos da mesma família
+
+A sondagem nasceu com **152 falsos positivos** num desktop comum. As causas:
+
+```
+1  montei o conjunto "visível" a partir do que consegui LER, não do que o
+   readdir LISTOU. A diferença entre os dois é permissão — a confusão entre
+   "não achei" e "não consegui olhar", desta vez DENTRO da ferramenta
+
+2  THREAD não é processo oculto. O procfs expõe /proc/<tid> para stat mas não
+   lista TIDs no readdir; eles aparecem só em /proc/<pid>/task. O que separa
+   está no próprio status: líder de grupo tem Tgid == Pid
+
+3  lista de módulos VAZIA não é fonte ilegível. Guest sem módulo carregado tem
+   /proc/modules vazio, e isso é resposta completa — tratar como lacuna fazia
+   toda VM mínima sair degradada
+```
+
+O primeiro e o terceiro são a mesma pergunta em direções opostas, e é a
+pergunta central desta ferramenta. Escrevê-la certa nos checks não impediu de
+errá-la duas vezes no coletor.
+
+Depois das três: 152 → **zero**, em desktop, Debian 12, Alpine, CentOS 7 e
+Ubuntu 14.04.
+
+### Uma impossibilidade declarada em vez de escondida
+
+Os três checks de cross-view só disparam contra ocultação de VERDADE, e a suíte
+não vai carregar um rootkit para se testar. O invariante "todo check tem
+cenário" recusaria os três.
+
+A saída não foi relaxar o invariante nem fingir um cenário: `Scenario` ganhou
+`UntestableChecks`, e o cenário 91 declara a impossibilidade com o motivo
+escrito. O pulo aparece na saída do teste, com a razão — que é o oposto de um
+check sem cobertura passando despercebido.
+
+O que a suíte prova é o contrário, e vale por si: em host limpo as três
+comparações não produzem achado nenhum.
+
+### Estado
+
+46 checks, 70 cenários. `wtf` em 336ms.

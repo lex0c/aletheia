@@ -131,6 +131,17 @@ type Scenario struct {
 	// VM com o kernel do host. Quando preenchido, o cenário é pulado e serve de
 	// documentação do limite.
 	Untestable string
+
+	// UntestableChecks são os checks que este cenário DECLARA impossíveis de
+	// demonstrar, e vale só junto de Untestable.
+	//
+	// Existe porque a alternativa é pior. O invariante "todo check tem cenário"
+	// recusa check que ninguém provou disparar — mas alguns só disparam contra
+	// um rootkit de verdade, e a suíte não vai carregar um para se testar.
+	// Sem este campo, a saída seria relaxar o invariante ou fingir um cenário;
+	// com ele, a impossibilidade fica ESCRITA, com motivo, e o pulo aparece na
+	// saída do teste.
+	UntestableChecks []string
 }
 
 var registry = map[string]Scenario{}
@@ -169,6 +180,11 @@ func CoveredCheckIDs() map[string]bool {
 	for _, s := range All() {
 		for _, e := range s.Expect {
 			out[e.ID] = true
+		}
+		// Impossibilidade DECLARADA conta como cobertura: o motivo está escrito
+		// e sai na mensagem de pulo do teste.
+		for _, id := range s.UntestableChecks {
+			out[id] = true
 		}
 	}
 	return out

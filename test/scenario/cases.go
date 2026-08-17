@@ -702,6 +702,48 @@ func init() {
 		Exit: 2,
 	})
 
+	Register(Scenario{
+		ID:   "68-linhagem",
+		Desc: "daemon de rede gerando shell: a cadeia clássica de pós-exploração web",
+		// Nenhum dos três processos é suspeito sozinho — `sh` e `sleep` são
+		// rotina. A LINHAGEM é o sinal, e ela só existe com pai e filho de
+		// verdade.
+		Images: matriz,
+		Plant: `mkdir -p /usr/local/bin
+			cp /helper /usr/local/bin/nginx
+			/usr/local/bin/nginx spawn /bin/sh -c "sleep 300" &
+			sleep 0.5`,
+		Expect: []Expect{
+			{ID: "proc.shell_from_service", Sev: "CRITICAL",
+				Evidence: "não abre shell no curso normal"},
+			// e o binário falso em /usr/local/bin não tem dono de pacote
+			{ID: "integrity.no_package_owner"},
+		},
+		Exit: 2,
+	})
+
+	Register(Scenario{
+		ID:   "69-pty-de-conta-de-servico",
+		Desc: "conta de serviço com terminal: alguém entrou com a identidade dela",
+		// Um PTY não é malicioso — é o normal de toda sessão SSH. O sinal é
+		// QUEM o tem: conta de serviço roda daemon, não faz login.
+		//
+		// SYS_PTRACE não é conveniência: ler /proc/<pid>/fd de processo com
+		// credencial diferente exige essa capability, e sem ela a ferramenta
+		// declara a lacuna em vez de dizer que não há PTY. É o comportamento
+		// certo, e o cenário precisa da capability para exercitar o achado.
+		Images: matriz,
+		Caps:   []string{"SYS_PTRACE"},
+		Plant: `useradd -u 500 -M -s /bin/sh svcapp 2>/dev/null || adduser -D -u 500 -s /bin/sh svcapp 2>/dev/null
+			/helper pty 500 /bin/sh -c "sleep 300" &
+			sleep 0.6`,
+		Expect: []Expect{
+			{ID: "proc.service_account_pty", Sev: "WARN",
+				Evidence: "não faz login interativo"},
+		},
+		Exit: -1, // o /helper do rig não tem dono de pacote
+	})
+
 	// ------------------------------------------------- adversário, não mecanismo
 	//
 	// Os cenários acima testam UMA forma cada: plantam um mecanismo, afirmam um
@@ -1019,6 +1061,30 @@ func init() {
 		},
 		Exit:           2,
 		MustBeComplete: true,
+	})
+
+	Register(Scenario{
+		ID:   "91-ocultacao-por-rootkit",
+		Desc: "as três comparações cruzadas só disparam contra ocultação de verdade",
+		// A pergunta que estes checks fazem é diferente de todas as outras:
+		// não "isto que vejo é suspeito?", mas "o que vejo é TUDO que existe?".
+		//
+		// Demonstrá-los exige um rootkit que esconda processo, thread ou módulo
+		// — e a suíte não vai carregar um para se testar. A lógica está coberta
+		// por teste unitário; o que NÃO dá para provar aqui é o comportamento
+		// contra ocultação real.
+		//
+		// O que a suíte prova é o contrário, e isso tem valor próprio: em host
+		// limpo, desktop e contêiner, as três comparações não produzem achado
+		// nenhum. Chegar a isso custou corrigir dois enganos — usar a lista de
+		// processos LIDOS em vez dos LISTADOS, e tratar thread como processo,
+		// que sozinho gerava 152 falsos positivos.
+		UntestableChecks: []string{
+			"cross.hidden_pid", "cross.thread_count", "cross.module_view",
+		},
+		Untestable: "exige um rootkit que esconda processo, thread ou módulo. " +
+			"Carregar um LKM de ocultação na suíte trocaria a garantia de um " +
+			"check pela perda de controle sobre o ambiente de teste.",
 	})
 
 	Register(Scenario{

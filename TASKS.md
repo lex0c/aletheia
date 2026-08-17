@@ -2253,3 +2253,103 @@ razão de esta ferramenta existir.
 ### Estado
 
 55 checks, 73 cenários, 108 execuções. `make race` limpo nos dois pacotes.
+
+---
+
+## Registro — baseline
+
+A pergunta que nenhum check fazia sozinho:
+
+> **isso deveria existir NESTE host?**
+
+Os 55 checks perguntam "isto é suspeito?" olhando forma, procedência e
+integridade — todas propriedades do ARTEFATO. Nenhum deles sabe que o `rclone`
+daquele servidor é o backup que roda desde 2023, nem que o binário sem dono de
+pacote em `/usr/local` é a aplicação da casa.
+
+Quem sabe isso é a história do host. A ferramenta não fala com outros hosts de
+propósito — binário estático, local, sem rede —, então a história é TRAZIDA:
+
+```
+aletheia baseline -o base.json          captura o que existe hoje
+aletheia scan --baseline base.json      mede contra isso
+```
+
+### O efeito medido
+
+O cenário 80 é o servidor de produção com dois anos de acúmulo e sem invasor
+nenhum. Cada aviso dele é um achado CORRETO — binário sem dono de pacote É um
+fato, CA fora do bundle É um fato.
+
+```
+sem baseline    6 avisos · 1 manual   RESULT: WARNING
+com baseline    0 · 0                 RESULT: OK
+```
+
+E o implante plantado DEPOIS da captura atravessa inteiro: crítico, três sinais
+correlacionados, marcado `✳NOVO`.
+
+### A propriedade que decidiu o desenho
+
+A tentação óbvia é SUPRIMIR o que já era conhecido — é o que mais reduz ruído, e
+é o que a maioria das ferramentas faz. O custo aparece num caso só, e ele não é
+raro: **se a captura pegou o host já comprometido, suprimir abençoa o implante
+para sempre**, e a ferramenta passa a certificar como limpo justamente o host
+que deveria denunciar.
+
+Por isso, aqui, casar com a baseline **nunca apaga**:
+
+```
+crítico → aviso      aviso → informativo      piso: informativo
+```
+
+O achado continua no relatório, com a data em que já estava lá, e com a frase
+que o operador precisa ler: *estar na baseline não prova que é legítimo, prova
+apenas que não é novo*. O exit também não vai a zero — host com implante
+conhecido não é host aprovado.
+
+É a mesma distinção que separa "não achei" de "não consegui olhar", e a baseline
+é onde ela é mais fácil de trair. O cenário B2 existe só para isso.
+
+### A autoridade se declara, nos dois canais
+
+Uma baseline rebaixa achado, e autoridade que rebaixa precisa ser examinável.
+O cabeçalho diz de onde veio, de quando, quantos calou — e as ressalvas:
+
+```
+capturada em OUTRO host        serve como imagem de referência
+capturada há N dias            deriva normal já basta para descrever um host
+                               que não existe mais
+cobertura incompleta           o que não foi olhado na captura NÃO entrou, e
+                               vai aparecer como novo sem ter nascido
+```
+
+E o mesmo vai para o **JSONL**, que é o que a automação de frota lê. Sem a linha
+`id: baseline`, um agregador veria `verdict: OK` sem como distinguir "host
+limpo" de "host cujos achados foram todos rebaixados por uma referência velha,
+de outra máquina, capturada com metade da cobertura".
+
+### Duas decisões de identidade
+
+**A chave é `ID|Subject`**, e não um modelo de fatos. Ela não pode divergir do
+que os checks produzem, porque é feita do que eles produzem.
+
+**PID não serve de identidade** — muda a cada boot. Para achado de processo a
+chave usa o EXECUTÁVEL, que sai dos fatos, e os dois lados da comparação
+calculam igual. Processo sem exe legível não recebe chave nenhuma: entrar na
+baseline sem identidade estável abençoaria qualquer processo que aparecesse
+naquele PID depois.
+
+**Esquema diferente é RECUSADO**, não interpretado torto: casar chave errada
+abençoaria achado que ninguém aprovou.
+
+### O que a baseline NÃO resolve
+
+Ela responde "mudou desde quando eu olhei". Não responde "isto é normal para
+esta CLASSE de host" — para isso a referência precisa vir da frota, agregada, e
+a agregação é trabalho de quem opera, não deste binário. O formato é JSON de
+propósito: interseção de baselines de N hosts é um script de dez linhas.
+
+### Estado
+
+55 checks, 76 cenários, 114 execuções. `make race` limpo nos dois pacotes.

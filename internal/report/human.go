@@ -18,6 +18,23 @@ import (
 type Options struct {
 	Verbose int  // 0 = decisão, 1 = investigação, 2 = + INFO e detalhe
 	Color   bool // reservado; o padrão é texto puro para caber em ticket
+
+	// Baseline descreve a referência usada, quando houve uma. Nil = nenhuma.
+	Baseline *BaselineInfo
+}
+
+// BaselineInfo é o que o relatório precisa dizer sobre a referência usada.
+//
+// Uma baseline REBAIXA achado, e autoridade que rebaixa precisa ser examinável:
+// de onde veio, de quando, quantos achados calou e por que se deve ou não
+// confiar nela. Sem isso o operador lê um relatório mais limpo sem saber que
+// alguém limpou.
+type BaselineInfo struct {
+	Host       string
+	CapturedAt string
+	Conhecidos int
+	Rebaixados int
+	Ressalvas  []string
 }
 
 // Human escreve o relatório de decisão: uma linha por GRUPO de achado, bloco
@@ -25,6 +42,7 @@ type Options struct {
 // incidente.
 func Human(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, o Options) {
 	writeHeader(w, f, e)
+	writeBaseline(w, o.Baseline)
 
 	if o.Verbose > 0 {
 		writeVerbose(w, r, o)
@@ -90,7 +108,7 @@ func writeCompact(w io.Writer, r *check.Report) {
 		fmt.Fprintf(w, "%s %-13s %d sinais no mesmo alvo\n",
 			g.Sev().Mark(), Safe(g.Subject), len(g.Findings))
 		for _, fd := range g.Findings {
-			line := "     · " + Safe(fd.Title)
+			line := "     · " + Safe(fd.Title) + marcaNovo(fd)
 			if fd.Downgraded {
 				line += " ⚠rebaixado"
 			}
@@ -110,7 +128,8 @@ func writeCompact(w io.Writer, r *check.Report) {
 		if g.N() > 1 {
 			subj = strconv.Itoa(g.N()) + "×"
 		}
-		line := fmt.Sprintf("%s %-13s %s", first.Sev.Mark(), Safe(subj), Safe(first.Title))
+		line := fmt.Sprintf("%s %-13s %s%s", first.Sev.Mark(), Safe(subj),
+			Safe(first.Title), marcaNovo(first))
 		if g.N() > 1 {
 			line += " (" + Safe(g.Subjects(3)) + ")"
 		}
@@ -370,4 +389,38 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// writeBaseline declara a referência usada, e é a primeira coisa depois do
+// cabeçalho de propósito: o resto do relatório foi medido contra ela.
+func writeBaseline(w io.Writer, b *BaselineInfo) {
+	if b == nil {
+		return
+	}
+	fmt.Fprintf(w, "BASELINE    %s · capturada em %s · %d achados conhecidos · %d rebaixados aqui\n",
+		Safe(nz(b.Host, "?")), Safe(b.CapturedAt), b.Conhecidos, b.Rebaixados)
+	if b.Rebaixados > 0 {
+		fmt.Fprintln(w, "            o que já estava lá desceu um nível e CONTINUA abaixo:")
+		fmt.Fprintln(w, "            estar na baseline diz que não é novo, não que é legítimo")
+	}
+	for _, m := range b.Ressalvas {
+		fmt.Fprintf(w, "            ⚠ %s\n", Safe(m))
+	}
+	fmt.Fprintln(w)
+}
+
+// marcaNovo destaca o achado AUSENTE da baseline.
+//
+// Quando há uma referência, esta é a informação mais valiosa da execução: tudo
+// o que já era conhecido desceu de nível, e o que sobra em cima é o que mudou
+// desde a captura. Sem a marca, o operador teria de comparar dois relatórios
+// para descobrir o que a ferramenta já sabe.
+//
+// Fora de uma comparação a marca não aparece: sem baseline TUDO seria novo, e
+// uma marca que está em toda linha não distingue nada.
+func marcaNovo(fd check.Finding) string {
+	if fd.Novo {
+		return " ✳NOVO"
+	}
+	return ""
 }

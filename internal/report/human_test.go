@@ -284,10 +284,10 @@ func TestJSONLNaoDependeDaVerbosidade(t *testing.T) {
 	r := &check.Report{Findings: []check.Finding{fd}, Coverage: check.Coverage{Total: 2, Complete: 1}}
 
 	var a, b bytes.Buffer
-	if err := JSONL(&a, r, testFacts(), testEnv()); err != nil {
+	if err := JSONL(&a, r, testFacts(), testEnv(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := JSONL(&b, r, testFacts(), testEnv()); err != nil {
+	if err := JSONL(&b, r, testFacts(), testEnv(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if a.String() != b.String() {
@@ -306,7 +306,7 @@ func TestJSONLSempreTrazLinhaDeCobertura(t *testing.T) {
 		NotChecked: []check.NotChecked{{ID: "kernel.ebpf", Ref: "35.4", Reason: "bpftool ausente"}},
 	}}
 	var buf bytes.Buffer
-	if err := JSONL(&buf, r, testFacts(), testEnv()); err != nil {
+	if err := JSONL(&buf, r, testFacts(), testEnv(), nil); err != nil {
 		t.Fatal(err)
 	}
 

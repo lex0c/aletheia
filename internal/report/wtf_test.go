@@ -24,7 +24,7 @@ func renderWtf(r *check.Report, f *facts.Facts) string {
 	if f == nil {
 		f = &facts.Facts{}
 	}
-	Wtf(&b, r, f, wtfEnv(), 57*time.Millisecond, r.Coverage.Total)
+	Wtf(&b, r, f, wtfEnv(), 57*time.Millisecond, r.Coverage.Total, nil)
 	return b.String()
 }
 
@@ -215,7 +215,7 @@ func TestRodapeSoMandaRodarScanQuandoEleAcrescenta(t *testing.T) {
 	rel := func(catalogo int) string {
 		var b bytes.Buffer
 		r := &check.Report{Coverage: check.Coverage{Total: 10, Complete: 10}}
-		Wtf(&b, r, &facts.Facts{}, wtfEnv(), 57*time.Millisecond, catalogo)
+		Wtf(&b, r, &facts.Facts{}, wtfEnv(), 57*time.Millisecond, catalogo, nil)
 		return b.String()
 	}
 

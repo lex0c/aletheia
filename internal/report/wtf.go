@@ -26,8 +26,9 @@ const maxWtfLinhas = 8
 // o `scan` quando ele REALMENTE acrescenta — mandar o operador repetir trabalho
 // que não muda nada é o mesmo tipo de mentira que a ferramenta evita nos
 // achados.
-func Wtf(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, elapsed time.Duration, catalogo int) {
+func Wtf(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, elapsed time.Duration, catalogo int, bl *BaselineInfo) {
 	writeWtfHeader(w, f, e)
+	writeBaseline(w, bl)
 
 	sobra := catalogo - r.Coverage.Total
 

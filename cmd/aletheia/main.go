@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lex0c/aletheia/internal/baseline"
 	"github.com/lex0c/aletheia/internal/check"
 	_ "github.com/lex0c/aletheia/internal/checks" // registra os checks
 	"github.com/lex0c/aletheia/internal/env"
@@ -41,6 +42,7 @@ USO
 COMANDOS
   scan          coleta e analisa este host (modo normal)
   wtf           overview em ~1s: este host está pegando fogo?
+  baseline      captura o estado atual como referência para comparar depois
   checks        catálogo: id, §ref, modo, grupo, requires, falsos positivos
   version       versão e hash deste binário
 
@@ -48,11 +50,17 @@ FLAGS DE scan E wtf
   --root PATH   analisar uma imagem montada read-only em vez do host vivo.
                 Ali o kernel é o SEU: ocultamento de arquivo não acontece (§35.6)
   --json FILE   JSONL; "-" = stdout. NUNCA afetado pela verbosidade
+  --baseline F  compara com a baseline em F: o que já estava lá desce um nível
+                de severidade e CONTINUA no relatório, com a data
 
 FLAGS DE scan
   --only G,G    escopo por subsistema: proc net persist priv integrity kernel app cloud
   --mode M      auto | manual
   -v, -vv       evidência por achado / + INFO e detalhe de cobertura
+
+FLAGS DE baseline
+  --root PATH   capturar de imagem montada em vez do host vivo
+  -o FILE       arquivo de saída ("-" = stdout)
 
 FLAGS DE wtf
   --oneline     UMA linha: veredito + alvos. Para triagem de FROTA por ssh
@@ -101,6 +109,8 @@ func main() {
 		os.Exit(runScan(os.Args[2:], false))
 	case "wtf", "quick":
 		os.Exit(runWtf(os.Args[2:]))
+	case "baseline":
+		os.Exit(runBaseline(os.Args[2:]))
 	case "checks":
 		os.Exit(runChecks(os.Args[2:]))
 	case "version":
@@ -142,6 +152,7 @@ func runWtf(args []string) int {
 		oneline = fs.Bool("oneline", false, "uma linha por host, para triagem de frota")
 		budget  = fs.Duration("budget", wtfBudget, "teto de tempo")
 		jsonOut = fs.String("json", "", "escrever JSONL em FILE ('-' = stdout)")
+		base    = fs.String("baseline", "", "comparar com a baseline em FILE")
 	)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
@@ -179,6 +190,11 @@ func runWtf(args []string) int {
 		Budget:   *budget,
 	})
 	collectorGaps(r, f)
+
+	bl, code := aplicarBaseline(r, f, e, *base)
+	if code != 0 {
+		return code
+	}
 	elapsed := time.Since(start)
 
 	out := io.Writer(os.Stdout)
@@ -188,11 +204,11 @@ func runWtf(args []string) int {
 	if *oneline {
 		report.Oneline(out, r)
 	} else {
-		report.Wtf(out, r, f, e, elapsed, len(check.All()))
+		report.Wtf(out, r, f, e, elapsed, len(check.All()), bl)
 	}
 
 	if *jsonOut != "" {
-		if code := writeJSONL(*jsonOut, r, f, e); code != 0 {
+		if code := writeJSONL(*jsonOut, r, f, e, bl); code != 0 {
 			return code
 		}
 	}
@@ -209,6 +225,7 @@ func runScan(args []string, wtf bool) int {
 		jsonOut  = fs.String("json", "", "escrever JSONL em FILE ('-' = stdout)")
 		verbose  = fs.Bool("v", false, "evidência por achado")
 		verbose2 = fs.Bool("vv", false, "+ INFO e detalhe de cobertura")
+		base     = fs.String("baseline", "", "comparar com a baseline em FILE")
 	)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
@@ -257,6 +274,11 @@ func runScan(args []string, wtf bool) int {
 
 	collectorGaps(r, f)
 
+	bl, code := aplicarBaseline(r, f, e, *base)
+	if code != 0 {
+		return code
+	}
+
 	v := 0
 	if *verbose {
 		v = 1
@@ -272,15 +294,104 @@ func runScan(args []string, wtf bool) int {
 	if *jsonOut == "-" {
 		humanOut = os.Stderr
 	}
-	report.Human(humanOut, r, f, e, report.Options{Verbose: v})
+	report.Human(humanOut, r, f, e, report.Options{Verbose: v, Baseline: bl})
 
 	if *jsonOut != "" {
-		if code := writeJSONL(*jsonOut, r, f, e); code != 0 {
+		if code := writeJSONL(*jsonOut, r, f, e, bl); code != 0 {
 			return code
 		}
 	}
 
 	return r.Exit()
+}
+
+// aplicarBaseline carrega e aplica a baseline, ou falha alto.
+//
+// Falhar alto e não seguir sem ela é deliberado: quem pediu `--baseline`
+// pediu uma comparação, e uma execução que ignora o arquivo em silêncio
+// devolve um relatório com severidades diferentes do esperado sem dizer por
+// quê — e é exatamente esse relatório que vai para a automação de frota.
+func aplicarBaseline(r *check.Report, f *facts.Facts, e *env.Env, caminho string) (*report.BaselineInfo, int) {
+	if caminho == "" {
+		return nil, 0
+	}
+	bl, err := baseline.Carregar(caminho)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "--baseline: %v\n", err)
+		return nil, 3
+	}
+	n := bl.Aplicar(r, f)
+	return &report.BaselineInfo{
+		Host:       bl.Host,
+		CapturedAt: bl.CapturedAt,
+		Conhecidos: len(bl.Keys),
+		Rebaixados: n,
+		Ressalvas:  bl.Ressalvas(f.Host.Hostname, e.Now),
+	}, 0
+}
+
+// runBaseline captura o estado deste host como referência para comparações
+// futuras.
+//
+// Roda a MESMA coleta e o MESMO conjunto de checks de um scan: uma baseline
+// montada com seleção menor descreveria menos do que o scan vai perguntar
+// depois, e a diferença apareceria como novidade sem ter nascido.
+func runBaseline(args []string) int {
+	fs := flag.NewFlagSet("baseline", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var (
+		root = fs.String("root", "", "capturar de imagem montada em PATH")
+		out  = fs.String("o", "-", "arquivo de saída ('-' = stdout)")
+	)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	if err := fs.Parse(args); err != nil {
+		return 3
+	}
+	if *root != "" {
+		if fi, err := os.Stat(*root); err != nil || !fi.IsDir() {
+			fmt.Fprintf(os.Stderr, "--root: %s não é um diretório acessível\n", *root)
+			return 3
+		}
+	}
+
+	e := env.Probe(env.Options{Root: *root, Version: version})
+	defer e.Close()
+	f := facts.Collect(e)
+
+	selected := check.Select(check.Selection{})
+	r := check.Run(selected, f, e)
+	collectorGaps(r, f)
+
+	bl := baseline.Capturar(r, f, f.Host.Hostname, version, e.Now)
+
+	w := io.Writer(os.Stdout)
+	if *out != "-" {
+		fh, err := os.Create(*out)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "baseline: %v\n", err)
+			return 3
+		}
+		defer fh.Close()
+		w = fh
+	}
+	if err := bl.Escrever(w); err != nil {
+		fmt.Fprintf(os.Stderr, "baseline: %v\n", err)
+		return 3
+	}
+
+	// A captura DIZ o que viu. Uma baseline montada em execução degradada
+	// descreve menos do que parece, e quem a usar depois merece saber disso
+	// antes, não quando o relatório vier cheio de novidade.
+	fmt.Fprintf(os.Stderr, "baseline: %d achados conhecidos · cobertura %s%s\n",
+		len(bl.Keys), bl.CoberturaTxt, seNao(bl.Completa, " — INCOMPLETA"))
+	return 0
+}
+
+func seNao(ok bool, texto string) string {
+	if ok {
+		return ""
+	}
+	return texto
 }
 
 // collectorGaps move a falha de COLETA para o eixo próprio dela: não é um check
@@ -294,7 +405,7 @@ func collectorGaps(r *check.Report, f *facts.Facts) {
 	}
 }
 
-func writeJSONL(path string, r *check.Report, f *facts.Facts, e *env.Env) int {
+func writeJSONL(path string, r *check.Report, f *facts.Facts, e *env.Env, bl *report.BaselineInfo) int {
 	w := os.Stdout
 	if path != "-" {
 		fh, err := openJSONOut(path)
@@ -305,7 +416,7 @@ func writeJSONL(path string, r *check.Report, f *facts.Facts, e *env.Env) int {
 		defer fh.Close()
 		w = fh
 	}
-	if err := report.JSONL(w, r, f, e); err != nil {
+	if err := report.JSONL(w, r, f, e, bl); err != nil {
 		fmt.Fprintf(os.Stderr, "erro ao escrever JSONL: %v\n", err)
 		return 3
 	}

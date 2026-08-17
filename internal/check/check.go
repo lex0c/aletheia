@@ -112,6 +112,15 @@ type Finding struct {
 	// Downgraded é marcado pelo motor quando algo invalidou a confiança em
 	// binário do host nesta execução.
 	Downgraded bool `json:"downgraded,omitempty"`
+
+	// Baseline marca o achado que JÁ ESTAVA presente na baseline informada. Ele
+	// desce um nível de severidade e continua no relatório: estar na baseline
+	// diz que não é novo, e não diz que é legítimo.
+	Baseline bool `json:"baseline,omitempty"`
+	// Novo marca o achado AUSENTE da baseline. Só tem significado quando uma
+	// baseline foi informada — sem ela, tudo seria "novo" e a marca não
+	// informaria nada.
+	Novo bool `json:"new,omitempty"`
 	// FalsePositives é copiado do check para o achado: o operador precisa
 	// saber o que descartar ANTES de investigar.
 	FalsePositives []string `json:"false_positives,omitempty"`

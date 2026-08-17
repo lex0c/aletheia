@@ -140,3 +140,16 @@ Ali a resposta é check novo, não correlação melhor.
 E há o eixo que nenhuma técnica desta lista captura: **tempo**. O cenário A3 —
 ativação adiada, nada rodando no instante da varredura — não é uma técnica
 faltante, é uma propriedade do modelo de retrato.
+
+O `watch` ataca essa propriedade, e o par de cenários K1/K1b mede a diferença
+com o **mesmo plantio**: o `scan` não menciona o implante em lugar nenhum do
+relatório — e está certo, porque no instante em que ele olhou não havia
+processo nem conexão —, enquanto a vigília o vê nascer. O K3 mede a forma que
+só o tempo revela: algo que aparece, some e **volta** está sendo executado por
+gatilho, e isso separa "software instalado à mão" de "algo sendo executado por
+alguém".
+
+O que continua verdadeiro é o tamanho do buraco: o que roda e sai entre dois
+ciclos não é visto por nenhum dos dois. A vigília troca uma cegueira total por
+uma cegueira do tamanho do intervalo, e o resumo diz isso em voz alta em vez de
+deixar o silêncio parecer prova.

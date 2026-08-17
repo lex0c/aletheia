@@ -514,9 +514,23 @@ processo efêmero      §2.7  nasce, executa, morre entre duas execuções do sc
 ```
 
 ```bash
-aletheia watch --duration 15m --out watch.jsonl
-aletheia watch --duration 30m --interval 5s --focus 51.91.190.241
+aletheia watch --for 15m --json watch.jsonl
+aletheia watch --for 30m --interval 1s --full 30s
 ```
+
+**Duas cadências, e são duas porque medem coisas diferentes.** A varredura
+completa custa ~1,5s medidos e por isso não roda de cinco em cinco segundos; a
+amostra de `/proc` e sockets custa 164ms e por isso pode.
+
+```
+--interval   amostra: processo novo, processo que saiu, conexão nova, ritmo
+--full       varredura dos 70 checks, com o diff no nível do ACHADO
+```
+
+> A coleta volátil vem marcada, e o motor de checks **se recusa** a rodar sobre
+> ela: um check de unit encontraria zero units e diria "nada encontrado" onde o
+> certo é "não olhei". A economia não pode virar falso negativo, então a
+> tentativa vira NÃO VERIFICADO com o motivo dito.
 
 Amostra `/proc` e a tabela de socket em intervalo fixo e reporta **o que apareceu e o que sumiu**:
 
@@ -527,6 +541,16 @@ conexão nova         destino, dono, e o DELTA entre aparições do mesmo destin
 periodicidade        delta quase constante = automação; irregular = humano (§2.7)
 correlação de gatilho o delta medido casa com algum `*/N` de cron ou OnUnitActiveSec? (§7.1)
 ```
+
+A correlação de gatilho é o que as duas cadências dão juntas e nenhuma sozinha:
+a amostra mede o ritmo **de fora**, sem saber de onde vem, e a varredura
+completa sabe quais agendamentos existem. Cruzar os dois troca "há automação
+aqui" por "é este timer".
+
+Só o que **sai** entra na conta. Conexão de entrada é o outro lado de uma
+conversa que alguém abriu conosco, e o "destino" dela é a porta efêmera do
+cliente — contá-las faz cada requisição virar um destino novo, e num servidor
+com tráfego o beacon fica enterrado.
 
 **Duas restrições, fixadas de propósito:**
 
@@ -540,7 +564,11 @@ não compete com falco/tracee  amostragem por polling PERDE processo muito curto
 
 > Detecção contínua de verdade se instala **antes** do incidente, com eBPF (§34.7, §40.1). `watch` é o substituto para quando isso não existe — que é o caso comum, e é justamente por isso que ele vale.
 
-`watch` é read-only: `--out` só recebe o JSONL do que foi observado.
+`watch` é read-only: `--json` só recebe o JSONL do que foi observado.
+
+**O que ainda não existe:** `--focus ADDR`, que filtraria a vigília a um destino
+conhecido. É conveniência sobre o que já é medido, não capacidade nova — a
+periodicidade e a correlação de gatilho funcionam sem ele.
 
 ### 6.3. `preserve` — o único comando que escreve
 

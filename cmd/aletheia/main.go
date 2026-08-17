@@ -42,6 +42,7 @@ USO
 COMANDOS
   scan          coleta e analisa este host (modo normal)
   wtf           overview em ~1s: este host está pegando fogo?
+  watch         varre em ciclo e reporta só o que MUDAR: o eixo do tempo
   baseline      captura o estado atual como referência para comparar depois
   checks        catálogo: id, §ref, modo, grupo, requires, falsos positivos
   version       versão e hash deste binário
@@ -57,6 +58,20 @@ FLAGS DE scan
   --only G,G    escopo por subsistema: proc net persist priv integrity kernel app cloud
   --mode M      auto | manual
   -v, -vv       evidência por achado / + INFO e detalhe de cobertura
+
+FLAGS DE watch
+  --interval D  entre AMOSTRAS de /proc e sockets (padrão 5s). Barato: é o que
+                pega beacon curto e processo efêmero
+  --full D      entre VARREDURAS completas dos 70 checks (padrão 60s)
+  --for D       duração total (padrão: até Ctrl-C)
+  --only G,G    igual ao scan
+  --baseline F  o que a baseline já conhece não conta como novidade
+
+  O exit code vem da PIOR severidade vista em QUALQUER ciclo, não do último:
+  um implante que rodou às 03:00 e saiu não está no ciclo final.
+
+  Amostragem por polling PERDE o que dura menos que o intervalo, e o resumo diz
+  isso. Detecção contínua de verdade se instala ANTES do incidente, com eBPF.
 
 FLAGS DE baseline
   --root PATH   capturar de imagem montada em vez do host vivo
@@ -109,6 +124,8 @@ func main() {
 		os.Exit(runScan(os.Args[2:], false))
 	case "wtf", "quick":
 		os.Exit(runWtf(os.Args[2:]))
+	case "watch":
+		os.Exit(runWatch(os.Args[2:]))
 	case "baseline":
 		os.Exit(runBaseline(os.Args[2:]))
 	case "checks":

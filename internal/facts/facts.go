@@ -24,6 +24,13 @@ type Facts struct {
 	CollectedAt   string `json:"collected_at"` // RFC3339 UTC
 	Source        string `json:"source"`       // live | image
 
+	// Volatil marca a coleta PARCIAL do amostrador do `watch`: /proc e sockets,
+	// sem nada de filesystem. Existe para que rodar checks sobre ela seja
+	// impossível por acidente — um check que lê unit encontraria zero units e
+	// diria "nada encontrado" onde o certo é "não olhei". O motor recusa em
+	// voz alta (ver check.RunWith).
+	Volatil bool `json:"volatile,omitempty"`
+
 	Host      Host      `json:"host"`
 	Processes []Process `json:"processes,omitempty"`
 	Sockets   []Socket  `json:"sockets,omitempty"`
@@ -189,6 +196,34 @@ func Collect(e *env.Env) *Facts {
 		f.partial("persist", e.Reason(env.CapFilesystem))
 	}
 
+	f.Index()
+	return f
+}
+
+// CollectVolatile é a coleta BARATA, para amostragem em intervalo curto.
+//
+// Medido: a coleta completa leva 1487ms e esta 164ms — nove vezes menos. A
+// diferença é a varredura de filesystem, e é ela que impede um `watch` de
+// amostrar de cinco em cinco segundos.
+//
+// O que ela entrega é o que muda em segundos: processo e socket. O que ela NÃO
+// entrega é tudo o mais — unit, cron, propriedade de pacote, hash, atributo de
+// inode. Por isso o resultado vem marcado com Volatil, e o motor de checks se
+// recusa a rodar sobre ele: a economia não pode virar falso negativo.
+func CollectVolatile(e *env.Env) *Facts {
+	f := &Facts{
+		SchemaVersion: SchemaVersion,
+		CollectedAt:   e.Now.Format("2006-01-02T15:04:05Z"),
+		Source:        e.Source.String(),
+		Volatil:       true,
+	}
+	collectHost(f, e)
+	if e.Has(env.CapProcfs) {
+		collectProcesses(f, e)
+		collectSockets(f, e)
+	} else {
+		f.partial("proc", e.Reason(env.CapProcfs))
+	}
 	f.Index()
 	return f
 }

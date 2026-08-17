@@ -106,6 +106,24 @@ func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 
 	r := &Report{Coverage: Coverage{Total: len(checks)}}
 
+	// Coleta VOLÁTIL não sustenta check nenhum, e a recusa é em voz alta.
+	//
+	// O amostrador do `watch` lê só /proc e sockets porque é nove vezes mais
+	// barato. Rodar os checks sobre esse Facts faria um check de unit encontrar
+	// zero units e reportar "nada encontrado" — a mentira que esta ferramenta
+	// existe para não contar, entrando por uma otimização de custo. Aqui ela
+	// vira o que de fato é: NÃO VERIFICADO, com o motivo dito.
+	if f.Volatil {
+		for _, c := range checks {
+			r.Coverage.NotChecked = append(r.Coverage.NotChecked, NotChecked{
+				ID: c.ID, Ref: c.Ref, Title: c.Title,
+				Reason: "coleta volátil (amostragem do watch): só /proc e sockets foram lidos",
+				Manual: []string{"rode `aletheia scan`, que faz a coleta completa"},
+			})
+		}
+		return r
+	}
+
 	for _, c := range checks {
 		if !o.Deadline.IsZero() && time.Now().After(o.Deadline) {
 			r.Coverage.NotChecked = append(r.Coverage.NotChecked, NotChecked{

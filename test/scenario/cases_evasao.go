@@ -120,6 +120,11 @@ func init() {
 		//
 		// É o cenário que separa ferramenta de triagem de ferramenta de
 		// monitoração: tudo que vale aqui está em DISCO, e nada está vivo.
+		//
+		// Aqui o retrato ainda GANHA, porque a persistência ficou em disco e
+		// disco é estático. Onde ele perde é no irmão deste, medido pelo par
+		// K1/K1b: implante já em disco, mas que só acorda depois e não deixa
+		// nem gatilho — contra aquele a resposta não é check novo, é o `watch`.
 		Images: matriz,
 		Plant:  ativacaoAdiada,
 		Expect: []Expect{

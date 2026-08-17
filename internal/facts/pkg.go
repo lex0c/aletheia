@@ -361,6 +361,11 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 	for i := range f.Modules {
 		add(f.Modules[i].File, "config de módulo")
 	}
+	// O programa que o KERNEL invoca sozinho é o candidato mais forte desta
+	// lista: ele executa como root, sem processo pai suspeito e sem unit.
+	for i := range f.Helpers {
+		add(f.Helpers[i].Alvo, "helper do kernel ("+f.Helpers[i].Nome+")")
+	}
 	// Só os módulos CARREGADOS ou configurados para carregar.
 	//
 	// A árvore de um kernel moderno tem doze mil arquivos. Perguntar por todos

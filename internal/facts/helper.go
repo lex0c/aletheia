@@ -1,0 +1,195 @@
+package facts
+
+import (
+	"os"
+	"sort"
+	"strings"
+
+	"github.com/lex0c/aletheia/internal/env"
+)
+
+// Os programas que o KERNEL invoca sozinho (runbook §7.12).
+//
+// # Por que esta família existe
+//
+// Toda a §7 pergunta "o que faz este host executar alguma coisa?" — e responde
+// olhando unit, cron, perfil de shell, hook de pacote. Todos esses são
+// mecanismos de USERLAND: alguém agenda, alguém inicia, alguém faz login.
+//
+// Existe uma classe que não passa por nenhum deles: caminhos onde o próprio
+// kernel guarda o nome de um programa e o executa, como root, por conta
+// própria. Não há unit, não há cron, não há processo pai suspeito — há uma
+// linha num arquivo de uma linha, e o gatilho é um evento comum do sistema.
+//
+//	modprobe       o kernel executa isto ao precisar carregar um módulo
+//	core_pattern   com "|" na frente, o kernel PIPA o core dump para o programa,
+//	               como root — e qualquer processo que morra com SIGSEGV dispara
+//	uevent_helper  invocado a cada evento de dispositivo (legado; hoje vazio)
+//	binfmt_misc    interpretador registrado por assinatura de arquivo
+//
+// # O que decide o falso positivo
+//
+// Todos os quatro TÊM valor legítimo, e três deles vêm preenchidos de fábrica:
+// num host com systemd o core_pattern aponta para o `systemd-coredump`, no
+// Ubuntu para o `apport`, e um host com docker buildx tem meia dúzia de
+// entradas de binfmt para qemu.
+//
+// O discriminador é o mesmo da §24, e ele resolve os quatro de uma vez: o
+// programa que o kernel invoca deveria vir de um PACOTE. Quando não vem — ou
+// quando está em diretório gravável —, é a forma mais silenciosa de persistência
+// com execução como root que existe neste sistema.
+type HelperDoKernel struct {
+	// Nome é o mecanismo: modprobe, core_pattern, uevent_helper ou
+	// binfmt:<registro>.
+	Nome  string `json:"name"`
+	Fonte string `json:"source"`
+	Valor string `json:"value"`
+	// Alvo é o programa extraído do valor, quando o valor aponta para um. Vazio
+	// significa que aquele valor NÃO executa nada — o core_pattern sem "|" é um
+	// modelo de nome de arquivo, e não um programa.
+	Alvo string `json:"target,omitempty"`
+	// Padrao diz que o valor é o de fábrica daquele mecanismo.
+	Padrao bool `json:"default,omitempty"`
+}
+
+// padroesDeUevent é o valor de FÁBRICA dos kernels antigos.
+//
+// "Vazio é o normal" vale para kernel moderno, e virou um falso positivo contra
+// um guest de 3.18: até a série 4.x o CONFIG_UEVENT_HELPER_PATH vinha
+// preenchido com /sbin/hotplug, e acusar isso é acusar o estado de fábrica de
+// uma máquina de 2014.
+//
+// O que continua protegido é o caso que importa: se alguém CRIAR um
+// /sbin/hotplug, o arquivo passa a existir, a pergunta de propriedade é feita, e
+// um binário sem dono num diretório de pacote continua sendo crítico.
+var padroesDeUevent = map[string]bool{
+	"/sbin/hotplug":     true,
+	"/usr/sbin/hotplug": true,
+}
+
+// padroesDeModprobe são os caminhos que a distribuição usa. O kernel monta o
+// valor a partir do CONFIG_MODPROBE_PATH, e as duas formas abaixo cobrem o que
+// as distribuições entregam — o usrmerge move um para o outro.
+var padroesDeModprobe = map[string]bool{
+	"/sbin/modprobe":     true,
+	"/usr/sbin/modprobe": true,
+	"/bin/modprobe":      true,
+	"/usr/bin/modprobe":  true,
+}
+
+func collectHelpers(f *Facts, e *env.Env) {
+	if e.Source != env.SourceLive {
+		// São todos /proc e /sys: não existem numa imagem montada. A
+		// persistência equivalente EM DISCO — um sysctl.d que reescreve o valor
+		// no boot — é outra pergunta, e ela não está feita.
+		return
+	}
+
+	// modprobe: o kernel executa este caminho ao autoloadar módulo.
+	if v, ok := readTrim("/proc/sys/kernel/modprobe"); ok && v != "" {
+		f.Helpers = append(f.Helpers, HelperDoKernel{
+			Nome: "modprobe", Fonte: "/proc/sys/kernel/modprobe",
+			Valor: v, Alvo: v, Padrao: padroesDeModprobe[v],
+		})
+	}
+
+	// core_pattern: com "|" na frente, o kernel PIPA o core para o programa.
+	// Sem "|", é um modelo de nome de arquivo e não executa nada.
+	if v, ok := readTrim("/proc/sys/kernel/core_pattern"); ok && v != "" {
+		h := HelperDoKernel{
+			Nome: "core_pattern", Fonte: "/proc/sys/kernel/core_pattern", Valor: v,
+		}
+		h.Alvo, h.Padrao = alvoDeCorePattern(v)
+		f.Helpers = append(f.Helpers, h)
+	}
+
+	// uevent_helper: em sistema moderno é VAZIO — o udev escuta por netlink, e
+	// o kernel não precisa executar nada. Valor preenchido é o caso raro.
+	if v, ok := readTrim("/sys/kernel/uevent_helper"); ok {
+		if v == "" {
+			f.Helpers = append(f.Helpers, HelperDoKernel{
+				Nome: "uevent_helper", Fonte: "/sys/kernel/uevent_helper", Padrao: true,
+			})
+		} else {
+			alvo := primeiroCampo(v)
+			f.Helpers = append(f.Helpers, HelperDoKernel{
+				Nome: "uevent_helper", Fonte: "/sys/kernel/uevent_helper",
+				Valor: v, Alvo: alvo, Padrao: padroesDeUevent[alvo],
+			})
+		}
+	}
+
+	collectBinfmt(f)
+
+	sort.Slice(f.Helpers, func(i, j int) bool { return f.Helpers[i].Nome < f.Helpers[j].Nome })
+}
+
+// collectBinfmt lê os interpretadores registrados por assinatura.
+//
+// O formato de cada registro é uma linha por campo:
+//
+//	enabled
+//	interpreter /usr/bin/qemu-aarch64-static
+//	flags: OCF
+//	offset 0
+//	magic 7f454c46...
+//
+// O `register` e o `status` são controles do próprio mecanismo, não registros.
+func collectBinfmt(f *Facts) {
+	const base = "/proc/sys/fs/binfmt_misc"
+	ents, err := os.ReadDir(base)
+	if err != nil {
+		return // não montado: é o normal em host sem emulação
+	}
+	for _, ent := range ents {
+		nome := ent.Name()
+		if nome == "register" || nome == "status" || ent.IsDir() {
+			continue
+		}
+		corpo, ok := readTrim(base + "/" + nome)
+		if !ok {
+			continue
+		}
+		h := HelperDoKernel{Nome: "binfmt:" + nome, Fonte: base + "/" + nome}
+		h.Alvo = interpretadorDeBinfmt(corpo)
+		h.Valor = h.Alvo
+		if h.Alvo != "" {
+			f.Helpers = append(f.Helpers, h)
+		}
+	}
+}
+
+// alvoDeCorePattern separa as duas formas do core_pattern, que fazem coisas
+// completamente diferentes:
+//
+//	|/usr/lib/systemd/systemd-coredump …   EXECUTA o programa, como root
+//	core.%p                               é modelo de NOME DE ARQUIVO
+//
+// Tratar as duas igual acusaria todo host que apenas escolheu onde gravar o
+// core.
+func alvoDeCorePattern(v string) (alvo string, padrao bool) {
+	cano, ok := strings.CutPrefix(v, "|")
+	if !ok {
+		return "", true
+	}
+	return primeiroCampo(cano), false
+}
+
+// interpretadorDeBinfmt extrai o programa de um registro. O formato é uma linha
+// por campo, e só a do interpretador aponta para um executável.
+func interpretadorDeBinfmt(corpo string) string {
+	for _, ln := range strings.Split(corpo, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(ln), "interpreter "); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func primeiroCampo(s string) string {
+	fs := strings.Fields(s)
+	if len(fs) == 0 {
+		return ""
+	}
+	return fs[0]
+}

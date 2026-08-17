@@ -3896,3 +3896,85 @@ que existem fora da suíte**.
 
 78 checks, 129 cenários, 30 orçamentos de ruído declarados. `make verify`,
 `make race` e a suíte inteira limpos.
+
+---
+
+## Registro — os programas que o KERNEL invoca sozinho
+
+Veio de uma lista externa de heurísticas comparando chkrootkit, rkhunter,
+Wazuh, Unhide e Falco/Tracee. Dez das doze famílias dela já estavam feitas —
+várias em forma mais forte que a descrita —, e sobrou **uma ideia que eu não
+tinha**, com a melhor relação sinal/custo do lote.
+
+### A classe que não passa por userland
+
+Toda a §7 pergunta "o que faz este host executar alguma coisa?" e responde
+olhando unit, cron, perfil de shell e hook de pacote. Todos são mecanismos de
+USERLAND: alguém agenda, alguém inicia, alguém faz login.
+
+Existe uma classe que não passa por nenhum deles — o próprio kernel guarda o
+nome de um programa e o executa, **como root**, por conta própria:
+
+```
+modprobe       gatilho: qualquer coisa que peça um módulo — montar um
+               filesystem, criar interface, abrir socket de protocolo incomum
+core_pattern   com "|" na frente, o kernel PIPA o core dump para o programa.
+               Gatilho: um processo morrer com SIGSEGV
+uevent_helper  gatilho: qualquer evento de dispositivo
+binfmt_misc    gatilho: executar um arquivo com a assinatura registrada
+```
+
+Não há unit para achar, não há processo pai suspeito, não há entrada de cron.
+Há uma linha num arquivo de uma linha. E em três dos quatro o gatilho é
+banal — provocar um SIGSEGV é trivial para quem já tem uma conta.
+
+### O discriminador não precisou ser inventado
+
+Os quatro têm valor legítimo e três vêm preenchidos de fábrica: com systemd o
+`core_pattern` aponta para o `systemd-coredump`, no Ubuntu para o `apport`, e um
+host com docker buildx tem meia dúzia de registros de binfmt para qemu.
+
+A §24 já respondia a pergunta certa: **de onde vem o programa?** Os alvos entram
+na mesma lista de candidatos de propriedade que o resto do catálogo usa, e a
+escala sai de graça — gravável é crítico, diretório de pacote sem dono é
+crítico, /usr/local sem dono é aviso, dono de pacote é silêncio.
+
+Medido neste desktop, com o mecanismo mais perigoso da lista ativo:
+
+```
+core_pattern = |/usr/lib/systemd/systemd-coredump …   → silêncio (tem dono)
+modprobe     = /sbin/modprobe                          → silêncio (de fábrica)
+```
+
+### E o kernel legado pegou o terceiro falso positivo
+
+A regra "uevent_helper vazio é o normal" é uma suposição de kernel MODERNO. Num
+guest de 3.18 o valor de fábrica é `/sbin/hotplug` — até a série 4.x o
+`CONFIG_UEVENT_HELPER_PATH` vinha preenchido —, e a ferramenta acusou uma
+máquina de 2014 pelo estado de fábrica dela.
+
+É a terceira vez que os kernels legados da suíte pegam algo que nenhuma outra
+camada pegaria. O valor histórico virou padrão declarado, e o caso que importa
+continua protegido: se alguém **criar** um `/sbin/hotplug`, o arquivo passa a
+existir, a propriedade é perguntada, e binário sem dono em diretório de pacote
+continua crítico.
+
+### O que eu recusei da mesma lista
+
+Duas coisas, e vale escrever por quê:
+
+**O motor de score numérico** com bônus de correlação. Esta base já mediu e
+matou a ideia: promover por contagem faria um agente compilado localmente em
+`/usr/local` — sem dono de pacote, falando com a internet, com unit que o
+inicia — somar três sinais e virar crítico, legitimamente, em quase todo
+servidor. Aqui cada check tem severidade própria com falso positivo escrito, e
+a correlação melhora a LEITURA, não a acusação.
+
+**Sondagem de porta por `bind()`** para achar porta escondida. É a única
+sugestão que exige AGIR no host, contra a trava de read-only da SPEC — e o
+sinal envelheceu: implante moderno não escuta. O BPFDoor não abre porta, e foi
+por isso que a leitura de `AF_PACKET` existe.
+
+### Estado
+
+79 checks, 132 cenários. `make verify`, `make race` e a suíte inteira limpos.

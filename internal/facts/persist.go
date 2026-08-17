@@ -146,6 +146,9 @@ func collectPersist(f *Facts, e *env.Env) {
 	collectGitHooks(f, e)
 	collectSuid(f, e)
 	collectModprobe(f, e)
+	// Antes do pkg: os alvos dos helpers do kernel precisam entrar na pergunta
+	// de propriedade, que é o discriminador inteiro deles.
+	collectHelpers(f, e)
 	// ANTES do collectPkg: o ALVO de um hook de interpretador é candidato a
 	// propriedade, e é a resposta dessa pergunta que separa configuração de
 	// deploy de implante. Depois do collectPkg ele nunca era perguntado, e o

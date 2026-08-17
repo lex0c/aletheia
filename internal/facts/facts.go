@@ -45,23 +45,26 @@ type Facts struct {
 	Loader Loader `json:"loader"`
 	// HooksInterp são as variáveis que fazem um interpretador carregar código
 	// de terceiro — o LD_PRELOAD de quem não é ELF.
-	HooksInterp    []HookInterp            `json:"interpreter_hooks,omitempty"`
-	Units          []Unit                  `json:"units,omitempty"`
-	ToolArtifacts  []ToolArtifact          `json:"tool_artifacts,omitempty"`
-	Cron           []CronEntry             `json:"cron,omitempty"`
-	SSH            SSHConfig               `json:"ssh"`
-	SSHKeys        []SSHKey                `json:"ssh_keys,omitempty"`
-	Triggers       []Trigger               `json:"triggers,omitempty"`
-	CACerts        []CACert                `json:"ca_certs,omitempty"`
-	Hosts          []HostEntry             `json:"hosts,omitempty"`
-	Resolver       Resolver                `json:"resolver"`
-	Pkg            PkgDB                   `json:"pkg"`
-	Ownership      []Ownership             `json:"ownership,omitempty"`
-	Accounts       []Account               `json:"accounts,omitempty"`
-	Grupos         []Grupo                 `json:"groups,omitempty"`
-	Sudoers        []SudoRule              `json:"sudoers,omitempty"`
-	Suid           []SuidFile              `json:"suid,omitempty"`
-	Modules        []ModuleConf            `json:"modules,omitempty"`
+	HooksInterp   []HookInterp   `json:"interpreter_hooks,omitempty"`
+	Units         []Unit         `json:"units,omitempty"`
+	ToolArtifacts []ToolArtifact `json:"tool_artifacts,omitempty"`
+	Cron          []CronEntry    `json:"cron,omitempty"`
+	SSH           SSHConfig      `json:"ssh"`
+	SSHKeys       []SSHKey       `json:"ssh_keys,omitempty"`
+	Triggers      []Trigger      `json:"triggers,omitempty"`
+	CACerts       []CACert       `json:"ca_certs,omitempty"`
+	Hosts         []HostEntry    `json:"hosts,omitempty"`
+	Resolver      Resolver       `json:"resolver"`
+	Pkg           PkgDB          `json:"pkg"`
+	Ownership     []Ownership    `json:"ownership,omitempty"`
+	Accounts      []Account      `json:"accounts,omitempty"`
+	Grupos        []Grupo        `json:"groups,omitempty"`
+	Sudoers       []SudoRule     `json:"sudoers,omitempty"`
+	Suid          []SuidFile     `json:"suid,omitempty"`
+	Modules       []ModuleConf   `json:"modules,omitempty"`
+	// Helpers são os programas que o KERNEL invoca sozinho: modprobe,
+	// core_pattern, uevent_helper e binfmt_misc.
+	Helpers        []HelperDoKernel        `json:"kernel_helpers,omitempty"`
 	ModuleFiles    []string                `json:"module_files,omitempty"`
 	PkgEstranho    []ReivindicacaoEstranha `json:"pkg_odd_claims,omitempty"`
 	HashDiff       []HashDivergente        `json:"hash_mismatch,omitempty"`

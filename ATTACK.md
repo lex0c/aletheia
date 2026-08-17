@@ -29,6 +29,7 @@ Três rótulos, e o do meio é o que mais informa:
 | T1546.018 Hook de interpretador | coberto | `persist.interpreter_hook` — BASH_ENV, PYTHONPATH, NODE_OPTIONS, PERL5OPT, RUBYOPT, JAVA_TOOL_OPTIONS, e os sitecustomize/usercustomize pela propriedade de pacote. **Veio do corpus externo** |
 | T1546.005 Trap | coberto | `persist.shell_startup` — DEBUG, EXIT e ERR; `trap -` restaura o padrão e não é achado |
 | T1546.016 Hook de instalador | coberto | `persist.trigger_exec` (apt.conf.d, dnf, yum) |
+| T1546 Execução disparada por evento — helpers do KERNEL | coberto | `persist.kernel_helper` — `core_pattern` com cano, `modprobe`, `uevent_helper` e `binfmt_misc`. O ATT&CK não tem sub-técnica para eles, e a família merece linha própria: é a única persistência com execução COMO ROOT que não passa por unit, cron nem processo pai. O gatilho do `core_pattern` é um SIGSEGV, que quem tem uma conta provoca à vontade |
 | T1098.004 Chave SSH autorizada | coberto | `persist.ssh_keys`, `ssh_forced_command`, `sshd_key_source` |
 | T1136.001 Conta local criada | coberto | `priv.account_no_shadow` — a conta que não passou pelo `useradd`, mais os três de privilégio |
 | T1505.003 Web shell | parcial | `persist.web_prepend` cobre `auto_prepend_file`; arquivo de webshell largado na raiz do site não é procurado |

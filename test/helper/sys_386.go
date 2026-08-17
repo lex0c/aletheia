@@ -4,4 +4,8 @@ package main
 
 // memfd_create não está no pacote syscall da stdlib. O número é estável por
 // arquitetura e é ABI do kernel — não muda.
-const sysMemfdCreate = 356
+const (
+	sysMemfdCreate   = 356
+	sysBPF           = 357
+	sysPerfEventOpen = 336
+)

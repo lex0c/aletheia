@@ -84,6 +84,33 @@ const usage = `helper — monta situações para a suíte de cenários
   helper proxy <ip:porta-escuta> <ip:porta-backend>
       aceita conexão de fora e abre outra para o backend. É a forma do proxy
       reverso: entrada externa + saída interna. Não pode ser lida como pivô.
+
+  helper bpf socket <nome>
+      carrega um programa eBPF mínimo, ANEXA a um socket e FECHA o descritor do
+      programa. Ninguém mais tem descritor, não há pin e não há link: quem
+      segura é o socket. É a forma do implante em eBPF (runbook §35), sem
+      nenhum comportamento dele — o programa devolve zero e termina.
+
+  helper bpf hold <nome>
+      carrega e MANTÉM o descritor aberto. É o que toda ferramenta com libbpf
+      faz, e é o caso que NÃO pode virar achado.
+
+  helper bpf pin <caminho> <nome>
+      carrega e prende no bpffs. O pin é um dono visível.
+
+  helper bpf tracepoint <evento> <nome>
+      caminho LEGADO: perf_event_open no tracepoint e o programa pendurado por
+      ioctl, sem link nenhum. É como bpftrace e agente com libbpf antiga
+      anexam, e é o falso positivo que o BPF_TASK_FD_QUERY existe para evitar.
+
+  helper bpf cgroup <caminho-do-cgroup> <nome>
+      anexa por BPF_PROG_ATTACH e SAI. Não deixa descritor, pin nem link: quem
+      segura é o CGROUP. É como o systemd aplica controle por unit, e é a
+      população legítima que não pode virar achado.
+
+  helper bpf tailcall <nome>
+      deixa o programa preso a um prog_array e segura o MAPA. É como cilium
+      encadeia o datapath: o programa não tem descritor próprio.
 `
 
 func main() {
@@ -261,6 +288,37 @@ func main() {
 
 	case "rwx":
 		die(mapRWX())
+		hold()
+
+	case "bpf":
+		need(4)
+		switch os.Args[2] {
+		case "socket":
+			die(bpfNoSocket(os.Args[3]))
+		case "hold":
+			die(bpfSegura(os.Args[3]))
+		case "pin":
+			// SAI de propósito: quem segura o programa passa a ser só o pin, e
+			// é isso que o cenário precisa demonstrar. Segurar o descritor aqui
+			// provaria outra coisa.
+			need(5)
+			die(bpfPina(os.Args[3], os.Args[4]))
+			return
+		case "tracepoint":
+			need(5)
+			die(bpfNoTracepoint(os.Args[3], os.Args[4]))
+		case "cgroup":
+			// Também SAI: quem segura passa a ser o cgroup, e é isso que o
+			// cenário precisa mostrar.
+			need(5)
+			die(bpfNoCgroup(os.Args[3], os.Args[4]))
+			return
+		case "tailcall":
+			die(bpfNoTailCall(os.Args[3]))
+		default:
+			fmt.Fprint(os.Stderr, usage)
+			os.Exit(2)
+		}
 		hold()
 
 	case "proxy":

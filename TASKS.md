@@ -30,14 +30,14 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 ## Fase 3 — rede
 
 - [x] **3.1** `facts/net` — `/proc/net/tcp{,6}` + mapeamento inode→pid sob orçamento
-- [ ] **3.2** checks §2 — saída para IP público, listener fora de loopback
+- [x] **3.2** checks §2 — saída para IP público, listener fora de loopback
 - [x] **3.3** `net.pivot` — **saída** externa + **saída** interna no mesmo PID (direção é o que separa do proxy)
 - [ ] **3.4** `net.systemd_listener_orphan` — listener do PID 1 **sem** `.socket` unit correspondente
 
 ## Fase 4 — persistência (§7)  ▸ maior economia de tempo manual
 
 - [x] **4.1** `facts/systemd` — **baseado em arquivo**: units, timers, `.socket`, `.path`, `*.wants/`, drop-ins
-- [ ] **4.2** cron, `at`, anacron — incluindo extração do intervalo `*/N`
+- [~] **4.2** cron e `at` feitos, com a extração do intervalo `*/N`; anacron não tem coletor próprio
 - [x] **4.3** SSH — `authorized_keys`, `sshd_config` efetivo, `AuthorizedKeysCommand`, `.ssh/rc`
 - [x] **4.4** shell startup — lista exata + diff contra `/etc/skel` (contexto, não achado) + `BASH_ENV`
 - [x] **4.5** loader — `ld.so.preload`, `ld.so.conf.d`, `/etc/environment`
@@ -52,19 +52,23 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 
 ## Fase 6 — anti-forense e catálogo
 
-- [ ] **6.1** família `antiforense` — wtmp com salto, log zerado, `HISTFILE` off, `chattr +a`, timestomp
-- [ ] **6.2** `aletheia checks` — catálogo com coluna de falso positivo
+- [x] **6.1** família `antiforense` — wtmp com salto, log zerado, `HISTFILE` off, `chattr +a`, timestomp
+- [x] **6.2** `aletheia checks` — catálogo com coluna de falso positivo
 
 ## Fase 7 — integridade e privilégio
 
 - [~] **7.1** `§24` — feito NATIVO (dpkg e apk lidos do disco, sem `origin:tool`); rpm declara a lacuna
-- [ ] **7.2** `§25`/`§36` — SUID, capabilities, sudoers, grupos, gravável-executado-por-root
+- [x] **7.2** `§25`/`§36` — SUID, capabilities, sudoers, grupos, gravável-executado-por-root
 
 ## Fase 8 — kernel (§35)
 
-- [ ] **8.1** taint decodificado (só bit 13 sem DKMS), `/sys/module` × `/proc/modules`, módulo sem arquivo
-- [ ] **8.2** ftrace, kprobes
-- [ ] **8.3** eBPF nativo via `bpf()` — `PROG_GET_NEXT_ID`, `GET_FD_BY_ID`, `OBJ_GET_INFO_BY_FD`
+- [~] **8.1** taint decodificado e ATRIBUÍDO (`kernel.taint_unexplained`: o achado é a marca que
+        nenhum módulo carregado assume) + `/sys/module` × `/proc/modules` (`cross.module_view`);
+        módulo carregado sem arquivo em disco continua de fora
+- [~] **8.2** ftrace feito (`kernel.ftrace_hook`); a LISTA de kprobes registrados não é lida —
+        o que se vê hoje é o kprobe com programa eBPF pendurado, pela fase 8.3
+- [x] **8.3** eBPF nativo via `bpf()` — `PROG_GET_NEXT_ID`, `GET_FD_BY_ID`, `OBJ_GET_INFO_BY_FD`,
+        mais `LINK_*`, `MAP_LOOKUP_ELEM` (tail call), `OBJ_GET` (pin) e `TASK_FD_QUERY` (anexo legado)
 
 ## Fase 9 — checks manuais parametrizados
 
@@ -72,7 +76,7 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 
 ## Fase 10 — `watch`
 
-- [ ] **10.1** amostragem, diff entre snapshots, delta e periodicidade, casamento com gatilho
+- [x] **10.1** amostragem, diff entre snapshots, delta e periodicidade, casamento com gatilho
 
 ## Fase 11 — collect / analyze / fixtures
 
@@ -89,7 +93,7 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 
 ## Fase 13 — rotina
 
-- [ ] **13.1** `baseline` / `diff`
+- [~] **13.1** `baseline` feito; o `diff` é a flag `--baseline` de `scan` e `watch`, não subcomando
 - [ ] **13.2** `readiness`
 
 ---
@@ -3181,3 +3185,235 @@ distinção exige ler o código, que é o trabalho que ele existe para direciona
 ### Estado
 
 70 checks, 99 cenários, 148 execuções. `make mutacao` é alvo próprio.
+
+---
+
+## Registro — a perna do kernel: eBPF e taint
+
+A fase 8 era a última do `SPEC 15` com sinal de detecção que continuava aberta,
+e a razão de ela vir agora não é a ordem da lista.
+
+### O ponto cego estava escrito no código e invisível na saída
+
+```go
+// internal/env/env.go, antes desta fase
+e.grant(CapBPF, false, "enumeração de eBPF ainda não implementada (fase 8)")
+```
+
+A capacidade era sondada, negada e explicada. E **nenhum check a exigia** — o
+rodapé de cobertura só imprime motivo de check `NOT_CHECKED`, então aquela
+frase nunca chegava a um operador. Um host com implante em eBPF saía
+`RESULT: OK` e o relatório não dizia que ninguém tinha olhado para lá.
+
+É a única forma de lacuna que esta ferramenta não pode ter: a que ela conhece e
+não conta. O invariante "limite vira NOT_CHECKED, nunca truncamento silencioso"
+existe exatamente contra isso, e estava sendo violado pelo próprio `env`.
+
+### O que um programa eBPF é, no modelo desta ferramenta
+
+Todo o resto da base pergunta por ARQUIVO ou por PROCESSO. Um programa eBPF não
+é nenhum dos dois: depois de carregado ele vive dentro do kernel, sem caminho em
+disco, sem entrada em `/proc/modules`, sem inode para comparar hash e sem pacote
+que o reivindique. O `find` não acha, a §24 não tem opinião, a §7 não tem onde
+olhar — e ele intercepta syscall, lê pacote e altera retorno com a força de um
+módulo.
+
+É o implante fileless que o modelo de RETRATO ainda enxerga, desde que alguém
+pergunte ao kernel pela `bpf(2)`. Nativo pelo mesmo motivo da §24: `bpftool` não
+está instalado na maioria dos servidores, e perguntar a ele transformaria "não
+verifiquei" em "não encontrei".
+
+### A pergunta certa não é "há eBPF neste host?"
+
+Há em todo host com systemd moderno, e num nó de Kubernetes há dezenas. A
+pergunta é **quem segura este programa** — porque ele só continua carregado
+enquanto alguém o segurar, e os detentores são conhecidos:
+
+```
+descritor aberto   /proc/<pid>/fd + fdinfo        toda ferramenta com libbpf
+perf_event legado  BPF_TASK_FD_QUERY              bpftrace e agente antigo
+pin no bpffs       arquivo, com caminho e data    cilium, bpfman
+link               enumerável pela bpf(2)         o mecanismo moderno
+tail call          entrada de prog_array          o datapath do cilium
+```
+
+Nenhum dos cinco é achado. **Nenhum dos cinco aparecendo** é o achado, e é a
+forma do implante: alguém carregou, anexou e foi embora.
+
+O segundo item da lista é o que mais trabalho deu e o que menos aparece. No
+caminho antigo — `perf_event_open` num kprobe e o programa pendurado por ioctl
+— não existe link, e o descritor que segura é um `perf_event`, cujo fdinfo NÃO
+cita o programa. Sem perguntar ao kernel, todo bpftrace do mundo viraria um
+crítico.
+
+### E o TIPO decide se a pergunta pode ser respondida
+
+Programa de tc, de xdp e de cgroup é segurado por INTERFACE e por CGROUP —
+coisas que se leem por netlink e por `BPF_PROG_QUERY`, e esta ferramenta não faz
+nem uma nem outra. Ali "sem dono" não significa nada, e acusar produziria achado
+em todo host com cilium.
+
+Esses viram **lacuna declarada com o número junto**, no rodapé de cobertura, em
+vez de acusação. Tipo que o binário não conhece — kernel mais novo que ele — cai
+na mesma regra: não se acusa o que não se sabe interpretar.
+
+### O defeito que o teste de layout pegou antes da primeira execução
+
+A `bpf_attr` declara todo endereço como `__aligned_u64`: oito bytes em qualquer
+arquitetura. Em Go um ponteiro tem quatro bytes em 32 bits, e a primeira versão
+resolveu isso com um preenchimento calculado em tempo de compilação:
+
+```go
+type ponteiro64 struct {
+	p unsafe.Pointer
+	_ [8 - unsafe.Sizeof(unsafe.Pointer(nil))]byte   // errado
+}
+```
+
+Parecia elegante. Em Go, **campo de tamanho zero no fim de uma struct ganha
+padding** — a struct saiu com dezesseis bytes em x86_64, e o deslocamento de
+todo campo seguinte mudou junto. Nada disso quebra a compilação: quebra a
+leitura de mapa e a consulta de perf_event, em silêncio, devolvendo o conteúdo
+de outro campo.
+
+O `ponteiro64` foi para os arquivos por arquitetura, ao lado do número da
+syscall — que é o outro eixo que varia. É o mesmo tipo de defeito do
+`FS_IOC_GETFLAGS`, e desta vez ele morreu antes de rodar.
+
+### Taint: a evidência que o invasor não consegue apagar
+
+O taint do kernel é MONOTÔNICO. Escrever em `/proc/sys/kernel/tainted` faz OR
+com o valor atual, e nem o root limpa sem reiniciar. Um módulo que se carrega,
+suja o kernel e depois se desencadeia da lista para sumir **deixa o bit para
+trás**.
+
+Quase nada nesta base tem essa propriedade — log se apaga, arquivo se remove,
+histórico se desliga, e cada um desses tem um check de anti-forense justamente
+porque some.
+
+E o achado não é o estado, é a ATRIBUIÇÃO que falta. Medido num desktop real:
+
+```
+/proc/sys/kernel/tainted   12288  = bits 12 (O) e 13 (E)
+/proc/modules              nvidia, nvidia_drm, nvidia_modeset, nvidia_uvm (OE)
+achado                     NENHUM — as duas letras têm dono
+```
+
+Acusar o estado acusaria esse host, e não há nada de errado com ele. O achado é
+o kernel dizer "um módulo não assinado foi carregado" e nenhum módulo carregado
+assumir: ou ele saiu depois — que é o que se faz para não deixar rastro — ou
+ainda está lá e não aparece na lista, que é a definição de rootkit.
+
+### O falso positivo que a suíte inteira pegou, e que eu não tinha previsto
+
+O cenário 19 roda um contêiner com `SYS_ADMIN`, e foi o único da matriz onde a
+`bpf(2)` responde de dentro de um contêiner. O resultado:
+
+```
+⛔ bpf prog id=48   programa eBPF carregado no kernel sem nenhum dono visível
+   parcial          46 programa(s) eBPF sem dono visível não foram atribuídos
+```
+
+Um crítico contra um programa legítimo da máquina que rodava a suíte. A causa é
+estrutural e vale mais que o achado: **o espaço de ids do eBPF é global**. De
+dentro de um contêiner enumeram-se os programas do HOST — e os processos que os
+seguram estão fora daquele namespace de PID. A metade da pergunta que atribui
+está cega, então nenhuma resposta dela vale.
+
+A regra que entrou: em contêiner o check não acusa e declara. O cenário 19
+passou a travar isso — `Forbid: kernel.bpf_unowned` e cobertura incompleta, com
+o motivo dito. É a mesma decisão que o coletor de ftrace já tinha tomado por
+outro caminho, e agora as duas estão escritas lado a lado.
+
+### O par de cenários que prova o check, e não só o dispara
+
+`P1` e `P2` carregam o MESMO programa, com a mesma syscall, no mesmo kernel. A
+única diferença é quem fica segurando o descritor depois:
+
+```
+P1  fecha o descritor, o socket segura     ⛔ crítico     (a forma do BPFDoor)
+P2  mantém o descritor aberto              silêncio      (a forma do libbpf)
+P3  pin no bpffs, carregador saiu          silêncio      (a forma do cilium)
+P4  perf_event legado, sem link            silêncio      (a forma do bpftrace)
+P6  BPF_PROG_ATTACH num cgroup, e sai      lacuna dita   (a forma do systemd)
+P7  vivo só por estar num prog_array       silêncio      (o datapath do cilium)
+P5  taint sem módulo que o admita          ⚠ aviso
+```
+
+Sem P2, P3, P4, P6 e P7 o check estaria só disparando. **Cinco dos sete
+cenários existem para provar SILÊNCIO**, e cada um é uma população legítima que
+existe em servidor de verdade — se qualquer uma delas virasse achado, o check
+falaria em todo host com observabilidade, com contêiner ou com systemd, e
+ninguém leria a saída.
+
+O plantio é eBPF de verdade em todos: `BPF_PROG_LOAD` à mão, mais
+`BPF_PROG_ATTACH` num cgroup v2 montado pelo guest e `BPF_MAP_CREATE` de um
+prog_array com o programa dentro. Duas instruções — devolve um valor e termina.
+A FORMA é o que está sob teste; comportamento de implante não entra na suíte.
+
+E o P7 vale por um detalhe: ele é a única coisa que exercita a leitura de mapa
+contra um kernel de verdade. Foi ali que o defeito de layout teria aparecido em
+execução, se o teste não o tivesse pego antes.
+
+### O kernel de 2014 respondeu diferente do que eu tinha escrito
+
+A regra "sem MECANISMO não é lacuna" foi medida contra os dois kernels legados
+que a suíte já baixa, e ela vale — mas a FRASE estava errada:
+
+```
+kernel 3.18   ENOSYS  →  cobertura completa, e o motivo dito
+kernel 4.14   ENOSYS  →  idem
+```
+
+Os dois são `linux-vanilla` do Alpine, compilados sem `CONFIG_BPF_SYSCALL`. A
+primeira versão da mensagem afirmava "anterior ao 3.18" — e saiu num guest 3.18
+e num 4.14. O errno prova que a syscall não existe AQUI; a versão é outra
+pergunta, e afirmar o que não se mediu é o defeito que esta base persegue nos
+outros lugares. O texto agora diz as duas causas possíveis, e o cenário 50
+trava isso contra um kernel de 2014 de verdade.
+
+### O que ficou declarado e NÃO foi feito
+
+```
+netlink            tc e xdp: quem segura é a interface. É a mesma dependência
+                   que a §35.5 já esperava, e fecharia a maior das lacunas novas
+BPF_PROG_QUERY     anexo por cgroup sem link, que é o systemd antigo
+nome por BTF       um programa fentry sabe qual função intercepta, e o nome está
+                   no BTF do kernel. Hoje isso vem do ftrace, pelo outro lado
+conteúdo de mapa   só o prog_array é lido, e só para resolver tail call. O mapa
+                   de um implante guarda config e alvo, e ninguém olha
+/proc/net/packet   o socket que segura um socket_filter órfão é de ALGUÉM, e
+                   AF_PACKET tem inode — dá para nomear o processo. É barato, e
+                   é a continuação natural do P1
+módulo VISÍVEL     módulo carregado que assume a própria marca não vira achado,
+                   por desenho. Um LKM malicioso que não se esconde passa — o
+                   que falta ali é inventário de módulo, não outro juízo
+```
+
+### As decisões novas, medidas por mutação
+
+O `make mutacao` amostra o pacote inteiro, e o que interessava aqui era saber se
+a suíte tem dentes NO QUE ACABOU DE SER ESCRITO. Oito mutações dirigidas às
+decisões desta fase, todas mortas:
+
+```
+órfão que intercepta deixa de ser crítico          morta
+conjunção da fixação vira disjunção                morta
+guarda de contêiner removida                       morta
+atribuição do taint invertida                      morta
+marca não atribuível a módulo passa a ser órfã     morta
+módulo forçado deixa de ser crítico                morta
+programa COM dono passa a ser avaliado             morta
+tipo desconhecido vira fixação visível             morta
+```
+
+A terceira é a que mais importa: ela é o falso positivo do cenário 19, e ganhou
+teste unitário além do cenário. A auditoria de cobertura de teste já tinha
+achado que **nenhum dos falsos positivos corrigidos tinha teste**; este tem.
+
+### Estado
+
+76 checks, 117 cenários, 178 execuções. `make verify`, `make race` e a suíte de
+cenários limpos. Sete das oito lacunas do `ATTACK.md` continuam fechadas, e o
+mapa ganhou uma linha nova: `T1205.002`, filtro de socket — a forma do BPFDoor,
+que não abre porta e por isso nunca apareceu na tabela de conexões.

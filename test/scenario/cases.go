@@ -295,9 +295,23 @@ func init() {
 		Caps:   []string{"SYS_ADMIN"}, // unshare exige
 		Plant: `unshare -n /helper sleep 300 &
 			sleep 0.5`,
-		Expect:         []Expect{{ID: "proc.ns_divergent", Sev: "WARN"}},
-		Exit:           1,
-		MustBeComplete: true,
+		Expect: []Expect{{ID: "proc.ns_divergent", Sev: "WARN"}},
+		// E ele virou também o cenário que trava um falso positivo caro,
+		// descoberto quando a fase 8 entrou.
+		//
+		// SYS_ADMIN é o que faz a bpf(2) responder dentro de um contêiner — e aí
+		// a enumeração funciona e a ATRIBUIÇÃO não: o espaço de ids do eBPF é
+		// global, então são os programas do HOST que aparecem, e os processos
+		// que os seguram estão fora deste namespace de PID. Na primeira medição
+		// isso deu 46 programas não atribuíveis e um CRÍTICO contra um programa
+		// legítimo da máquina que rodava a suíte.
+		//
+		// A cobertura deixou de ser completa aqui de propósito: a ferramenta
+		// enumerou 47 programas e não pôde responder por nenhum. Dizer isso é o
+		// contrato; dizer "completo" seria a mentira.
+		Forbid:           []string{"kernel.bpf_unowned"},
+		Exit:             1,
+		MustBeIncomplete: true,
 	})
 
 	// ------------------------------------------------------- userland de época
@@ -1033,10 +1047,19 @@ func init() {
 	// encontra em produção de verdade.
 
 	Register(Scenario{
-		ID:             "50-kernel-3.18-limpo",
-		Desc:           "kernel de 2014, guest limpo: cobertura completa e nenhum achado",
-		Mode:           VM,
-		Kernel:         "3.18",
+		ID:     "50-kernel-3.18-limpo",
+		Desc:   "kernel de 2014, guest limpo: cobertura completa e nenhum achado",
+		Mode:   VM,
+		Kernel: "3.18",
+		// E é aqui que a regra "sem MECANISMO não é lacuna" fica provada contra
+		// um kernel de verdade. Este guest não tem `bpf(2)` — a distribuição o
+		// compilou sem CONFIG_BPF_SYSCALL —, então não existe programa eBPF
+		// para enumerar e a cobertura continua completa. A ferramenta DIZ isso
+		// em vez de calar, e diz sem afirmar versão: a primeira versão da frase
+		// dizia "anterior ao 3.18" e saiu num guest 3.18 e num 4.14.
+		Expect: []Expect{
+			{ID: "kernel.bpf_inventory", Sev: "INFO", Evidence: "não tem a syscall bpf(2)"},
+		},
 		Exit:           0,
 		MustBeComplete: true,
 	})
@@ -1131,26 +1154,33 @@ func init() {
 
 	Register(Scenario{
 		ID:   "91-ocultacao-por-rootkit",
-		Desc: "as três comparações cruzadas só disparam contra ocultação de verdade",
+		Desc: "as quatro comparações cruzadas só disparam contra ocultação de verdade",
 		// A pergunta que estes checks fazem é diferente de todas as outras:
 		// não "isto que vejo é suspeito?", mas "o que vejo é TUDO que existe?".
 		//
-		// Demonstrá-los exige um rootkit que esconda processo, thread ou módulo
-		// — e a suíte não vai carregar um para se testar. A lógica está coberta
-		// por teste unitário; o que NÃO dá para provar aqui é o comportamento
-		// contra ocultação real.
+		// Demonstrá-los exige um rootkit que esconda processo, thread, módulo ou
+		// programa eBPF — e a suíte não vai carregar um para se testar. A lógica
+		// está coberta por teste unitário; o que NÃO dá para provar aqui é o
+		// comportamento contra ocultação real.
 		//
 		// O que a suíte prova é o contrário, e isso tem valor próprio: em host
-		// limpo, desktop e contêiner, as três comparações não produzem achado
+		// limpo, desktop e contêiner, as comparações não produzem achado
 		// nenhum. Chegar a isso custou corrigir dois enganos — usar a lista de
 		// processos LIDOS em vez dos LISTADOS, e tratar thread como processo,
 		// que sozinho gerava 152 falsos positivos.
+		//
+		// O cross.bpf_hidden entrou nesta lista pelo mesmo motivo e com uma
+		// diferença: a rota do trampolim compara ftrace com a enumeração da
+		// bpf(2), e produzi-la exigiria um programa que o kernel ANEXA e NÃO
+		// LISTA. Só um kernel manipulado faz isso — que é justamente o que o
+		// check existe para achar.
 		UntestableChecks: []string{
 			"cross.hidden_pid", "cross.thread_count", "cross.module_view",
+			"cross.bpf_hidden",
 		},
-		Untestable: "exige um rootkit que esconda processo, thread ou módulo. " +
-			"Carregar um LKM de ocultação na suíte trocaria a garantia de um " +
-			"check pela perda de controle sobre o ambiente de teste.",
+		Untestable: "exige um rootkit que esconda processo, thread, módulo ou " +
+			"programa eBPF. Carregar um LKM de ocultação na suíte trocaria a " +
+			"garantia de um check pela perda de controle sobre o ambiente de teste.",
 	})
 
 	Register(Scenario{

@@ -9,12 +9,15 @@ package env
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/lex0c/aletheia/internal/kbpf"
 )
 
 // Cap é uma capacidade do ambiente. O check declara o que precisa (Requires) e
@@ -121,6 +124,11 @@ type Env struct {
 	// Zero significa sem limite, ou não determinado. É o que o runtime NÃO
 	// enxerga, e é o que decide quantos leitores de /proc abrir.
 	CPUQuota float64
+
+	// BPFSemMecanismo diz que este kernel não tem O QUE enumerar — a bpf(2) não
+	// existe. É diferente de "não me deixaram olhar", e a diferença decide se a
+	// ausência degrada a cobertura ou não.
+	BPFSemMecanismo bool
 
 	// root é a raiz travada em modo image. Ver fs.go: prefixar string não
 	// impede symlink absoluto de escapar da imagem.
@@ -315,8 +323,29 @@ func (e *Env) probeCaps() {
 	}
 	e.grant(CapPkgDB, pkg, "sem base de pacotes legível: integridade não foi verificada")
 
-	// Ainda não implementados. Declarar ausência é melhor que fingir cobertura.
-	e.grant(CapBPF, false, "enumeração de eBPF ainda não implementada (fase 8)")
+	// eBPF — perguntado à própria bpf(2), não presumido.
+	//
+	// Esta capacidade passou por um período declarada como "não implementada", e
+	// isso tinha um efeito que só apareceu quando alguém foi procurar: como
+	// NENHUM check a exigia, o motivo nunca chegava ao rodapé. O ponto cego
+	// estava escrito no código e invisível na saída — que é a única forma de
+	// lacuna que esta ferramenta não pode ter.
+	if e.Source == SourceImage {
+		e.BPFSemMecanismo = true
+		e.grant(CapBPF, false, "modo image: não há kernel vivo para enumerar programa eBPF")
+	} else if err := kbpf.Sonda(); err != nil {
+		var es *kbpf.ErroSonda
+		if errors.As(err, &es) {
+			e.BPFSemMecanismo = es.SemMecanismo
+			e.grant(CapBPF, false, es.Motivo)
+		} else {
+			e.grant(CapBPF, false, "enumeração de eBPF indisponível: "+err.Error())
+		}
+	} else {
+		e.grant(CapBPF, true, "")
+	}
+
+	// Ainda não implementado. Declarar ausência é melhor que fingir cobertura.
 	e.grant(CapNetlink, false, "netlink ainda não implementado (fase 3): sem a divergência do runbook §35.5")
 }
 

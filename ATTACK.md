@@ -24,7 +24,7 @@ Três rótulos, e o do meio é o que mais informa:
 | T1053.003 Cron | coberto | `persist.cron_suspect`, `cron_frequent` |
 | T1053.006 Timer do systemd | coberto | `persist.timer_frequent` |
 | T1053.002 At | coberto | `persist.at_job` |
-| T1547.006 Módulo de kernel | parcial | `persist.modprobe_install`, `cross.module_view` — a carga por `modules-load.d` é vista pela propriedade do `.ko`, não por check próprio |
+| T1547.006 Módulo de kernel | parcial | `persist.modprobe_install`, `cross.module_view`, `kernel.taint_unexplained` — este último pega o módulo que carregou e SAIU: a marca de taint não se apaga sem reiniciar. O que continua fora é o módulo carregado e VISÍVEL, porque ele assume a própria marca — que é como o driver de vídeo aparece |
 | T1546.004 Configuração de shell | coberto | `persist.shell_startup`, `persist.bash_env` |
 | T1546.018 Hook de interpretador | coberto | `persist.interpreter_hook` — BASH_ENV, PYTHONPATH, NODE_OPTIONS, PERL5OPT, RUBYOPT, JAVA_TOOL_OPTIONS, e os sitecustomize/usercustomize pela propriedade de pacote. **Veio do corpus externo** |
 | T1546.005 Trap | coberto | `persist.shell_startup` — DEBUG, EXIT e ERR; `trap -` restaura o padrão e não é achado |
@@ -54,7 +54,7 @@ Três rótulos, e o do meio é o que mais informa:
 | T1070.003 Apagar histórico | coberto | `antiforense.shell_history` |
 | T1070.006 Timestomp | coberto | `integrity.timestomp` |
 | T1070.002 Apagar logs do sistema | coberto | `antiforense.log_rotation_gap`, `antiforense.wtmp_cleared` |
-| T1014 Rootkit | parcial | `cross.hidden_pid`, `module_view`, `thread_count`, `kernel.ftrace_hook` — e o limite está declarado: se o kernel mente, as fontes mentem juntas |
+| T1014 Rootkit | parcial | `cross.hidden_pid`, `module_view`, `thread_count`, `kernel.ftrace_hook`, `kernel.bpf_unowned`, `cross.bpf_hidden`, `kernel.taint_unexplained` — o implante em eBPF é o rootkit que não tem arquivo nem módulo, e agora é enumerado pela própria `bpf(2)`. O limite continua declarado: se o kernel mente, as fontes mentem juntas |
 | T1036.005 Nome/lugar legítimo | coberto | `proc.kthread_disguise`, `integrity.no_package_owner` |
 | T1564.001 Arquivo oculto | coberto | `path.hidden_exec` — só com executável dentro, e só em árvore temporária |
 | T1562.001 Desabilitar ferramenta de defesa | parcial | `antiforense.mac_downgraded` — só a CONTRADIÇÃO entre config e runtime do SELinux; AppArmor e "MAC simplesmente inativo" ficam de fora, e o texto abaixo diz por quê |
@@ -84,6 +84,7 @@ Três rótulos, e o do meio é o que mais informa:
 | T1071 Protocolo de aplicação | parcial | `net.egress_unowned` — pela ORIGEM, nunca pelo destino |
 | T1571 Porta fora do padrão | parcial | `net.listener_unowned` |
 | T1090 Proxy / pivô | coberto | `net.pivot` |
+| T1205.002 Filtro de socket | coberto | `kernel.bpf_unowned` — é a forma do BPFDoor: programa de `socket_filter` carregado, anexado a um socket e com o descritor fechado, esperando um pacote-gatilho. Não abre porta, e por isso a tabela de conexões não o mostra |
 | T1219 Ferramenta de acesso remoto | coberto | `tool.artifact`, `tool.binary` |
 | T1567 Exfiltração por serviço web | parcial | `tool.artifact` reconhece rclone e afins pelo artefato |
 | T1496 Sequestro de recurso | parcial | a forma do minerador é vista por caminho, disfarce e memória; consumo de CPU não é medido |
@@ -120,6 +121,26 @@ firewall    tabela vazia é comum e legítima (grupo de segurança da nuvem faz
             a filtragem), e ler regra nativamente exige netlink de nftables.
             Custo alto, sinal fraco — é a de pior relação da lista
 ```
+
+### 2. Atribuição de eBPF por netlink e por cgroup
+
+Nasceu com a fase 8, e é uma lacuna de ATRIBUIÇÃO, não de detecção: os
+programas são enumerados: o que não se sabe é quem os segura quando o detentor
+não é descritor, pin, link nem tail call.
+
+```
+tc / xdp    quem segura é a INTERFACE, e ler isso exige netlink — a mesma
+            dependência que a §35.5 já esperava. Um programa de tc sem dono
+            aparente não vira achado hoje: vira lacuna declarada, com o número
+cgroup      quem segura é o CGROUP, e resolver exigiria BPF_PROG_QUERY em cada
+            um da árvore. systemd moderno usa link e cai fora disto; systemd
+            antigo, não
+```
+
+A escolha de declarar em vez de acusar tem uma medição por trás: num nó com
+cilium são dezenas de programas de tc, todos legítimos, e acusá-los faria o
+operador parar de ler a saída. O número aparece no rodapé de cobertura, que é
+onde "não verifiquei" pertence.
 
 ---
 

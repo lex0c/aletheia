@@ -66,6 +66,8 @@ type Facts struct {
 	Mounts         []Montagem              `json:"mounts,omitempty"`
 	Logins         []Login                 `json:"logins,omitempty"`
 	Ftrace         []HookFtrace            `json:"ftrace_hooks,omitempty"`
+	BPF            BPF                     `json:"bpf"`
+	Taint          Taint                   `json:"kernel_taint"`
 	ChavesPrivadas []ChavePrivada          `json:"private_keys,omitempty"`
 	Destinos       []DestinoConhecido      `json:"known_hosts,omitempty"`
 	Historicos     []HistoricoShell        `json:"shell_history,omitempty"`
@@ -193,6 +195,12 @@ func Collect(e *env.Env) *Facts {
 		// Junto do cross-view: aqueles dizem que o kernel pode estar mentindo,
 		// e este diz COMO.
 		collectFtrace(f, e)
+		// Marca do próprio kernel sobre o que já foi carregado nele. Não
+		// depende de privilégio e não pode ser apagada sem reiniciar.
+		collectTaint(f, e)
+		// Depois dos processos: o dono de um programa eBPF é um descritor
+		// aberto, e a lista de descritores já está lida.
+		collectBPF(f, e)
 	} else {
 		f.partial("proc", e.Reason(env.CapProcfs))
 	}

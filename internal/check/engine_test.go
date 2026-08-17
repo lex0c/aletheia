@@ -281,3 +281,45 @@ func TestSourceIncompativelViraNotChecked(t *testing.T) {
 		t.Errorf("motivo deve citar o modo: %q", r.Coverage.NotChecked[0].Reason)
 	}
 }
+
+// O orçamento do wtf não pode virar silêncio. Um check que não coube no prazo é
+// NÃO VERIFICADO — se virasse "nada encontrado", o overview ficaria rápido
+// mentindo, que é pior que ficar lento.
+func TestOrcamentoEstouradoViraNaoVerificado(t *testing.T) {
+	disparar := func(c *Check) {
+		c.Run = func(self Check, f *facts.Facts, e *env.Env) Result {
+			return Result{Findings: []Finding{self.F(SevCritical, "x", "")}}
+		}
+	}
+	checks := []Check{mkCheck("a", disparar), mkCheck("b", disparar), mkCheck("c", disparar)}
+
+	// Prazo já vencido: nenhum check chega a rodar.
+	r := RunWith(checks, &facts.Facts{}, liveEnv(env.CapProcfs),
+		RunOptions{Deadline: time.Now().Add(-time.Second), Budget: 2 * time.Second})
+
+	if len(r.Findings) != 0 {
+		t.Fatalf("achados = %d: nenhum check devia ter rodado", len(r.Findings))
+	}
+	if len(r.Coverage.NotChecked) != 3 {
+		t.Fatalf("não verificados = %d, quer 3", len(r.Coverage.NotChecked))
+	}
+	if !strings.Contains(r.Coverage.NotChecked[0].Reason, "orçamento") {
+		t.Errorf("o motivo precisa dizer que foi o prazo: %q", r.Coverage.NotChecked[0].Reason)
+	}
+	// E o veredito jamais pode ser OK: 0 de 3 cobertos.
+	if v := r.Verdict(); v != "INCOMPLETE" {
+		t.Errorf("veredito = %s, quer INCOMPLETE", v)
+	}
+	if r.Exit() == 0 {
+		t.Error("exit 0 com 0/3 cobertos é a mentira que a ferramenta existe para não contar")
+	}
+}
+
+// Sem prazo, RunWith é o Run de sempre.
+func TestSemPrazoNadaEhCortado(t *testing.T) {
+	r := RunWith([]Check{mkCheck("a")}, &facts.Facts{}, liveEnv(env.CapProcfs), RunOptions{})
+	if len(r.Coverage.NotChecked) != 0 || r.Coverage.Complete != 1 {
+		t.Errorf("cobertura = %d/%d, não verificados = %d",
+			r.Coverage.Complete, r.Coverage.Total, len(r.Coverage.NotChecked))
+	}
+}

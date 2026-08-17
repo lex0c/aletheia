@@ -25,7 +25,7 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 - [x] **2.4** `proc.caps_unexpected` — `CapEff` **comparado com o esperado**, não apenas != 0 (§3.7)
 - [x] **2.5** `proc.tracer`, `proc.ns_divergent`, `proc.maps_rwx_anon` (§3.7, §3.15, §3.10)
 - [x] **2.6** `correlate.revshell` — fd 0,1,2 no mesmo socket **descartando socket activation** (§17)
-- [ ] **2.7** `wtf` — mesma coleta, renderização e orçamento próprios
+- [x] **2.7** `wtf` — mesma coleta, renderização e orçamento próprios
 
 ## Fase 3 — rede
 
@@ -474,3 +474,60 @@ O `15` é o único `MustBeIncomplete` do bloco, e por um motivo que vale registr
 trocar de uid zera o flag `dumpable`, e a partir daí nem o root do contêiner lê
 o `exe` daquele processo sem `CAP_SYS_PTRACE`. A cobertura CAI — e a ferramenta
 diz isso em vez de fingir que olhou.
+
+---
+
+## Registro — `wtf` (2.7)
+
+Comando próprio, não `scan --compacto`. Mesma coleta; seleção, orçamento e
+renderização separados.
+
+```
+seleção        os checks com Wtf:true. O denominador da cobertura é ELE, não o
+               catálogo — senão o wtf sairia INCOMPLETE sempre e o exit code
+               deixaria de significar alguma coisa
+orçamento      teto de 2s, e o relógio começa ANTES da coleta: a coleta é a
+               parte cara, e um orçamento que só cobrisse os checks estaria
+               medindo a parte errada
+prazo estourado  vira NÃO VERIFICADO, nunca "nada encontrado". Um overview que
+               fica rápido calando check é pior que um overview lento
+tela           crítico ganha 2 linhas de evidência e o passo irreversível;
+               aviso ganha uma linha. Corte em 8, com a contagem do que sobrou
+```
+
+Contra host real: **57ms** para 10 checks.
+
+### O rodapé é o comando
+
+`wtf` é o que mais corre risco de ser lido como "host limpo". Sem achado, o
+texto diz o contrário do que a tela sugere:
+
+```
+✓ nenhum indicador decisivo em 10 checks (57ms)
+  isto NÃO significa host limpo (runbook §35.8). Para o resto: aletheia scan
+```
+
+E o `RESULT` sempre termina com `Isto NÃO é varredura: rode aletheia scan`.
+
+### `--oneline`, para frota
+
+```
+CRITICAL   revshell(21) pivot(22) suspicious_path(32)
+OK         —
+INCOMPLETE —  [cobertura 4/10]
+```
+
+Sem hostname: quem varre a frota já sabe em qual host mandou rodar e prefixa a
+linha. A **cobertura entra sempre que estiver degradada** — sem ela, um host
+onde metade não rodou apareceria na lista igual a um host varrido inteiro, e é
+justamente esse que precisa de atenção primeiro.
+
+O `Subject` passa pelo `Safe()` também aqui, e por um motivo que só existe neste
+formato: numa varredura por ssh a saída de dezenas de hosts é concatenada, e uma
+sequência de escape vinda de argv forjaria a linha dos outros hosts.
+
+### Cenário
+
+O harness ganhou `Cmd`, e `44-wtf-revshell` roda o comando de verdade. O que ele
+trava não é a renderização — é o CONTRATO: mesmo JSONL, mesmo exit code. É por
+ele que a frota se ordena.

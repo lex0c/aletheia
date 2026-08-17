@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/lex0c/aletheia/internal/check"
 	_ "github.com/lex0c/aletheia/internal/checks" // registra os checks
@@ -43,13 +44,19 @@ COMANDOS
   checks        catálogo: id, §ref, modo, grupo, requires, falsos positivos
   version       versão e hash deste binário
 
-FLAGS DE scan / wtf
+FLAGS DE scan E wtf
   --root PATH   analisar uma imagem montada read-only em vez do host vivo.
                 Ali o kernel é o SEU: ocultamento de arquivo não acontece (§35.6)
+  --json FILE   JSONL; "-" = stdout. NUNCA afetado pela verbosidade
+
+FLAGS DE scan
   --only G,G    escopo por subsistema: proc net persist priv integrity kernel app cloud
   --mode M      auto | manual
-  --json FILE   JSONL; "-" = stdout. NUNCA afetado pela verbosidade
   -v, -vv       evidência por achado / + INFO e detalhe de cobertura
+
+FLAGS DE wtf
+  --oneline     UMA linha: veredito + alvos. Para triagem de FROTA por ssh
+  --budget D    teto de tempo (padrão 2s). O que estourar vira NÃO VERIFICADO
 
 EXIT CODES
   0  OK          zero achados E cobertura completa
@@ -93,7 +100,7 @@ func main() {
 	case "scan":
 		os.Exit(runScan(os.Args[2:], false))
 	case "wtf", "quick":
-		os.Exit(runScan(os.Args[2:], true))
+		os.Exit(runWtf(os.Args[2:]))
 	case "checks":
 		os.Exit(runChecks(os.Args[2:]))
 	case "version":
@@ -108,6 +115,70 @@ func main() {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(3)
 	}
+}
+
+// wtfBudget é o teto rígido da SPEC 6.1. O wtf não pode mentir para ser
+// rápido: o que não couber vira NÃO VERIFICADO e sai no rodapé.
+const wtfBudget = 2 * time.Second
+
+// runWtf responde uma pergunta diferente do scan — este host está pegando
+// fogo? Mesma coleta, seleção menor, renderização e orçamento próprios.
+func runWtf(args []string) int {
+	fs := flag.NewFlagSet("wtf", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var (
+		root    = fs.String("root", "", "analisar imagem montada em PATH")
+		oneline = fs.Bool("oneline", false, "uma linha por host, para triagem de frota")
+		budget  = fs.Duration("budget", wtfBudget, "teto de tempo")
+		jsonOut = fs.String("json", "", "escrever JSONL em FILE ('-' = stdout)")
+	)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	if err := fs.Parse(args); err != nil {
+		return 3
+	}
+	if *root != "" {
+		if fi, err := os.Stat(*root); err != nil || !fi.IsDir() {
+			fmt.Fprintf(os.Stderr, "--root: %s não é um diretório acessível\n", *root)
+			return 3
+		}
+	}
+
+	// O relógio começa a contar ANTES da coleta: a coleta é a parte cara, e um
+	// orçamento que só cobre os checks mediria a parte errada.
+	start := time.Now()
+
+	e := env.Probe(env.Options{Root: *root, Version: version})
+	defer e.Close()
+	f := facts.Collect(e)
+
+	selected := check.Select(check.Selection{Wtf: true})
+	if len(selected) == 0 {
+		fmt.Fprintln(os.Stderr, "nenhum check cabe no orçamento do wtf")
+		return 3
+	}
+	r := check.RunWith(selected, f, e, check.RunOptions{
+		Deadline: start.Add(*budget),
+		Budget:   *budget,
+	})
+	collectorGaps(r, f)
+	elapsed := time.Since(start)
+
+	out := io.Writer(os.Stdout)
+	if *jsonOut == "-" {
+		out = os.Stderr
+	}
+	if *oneline {
+		report.Oneline(out, r)
+	} else {
+		report.Wtf(out, r, f, e, elapsed)
+	}
+
+	if *jsonOut != "" {
+		if code := writeJSONL(*jsonOut, r, f, e); code != 0 {
+			return code
+		}
+	}
+	return r.Exit()
 }
 
 func runScan(args []string, wtf bool) int {
@@ -166,14 +237,7 @@ func runScan(args []string, wtf bool) int {
 
 	r := check.Run(selected, f, e)
 
-	// Falha de coleta é cobertura degradada num eixo próprio: não é um check
-	// que deixou de rodar, é dado que não pôde ser lido. Some da aritmética de
-	// checks, mas continua impedindo um veredito de OK.
-	for collector, reasons := range f.Partial {
-		for _, reason := range reasons {
-			r.Coverage.CollectorGaps = append(r.Coverage.CollectorGaps, collector+": "+reason)
-		}
-	}
+	collectorGaps(r, f)
 
 	v := 0
 	if *verbose {
@@ -193,23 +257,41 @@ func runScan(args []string, wtf bool) int {
 	report.Human(humanOut, r, f, e, report.Options{Verbose: v})
 
 	if *jsonOut != "" {
-		w := os.Stdout
-		if *jsonOut != "-" {
-			fh, err := openJSONOut(*jsonOut)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				return 3
-			}
-			defer fh.Close()
-			w = fh
-		}
-		if err := report.JSONL(w, r, f, e); err != nil {
-			fmt.Fprintf(os.Stderr, "erro ao escrever JSONL: %v\n", err)
-			return 3
+		if code := writeJSONL(*jsonOut, r, f, e); code != 0 {
+			return code
 		}
 	}
 
 	return r.Exit()
+}
+
+// collectorGaps move a falha de COLETA para o eixo próprio dela: não é um check
+// que deixou de rodar, é dado que não pôde ser lido. Sai da aritmética de
+// checks e continua impedindo um veredito de OK.
+func collectorGaps(r *check.Report, f *facts.Facts) {
+	for collector, reasons := range f.Partial {
+		for _, reason := range reasons {
+			r.Coverage.CollectorGaps = append(r.Coverage.CollectorGaps, collector+": "+reason)
+		}
+	}
+}
+
+func writeJSONL(path string, r *check.Report, f *facts.Facts, e *env.Env) int {
+	w := os.Stdout
+	if path != "-" {
+		fh, err := openJSONOut(path)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 3
+		}
+		defer fh.Close()
+		w = fh
+	}
+	if err := report.JSONL(w, r, f, e); err != nil {
+		fmt.Fprintf(os.Stderr, "erro ao escrever JSONL: %v\n", err)
+		return 3
+	}
+	return 0
 }
 
 // openJSONOut abre o destino do JSONL sem NUNCA destruir dado do host.

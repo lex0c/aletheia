@@ -179,7 +179,7 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 func runLive(t *testing.T, bin, img string, sc scenario.Scenario) result {
 	t.Helper()
 
-	script := sc.Plant + "\n/aletheia scan --json -"
+	script := sc.Plant + "\n/aletheia " + cmdOf(sc) + " --json -"
 	if len(sc.Args) > 0 {
 		script += " " + strings.Join(sc.Args, " ")
 	}
@@ -239,7 +239,7 @@ func runImage(t *testing.T, bin, img string, sc scenario.Scenario) result {
 		t.Fatalf("export falhou: %v\n%s", err, out)
 	}
 
-	args := append([]string{"scan", "--root", rootfs, "--json", "-"}, sc.Args...)
+	args := append([]string{cmdOf(sc), "--root", rootfs, "--json", "-"}, sc.Args...)
 	return localRun(t, bin, args)
 }
 
@@ -350,6 +350,13 @@ func parseSerial(t *testing.T, out string) result {
 	}
 	r.stderr = human.String()
 	return r
+}
+
+func cmdOf(sc scenario.Scenario) string {
+	if sc.Cmd != "" {
+		return sc.Cmd
+	}
+	return "scan"
 }
 
 func dockerRun(t *testing.T, args []string) result {

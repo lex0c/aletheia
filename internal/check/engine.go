@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
@@ -80,11 +81,36 @@ func runGuarded(c Check, f *facts.Facts, e *env.Env) (res Result, panicked strin
 	return c.Run(c, f, e), ""
 }
 
+// RunOptions são os limites da execução, não a apresentação dela.
+type RunOptions struct {
+	// Deadline é o teto do `wtf` (SPEC 6.1). Zero = sem teto.
+	//
+	// O que estourar o prazo vira NÃO VERIFICADO, nunca "nada encontrado": um
+	// overview que fica rápido calando check é pior que um overview lento,
+	// porque a mentira sai com cara de resposta.
+	Deadline time.Time
+	// Budget é só para o texto do motivo.
+	Budget time.Duration
+}
+
 // Run executa a seleção e monta o relatório.
 func Run(checks []Check, f *facts.Facts, e *env.Env) *Report {
+	return RunWith(checks, f, e, RunOptions{})
+}
+
+// RunWith é o Run com limites.
+func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 	r := &Report{Coverage: Coverage{Total: len(checks)}}
 
 	for _, c := range checks {
+		if !o.Deadline.IsZero() && time.Now().After(o.Deadline) {
+			r.Coverage.NotChecked = append(r.Coverage.NotChecked, NotChecked{
+				ID: c.ID, Ref: c.Ref, Title: c.Title,
+				Reason: "orçamento de " + o.Budget.String() + " esgotado antes deste check",
+				Manual: []string{"rode `aletheia scan`, que não tem teto de tempo"},
+			})
+			continue
+		}
 		if c.Sources&e.Source == 0 {
 			r.Coverage.NotChecked = append(r.Coverage.NotChecked, NotChecked{
 				ID: c.ID, Ref: c.Ref, Title: c.Title,

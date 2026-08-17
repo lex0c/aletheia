@@ -19,8 +19,13 @@ func init() {
 		Desc:   "contêiner intocado não pode produzir achado nenhum",
 		Images: matriz,
 		Expect: nil,
-		Forbid: []string{"proc.memfd_exec", "proc.exe_deleted", "proc.kthread_disguise"},
-		Exit:   0,
+		Forbid: []string{
+			"proc.memfd_exec", "proc.exe_deleted", "proc.kthread_disguise",
+			"proc.suspicious_path", "proc.caps_unexpected", "proc.tracer",
+			"proc.maps_rwx_anon", "proc.ns_divergent",
+			"correlate.revshell", "net.pivot",
+		},
+		Exit: 0,
 	})
 
 	Register(Scenario{
@@ -111,6 +116,99 @@ func init() {
 		MustBeComplete: true,
 	})
 
+	// -------------------------------------------------- caminho, privilégio, memória
+
+	Register(Scenario{
+		ID:     "14-caminho-suspeito",
+		Desc:   "binário rodando de /tmp — onde instalação nenhuma põe binário",
+		Images: matriz,
+		Plant: `cp /helper /tmp/.x
+			/tmp/.x sleep 300 &
+			sleep 0.4`,
+		Expect: []Expect{{ID: "proc.suspicious_path", Sev: "WARN"}},
+		// O binário existe e não foi apagado: os checks de exe não têm o que
+		// dizer aqui, e contar o mesmo processo três vezes infla a triagem.
+		Forbid:         []string{"proc.exe_deleted", "proc.memfd_exec"},
+		Exit:           1,
+		MustBeComplete: true,
+	})
+
+	Register(Scenario{
+		ID:   "15-capability-sem-root",
+		Desc: "processo de usuário comum com capability que vale por root",
+		// Como capability substitui o SUID (runbook §3.7): PR_SET_KEEPCAPS
+		// preserva o conjunto permitido através do setuid. `ps` mostra uid 1000
+		// e o processo pode virar root a qualquer momento.
+		//
+		// As duas capabilities usadas estão no conjunto PADRÃO do Docker: o
+		// cenário não precisa de --cap-add, e por isso roda na matriz inteira.
+		Images: matriz,
+		Plant: `/helper caps 1000 &
+			sleep 0.5`,
+		Expect: []Expect{{ID: "proc.caps_unexpected", Sev: "WARN"}},
+		Exit:   1,
+		// Trocar de uid zera o flag dumpable, e aí nem o root do contêiner lê
+		// o exe daquele processo sem CAP_SYS_PTRACE. A cobertura CAI — e é
+		// isso mesmo que a ferramenta precisa dizer.
+		MustBeIncomplete: true,
+	})
+
+	Register(Scenario{
+		ID:   "16-ptrace",
+		Desc: "processo sob ptrace: outro processo controla a memória dele",
+		// Pai/filho, que é o que ptrace_scope=1 permite — o padrão da maioria
+		// das distros. Injeção sem arquivo nenhum (runbook §3.16).
+		Images: matriz,
+		Plant: `/helper trace &
+			sleep 0.6`,
+		Expect:         []Expect{{ID: "proc.tracer", Sev: "WARN"}},
+		Exit:           1,
+		MustBeComplete: true,
+	})
+
+	Register(Scenario{
+		ID:   "17-rwx-anonimo",
+		Desc: "memória gravável, executável e sem arquivo por trás",
+		// A assinatura que o malfind procura, e que MemoryDenyWriteExecute=yes
+		// torna impossível (runbook §34.1).
+		Images: minimal,
+		Plant: `/helper rwx &
+			sleep 0.4`,
+		Expect:         []Expect{{ID: "proc.maps_rwx_anon", Sev: "WARN"}},
+		Exit:           1,
+		MustBeComplete: true,
+	})
+
+	Register(Scenario{
+		ID:   "18-jit-de-sistema-nao-dispara",
+		Desc: "runtime com JIT em diretório de sistema é pulado",
+		// O descarte que decide se o check é usável: sem ele, todo host com Java
+		// ou Node vira parede de aviso. A outra metade do par — o mesmo nome
+		// rodando de /tmp, que NÃO é isentado — está no teste unitário, porque
+		// depende só da regra e não do /proc.
+		Images: minimal,
+		Plant: `cp /helper /usr/bin/node
+			/usr/bin/node rwx &
+			sleep 0.4`,
+		Forbid: []string{"proc.maps_rwx_anon", "proc.suspicious_path"},
+		Exit:   0,
+	})
+
+	Register(Scenario{
+		ID:   "19-namespace-proprio",
+		Desc: "unshare fora de container e fora de unit: esconderijo sem rootkit",
+		// Explica os dois "impossíveis" da §3.15 sem precisar de rootkit — o
+		// arquivo que o `ls` não acha e a conexão que o `ss` não lista. O
+		// cgroup aqui é `/`: nem container nem unit, que são os dois descartes.
+		Images: matriz,
+		Caps:   []string{"SYS_ADMIN"}, // unshare exige
+		Plant: `unshare -n /helper sleep 300 &
+			sleep 0.5`,
+		Expect:         []Expect{{ID: "proc.ns_divergent", Sev: "WARN"}},
+		Exit:           1,
+		MustBeComplete: true,
+	})
+
 	// ------------------------------------------------------------------- rede
 	//
 	// Os quatro cenários abaixo existem em pares: uma forma que precisa
@@ -122,10 +220,11 @@ func init() {
 	// namespace.
 
 	Register(Scenario{
-		ID:       "40-revshell",
-		Desc:     "fd 0, 1 e 2 no mesmo socket, saindo para endereço público",
-		Images:   minimal,
-		NetAdmin: true,
+		ID:        "40-revshell",
+		Desc:      "fd 0, 1 e 2 no mesmo socket, saindo para endereço público",
+		Images:    minimal,
+		Caps:      []string{"NET_ADMIN"},
+		NoNetwork: true,
 		Plant: `ip link set lo up
 			ip addr add 51.91.190.241/32 dev lo
 			/helper listen 51.91.190.241:9001 &
@@ -161,10 +260,11 @@ func init() {
 	})
 
 	Register(Scenario{
-		ID:       "42-pivot",
-		Desc:     "mesmo processo com saída externa e saída interna: a VM é caminho",
-		Images:   minimal,
-		NetAdmin: true,
+		ID:        "42-pivot",
+		Desc:      "mesmo processo com saída externa e saída interna: a VM é caminho",
+		Images:    minimal,
+		Caps:      []string{"NET_ADMIN"},
+		NoNetwork: true,
 		Plant: `ip link set lo up
 			ip addr add 51.91.190.241/32 dev lo
 			ip addr add 10.0.0.9/32 dev lo
@@ -187,8 +287,9 @@ func init() {
 		// O defeito que a revisão encontrou no check: sem direção, todo nginx
 		// que serve tráfego público virava pivô. A diferença é inteira aqui —
 		// tráfego externo de ENTRADA, não de saída.
-		Images:   minimal,
-		NetAdmin: true,
+		Images:    minimal,
+		Caps:      []string{"NET_ADMIN"},
+		NoNetwork: true,
 		Plant: `ip link set lo up
 			ip addr add 51.91.190.241/32 dev lo
 			ip addr add 10.0.0.9/32 dev lo

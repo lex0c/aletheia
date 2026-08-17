@@ -63,13 +63,17 @@ type Scenario struct {
 	// Args extras para o scan.
 	Args []string
 
-	// NetAdmin dá CAP_NET_ADMIN ao contêiner e o deixa SEM REDE
-	// (--network=none). Os cenários de rede precisam de endereços de escopo
-	// público e privado para exercitar a classificação de peer, e a forma
-	// honesta de obter isso é criar apelidos em `lo` dentro de um namespace de
-	// rede isolado: o endereço é público para quem classifica, e nenhum pacote
-	// jamais sai da máquina.
-	NetAdmin bool
+	// Caps são capabilities extras do contêiner (--cap-add). Só os cenários que
+	// PRECISAM de privilégio para montar a situação as pedem: NET_ADMIN para
+	// criar apelido de endereço, SYS_ADMIN para o unshare.
+	Caps []string
+
+	// NoNetwork tira a rede do contêiner (--network=none). Os cenários de rede
+	// precisam de endereço de escopo PÚBLICO para exercitar a classificação, e a
+	// forma honesta de conseguir isso é criar apelidos em `lo` dentro de um
+	// namespace isolado: o endereço é público para quem classifica, e nenhum
+	// pacote jamais sai da máquina.
+	NoNetwork bool
 
 	// Expect precisa aparecer; Forbid não pode aparecer. As proibições são
 	// tão valiosas quanto as expectativas: elas travam confusão entre checks

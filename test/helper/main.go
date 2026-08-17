@@ -17,7 +17,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 	"unsafe"
@@ -56,19 +58,32 @@ const usage = `helper — monta situações para a suíte de cenários
       systemd — idêntica à de cima, exceto pela DIREÇÃO. Existe para provar que
       a ferramenta não confunde as duas.
 
+  helper caps <uid>
+      larga o uid de root MANTENDO capability. É como capability substitui o
+      SUID (runbook §3.7): o processo aparece como usuário comum e tem poder de
+      root. Não precisa de setcap nem de libcap — só de PR_SET_KEEPCAPS.
+
+  helper trace
+      inicia um filho sob PTRACE_TRACEME e o mantém traçado. A relação pai/filho
+      é o que satisfaz ptrace_scope=1, que é o padrão da maioria das distros.
+
+  helper rwx
+      mapeia uma região ANÔNIMA gravável e executável e a mantém. É a assinatura
+      que o malfind procura (runbook §3.10) — sem escrever código nela: só a forma.
+
   helper proxy <ip:porta-escuta> <ip:porta-backend>
       aceita conexão de fora e abre outra para o backend. É a forma do proxy
       reverso: entrada externa + saída interna. Não pode ser lida como pivô.
 `
 
 func main() {
-	if len(os.Args) < 3 {
-		fmt.Fprint(os.Stderr, usage)
-		os.Exit(2)
-	}
+	// O mínimo é o subcomando: `trace` não leva argumento nenhum. Cada caso
+	// confere o que precisa.
+	need(2)
 
 	switch os.Args[1] {
 	case "sleep":
+		need(3)
 		var n int
 		fmt.Sscanf(os.Args[2], "%d", &n)
 		time.Sleep(time.Duration(n) * time.Second)
@@ -76,24 +91,24 @@ func main() {
 
 	case "argv0":
 		// helper argv0 "[kworker/9:2]" /bin/sleep 300
-		if len(os.Args) < 4 {
-			fmt.Fprint(os.Stderr, usage)
-			os.Exit(2)
-		}
+		need(4)
 		fake, prog := os.Args[2], os.Args[3]
 		argv := append([]string{fake}, os.Args[4:]...)
 		die(syscall.Exec(prog, argv, os.Environ()))
 
 	case "memfd":
+		need(3)
 		prog := os.Args[2]
 		die(memfdExec(prog, os.Args[3:]))
 
 	case "listen":
+		need(3)
 		ln := mustListen(os.Args[2])
 		go acceptForever(ln)
 		hold()
 
 	case "connect":
+		need(3)
 		for _, addr := range os.Args[2:] {
 			keep(mustDial(addr))
 		}
@@ -103,6 +118,7 @@ func main() {
 		// A forma da §17: o processo SAI e amarra os três descritores padrão no
 		// socket. Nenhum shell é executado — o que a ferramenta reconhece é a
 		// estrutura, não o programa.
+		need(3)
 		c := mustDial(os.Args[2])
 		die(dupOntoStdio(c))
 		hold()
@@ -112,6 +128,7 @@ func main() {
 		// socket) e inetd entregam a conexão. O socket de ESCUTA fica aberto,
 		// como num serviço de verdade — é ele que permite classificar a conexão
 		// aceita como de ENTRADA.
+		need(3)
 		ln := mustListen(os.Args[2])
 		c, err := ln.Accept()
 		die(err)
@@ -119,13 +136,25 @@ func main() {
 		die(dupOntoStdio(c))
 		hold()
 
+	case "caps":
+		need(3)
+		uid, err := strconv.Atoi(os.Args[2])
+		die(err)
+		die(keepCapsAsUser(uid))
+		hold()
+
+	case "trace":
+		die(traceChild())
+		hold()
+
+	case "rwx":
+		die(mapRWX())
+		hold()
+
 	case "proxy":
 		// Entrada externa + saída interna: proxy reverso. Tem os dois lados
 		// como um pivô e NÃO é um — a direção é a diferença inteira.
-		if len(os.Args) < 4 {
-			fmt.Fprint(os.Stderr, usage)
-			os.Exit(2)
-		}
+		need(4)
 		ln := mustListen(os.Args[2])
 		c, err := ln.Accept()
 		die(err)
@@ -229,6 +258,97 @@ func dupOntoStdio(c net.Conn) error {
 	// descritores duplicados apontariam para nada.
 	keep(c)
 	return dupErr
+}
+
+// keepCapsAsUser reproduz o caminho da §3.7: PR_SET_KEEPCAPS preserva o
+// conjunto PERMITIDO através do setuid, e o capset devolve ao EFETIVO o que
+// interessa. O resultado é um processo com uid de usuário comum e poder de
+// root — que é exatamente o que auditoria por UID não enxerga.
+//
+// As duas capabilities escolhidas estão no conjunto padrão do Docker, então o
+// cenário roda sem --cap-add.
+func keepCapsAsUser(uid int) error {
+	const (
+		prSetKeepCaps  = 8
+		capVersion3    = 0x20080522
+		capDACOverride = 1
+		capSetUID      = 7
+	)
+	if _, _, e := syscall.RawSyscall(syscall.SYS_PRCTL, prSetKeepCaps, 1, 0); e != 0 {
+		return fmt.Errorf("PR_SET_KEEPCAPS: %w", e)
+	}
+	if err := syscall.Setresgid(uid, uid, uid); err != nil {
+		return fmt.Errorf("setresgid: %w", err)
+	}
+	if err := syscall.Setresuid(uid, uid, uid); err != nil {
+		return fmt.Errorf("setresuid: %w", err)
+	}
+	// O setuid limpa o conjunto EFETIVO mesmo com KEEPCAPS; o permitido
+	// sobrevive, e é dele que se reergue o efetivo.
+	want := uint32(1<<capDACOverride | 1<<capSetUID)
+	hdr := capHeader{version: capVersion3}
+	data := [2]capData{{effective: want, permitted: want}}
+	if _, _, e := syscall.RawSyscall(syscall.SYS_CAPSET,
+		uintptr(unsafe.Pointer(&hdr)), uintptr(unsafe.Pointer(&data[0])), 0); e != 0 {
+		return fmt.Errorf("capset: %w", e)
+	}
+	return nil
+}
+
+// capset não está no pacote syscall da biblioteca padrão — só em
+// golang.org/x/sys. Como o helper é sem dependência (mesma regra do binário
+// principal), as duas estruturas vêm à mão. Layout de <linux/capability.h>.
+type capHeader struct {
+	version uint32
+	pid     int32
+}
+
+type capData struct {
+	effective   uint32
+	permitted   uint32
+	inheritable uint32
+}
+
+// traceChild deixa um processo com TracerPid != 0. O filho é iniciado com
+// PTRACE_TRACEME e depois liberado: fica RODANDO e traçado, que é a forma de
+// injeção da §3.16 — e não um processo parado, que não pareceria nada.
+func traceChild() error {
+	// A thread que inicia o filho é a única que pode esperar por ele.
+	runtime.LockOSThread()
+
+	cmd := exec.Command(os.Args[0], "sleep", "300")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	var ws syscall.WaitStatus
+	if _, err := syscall.Wait4(cmd.Process.Pid, &ws, 0, nil); err != nil {
+		return err
+	}
+	return syscall.PtraceCont(cmd.Process.Pid, 0)
+}
+
+// mapRWX cria a região que `MemoryDenyWriteExecute=yes` torna impossível
+// (runbook §34.1): sem arquivo por trás, gravável e executável ao mesmo tempo.
+func mapRWX() error {
+	b, err := syscall.Mmap(-1, 0, 4096,
+		syscall.PROT_READ|syscall.PROT_WRITE|syscall.PROT_EXEC,
+		syscall.MAP_PRIVATE|syscall.MAP_ANONYMOUS)
+	if err != nil {
+		return fmt.Errorf("mmap rwx: %w", err)
+	}
+	rwx = b
+	return nil
+}
+
+// rwx é global para o mapeamento não ser recolhido antes da varredura.
+var rwx []byte
+
+func need(n int) {
+	if len(os.Args) < n {
+		fmt.Fprint(os.Stderr, usage)
+		os.Exit(2)
+	}
 }
 
 func die(err error) {

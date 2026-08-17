@@ -21,9 +21,9 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 
 - [x] **2.1** `proc.exe_missing` — `/memfd:` e `(deleted)` (§3.16, §3.14)
 - [x] **2.2** `proc.kthread_disguise` — cmdline vazio + argv0 `[…]` com exe existente, relendo contra corrida (§3.5)
-- [ ] **2.3** `proc.suspicious_path` — `/tmp`, `/dev/shm`, `~/.config/<dir>/<bin>`; `~/.local` é XDG legítimo (§8)
-- [ ] **2.4** `proc.caps_unexpected` — `CapEff` **comparado com o esperado**, não apenas != 0 (§3.7)
-- [ ] **2.5** `proc.tracer`, `proc.ns_divergent`, `proc.maps_rwx_anon` (§3.7, §3.15, §3.10)
+- [x] **2.3** `proc.suspicious_path` — `/tmp`, `/dev/shm`, `~/.config/<dir>/<bin>`; `~/.local` é XDG legítimo (§8)
+- [x] **2.4** `proc.caps_unexpected` — `CapEff` **comparado com o esperado**, não apenas != 0 (§3.7)
+- [x] **2.5** `proc.tracer`, `proc.ns_divergent`, `proc.maps_rwx_anon` (§3.7, §3.15, §3.10)
 - [x] **2.6** `correlate.revshell` — fd 0,1,2 no mesmo socket **descartando socket activation** (§17)
 - [ ] **2.7** `wtf` — mesma coleta, renderização e orçamento próprios
 
@@ -399,3 +399,78 @@ falso POSITIVO   serviço que fecha o listener depois do accept: a conexão
 
 Trocar isso por faixa de porta efêmera seria pior — é chute, e quem escolhe a
 porta é o implante.
+
+---
+
+## Registro — caminho, privilégio e memória (2.3, 2.4, 2.5)
+
+Cinco checks novos: `proc.suspicious_path` (§8), `proc.caps_unexpected` (§3.7),
+`proc.tracer` (§3.7), `proc.maps_rwx_anon` (§3.10) e `proc.ns_divergent`
+(§3.15). Total: 10 checks automáticos, todos com cenário.
+
+### O coletor engolia dois erros em silêncio
+
+`readMaps` e `readNS` retornavam sem registrar nada quando faltava permissão —
+a mesma classe de defeito que a revisão pegou em `exe` e `fd`. Um host sem root
+produziria mapa de namespace vazio, e o check leria "nenhum namespace
+divergente". Agora viram `MapsDenied`/`NSDenied` por processo e lacuna de coleta
+declarada.
+
+### Rodar contra host real pegou o que teste sintético não pegaria
+
+Primeira execução, um achado: `fusermount3`, uid 1000, com o conjunto cheio de
+capability. Falso positivo — `Uid: 1000 0 0 0`. O uid REAL é 1000, o EFETIVO é
+0: é setuid-root, e portanto É root. O coletor só guardava o primeiro campo.
+
+```
+antes    p.UID = fs[0]                      todo setuid do sistema virava escalada
+depois   p.UID = fs[0]; p.EUID = fs[1]      e o check testa o EFETIVO
+```
+
+O segundo veio do mesmo teste: processo em namespace de usuário (Podman
+rootless, sandbox de navegador) exibe `CapEff` cheio, e essas capabilities não
+valem nada fora do namespace. Descartadas comparando com o namespace do PID 1.
+
+### E depois, com visão de root sobre o host inteiro
+
+`docker run --pid=host --privileged` dá a visão que `sudo` daria. Resultado:
+**36 avisos**, todos de `proc.ns_divergent`. A investigação mudou o desenho do
+check:
+
+```
+25 de udevd      isUnitCgroup usava HasSuffix, e o cgroup de serviço com
+                 subgrupo é /system.slice/systemd-udevd.service/udev
+ 3 de polkit,    systemd cria namespace de REDE e de USUÁRIO por hardening de
+   upower,       unit — PrivateNetwork=, PrivateUsers=. A premissa de que só
+   accounts      mnt era comum estava errada
+ 8 do Firefox    sandbox de navegador. É FP declarado, e só aparece em desktop
+```
+
+Passou a pular unit por inteiro, não só o namespace de mount. De 36 para 8 —
+e os 8 são o FP declarado. Em servidor, zero. O preço é um ponto cego dito em
+voz alta: quem comprometeu uma unit não aparece neste check (aparece nos outros).
+
+Os outros quatro checks novos: **zero achado** contra o host real com visão de
+root. É o resultado que interessa — ruído treina o operador a ignorar o
+relatório inteiro.
+
+### Cenários novos
+
+O helper ganhou `caps`, `trace`, `rwx`, e o harness ganhou `Caps`/`NoNetwork`
+no lugar do `NetAdmin`.
+
+```
+14-caminho-suspeito             binário de /tmp
+15-capability-sem-root          PR_SET_KEEPCAPS através do setuid: as duas
+                                capabilities usadas estão no conjunto PADRÃO do
+                                Docker, então não precisa de --cap-add
+16-ptrace                       filho sob PTRACE_TRACEME (satisfaz ptrace_scope=1)
+17-rwx-anonimo                  mmap PROT_EXEC|PROT_WRITE anônimo
+18-jit-de-sistema-nao-dispara   negativo: /usr/bin/node com a mesma forma
+19-namespace-proprio            unshare -n com cgroup `/`
+```
+
+O `15` é o único `MustBeIncomplete` do bloco, e por um motivo que vale registrar:
+trocar de uid zera o flag `dumpable`, e a partir daí nem o root do contêiner lê
+o `exe` daquele processo sem `CAP_SYS_PTRACE`. A cobertura CAI — e a ferramenta
+diz isso em vez de fingir que olhou.

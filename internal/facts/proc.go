@@ -31,6 +31,11 @@ type Process struct {
 	UID  int `json:"uid"`
 	GID  int `json:"gid"`
 
+	// EUID/EGID são o privilégio que VALE agora. Diferente do real significa
+	// troca de privilégio — setuid, ou o processo largou privilégio de propósito.
+	EUID int `json:"euid"`
+	EGID int `json:"egid"`
+
 	Comm  string `json:"comm"`  // de /proc/<pid>/stat, entre parênteses
 	State string `json:"state"` // R S D Z T ...
 
@@ -58,6 +63,12 @@ type Process struct {
 	StartUTC string        `json:"start_utc,omitempty"`
 	Age      time.Duration `json:"-"`
 
+	// MapsDenied e NSDenied são EXPORTADOS porque quem precisa deles é o
+	// check: "nenhuma região rwx" e "nenhum namespace divergente" só valem
+	// alguma coisa se a fonte tiver sido legível.
+	MapsDenied bool `json:"maps_denied,omitempty"`
+	NSDenied   bool `json:"ns_denied,omitempty"`
+
 	Cgroup    string            `json:"cgroup,omitempty"`
 	NS        map[string]string `json:"ns,omitempty"`
 	FDs       []FD              `json:"fds,omitempty"`
@@ -74,9 +85,10 @@ type Process struct {
 	// que não reportar.
 	Vanished bool `json:"vanished,omitempty"`
 
-	startTicks       int64 // campo 22 de stat, em ticks desde o boot
-	deniedFDs        bool  // /proc/<pid>/fd ilegível: vira cobertura parcial
-	cmdlineCandidate bool  // cmdline vazio na 1ª leitura; aguarda reconfirmação
+	startTicks int64 // campo 22 de stat, em ticks desde o boot
+	deniedFDs  bool  // /proc/<pid>/fd ilegível: vira cobertura parcial
+
+	cmdlineCandidate bool // cmdline vazio na 1ª leitura; aguarda reconfirmação
 }
 
 // FD é um descritor aberto, já resolvido.
@@ -130,7 +142,7 @@ func collectProcesses(f *Facts, e *env.Env) {
 
 	self := os.Getpid()
 
-	var denied, dropped, listed int
+	var denied, deniedMaps, deniedNS, dropped, listed int
 	for _, ent := range ents {
 		pid, err := strconv.Atoi(ent.Name())
 		if err != nil {
@@ -163,6 +175,12 @@ func collectProcesses(f *Facts, e *env.Env) {
 		if p.deniedFDs {
 			denied++
 		}
+		if p.MapsDenied {
+			deniedMaps++
+		}
+		if p.NSDenied {
+			deniedNS++
+		}
 		f.Processes = append(f.Processes, *p)
 	}
 
@@ -173,6 +191,15 @@ func collectProcesses(f *Facts, e *env.Env) {
 	if denied > 0 {
 		f.partial("proc", strconv.Itoa(denied)+" processos com fds ilegíveis (sem permissão): "+
 			"reverse shell por fd 0/1/2 não pôde ser avaliado neles")
+	}
+	if deniedMaps > 0 {
+		f.partial("proc", strconv.Itoa(deniedMaps)+" processos com /proc/<pid>/maps ilegível "+
+			"(sem permissão): região rwx anônima — a assinatura de injeção — não pôde "+
+			"ser avaliada neles")
+	}
+	if deniedNS > 0 {
+		f.partial("proc", strconv.Itoa(deniedNS)+" processos com /proc/<pid>/ns/* ilegível "+
+			"(sem permissão): namespace próprio não pôde ser avaliado neles")
 	}
 	if dropped > 0 {
 		f.partial("proc", strconv.Itoa(dropped)+" de "+strconv.Itoa(listed)+
@@ -282,12 +309,24 @@ func readStatus(p *Process) {
 		v = strings.TrimSpace(v)
 		switch k {
 		case "Uid":
-			if fs := strings.Fields(v); len(fs) > 0 {
+			// real, efetivo, salvo, fs. O que MANDA é o efetivo: um binário
+			// setuid tem uid real 1000 e efetivo 0 — ele É root, e ler só o
+			// primeiro campo faz a ferramenta chamá-lo de processo comum
+			// (runbook §3.7).
+			if fs := strings.Fields(v); len(fs) > 1 {
 				p.UID, _ = strconv.Atoi(fs[0])
+				p.EUID, _ = strconv.Atoi(fs[1])
+			} else if len(fs) == 1 {
+				p.UID, _ = strconv.Atoi(fs[0])
+				p.EUID = p.UID
 			}
 		case "Gid":
-			if fs := strings.Fields(v); len(fs) > 0 {
+			if fs := strings.Fields(v); len(fs) > 1 {
 				p.GID, _ = strconv.Atoi(fs[0])
+				p.EGID, _ = strconv.Atoi(fs[1])
+			} else if len(fs) == 1 {
+				p.GID, _ = strconv.Atoi(fs[0])
+				p.EGID = p.GID
 			}
 		case "TracerPid":
 			p.TracerPID, _ = strconv.Atoi(v)
@@ -451,9 +490,16 @@ func readCgroup(p *Process) {
 }
 
 func readNS(p *Process) {
-	for _, n := range []string{"mnt", "net", "pid"} {
-		if t, err := os.Readlink(procPath(p.PID, "ns/"+n)); err == nil {
+	for _, n := range []string{"mnt", "net", "pid", "user"} {
+		t, err := os.Readlink(procPath(p.PID, "ns/"+n))
+		switch {
+		case err == nil:
 			p.NS[n] = t
+		case os.IsPermission(err):
+			// Sem isto, um host sem root produziria mapa de namespace vazio e
+			// o check leria "nenhum namespace divergente" — que é a mentira
+			// que a ferramenta existe para não contar.
+			p.NSDenied = true
 		}
 	}
 }
@@ -515,6 +561,9 @@ func readFDs(p *Process) {
 func readMaps(p *Process) {
 	b, err := os.ReadFile(procPath(p.PID, "maps"))
 	if err != nil {
+		if os.IsPermission(err) {
+			p.MapsDenied = true
+		}
 		return
 	}
 	lines := strings.Split(string(b), "\n")

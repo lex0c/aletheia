@@ -120,6 +120,7 @@ var shellDeServico = check.Check{
 			}
 
 			fd := self.F(check.SevCritical, "pid="+strconv.Itoa(p.PID), "", ev...)
+			fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"a linhagem é a evidência: preserve a árvore inteira antes de matar " +
@@ -188,6 +189,7 @@ var ptyDeServico = check.Check{
 			}
 
 			fd := self.F(check.SevWarn, "pid="+strconv.Itoa(p.PID), "", ev...)
+			fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 			fd.NextSteps = []string{
 				"pergunte ao time se alguém estava trabalhando como este usuário " +
 					"nesse horário",

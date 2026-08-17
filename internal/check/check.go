@@ -109,6 +109,17 @@ type Finding struct {
 	Evidence  []string `json:"evidence,omitempty"`
 	NextSteps []string `json:"next_steps,omitempty"`
 
+	// Quando é o instante que DATA este achado, em UTC, e vazio é o normal:
+	// nem todo achado tem data. A diferença decide o que a janela de
+	// investigação (--since) faz com ele — o que tem data e ficou fora sai do
+	// relatório e é CONTADO; o que não tem data FICA, porque descartá-lo seria
+	// esconder achado por ignorância, não por escolha.
+	Quando string `json:"when,omitempty"`
+	// QuandoFonte diz o que aquela data significa. Sem isso, "2026-04-30" não
+	// distingue "o arquivo foi modificado" de "o processo subiu" — e essas duas
+	// frases mandam o operador para lugares diferentes.
+	QuandoFonte string `json:"when_source,omitempty"`
+
 	// Irreversible marca o achado cujo passo seguinte se perde para sempre se
 	// for pulado — matar um processo memfd destrói a única cópia do binário.
 	// O relatório promove estes ao passo 1 por ESTE campo, não por casar o

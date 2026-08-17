@@ -60,7 +60,7 @@ type coverageLine struct {
 
 // JSONL escreve uma finding por linha, mais a linha de cobertura.
 // Nunca é afetado pela verbosidade.
-func JSONL(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, bl *BaselineInfo) error {
+func JSONL(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, bl *BaselineInfo, jn *JanelaInfo) error {
 	enc := json.NewEncoder(w)
 	host := f.Host.Hostname
 	ts := e.Now.Format("2006-01-02T15:04:05Z")
@@ -98,6 +98,21 @@ func JSONL(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, bl *Baselin
 		}
 	}
 
+	// A JANELA PRECISA APARECER AQUI pelo mesmo motivo da baseline, e com mais
+	// razão: a baseline REBAIXA achado, a janela o REMOVE. Sem esta linha, um
+	// agregador de frota vê `verdict: OK` sem ter como distinguir "host limpo"
+	// de "host onde a janela cortou três achados, um deles crítico".
+	if jn != nil && (jn.Desde != "" || jn.Ancora != "") {
+		if err := enc.Encode(janelaLine{
+			Host: host, TS: ts, Tool: tool, ID: "window",
+			Desde: jn.Desde, Spec: jn.Spec, Fora: jn.Fora,
+			ForaTexto: jn.ForaTexto, SemData: jn.SemData,
+			Ancora: jn.Ancora, AncoraOrigem: jn.AncoraOrigem, AncoraDe: jn.AncoraDe,
+		}); err != nil {
+			return err
+		}
+	}
+
 	return enc.Encode(coverageLine{
 		Host: host, TS: ts, Tool: tool, ID: "coverage",
 		Total: r.Coverage.Total, Complete: r.Coverage.Complete,
@@ -105,6 +120,24 @@ func JSONL(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, bl *Baselin
 		CollectorGaps: r.Coverage.CollectorGaps, TrustBroken: r.TrustBroken,
 		Verdict: r.Verdict(), Exit: r.Exit(),
 	})
+}
+
+// janelaLine declara o recorte temporal e o âncora derivado.
+type janelaLine struct {
+	Host string `json:"host"`
+	TS   string `json:"ts"`
+	Tool string `json:"tool"`
+	ID   string `json:"id"`
+
+	Desde     string `json:"since,omitempty"`
+	Spec      string `json:"since_spec,omitempty"`
+	Fora      int    `json:"outside_window,omitempty"`
+	ForaTexto string `json:"outside_by_severity,omitempty"`
+	SemData   int    `json:"undated_kept,omitempty"`
+
+	Ancora       string `json:"anchor,omitempty"`
+	AncoraOrigem string `json:"anchor_origin,omitempty"`
+	AncoraDe     string `json:"anchor_from,omitempty"`
 }
 
 // baselineLine declara a referência usada. Existe pelo mesmo motivo da linha de

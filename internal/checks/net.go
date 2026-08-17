@@ -84,6 +84,7 @@ var revshell = check.Check{
 			}
 
 			fd := self.F(sev, "pid="+strconv.Itoa(p.PID), "", ev...)
+			fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"NÃO mate antes de preservar (runbook §6) — e NÃO bloqueie só o IP: " +
@@ -165,6 +166,7 @@ var pivot = check.Check{
 			}
 
 			fd := self.F(check.SevWarn, "pid="+strconv.Itoa(p.PID), "", ev...)
+			fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 			fd.NextSteps = []string{
 				"este host é CAMINHO, não só alvo: os alvos internos passam a ser suspeitos (runbook §23)",
 				"o alcance interno está na §12.4; a mitigação é egress default-deny (runbook §34.3)",

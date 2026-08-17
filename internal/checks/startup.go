@@ -175,6 +175,7 @@ var shellStartup = check.Check{
 				ev = append(ev, contextoDoTrigger(t)...)
 
 				fd := self.F(sev, alvoDoTrigger(t), "", ev...)
+				fd.Quando, fd.QuandoFonte = t.ModUTC, "mtime do arquivo de gatilho"
 				fd.NextSteps = []string{
 					"`tail -20` em cada arquivo de inicialização vale mais que grep: " +
 						"o acréscimo fica no fim (runbook §7.6)",
@@ -230,6 +231,7 @@ var bashEnv = check.Check{
 				ev = append(ev, contextoDoTrigger(t)...)
 
 				fd := self.F(check.SevCritical, alvoDoTrigger(t), "", ev...)
+				fd.Quando, fd.QuandoFonte = t.ModUTC, "mtime do arquivo de gatilho"
 				fd.NextSteps = []string{
 					"leia o arquivo apontado: ele roda em toda execução não interativa",
 					"procure o mesmo padrão em /etc/environment e em drop-in de unit " +
@@ -336,6 +338,7 @@ var triggerExec = check.Check{
 				ev = append(ev, contextoDoTrigger(t)...)
 
 				fd := self.F(sev, alvoDoTrigger(t), "", ev...)
+				fd.Quando, fd.QuandoFonte = t.ModUTC, "mtime do arquivo de gatilho"
 				fd.NextSteps = []string{
 					"o ctime do arquivo data a ativação, mesmo que o conteúdo pareça " +
 						"antigo (runbook §5.2, §9)",
@@ -408,6 +411,7 @@ var pamExec = check.Check{
 				ev = append(ev, contextoDoTrigger(t)...)
 
 				fd := self.F(sev, alvoDoTrigger(t), "", ev...)
+				fd.Quando, fd.QuandoFonte = t.ModUTC, "mtime do arquivo de gatilho"
 				fd.NextSteps = []string{
 					"o caminho de autenticação vê a senha: trate como comprometimento " +
 						"de credencial até provar o contrário (runbook §23)",
@@ -468,6 +472,7 @@ var udevRun = check.Check{
 				ev = append(ev, contextoDoTrigger(t)...)
 
 				fd := self.F(sev, alvoDoTrigger(t), "", ev...)
+				fd.Quando, fd.QuandoFonte = t.ModUTC, "mtime do arquivo de gatilho"
 				fd.NextSteps = []string{
 					"um dispositivo pode ser criado por software: o gatilho não " +
 						"depende de hardware novo",

@@ -59,6 +59,7 @@ var memfdExec = check.Check{
 				// JSONL da frota e para o ticket (SPEC 5.4).
 				"cmdline="+strings.Join(redact.Cmdline(p.Argv), " "),
 			)
+			fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 			if p.StartUTC != "" {
 				fd.Evidence = append(fd.Evidence, "início="+p.StartUTC)
 			}
@@ -119,6 +120,7 @@ var exeDeleted = check.Check{
 				"exe="+p.Exe+" (deleted)",
 				"comm="+p.Comm+" uid="+strconv.Itoa(p.UID)+" ppid="+strconv.Itoa(p.PPID),
 			)
+			fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 			if p.StartUTC != "" {
 				fd.Evidence = append(fd.Evidence, "início="+p.StartUTC)
 			}
@@ -188,6 +190,7 @@ var kthreadDisguise = check.Check{
 				"exe="+p.Exe,
 				"comm="+p.Comm+" uid="+strconv.Itoa(p.UID)+" ppid="+strconv.Itoa(p.PPID),
 			)
+			fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 			if len(p.Argv) > 0 {
 				fd.Evidence = append(fd.Evidence, "argv0="+p.Argv[0])
 			}

@@ -48,7 +48,7 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 ## Fase 5 — IOC e janela  ▸ o que fecha a §23
 
 - [x] **5.1** `--ioc` — IPs, hashes, paths, strings, chaves, usuários
-- [ ] **5.2** `--since` transversal, com a regra de default explícita
+- [x] **5.2** `--since` transversal, com a regra de default explícita
 
 ## Fase 6 — anti-forense e catálogo
 
@@ -3629,3 +3629,105 @@ execução, e chave que não decodifica — e as oito mutações dirigidas morre
 Falta a outra metade da fase 5: o `--since`, que é transversal e precisa de uma
 decisão própria — o que fazer com o achado SEM data. Descartá-lo porque não cabe
 na janela seria a truncagem silenciosa que esta base persegue em todo lugar.
+
+---
+
+## Registro — `--since`: a janela, e o achado que não tem data
+
+A outra metade da fase 5, e ela fecha a §23 junto com o `--ioc`: um recorta por
+INDICADOR, o outro por TEMPO.
+
+### O problema, e por que ele é diferente de filtrar
+
+Um host de dois anos tem centenas de coisas verdadeiras a dizer sobre si mesmo,
+e quase nenhuma pertence ao incidente. Quando se sabe QUANDO a invasão começou
+— e num incidente real quase sempre se sabe, por um log de aplicação, um alerta
+ou uma reclamação —, o recorte separa o caso da história do servidor.
+
+Só que filtrar relatório é a operação mais perigosa desta ferramenta inteira.
+Tudo aqui existe para não calar achado, e uma janela cala por desenho.
+
+### A decisão que decidiu o resto: o achado SEM data
+
+Nem todo achado tem data. Uma conta com uid 0, uma regra de sudoers, um socket
+aberto agora: não existe mtime que os situe no tempo. A saída fácil seria
+descartá-los junto com o que ficou fora — e ela seria a truncagem silenciosa
+que esta base persegue em todo lugar, porque descartaria por **ignorância** e
+não por escolha do operador.
+
+A regra é a oposta, e ela é o eixo do desenho:
+
+```
+tem data, dentro    fica
+tem data, fora      SAI, e é contado por severidade
+não tem data        FICA, e é contado à parte
+data ilegível       conta como SEM data — um erro de formatação não pode
+                    apagar achado do relatório
+```
+
+E é essa regra que torna a datação incremental segura: dos 91 pontos onde um
+check monta achado, 31 passaram a carregar data nesta rodada — processo pelo
+início, persistência pelo mtime, login pelo registro, eBPF pela carga,
+timestomp pelo **ctime**. Os outros continuam sem data e continuam aparecendo.
+
+O timestomp merece a nota: ele é datado pelo ctime, e não pelo mtime, porque o
+mtime é justamente o que foi falsificado. Datá-lo pelo mtime colocaria o
+implante na janela que o INVASOR escolheu.
+
+### O exit code, e a promessa que ele carrega
+
+O primeiro desenho deixava a janela recortar e pronto. A medição derrubou:
+`--since 30m` num desktop devolveu relatório limpo com um crítico cortado, e o
+exit foi zero.
+
+Exit 0 significa "não há o que ver". Se a varredura ACHOU o crítico e o recorte
+pedido o escondeu, há o que ver — e um `verdict: OK` mandaria a automação de
+frota arquivar um host comprometido. Então:
+
+```
+crítico recortado pela janela   →  exit 1, verdict INCOMPLETE, e o bloco JANELA
+                                   diz quantos e de quando
+```
+
+O relatório fica limpo, o exit não. Quem escolheu a janela lê o bloco; quem lê
+só o exit continua sabendo que há algo para olhar.
+
+### E ela se declara nos dois canais
+
+Mesma regra da baseline, com mais razão — a baseline REBAIXA achado, a janela o
+REMOVE:
+
+```
+JANELA      desde 2026-08-17T21:35:36Z (--since 30m)
+            2 achado(s) FORA da janela: 1 CRITICAL · 1 WARN
+            o mais recente deles é de 2026-08-17T12:35:26Z
+ÂNCORA      2026-08-17T21:35:36Z · informado em --since 30m
+```
+
+e a linha `window` no JSONL, porque é ela que a agregação de frota lê.
+
+### O âncora, e o ovo-e-galinha da §9
+
+A timeline precisa de um começo, e na primeira execução não existe achado de
+onde tirá-lo. A regra da SPEC virou código:
+
+```
+--since informado    o âncora é a janela pedida
+sem --since          deriva do achado MAIS SEVERO — entre iguais, o mais
+                     recente — e DIZ que derivou, nomeando o achado
+sem achado datável   âncora VAZIO. Inventar sete dias e apresentá-los como
+                     derivado seria fingir que derivou de alguma coisa
+```
+
+### Uma mutação sobrevivente, de novo
+
+O `case r.CriticosForaDaJanela > 0` do exit sobreviveu à mutação: meu teste
+tinha um crítico DENTRO da janela também, e o exit já era 2 por causa dele. O
+teste não testava a regra que dizia testar. Refeito com todos os achados fora, e
+a mutação morre.
+
+### Estado
+
+78 checks, 125 cenários, 191 execuções. `make verify` e `make race` limpos, e as
+sete mutações dirigidas à janela morrem. A fase 5 está fechada: `--ioc` e
+`--since`, que é o que a §23 pedia.

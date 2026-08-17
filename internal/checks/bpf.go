@@ -157,6 +157,7 @@ var bpfSemDono = check.Check{
 			}
 
 			fd := self.F(sev, "bpf prog id="+strconv.Itoa(int(p.ID)), "", ev...)
+			fd.Quando, fd.QuandoFonte = p.CarregadoUTC, "carga do programa eBPF"
 			// Um programa eBPF não tem arquivo: ele existe só na memória do
 			// kernel e some no reboot. Se ninguém guardar agora, não há o que
 			// analisar depois.

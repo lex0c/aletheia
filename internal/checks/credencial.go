@@ -77,6 +77,7 @@ var chavePrivadaSemSenha = check.Check{
 				"(runbook §23)")
 
 			fd := self.F(sev, c.Path, "", ev...)
+			fd.Quando, fd.QuandoFonte = c.ModUTC, "mtime do arquivo de chave"
 			fd.NextSteps = []string{
 				"descubra ONDE esta chave entra: a pública correspondente está no " +
 					"`authorized_keys` dos destinos",
@@ -236,6 +237,7 @@ var historicoDesligado = check.Check{
 					"legítimo que não seja não deixar rastro")
 			}
 			fd := self.F(sev, h.Path, "", ev...)
+			fd.Quando, fd.QuandoFonte = h.ModUTC, "mtime do histórico"
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"o que já foi digitado NÃO está aqui: procure em wtmp, no journal e " +

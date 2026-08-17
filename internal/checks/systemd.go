@@ -73,6 +73,7 @@ var unitExecSuspect = check.Check{
 				ev = append(ev, unitContext(u)...)
 
 				fd := self.F(sev, u.Name, "", ev...)
+				fd.Quando, fd.QuandoFonte = u.ModUTC, "mtime do arquivo da unit"
 				fd.NextSteps = []string{
 					"a config EFETIVA inclui drop-ins: `systemctl cat " + u.Name + "`",
 					"remova a persistência ANTES de matar o processo, senão o systemd " +
@@ -131,6 +132,7 @@ var unitDropIn = check.Check{
 			ev = append(ev, "`cat` no .service original NÃO mostra isto — só `systemctl cat`")
 
 			fd := self.F(check.SevWarn, u.DropInFor, "", ev...)
+			fd.Quando, fd.QuandoFonte = u.ModUTC, "mtime do drop-in"
 			fd.NextSteps = []string{
 				"veja a config efetiva: `systemctl cat " + u.DropInFor + "`",
 				"e tudo que sobrescreve algo do sistema: `systemd-delta --type=extended`",
@@ -182,6 +184,7 @@ var unitTimerFrequent = check.Check{
 				"o beacon só é visível na janela estendida, não no retrato")
 
 			fd := self.F(check.SevWarn, u.Name, "", ev...)
+			fd.Quando, fd.QuandoFonte = u.ModUTC, "mtime do arquivo da unit"
 			fd.NextSteps = []string{
 				"veja o que ele dispara: a unit de mesmo nome com sufixo .service",
 				"amostre a rede pelo intervalo do timer, não por instantes (runbook §2.7)",

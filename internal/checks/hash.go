@@ -174,6 +174,10 @@ var dataFalsificada = check.Check{
 			ev = append(ev, motivo)
 
 			fd := self.F(check.SevCritical, t.Path, "", ev...)
+			// A de METADADOS, não a de modificação: o mtime é justamente o que foi
+			// falsificado, e datar o achado por ele colocaria o implante na janela
+			// que o invasor escolheu.
+			fd.Quando, fd.QuandoFonte = t.MetaUTC, "ctime do arquivo (a data que o touch não muda)"
 			fd.NextSteps = []string{
 				"a data de METADADOS é a que vale para a linha do tempo: " +
 					t.MetaUTC + " (runbook §9)",

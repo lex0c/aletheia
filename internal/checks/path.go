@@ -87,6 +87,7 @@ var suspiciousPath = check.Check{
 			}
 
 			fd := self.F(check.SevWarn, "pid="+strconv.Itoa(p.PID), "", ev...)
+			fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"preserve o binário ANTES de qualquer coisa (runbook §6) — em tmpfs " +

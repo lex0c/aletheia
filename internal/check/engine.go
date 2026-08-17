@@ -59,6 +59,14 @@ type Report struct {
 	// TrustBroken lista os motivos pelos quais achados de binário do host
 	// foram rebaixados nesta execução.
 	TrustBroken []string
+
+	// CriticosForaDaJanela conta os achados CRÍTICOS que a janela removeu.
+	//
+	// Existe para o exit code, e a razão é a promessa central da ferramenta:
+	// exit 0 significa "não há o que ver". Se a varredura ACHOU um crítico e o
+	// recorte pedido o deixou de fora, há o que ver — e um `verdict: OK` ali
+	// mandaria a automação de frota arquivar um host comprometido.
+	CriticosForaDaJanela int
 }
 
 // trustBreakers são os IDs cujo disparo invalida a confiança em qualquer
@@ -278,6 +286,11 @@ func (r *Report) Exit() int {
 		return 1
 	case r.Coverage.Incomplete():
 		return 1
+	case r.CriticosForaDaJanela > 0:
+		// O crítico existe e foi recortado a pedido: o relatório fica limpo, o
+		// exit NÃO. Quem escolheu a janela lê o bloco JANELA; quem lê só o exit
+		// continua sabendo que há algo para olhar.
+		return 1
 	default:
 		return 0
 	}
@@ -291,7 +304,7 @@ func (r *Report) Verdict() string {
 		return "CRITICAL"
 	case warn > 0:
 		return "WARNING"
-	case r.Coverage.Incomplete():
+	case r.Coverage.Incomplete(), r.CriticosForaDaJanela > 0:
 		return "INCOMPLETE"
 	default:
 		return "OK"

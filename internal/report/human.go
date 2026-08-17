@@ -22,11 +22,34 @@ type Options struct {
 	// Baseline descreve a referência usada, quando houve uma. Nil = nenhuma.
 	Baseline *BaselineInfo
 
+	// Janela descreve o recorte temporal, quando houve um, e o âncora derivado.
+	Janela *JanelaInfo
+
 	// IOC descreve a lista de indicadores usada, quando houve uma. Vazio =
 	// nenhuma. É obrigatório dizer: uma varredura que procurou por dez
 	// indicadores e uma que procurou por dois, de uma lista mal entendida,
 	// terminam iguais no papel se ninguém contar quantos entraram.
 	IOC *IOCInfo
+}
+
+// JanelaInfo é o que o relatório precisa dizer sobre o recorte temporal.
+//
+// Existe pelo mesmo motivo do bloco de baseline, e com mais razão: a baseline
+// REBAIXA achado, a janela o REMOVE. Quem remove precisa dizer o que removeu.
+type JanelaInfo struct {
+	Desde string
+	Spec  string
+	// Fora é quanto ficou de fora, e ForaTexto descreve por severidade.
+	Fora        int
+	ForaTexto   string
+	MaisRecente string
+	// SemData são os achados sem data, que FICARAM.
+	SemData int
+
+	// Ancora é a data de referência da investigação (§9), com a origem dela.
+	Ancora       string
+	AncoraOrigem string
+	AncoraDe     string
 }
 
 // IOCInfo é o que o relatório precisa dizer sobre a lista de indicadores.
@@ -58,6 +81,7 @@ type BaselineInfo struct {
 func Human(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, o Options) {
 	writeHeader(w, f, e)
 	writeBaseline(w, o.Baseline)
+	writeJanela(w, o.Janela)
 	writeIOC(w, o.IOC)
 
 	if o.Verbose > 0 {
@@ -505,6 +529,38 @@ func writeBaseline(w io.Writer, b *BaselineInfo) {
 	}
 	for _, m := range b.Ressalvas {
 		fmt.Fprintf(w, "            ⚠ %s\n", Safe(m))
+	}
+	fmt.Fprintln(w)
+}
+
+// writeJanela declara o recorte e o âncora.
+//
+// A linha que mais importa aqui é a do que ficou FORA: um crítico removido por
+// uma janela mal escolhida é a diferença entre "host limpo" e "host onde eu
+// mandei não olhar". E a dos SEM DATA vem junto porque explica a assimetria —
+// eles ficaram, e ficaram de propósito.
+func writeJanela(w io.Writer, j *JanelaInfo) {
+	if j == nil {
+		return
+	}
+	if j.Desde != "" {
+		fmt.Fprintf(w, "JANELA      desde %s (--since %s)\n", Safe(j.Desde), Safe(j.Spec))
+		if j.Fora > 0 {
+			fmt.Fprintf(w, "            %d achado(s) FORA da janela: %s\n", j.Fora, Safe(j.ForaTexto))
+			if j.MaisRecente != "" {
+				fmt.Fprintf(w, "            o mais recente deles é de %s\n", Safe(j.MaisRecente))
+			}
+		}
+		if j.SemData > 0 {
+			fmt.Fprintf(w, "            %d achado(s) SEM data foram MANTIDOS: descartá-los "+
+				"seria esconder por ignorância, não por escolha\n", j.SemData)
+		}
+	}
+	if j.Ancora != "" {
+		fmt.Fprintf(w, "ÂNCORA      %s · %s\n", Safe(j.Ancora), Safe(j.AncoraOrigem))
+		if j.AncoraDe != "" {
+			fmt.Fprintf(w, "            de %s\n", Safe(j.AncoraDe))
+		}
 	}
 	fmt.Fprintln(w)
 }

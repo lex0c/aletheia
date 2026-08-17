@@ -57,6 +57,7 @@ var cronSuspect = check.Check{
 			ev = append(ev, cronContexto(c)...)
 
 			fd := self.F(sev, cronSubject(c), "", ev...)
+			fd.Quando, fd.QuandoFonte = c.ModUTC, "mtime do arquivo de cron"
 			fd.NextSteps = []string{
 				"remova a persistência ANTES de matar o processo: o cron o recria " +
 					"na próxima execução (runbook §19)",
@@ -127,6 +128,7 @@ var cronFrequent = check.Check{
 				"o beacon só é visível na janela estendida, não no retrato")
 
 			fd := self.F(check.SevWarn, cronSubject(c), "", ev...)
+			fd.Quando, fd.QuandoFonte = c.ModUTC, "mtime do arquivo de cron"
 			fd.NextSteps = []string{
 				"amostre a rede pelo intervalo do agendamento, não por instantes (runbook §2.7)",
 			}
@@ -192,6 +194,7 @@ var atJob = check.Check{
 				sev = check.SevCritical
 			}
 			fd := self.F(sev, "at:"+baseDe(c.File), "", ev...)
+			fd.Quando, fd.QuandoFonte = c.ModUTC, "mtime do job de at"
 			fd.NextSteps = []string{
 				"leia o job inteiro: ele carrega o ambiente de quem o criou (runbook §7.4)",
 				"depois de qualquer limpeza, `atq` de novo: é o gatilho que sobrevive " +

@@ -104,6 +104,7 @@ var inventarioDeLogin = check.Check{
 					"é quem opera o host",
 			}
 			fd := self.F(check.SevManual, u, "", ev...)
+			fd.Quando, fd.QuandoFonte = s.ultima, "último login registrado"
 			fd.NextSteps = []string{
 				"confirme com o time cada ORIGEM que ninguém reconhecer",
 				"`last -f /var/log/wtmp.1` e os rotacionados cobrem o período " +
@@ -207,6 +208,7 @@ var forcaBrutaComSucesso = check.Check{
 					"internet, e entrada bem-sucedida é o host funcionando",
 			}
 			fd := self.F(check.SevCritical, o, "", ev...)
+			fd.Quando, fd.QuandoFonte = quandoEntrou(ss), "registro de login bem-sucedido"
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"este endereço e este horário são o começo da linha do tempo (runbook §16)",
@@ -235,6 +237,18 @@ func origemDeRede(o string) bool {
 
 // entrada é um login bem-sucedido, guardado para o cruzamento.
 type entrada struct{ user, quando string }
+
+// quandoEntrou devolve o instante da PRIMEIRA entrada bem-sucedida daquela
+// origem — é ele que começa a linha do tempo da §16, não a última.
+func quandoEntrou(ss []entrada) string {
+	primeiro := ""
+	for _, s := range ss {
+		if s.quando != "" && (primeiro == "" || s.quando < primeiro) {
+			primeiro = s.quando
+		}
+	}
+	return primeiro
+}
 
 func descreveSucessos(ss []entrada) string {
 	var out []string

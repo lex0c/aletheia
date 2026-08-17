@@ -86,6 +86,7 @@ var sshForcedCommand = check.Check{
 					"está impedindo o shell que o atacante quer")
 			}
 			fd := self.F(sev, k.User+":"+strconv.Itoa(k.Line), "", ev...)
+			fd.Quando, fd.QuandoFonte = k.ModUTC, "mtime do authorized_keys"
 			fd.NextSteps = []string{
 				"a impressão digital é IOC de frota: procure a MESMA chave nos " +
 					"outros hosts antes de concluir o alcance (runbook §23)",

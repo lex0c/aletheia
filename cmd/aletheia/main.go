@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,6 +61,9 @@ FLAGS DE scan
                 (§23). Aceita "ips: [a, b]", bloco com "- item", ou um indicador
                 por linha; o tipo é deduzido pela forma quando não vem dito.
                 Achado por indicador é CRÍTICO — e vale o que a lista valer
+  --since S     janela de investigação (§9): instante (2026-04-30T18:00Z,
+                2026-04-30) ou duração (72h, 7d). O que tem data e cai FORA sai
+                do relatório e é CONTADO; o que não tem data FICA
   --only G,G    escopo por subsistema: proc net persist priv integrity kernel app cloud ioc
   --mode M      auto | manual
   -v, -vv       evidência por achado / + INFO e detalhe de cobertura
@@ -230,7 +234,7 @@ func runWtf(args []string) int {
 	}
 
 	if *jsonOut != "" {
-		if code := writeJSONL(*jsonOut, r, f, e, bl); code != 0 {
+		if code := writeJSONL(*jsonOut, r, f, e, bl, nil); code != 0 {
 			return code
 		}
 	}
@@ -249,6 +253,7 @@ func runScan(args []string, wtf bool) int {
 		verbose2 = fs.Bool("vv", false, "+ INFO e detalhe de cobertura")
 		base     = fs.String("baseline", "", "comparar com a baseline em FILE")
 		iocFile  = fs.String("ioc", "", "casar os indicadores DESTE incidente, do arquivo FILE")
+		since    = fs.String("since", "", "janela de investigação: instante (2026-04-30T18:00Z) ou duração (72h, 7d)")
 	)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
@@ -266,12 +271,17 @@ func runScan(args []string, wtf bool) int {
 		}
 	}
 
-	// A lista é carregada ANTES do probe, e falhar aqui é falhar alto: quem
-	// pediu `--ioc` pediu uma caça, e uma execução que ignora o arquivo em
-	// silêncio devolve "nada encontrado" para quem acha que procurou.
+	// Os dois argumentos que mudam o RESULTADO são validados antes da coleta:
+	// falhar depois de gastar a parte cara para recusar um formato é desperdício,
+	// e seguir em silêncio com um deles mal entendido é pior.
 	lista, code := carregarIOC(*iocFile)
 	if code != 0 {
 		return code
+	}
+	janela, err := check.ParseJanela(*since, time.Now().UTC())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "--since %q: %v\n", *since, err)
+		return 3
 	}
 
 	e := env.Probe(env.Options{Root: *root, Version: version, IOC: lista})
@@ -310,6 +320,10 @@ func runScan(args []string, wtf bool) int {
 		return code
 	}
 
+	// A janela é aplicada DEPOIS da baseline: ela conta por severidade o que
+	// removeu, e a baseline é quem decide a severidade final.
+	jn := aplicarJanela(r, janela)
+
 	v := 0
 	if *verbose {
 		v = 1
@@ -326,16 +340,51 @@ func runScan(args []string, wtf bool) int {
 		humanOut = os.Stderr
 	}
 	report.Human(humanOut, r, f, e, report.Options{
-		Verbose: v, Baseline: bl, IOC: infoIOC(lista),
+		Verbose: v, Baseline: bl, IOC: infoIOC(lista), Janela: jn,
 	})
 
 	if *jsonOut != "" {
-		if code := writeJSONL(*jsonOut, r, f, e, bl); code != 0 {
+		if code := writeJSONL(*jsonOut, r, f, e, bl, jn); code != 0 {
 			return code
 		}
 	}
 
 	return r.Exit()
+}
+
+// aplicarJanela recorta o relatório e monta o que precisa ser DITO sobre o
+// recorte. Nada aqui é silencioso: o que saiu é contado por severidade, o que
+// não tinha data é contado à parte, e o âncora declara de onde veio.
+func aplicarJanela(r *check.Report, j check.Janela) *report.JanelaInfo {
+	rec := r.Aplicar(j)
+	anc := r.DerivarAncora(j)
+	if !j.Ativa && anc.Quando == "" {
+		return nil // sem janela e sem achado datável: não há o que declarar
+	}
+	info := &report.JanelaInfo{
+		Fora: rec.Fora, SemData: rec.SemData, MaisRecente: rec.MaisRecente,
+		ForaTexto:    porSeveridade(rec.ForaSev),
+		Ancora:       anc.Quando,
+		AncoraOrigem: anc.Origem,
+		AncoraDe:     anc.De,
+	}
+	if j.Ativa {
+		info.Desde, info.Spec = j.Desde.Format(time.RFC3339), j.Spec
+	}
+	return info
+}
+
+// porSeveridade descreve o que ficou de fora. O número sozinho não serve: três
+// achados fora da janela é rotina, e um crítico entre eles é uma frase que o
+// operador precisa ler.
+func porSeveridade(m map[check.Severity]int) string {
+	var partes []string
+	for _, s := range []check.Severity{check.SevCritical, check.SevWarn, check.SevManual, check.SevInfo} {
+		if m[s] > 0 {
+			partes = append(partes, strconv.Itoa(m[s])+" "+s.String())
+		}
+	}
+	return strings.Join(partes, " · ")
 }
 
 // carregarIOC lê a lista de indicadores, ou falha alto.
@@ -476,7 +525,7 @@ func collectorGaps(r *check.Report, f *facts.Facts) {
 	}
 }
 
-func writeJSONL(path string, r *check.Report, f *facts.Facts, e *env.Env, bl *report.BaselineInfo) int {
+func writeJSONL(path string, r *check.Report, f *facts.Facts, e *env.Env, bl *report.BaselineInfo, jn *report.JanelaInfo) int {
 	w := os.Stdout
 	if path != "-" {
 		fh, err := openJSONOut(path)
@@ -487,7 +536,7 @@ func writeJSONL(path string, r *check.Report, f *facts.Facts, e *env.Env, bl *re
 		defer fh.Close()
 		w = fh
 	}
-	if err := report.JSONL(w, r, f, e, bl); err != nil {
+	if err := report.JSONL(w, r, f, e, bl, jn); err != nil {
 		fmt.Fprintf(os.Stderr, "erro ao escrever JSONL: %v\n", err)
 		return 3
 	}

@@ -81,6 +81,7 @@ var mapsRWXAnon = check.Check{
 			}
 
 			fd := self.F(check.SevWarn, "pid="+strconv.Itoa(p.PID), "", ev...)
+			fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"o código só existe na memória deste processo: matá-lo destrói a " +
@@ -190,6 +191,7 @@ var nsDivergent = check.Check{
 			}
 
 			fd := self.F(check.SevWarn, "pid="+strconv.Itoa(p.PID), "", ev...)
+			fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 			fd.NextSteps = []string{
 				"olhe de DENTRO: sudo nsenter -t " + strconv.Itoa(p.PID) + " -a ls -la /",
 				"o `find` da §8 e o `ss` da §2 não enxergam o que está aqui — descarte " +

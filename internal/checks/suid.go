@@ -153,6 +153,7 @@ var suidInesperado = check.Check{
 			}
 
 			fd := self.F(sev, s.Path, "", ev...)
+			fd.Quando, fd.QuandoFonte = s.ModUTC, "mtime do arquivo"
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"sudo cp " + s.Path + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",

@@ -88,6 +88,7 @@ var procLdPreload = check.Check{
 						"é este que a definiu")
 				}
 				fd := self.F(sev, "pid="+strconv.Itoa(p.PID), "", ev...)
+				fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 				fd.Irreversible = true
 				fd.NextSteps = []string{
 					"preserve a lib antes de matar o processo: ela é a amostra (runbook §6)",
@@ -187,6 +188,7 @@ var envToolMarker = check.Check{
 						"variável — é este aqui que a definiu")
 				}
 				fd := self.F(sevDoRisco(fam.Risk), "pid="+strconv.Itoa(p.PID), "", ev...)
+				fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 				fd.NextSteps = []string{
 					"leia a §5.10 com o nome em mãos: ele muda a PRIORIDADE do resto " +
 						"da resposta, não só o diagnóstico",

@@ -386,7 +386,7 @@ func (w *vigia) emiteJSON(r *check.Report, f *facts.Facts, e *env.Env) {
 	if w.jsonW == nil {
 		return
 	}
-	if err := report.JSONL(w.jsonW, r, f, e, nil); err != nil {
+	if err := report.JSONL(w.jsonW, r, f, e, nil, nil); err != nil {
 		fmt.Fprintf(os.Stderr, "erro ao escrever JSONL: %v\n", err)
 	}
 }

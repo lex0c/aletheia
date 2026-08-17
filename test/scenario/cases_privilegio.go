@@ -25,9 +25,12 @@ func init() {
 		// O discriminador é o mesmo do setuid — nenhum pacote entregou isto —,
 		// e é por isso que a forma nova coube no check existente em vez de
 		// virar outro.
-		Images: []string{"debian:12", "alpine:3.20"},
-		Caps:   []string{"SETFCAP"},
-		Plant:  capabilityEmXattr,
+		// VM e não contêiner: escrever `security.capability` exige CAP_SETFCAP,
+		// e pedir isso ao Docker é privilégio EMPRESTADO — um ambiente que não
+		// se parece com o servidor que se varre. Na VM é só root num kernel
+		// próprio, que é a situação real.
+		Mode:  VM,
+		Setup: capabilityEmXattr,
 		Expect: []Expect{
 			{ID: "persist.suid_unowned", Sev: "CRITICAL",
 				Subject: "/usr/local/bin/.systemd-notify"},
@@ -54,9 +57,9 @@ func init() {
 		//
 		// Por isso o primeiro passo do achado é `chattr -i`, antes de qualquer
 		// remoção. É a única ordem em que o resto funciona.
-		Images: []string{"debian:12", "alpine:3.20"},
-		Caps:   []string{"LINUX_IMMUTABLE"},
-		Plant:  implanteImutavel,
+		// VM pelo mesmo motivo do C1: `chattr +i` exige CAP_LINUX_IMMUTABLE.
+		Mode:  VM,
+		Setup: implanteImutavel,
 		Expect: []Expect{
 			{ID: "integrity.immutable_flag", Sev: "CRITICAL",
 				Subject: "/usr/local/sbin/.agent"},

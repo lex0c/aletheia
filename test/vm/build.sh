@@ -92,7 +92,24 @@ done
 # com aspas, espaço e caractere especial.
 if [ -n "$setup" ]; then
 	echo "$setup" | base64 -d > /tmp/setup.sh
-	sh /tmp/setup.sh >/tmp/setup.log 2>&1 || echo "SETUP-FALHOU rc=$?" > /dev/console
+	# A SAÍDA do setup vai junto quando ele falha.
+	#
+	# A primeira versão mandava só "SETUP-FALHOU rc=N" para o console e
+	# descartava o log — o que deixa quem escreve cenário sem nada para
+	# diagnosticar. Um harness que esconde a causa da falha custa mais tempo
+	# que o cenário que ele testa.
+	# O status é capturado ANTES de qualquer teste: dentro de `if ! cmd`, o
+	# `$?` já é o do `!` e vale sempre zero. E a variável é própria — `rc`
+	# guarda o exit do scan mais abaixo, e reaproveitá-la aqui trocaria o
+	# veredito do cenário pelo status do setup.
+	sh /tmp/setup.sh >/tmp/setup.log 2>&1
+	rcsetup=$?
+	if [ "$rcsetup" -ne 0 ]; then
+		echo "SETUP-FALHOU rc=$rcsetup" > /dev/console
+		echo "--- saída do setup ---" > /dev/console
+		cat /tmp/setup.log > /dev/console
+		echo "--- fim ---" > /dev/console
+	fi
 fi
 
 # Varrer sem privilégio é um CENÁRIO, não um detalhe: metade dos defeitos da
@@ -102,9 +119,13 @@ fi
 # gravável por usuário comum, e afrouxar essa permissão tornaria o guest menos
 # parecido com um host real justamente no cenário que existe para ser realista.
 if [ -n "${asuser:-}" ]; then
-	su "$asuser" -s /bin/sh -c "/aletheia scan --json /tmp/out.jsonl ${args:-}" 2>/tmp/human.log
+	# STDOUT e stderr: com `--json ARQUIVO` o relatório humano sai pelo stdout,
+	# e capturar só o stderr deixava /tmp/human.log VAZIO em toda execução de
+	# VM. O comentário abaixo prometia que o relatório ia junto, e ele nunca
+	# foi — nenhuma asserção de saída humana funcionava em modo VM.
+	su "$asuser" -s /bin/sh -c "/aletheia scan --json /tmp/out.jsonl ${args:-}" >/tmp/human.log 2>&1
 else
-	/aletheia scan --json /tmp/out.jsonl ${args:-} 2>/tmp/human.log
+	/aletheia scan --json /tmp/out.jsonl ${args:-} >/tmp/human.log 2>&1
 fi
 rc=$?
 

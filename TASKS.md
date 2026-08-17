@@ -2903,3 +2903,71 @@ existe só para isso: sem ele, o check acusaria todo host na semana da rotação
 66 checks, 92 cenários, 138 execuções. `make race` limpo. Zero achado em Debian
 12, Alpine 3.20, Ubuntu 14.04 e CentOS 7 — e nenhum no host real, que tem
 rotação de verdade.
+
+---
+
+## Registro — T1562.001 e a mudança para VM
+
+### O check: contradição, não estado
+
+Desligar o MAC é passo comum depois de entrar. Acusar isso é que é difícil, e a
+medição mostrou por quê: um host meu tem **158 perfis de AppArmor com o módulo
+desligado** — é como o Manjaro entrega. Um check que acusa "MAC inativo"
+acusaria toda instalação padrão.
+
+O que é objetivo é a CONTRADIÇÃO entre duas fontes:
+
+```
+/etc/selinux/config       diz o que o administrador QUIS
+/sys/fs/selinux/enforce   diz o que está valendo AGORA
+```
+
+Nenhum sistema se instala auto-contraditório. Config pedindo enforcing com o
+kernel em permissivo é `setenforce 0` depois do boot — e isso **não sobrevive a
+um reboot**, o que torna a decisão recente por definição e delimita a janela.
+
+É a mesma forma dos checks de visão cruzada: duas fontes para o mesmo fato, e o
+achado mora na divergência.
+
+### Por que estes cenários foram para a VM
+
+`/sys/fs/selinux` não existe em contêiner nenhum — o runtime mascara /sys. Este
+check não era testável em lugar nenhum antes.
+
+E aproveitando, o que já dependia de privilégio emprestado mudou junto:
+
+```
+D1 montagem por cima   exigia --privileged   → G4, root de verdade
+D3 hook de ftrace      exigia SYS_ADMIN      → G3, tracefs do próprio guest
+C1 capability em xattr exigia SETFCAP        → VM
+C2 implante imutável   exigia LINUX_IMMUTABLE → VM
+```
+
+Contêiner privilegiado é uma concessão: não se parece com o servidor que se
+varre, e o runtime ainda mascara /sys por baixo. Manter as duas versões seria
+cobertura duplicada no pior dos dois ambientes — D1 e D3 foram REMOVIDOS, não
+duplicados.
+
+### Dois defeitos no próprio harness, achados por usá-lo
+
+**O log do setup era descartado.** Falha de cenário na VM devolvia só
+`SETUP-FALHOU rc=N`, sem uma linha do que aconteceu. Um harness que esconde a
+causa custa mais tempo que o cenário que ele testa. Corrigido, e a primeira
+execução já entregou o erro exato: `mkdir: can't create '/sys/fs/selinux'` —
+sysfs não aceita criar diretório, e a saída é montar tmpfs POR CIMA.
+
+Junto veio um bug de shell no próprio conserto: dentro de `if ! cmd`, o `$?`
+é o do `!` e vale sempre zero. A primeira versão reportava `rc=0` para toda
+falha.
+
+**O relatório humano nunca era capturado em VM.** O init redirecionava só o
+stderr, e com `--json ARQUIVO` o relatório humano sai pelo STDOUT. O comentário
+ali prometia que ele ia junto — e ele nunca foi, então nenhuma asserção de saída
+humana funcionava em modo VM. São 19 asserções desse tipo na suíte.
+
+Os dois são a mesma classe: **o harness perdendo informação em silêncio**, que é
+exatamente o defeito que a ferramenta testada existe para não cometer.
+
+### Estado
+
+67 checks, 94 cenários, 138 execuções — 14 delas em VM com kernel próprio.

@@ -61,6 +61,7 @@ type Facts struct {
 	Historicos     []HistoricoShell        `json:"shell_history,omitempty"`
 	Audit          Auditoria               `json:"audit"`
 	Logs           []ArquivoDeLog          `json:"logs,omitempty"`
+	MAC            MAC                     `json:"mac"`
 	MetaAcesso     []ArquivoMeta           `json:"access_meta,omitempty"`
 	Cross          CrossView               `json:"cross_view"`
 

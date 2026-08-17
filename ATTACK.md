@@ -55,7 +55,7 @@ Três rótulos, e o do meio é o que mais informa:
 | T1014 Rootkit | parcial | `cross.hidden_pid`, `module_view`, `thread_count`, `kernel.ftrace_hook` — e o limite está declarado: se o kernel mente, as fontes mentem juntas |
 | T1036.005 Nome/lugar legítimo | coberto | `proc.kthread_disguise`, `integrity.no_package_owner` |
 | T1564.001 Arquivo oculto | **ausente** | diretório com ponto em `/tmp` e `/var/tmp` não é procurado |
-| T1562.001 Desabilitar ferramenta de defesa | **ausente** | auditd parado, SELinux permissivo, AppArmor desligado |
+| T1562.001 Desabilitar ferramenta de defesa | parcial | `antiforense.mac_downgraded` — só a CONTRADIÇÃO entre config e runtime do SELinux; AppArmor e "MAC simplesmente inativo" ficam de fora, e o texto abaixo diz por quê |
 | T1562.004 Desabilitar firewall | **ausente** | tabela vazia não é notada |
 | T1562.012 Desabilitar auditoria do Linux | coberto | `antiforense.audit_disabled` — só o `-e 0` é achado; sem regra nenhuma é o estado da maioria dos hosts |
 | T1222.002 Alterar permissão | parcial | `integrity.immutable_flag` cobre o atributo de inode; mudança de modo não é comparada |
@@ -96,16 +96,24 @@ partir de um retrato**. Técnica comum que só se vê em fluxo contínuo não en
 Duas já foram fechadas e saíram desta lista: T1562.012 (auditoria desligada) e
 T1070.002 (logs apagados). O que sobrou:
 
-### 1. T1562.001 e T1562.004 — MAC e firewall desligados
+### 1. T1562.001 (resto) e T1562.004 — AppArmor e firewall
 
-SELinux em permissivo, AppArmor descarregado, tabela de firewall vazia. Todos
-legíveis em disco e em `/sys`.
+A parte do SELinux foi fechada, e só a CONTRADIÇÃO: config pedindo enforcing com
+o kernel em permissivo. O ESTADO — MAC inativo — continua deliberadamente fora,
+e a medição diz por quê: um host meu tem **158 perfis de AppArmor com o módulo
+desligado**, que é como a distribuição entrega. Acusar estado acusaria todos.
 
-Falso positivo grande e conhecido: **metade dos servidores roda com SELinux
-permissivo de propósito**, e contêiner não tem firewall próprio. O achado
-precisa nascer informativo e só subir quando houver outra coisa junto — é o
-mesmo desenho da reivindicação em `/usr/local`, e a mesma lição do
-`antiforense.audit_disabled`: estado de fábrica não é ataque.
+O que sobra, e cada um tem um problema próprio:
+
+```
+AppArmor    o equivalente ao setenforce 0 é o perfil em modo COMPLAIN quando
+            foi entregue em enforce. Legível em
+            /sys/kernel/security/apparmor/profiles, e o falso positivo é o
+            desenvolvedor que rodou aa-complain para depurar
+firewall    tabela vazia é comum e legítima (grupo de segurança da nuvem faz
+            a filtragem), e ler regra nativamente exige netlink de nftables.
+            Custo alto, sinal fraco — é a de pior relação da lista
+```
 
 ### 2. T1552.001 — credencial em arquivo
 

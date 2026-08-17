@@ -41,6 +41,11 @@ type Montagem struct {
 	RO     bool `json:"ro,omitempty"`
 
 	Opcoes string `json:"options,omitempty"`
+
+	// Dev é o dispositivo, resolvido uma vez na coleta. Existe para a varredura
+	// de arquivos saber onde a árvore troca de filesystem sem perguntar ao
+	// kernel a cada diretório.
+	Dev uint64 `json:"-"`
 }
 
 func collectMounts(f *Facts, e *env.Env) {
@@ -89,6 +94,9 @@ func collectMounts(f *Facts, e *env.Env) {
 			case "ro":
 				m.RO = true
 			}
+		}
+		if fi, err := e.Lstat(m.Ponto); err == nil {
+			m.Dev, _ = dispositivoDeInfo(fi)
 		}
 		f.Mounts = append(f.Mounts, m)
 	}

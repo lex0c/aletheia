@@ -78,6 +78,10 @@ type Facts struct {
 	Partial map[string][]string `json:"partial,omitempty"`
 
 	idx *idx
+
+	// idxMount indexa a tabela de montagem por ponto. Fica aqui e não no idx
+	// geral porque é usado pela COLETA, antes de o índice existir.
+	idxMount map[string]uint64
 }
 
 // idx são as buscas por chave. Sem elas, um check que pergunta "quais sockets

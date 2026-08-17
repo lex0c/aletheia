@@ -3,8 +3,11 @@ package facts
 import (
 	"io/fs"
 	"os"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/lex0c/aletheia/internal/env"
@@ -46,6 +49,10 @@ const (
 	// lugares onde uma retenção de root de fato fica — ~/bin, ~/.config/x,
 	// ~/.local/bin —, e o que fica de fora é dito em voz alta.
 	maxSuidDepthHome = 5
+
+	// Teto de trabalhadores da varredura. O mesmo do coletor de processos:
+	// acima disso a disputa por I/O custa mais do que o paralelismo rende.
+	maxSuidWorkers = 8
 )
 
 // suidRaizes são as árvores onde binário executável mora. É deliberadamente uma
@@ -121,23 +128,19 @@ type SuidFile struct {
 }
 
 func collectSuid(f *Facts, e *env.Env) {
-	// A varredura não ATRAVESSA montagem, como o `-xdev` do find: um NFS ou um
-	// volume de rede transforma meio segundo em minutos, e o que se acha ali é
-	// de OUTRO host.
+	// A varredura é PARALELA, e a razão é medida: /usr e /home somam sete
+	// décimos de segundo num desktop, e o trabalho é readdir mais stat — que é
+	// syscall, e syscall reparte entre núcleos como o hash repartiu.
 	//
-	// Mas a baseline é POR RAIZ, não a do "/". Comparar tudo contra o
-	// dispositivo do "/" fazia a varredura parar na porta de toda árvore que
-	// tem filesystem próprio — e as duas mais comuns são justamente as que
-	// importam: /home em partição separada (a norma em servidor) e /tmp em
-	// tmpfs (o padrão do systemd). Nesses hosts, SUID em home de usuário ou em
-	// subdiretório de /tmp nunca seria encontrado.
-	//
-	// Com a baseline por raiz, cada árvore listada é percorrida inteira, e o
-	// que continua fora é só o que estiver montado DENTRO dela.
-	visitados := 0
-	truncado := false
-	profundoDemais := false
-	var outroFS []string
+	// A recursão sequencial anterior usava um núcleo enquanto os outros onze
+	// esperavam.
+	trab := &varredura{
+		e:      e,
+		f:      f,
+		fila:   make([]tarefaDir, 0, 256),
+		limite: maxSuidDirs,
+	}
+
 	for _, raiz := range suidRaizes {
 		// Raiz que é SYMLINK não entra.
 		//
@@ -155,99 +158,196 @@ func collectSuid(f *Facts, e *env.Env) {
 		if raiz == "/home" || raiz == "/root" {
 			teto = maxSuidDepthHome
 		}
-		varrerSuid(f, e, raiz, 0, teto, dev, temDev, &visitados, &truncado, &profundoDemais, &outroFS)
+		trab.fila = append(trab.fila, tarefaDir{dir: raiz, teto: teto, dev: dev, temDev: temDev})
 	}
 
-	if truncado {
+	// O índice de montagens é montado ANTES de largar os trabalhadores.
+	//
+	// A construção preguiçosa dentro de `ehOutroFilesystem` era segura enquanto
+	// a varredura era sequencial; com fila e vários trabalhadores virou corrida
+	// de dados — vários escrevendo o mesmo mapa. Paralelizar não muda só a
+	// velocidade: muda quem pode tocar em quê.
+	f.devPorPonto()
+
+	trab.rodar(e.Workers(maxSuidWorkers))
+
+	if trab.truncado {
 		f.denyPersist("suid", "a varredura de SUID parou em "+
 			strconv.Itoa(maxSuidDirs)+" diretórios: o excedente NÃO foi examinado")
 	}
-	if profundoDemais {
+	if trab.profundoDemais {
 		f.denyPersist("suid", "a varredura de SUID desceu no máximo "+
 			strconv.Itoa(maxSuidDepthHome)+" níveis dentro de /home e /root: "+
 			"SUID mais fundo que isso NÃO foi procurado")
 	}
-	// A lacuna de escopo só vale se algo foi REALMENTE pulado.
-	//
-	// Declará-la sempre deixaria toda varredura permanentemente incompleta, e um
-	// parcial que nunca sai não informa nada — pior, gasta o sinal de cobertura,
-	// que é justamente o que esta ferramenta usa para separar "não achei" de
-	// "não consegui olhar". Com os caminhos nomeados, o operador sabe o que
-	// examinar por fora.
-	if len(outroFS) > 0 {
-		if len(outroFS) > 6 {
-			outroFS = append(outroFS[:6], "…")
+	if len(trab.outroFS) > 0 {
+		lista := trab.outroFS
+		sort.Strings(lista)
+		if len(lista) > 6 {
+			lista = append(lista[:6:6], "…")
 		}
 		f.denyPersist("suid", "a varredura de SUID não atravessou montagem: "+
-			strings.Join(outroFS, ", ")+" NÃO foram examinados")
+			strings.Join(lista, ", ")+" NÃO foram examinados")
+	}
+	// Ordem estável: a fila é consumida por vários trabalhadores, e sem isto o
+	// relatório mudaria de forma entre execuções idênticas.
+	sort.Slice(f.Suid, func(i, j int) bool { return f.Suid[i].Path < f.Suid[j].Path })
+}
+
+// tarefaDir é um diretório a percorrer, com o que a decisão precisa saber.
+type tarefaDir struct {
+	dir    string
+	prof   int
+	teto   int
+	dev    uint64
+	temDev bool
+}
+
+// varredura é a fila compartilhada e o que sai dela.
+type varredura struct {
+	e *env.Env
+	f *Facts
+
+	mu   sync.Mutex
+	fila []tarefaDir
+	// ativos conta quem está processando. A fila vazia só significa FIM quando
+	// ninguém está trabalhando: um trabalhador ocupado ainda pode empilhar
+	// subdiretórios, e parar antes dele perderia galhos inteiros em silêncio.
+	ativos int
+
+	visitados      int
+	limite         int
+	truncado       bool
+	profundoDemais bool
+	outroFS        []string
+}
+
+func (v *varredura) rodar(n int) {
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				t, ok := v.proxima()
+				if !ok {
+					return
+				}
+				v.visitar(t)
+				v.terminou()
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// proxima entrega o próximo diretório, ou diz que acabou.
+func (v *varredura) proxima() (tarefaDir, bool) {
+	for {
+		v.mu.Lock()
+		if len(v.fila) > 0 {
+			t := v.fila[len(v.fila)-1]
+			v.fila = v.fila[:len(v.fila)-1]
+			v.ativos++
+			v.mu.Unlock()
+			return t, true
+		}
+		ativos := v.ativos
+		v.mu.Unlock()
+		if ativos == 0 {
+			return tarefaDir{}, false
+		}
+		// Alguém ainda trabalha e pode empilhar. Ceder a vez é mais barato que
+		// uma variável de condição para um laço que dura milissegundos.
+		runtime.Gosched()
 	}
 }
 
-func varrerSuid(f *Facts, e *env.Env, dir string, prof, teto int, dev uint64, temDev bool,
-	visitados *int, truncado, profundoDemais *bool, outroFS *[]string) {
+func (v *varredura) terminou() {
+	v.mu.Lock()
+	v.ativos--
+	v.mu.Unlock()
+}
 
-	if prof > teto {
-		// A lacuna só vale se algo foi REALMENTE cortado. Declará-la sempre que
-		// /home existe deixaria todo servidor permanentemente degradado por uma
-		// escolha de escopo que nunca chegou a excluir nada — e um parcial que
-		// nunca sai gasta o sinal de cobertura.
-		*profundoDemais = true
+func (v *varredura) visitar(t tarefaDir) {
+	if suidPular[t.dir] {
 		return
 	}
-	if *truncado || suidPular[dir] {
-		return
-	}
-	if *visitados >= maxSuidDirs {
-		*truncado = true
-		return
-	}
-	*visitados++
 
-	ents, err := e.ReadDir(dir)
+	v.mu.Lock()
+	if v.truncado || v.visitados >= v.limite {
+		v.truncado = true
+		v.mu.Unlock()
+		return
+	}
+	v.visitados++
+	v.mu.Unlock()
+
+	ents, err := v.e.ReadDir(t.dir)
 	if err != nil {
 		return // sem permissão neste galho: o resto da árvore continua
 	}
+
+	var novos []tarefaDir
+	var achados []SuidFile
+	var fora []string
+
 	for _, ent := range ents {
-		p := dir + "/" + ent.Name()
-		if dir == "/" {
+		p := t.dir + "/" + ent.Name()
+		if t.dir == "/" {
 			p = "/" + ent.Name()
 		}
 
-		// Lstat, não Stat: um symlink para /bin/bash não é um SUID, e seguir
-		// links faria a varredura contar o mesmo arquivo muitas vezes — e entrar
-		// em ciclo.
-		fi, err := e.Lstat(p)
-		if err != nil {
+		// O TIPO vem do readdir, sem syscall nenhuma: o kernel devolve d_type
+		// junto com o nome. Chamar stat em toda entrada só para descobrir que
+		// aquilo era um symlink é uma syscall por arquivo do host.
+		//
+		// Symlink é descartado: um link para /bin/bash não é um SUID, e
+		// segui-lo faria a varredura contar o mesmo arquivo muitas vezes e
+		// entrar em ciclo.
+		tipo := ent.Type()
+		if tipo&os.ModeSymlink != 0 {
 			continue
 		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
-		if fi.IsDir() {
-			if temDev {
-				if d, ok := dispositivoDeInfo(fi); ok && d != dev {
-					// Outro filesystem: fora do escopo, e o caminho é NOMEADO
-					// para o operador saber o que examinar por fora.
-					*outroFS = append(*outroFS, p)
-					continue
-				}
+		if tipo.IsDir() {
+			if pularPorNome[ent.Name()] {
+				continue
 			}
-			varrerSuid(f, e, p, prof+1, teto, dev, temDev, visitados, truncado, profundoDemais, outroFS)
+			if t.prof+1 > t.teto {
+				v.mu.Lock()
+				v.profundoDemais = true
+				v.mu.Unlock()
+				continue
+			}
+			// PONTO DE MONTAGEM vem da tabela, não de um stat por diretório: o
+			// dispositivo só muda em ponto de montagem, e a tabela já está em
+			// memória.
+			if t.temDev && v.f.ehOutroFilesystem(p, t.dev) {
+				fora = append(fora, p)
+				continue
+			}
+			novos = append(novos, tarefaDir{dir: p, prof: t.prof + 1, teto: t.teto,
+				dev: t.dev, temDev: t.temDev})
 			continue
 		}
-		if !fi.Mode().IsRegular() {
+		if !tipo.IsRegular() {
+			continue
+		}
+
+		// Só AQUI vale a syscall: modo, tamanho e dono só existem no stat.
+		fi, err := v.e.Lstat(p)
+		if err != nil {
 			continue
 		}
 		setuid := fi.Mode()&os.ModeSetuid != 0
 		setgid := fi.Mode()&os.ModeSetgid != 0
 
 		// A capability só é perguntada em arquivo EXECUTÁVEL: xattr em arquivo
-		// que ninguém executa não confere poder a ninguém, e sondar tudo
-		// custaria uma syscall por arquivo do host em vez de por binário.
+		// que ninguém executa não confere poder a ninguém.
 		var capPerm uint64
 		var capEf bool
 		if fi.Mode()&0o111 != 0 {
-			capPerm, capEf = capabilityDoArquivo(e, p)
+			capPerm, capEf = capabilityDoArquivo(v.e, p)
 		}
 		if !setuid && !setgid && capPerm == 0 {
 			continue
@@ -262,7 +362,18 @@ func varrerSuid(f *Facts, e *env.Env, dir string, prof, teto int, dev uint64, te
 			s.ModUTC = fi.ModTime().UTC().Format("2006-01-02T15:04:05Z")
 		}
 		s.UID, s.GID = donoDe(fi)
-		f.Suid = append(f.Suid, s)
+		achados = append(achados, s)
+	}
+
+	// Um bloqueio por DIRETÓRIO e não por entrada: com doze trabalhadores e
+	// centenas de milhares de arquivos, travar por arquivo transformaria o
+	// paralelismo em fila.
+	if len(novos) > 0 || len(achados) > 0 || len(fora) > 0 {
+		v.mu.Lock()
+		v.fila = append(v.fila, novos...)
+		v.f.Suid = append(v.f.Suid, achados...)
+		v.outroFS = append(v.outroFS, fora...)
+		v.mu.Unlock()
 	}
 }
 
@@ -332,4 +443,35 @@ func capabilityDoArquivo(e *env.Env, p string) (uint64, bool) {
 
 func le32(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+}
+
+// devPorPonto é a tabela de montagem indexada por ponto, montada UMA vez.
+//
+// A primeira versão varria o slice de montagens a cada diretório. Com dezenas
+// de montagens e dezenas de milhares de diretórios isso é milhões de
+// comparações de string — trocar uma syscall por uma busca linear não é
+// otimizar, é mudar de credor.
+func (f *Facts) devPorPonto() map[string]uint64 {
+	if f.idxMount != nil {
+		return f.idxMount
+	}
+	f.idxMount = make(map[string]uint64, len(f.Mounts))
+	for i := range f.Mounts {
+		f.idxMount[f.Mounts[i].Ponto] = f.Mounts[i].Dev
+	}
+	return f.idxMount
+}
+
+// ehOutroFilesystem diz se o caminho é um ponto de montagem de dispositivo
+// diferente do da árvore que está sendo percorrida.
+//
+// O dispositivo só muda em ponto de montagem, e a tabela já foi lida no começo
+// da coleta: perguntar ao kernel o dispositivo de cada diretório percorrido é
+// pagar por informação que já está em memória.
+func (f *Facts) ehOutroFilesystem(p string, dev uint64) bool {
+	d, ehPonto := f.devPorPonto()[p]
+	// Não é ponto de montagem: continua no mesmo filesystem, sem perguntar.
+	// E ponto de montagem sem dispositivo resolvido desce mesmo assim — perder
+	// um galho por engano é pior que percorrer um a mais.
+	return ehPonto && d != 0 && d != dev
 }

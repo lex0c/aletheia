@@ -2538,3 +2538,84 @@ o kernel mente, todas as fontes que dependem dele mentem juntas.
 
 60 checks, 81 cenários, 122 execuções. `make race` limpo. Zero achado em Debian
 12, Alpine 3.20, Ubuntu 14.04, CentOS 7 e Rocky 9.
+
+---
+
+## Registro — otimização, medida antes de mexer
+
+Perfil da coleta no host, antes:
+
+```
+pkg+hash+attrs   955ms
+suid             797ms
+githooks         135ms
+crossview        133ms
+TOTAL           2124ms
+```
+
+Duas fases eram 82%.
+
+### O que estava errado na varredura de arquivos
+
+Duas coisas, e a segunda vale mais que a primeira.
+
+**Uma syscall por entrada, para descobrir o tipo.** O kernel devolve `d_type`
+junto com o nome no readdir, e a varredura chamava `Lstat` em TODA entrada só
+para saber se aquilo era diretório ou link. A maioria das chamadas existia para
+descartar symlink. O stat ficou só onde é insubstituível: modo, tamanho e dono
+de arquivo regular.
+
+**A varredura era SEQUENCIAL enquanto o hash já era paralelo.** Um núcleo
+trabalhando e onze esperando, num trabalho que é readdir mais stat — syscall,
+que reparte entre núcleos exatamente como o hash repartiu.
+
+Virou fila com trabalhadores:
+
+```
+suid   797ms → 111ms      7×
+```
+
+O detalhe que decide a correção da fila: **fila vazia não significa fim**. Um
+trabalhador ocupado ainda pode empilhar subdiretórios, e parar antes dele
+perderia galhos inteiros em silêncio. O fim é fila vazia E ninguém ativo.
+
+### E a corrida que eu mesmo introduzi
+
+O índice de pontos de montagem era construído de forma preguiçosa dentro de
+`ehOutroFilesystem`. Isso era seguro enquanto a varredura era sequencial; com
+vários trabalhadores viraram vários escrevendo o mesmo mapa.
+
+Paralelizar não muda só a velocidade — muda quem pode tocar em quê. O índice
+passou a ser montado antes de largar os trabalhadores, e o detector confirmou.
+
+### O que sobrou, e por que não vale mexer
+
+```
+pkg+hash+attrs   827ms  (65%)   dos quais ~750ms são hash
+suid             111ms
+githooks         124ms
+crossview        120ms
+TOTAL           1276ms
+```
+
+O hash está perto do limite do hardware: 1 GB a ~1,3 GB/s com oito
+trabalhadores. Ele já é paralelo, já tem teto de bytes, e o teto já MORDE num
+desktop — os maiores arquivos (`libxul.so`, `chromium`) são pulados e
+declarados. Num servidor o conjunto é uma fração disso e o teto nem encosta.
+
+Reduzir mais exigiria hashear menos, e hashear menos é ver menos: o valor
+disso é o Ebury, que troca biblioteca de sistema no lugar dela.
+
+`githooks` e `crossview` somam 244ms e são sequenciais — a mesma fila
+resolveria. Ficam anotados: 19% de ganho contra o risco de introduzir a segunda
+corrida em duas horas.
+
+### Resultado
+
+```
+scan   2124ms → 1276ms      40%
+wtf    2088ms → 1285ms      dentro do orçamento de 2s da SPEC 6.1
+```
+
+Nenhum achado mudou: 122 execuções de cenário, `make race` limpo nos dois
+pacotes.

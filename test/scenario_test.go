@@ -244,10 +244,20 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 	// indicadores que não trouxe indicador nenhum. Ali não houve varredura, e
 	// justamente por isso não pode haver linha de cobertura: uma cobertura
 	// impressa sem varredura seria a mentira que ela existe para impedir.
-	if sc.Exit != 3 && r.coverage.ID != "coverage" {
+	//
+	// O `preserve` é a outra exceção, e pelo mesmo motivo por outro caminho: ele
+	// COPIA, não analisa. Não existe denominador — nenhum check rodou —, e uma
+	// cobertura impressa ali afirmaria uma conclusão sobre o host que ninguém
+	// tirou. O que ele deve à automação é o manifesto, não o veredito.
+	switch {
+	case !sc.Varredura():
+		if r.coverage.ID == "coverage" {
+			t.Error("preserve não varre, coleta: uma linha de cobertura aqui " +
+				"afirmaria uma conclusão sobre o host que nenhum check tirou")
+		}
+	case sc.Exit != 3 && r.coverage.ID != "coverage":
 		t.Error("JSONL sem linha de cobertura")
-	}
-	if sc.Exit == 3 && r.coverage.ID == "coverage" {
+	case sc.Exit == 3 && r.coverage.ID == "coverage":
 		t.Error("exit 3 é erro de invocação: não pode haver linha de cobertura, " +
 			"porque varredura nenhuma aconteceu")
 	}

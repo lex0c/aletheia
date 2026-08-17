@@ -86,7 +86,11 @@ var mapsRWXAnon = check.Check{
 			fd.NextSteps = []string{
 				"o código só existe na memória deste processo: matá-lo destrói a " +
 					"única cópia (runbook §29)",
-				"sudo gcore -o \"$IR/pid-" + strconv.Itoa(p.PID) + ".core\" " + strconv.Itoa(p.PID),
+				// `--mem` dumpa as regiões ANÔNIMAS sem ptrace — sem parar o
+				// processo e sem escrever TracerPid, que é o que o `gcore`
+				// recomendado aqui antes fazia. As regiões rwx entram primeiro,
+				// caso o teto corte a coleta.
+				preservarPID(e, p.PID, "--mem"),
 				"o binário em disco não explica o que está rodando — compare com " +
 					"a §24 antes de concluir que o pacote está íntegro",
 			}

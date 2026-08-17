@@ -579,7 +579,9 @@ escreve APENAS em --out            nada fora dali, nunca
 alvo explícito                     --pid ou --file; jamais varre e preserva sozinho
 o que faz                          cp /proc/<pid>/exe · dump de memória nativo · stat ·
                                    sha256 do original E da cópia (cadeia de custódia da §6)
-ordem                              stat + hash ANTES da cópia — cp -a não preserva ctime (§5.2)
+ordem                              stat pelo DESCRITOR já aberto, não pelo caminho — cp -a não
+                                   preserva ctime (§5.2), e statear o caminho depois da cópia
+                                   pode descrever outro inode se o arquivo for trocado no meio
 o que NÃO faz                      não mata, não remove, não desabilita nada
                                    e NÃO executa gcore (ver abaixo)
 ```
@@ -1008,7 +1010,9 @@ watch          0 se nada apareceu; 1 se apareceu processo/conexão nova; 2 se al
                achado decisivo (ver 6.1) surgiu durante a janela
 collect        0 se o facts.json foi escrito íntegro; 3 em erro de escrita
 preserve       0 se todo artefato pedido foi copiado e conferido por hash; 1 se algum
-               falhou (processo morreu no meio, permissão) — nunca silencioso
+               falhou (processo morreu no meio, permissão) — nunca silencioso;
+               2 se o hash da ORIGEM e o da CÓPIA divergiram, que não é erro de
+               cópia e sim o artefato tendo mudado durante a leitura
 ```
 
 ---

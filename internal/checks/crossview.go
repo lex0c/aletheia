@@ -78,8 +78,7 @@ var pidOculto = check.Check{
 				"leia direto, sem passar por listagem: " +
 					"sudo cat /proc/" + strconv.Itoa(h.PID) + "/status /proc/" +
 					strconv.Itoa(h.PID) + "/cmdline",
-				"sudo cp /proc/" + strconv.Itoa(h.PID) + "/exe \"$IR/oculto-" +
-					strconv.Itoa(h.PID) + ".bin\"",
+				preservarPID(e, h.PID),
 				"ocultação de processo é a assinatura do rootkit: a partir daqui, " +
 					"analise a imagem DE FORA (runbook §35.6)",
 			}

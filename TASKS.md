@@ -86,10 +86,11 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 
 ## Fase 12 — `preserve`
 
-- [ ] **12.1** `cp /proc/<pid>/exe` + `stat` + sha256 do original e da cópia
-- [ ] **12.2** dump de memória nativo (`/proc/<pid>/maps` + `/proc/<pid>/mem`), sem ptrace
+- [x] **12.1** `cp /proc/<pid>/exe` + `stat` + sha256 do original e da cópia
+- [x] **12.2** dump de memória nativo (`/proc/<pid>/maps` + `/proc/<pid>/mem`), sem ptrace
 - [ ] **12.3** `--pcap` — AF_PACKET + `x/net/bpf`, com `PACKET_STATISTICS` reportado
-- [ ] **12.4** run log em `$IR/aletheia-runs.jsonl`
+- [x] **12.4** run log em `$IR/aletheia-runs.jsonl`
+- [x] **12.5** bytecode de eBPF como tipo de evidência: não há arquivo a copiar
 
 ## Fase 13 — rotina
 
@@ -4043,3 +4044,187 @@ vê-los intactos, e antes da remoção.
 
 79 checks, 135 cenários, 72 com prova de silêncio. `make verify`, `make race` e
 a suíte inteira limpos.
+
+---
+
+## Registro — `preserve`: o passo irreversível deixou de ser delegado
+
+O relatório manda preservar dezenas de vezes. Todo achado crítico começava com
+uma linha assim:
+
+```
+sudo cp /proc/812/exe "$IR/"   # a amostra, antes de qualquer coisa
+                               ← irreversível se pulado
+```
+
+E era só isso: uma frase. O operador montava o comando na mão, no meio do
+incidente — que é exatamente quando a janela se perde. A §19 é explícita: matar
+o processo destrói a única cópia de um binário em memfd ou já apagado do disco.
+A ferramenta sabia disso, dizia isso, e deixava a parte irreversível por conta
+de quem estava com pressa.
+
+Agora `aletheia preserve` faz o passo. É o **único comando que escreve**, e as
+travas vêm antes de qualquer leitura: sem `--out` nada acontece, o diretório
+precisa já existir, nada é sobrescrito, e nada é executado.
+
+### As quatro coisas que somem
+
+```
+exe apagado   /proc/<pid>/exe ainda abre o arquivo depois do unlink.
+              É a única cópia, e ela morre com o processo
+memfd         nunca houve arquivo: o binário existe só como descritor
+memória       região anônima gravável e executável — código injetado que
+              não tem arquivo em lugar nenhum
+eBPF          bytecode que vive dentro do kernel e some no reboot
+```
+
+Nenhuma sobrevive a um `kill`; três não sobrevivem a um reboot.
+
+### O dump de memória não usa ptrace, e essa é a diferença
+
+A recomendação anterior era `gcore`, que faz attach: **para o processo e escreve
+TracerPid**. Um alvo parado no meio da coleta muda o que se está medindo, e um
+implante que lê o próprio `TracerPid` sabe que está sendo olhado.
+
+Ler `/proc/<pid>/maps` + `/proc/<pid>/mem` não faz nenhuma das duas coisas. Só
+as regiões **anônimas** entram: o que tem arquivo por trás está no disco e se
+copia com `--file`; o que não tem é o único conteúdo que não existe em outro
+lugar.
+
+E a ordem das regiões é uma decisão, não um detalhe — o orçamento pode não
+cobrir todas, e a ordem decide o que sobrevive ao corte:
+
+```
+1. gravável E executável   código injetado se escreve e depois se executa
+2. [heap] e [stack]        onde payload em dado costuma parar
+3. o resto                 em ordem de endereço
+```
+
+O corte também mudou de forma: uma arena de alocador de 400 MB no meio do
+caminho **não consome a coleta inteira** — ela é pulada, declarada, e as quatro
+páginas RWX que vinham depois continuam sendo dumpadas. O teto é declarado no
+manifesto, nunca silencioso.
+
+A cópia é em fluxo, sem materializar a faixa em RAM: o respondedor pode estar
+num host com pouca memória livre — às vezes porque o próprio incidente a comeu —
+e alocar 500 MB para dumpar 500 MB transformaria a coleta em parte do problema.
+
+### A cadeia de custódia é o hash dos DOIS lados
+
+O manifesto registra o sha256 da **origem** (calculado enquanto se lê) e o da
+**cópia** (relendo o que foi escrito). Iguais é o normal. Diferentes não é erro
+de I/O: é o arquivo tendo mudado durante a leitura — e num incidente isso é
+achado, com exit 2 próprio.
+
+E o que **não** foi preservado sai com o mesmo destaque do que foi:
+
+```
+NÃO PRESERVADO — isto é lacuna de evidência, não detalhe:
+  mem pid=812: abrir a memória de outro processo exige privilégio de
+  ptrace: rode como root, e confira /proc/sys/kernel/yama/ptrace_scope
+```
+
+É o mesmo invariante da cobertura no scan, na versão que escreve: uma peça que
+fica de fora em silêncio é a pior saída possível de uma coleta — o operador
+guarda o diretório achando que tem tudo.
+
+### O defeito que o cenário achou
+
+O kernel resolve o link de um memfd como `/memfd:<nome> (deleted)` — **com o
+sufixo de apagado junto**. A primeira versão testava o sufixo antes do prefixo,
+e rotulava execução fileless como "o arquivo foi APAGADO do disco".
+
+Não é erro cosmético: as duas notas mandam o respondedor a lugares diferentes.
+Uma diz para procurar o caminho em backup, em log de pacote e na timeline do
+filesystem; a outra diz que esse caminho **nunca existiu**. A classificação virou
+função pura com teste de regressão, e o caso `/opt/memfd:x (deleted)` — arquivo
+que por acaso se chama assim — está travado do lado certo.
+
+O `facts` já acertava isso desde a fase 3; o pacote novo repetiu o erro por
+conta própria, o que é o argumento de sempre para o cenário existir.
+
+### Cenários
+
+```
+V1  exe apagado, processo vivo      a cópia em /proc é a última que existe
+V2  memfd + região anônima RWX      as duas coisas que só existem na RAM
+V3  sem privilégio                  metade falha, e a falha APARECE (exit 1)
+```
+
+O V2 pede `--cap-add=SYS_PTRACE`, e isso não é conveniência do rig: abrir
+`/proc/<pid>/mem` alheio exige privilégio de ptrace, que é exatamente o que a
+mensagem de falha diz. O V3 prova o outro lado — a mesma coleta sem privilégio,
+declarando o que perdeu.
+
+### Dois invariantes do harness precisaram de exceção, ambas escritas
+
+O `preserve` não produz achado nenhum: a saída dele é manifesto de coleta.
+
+- **Orçamento de ruído**: um `SemAvisos` ali seria verdadeiro por vacuidade —
+  exatamente a armadilha do `MaxWarn: 0` que parecia proteção e não conferia
+  nada. Exceção por subcomando, com o motivo no código.
+- **Linha de cobertura**: o `preserve` copia bytes, não analisa. Não existe
+  denominador — nenhum check rodou —, e uma cobertura impressa ali afirmaria
+  uma conclusão sobre o host que ninguém tirou. O harness agora **exige a
+  ausência** dela, pelo mesmo raciocínio que já valia para o exit 3.
+
+### O relatório parou de recomendar o comando pior
+
+Oito checks mandavam `cp /proc/<pid>/exe` e um mandava `gcore`. Agora mandam
+`preserve`, com o caminho REAL do binário que acabou de rodar — `ToolPath`, com
+symlink resolvido —, porque a ferramenta é estática e costuma ser copiada ad hoc
+para o host: `sudo aletheia` presumiria PATH.
+
+A regra de quando usar cada um ficou escrita num lugar só:
+
+```
+morre com o processo   →  aletheia preserve   exe, memfd, memória, eBPF
+está em disco          →  cp                  o arquivo não vai a lugar nenhum,
+                                              e cp é o comando que todo
+                                              respondedor lê sem hesitar
+```
+
+E existia um teste que proibia a string `aletheia preserve` em `NextSteps`,
+escrito quando o subcomando NÃO existia — o operador colava a linha, recebia
+"comando desconhecido", e podia seguir para matar o processo. O invariante foi
+invertido em vez de apagado: `TestInstrucaoDePreservacaoRodaNesteBuild` pega a
+instrução **como ela sai do check** e a entrega ao parser de verdade. Trocar
+`--pid` por `--pids` no gerador derruba o teste.
+
+### Duas correções que o próprio texto da SPEC provocou
+
+**O stat sai do DESCRITOR, não do caminho.** A SPEC pedia "stat antes da cópia,
+porque `cp -a` não preserva ctime". Antes ou depois, statear o caminho pode
+descrever OUTRO inode — o atacante troca o arquivo no meio da coleta e o
+manifesto casa os bytes de um com os metadados do outro. O `fstat` no descritor
+que acabou de ser lido descreve exatamente o inode de onde os bytes vieram,
+inclusive quando ele já foi apagado.
+
+**O manifesto vive DENTRO do diretório de evidência**, com ou sem `--json`.
+Sem isso a cadeia de custódia moraria no terminal: o operador leva as amostras
+para a análise e os hashes ficam na tela que ele fechou. O `--json` passou a ser
+o que sempre deveria ter sido — um canal para a automação, não a única forma de
+produzir a custódia. As lacunas vão no MESMO arquivo das peças: quem abrir o
+diretório meses depois precisa ver o que não está ali.
+
+E um detalhe de campo que é a tese do projeto em miniatura: `uid` e `gid` são
+ponteiro. Com `omitempty` num int, o dono **root** — uid 0 — sumia do JSON, e o
+leitor não conseguia separar "era do root" de "não deu para statear".
+
+### Mutação
+
+Oito mutantes plantados no pacote, oito mortos: destino sem `filepath.Base`,
+`destino` aceitando sobrescrever, `Integro` nunca acusando, `escreverFaixa`
+deixando arquivo vazio, `porInteresse` não ordenando, o `maps` aceitando região
+com arquivo, aceitando região sem leitura, e o `rwx` olhando só o bit de
+execução.
+
+### Estado
+
+79 checks, 138 cenários, suíte inteira e `make verify` limpos. `preserve` fecha
+12.1, 12.2, 12.4 e acrescenta o bytecode de eBPF como tipo de evidência. Falta o
+12.3 (`--pcap`), que é uma unidade própria: captura de tráfego tem decisão de
+escopo, de teto e de formato que não se resolve de passagem.
+
+O que mudou de fato para quem usa: o passo mais irreversível do incidente
+deixou de ser delegado a um `cp` montado à mão com pressa.

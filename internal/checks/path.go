@@ -92,7 +92,7 @@ var suspiciousPath = check.Check{
 			fd.NextSteps = []string{
 				"preserve o binário ANTES de qualquer coisa (runbook §6) — em tmpfs " +
 					"ele some no reboot, e em /tmp o systemd-tmpfiles o apaga sozinho",
-				"sudo cp /proc/" + strconv.Itoa(p.PID) + "/exe \"$IR/pid-" + strconv.Itoa(p.PID) + ".bin\"",
+				preservarPID(e, p.PID),
 				"identifique a FAMÍLIA antes de mitigar: o nome da ferramenta define o " +
 					"raio de alcance (runbook §5.10)",
 			}

@@ -55,20 +55,21 @@ func TestMemfdExecDispara(t *testing.T) {
 		t.Errorf("Subject = %q — é o que preserva o caso individual na agregação", f.Subject)
 	}
 	// O passo irreversível precisa estar no achado, com o PID preenchido, e
-	// precisa ser um comando que EXISTE. A versão anterior emitia
-	// "aletheia preserve", subcomando que este build não tem: o operador
-	// recebia "comando desconhecido" e podia seguir para matar o processo,
-	// destruindo a única cópia do binário.
+	// precisa ser um comando que EXISTE. A regra nasceu do erro oposto: uma
+	// versão prometia "aletheia preserve" quando o subcomando não existia, e o
+	// operador recebia "comando desconhecido" — podendo seguir para matar o
+	// processo e destruir a única cópia do binário.
+	//
+	// Hoje o subcomando existe, e quem prova que a linha impressa RODA é
+	// TestInstrucaoDePreservacaoRodaNesteBuild, em cmd/aletheia: ele pega a
+	// instrução como ela sai daqui e a entrega ao parser de verdade.
 	if !f.Irreversible {
 		t.Error("memfd precisa ser marcado Irreversible — é o campo que promove o passo a 1º")
 	}
 	var hasPreserve bool
 	for _, ns := range f.NextSteps {
-		if strings.Contains(ns, "cp /proc/8812/exe") {
+		if strings.Contains(ns, "preserve") && strings.Contains(ns, "--pid 8812") {
 			hasPreserve = true
-		}
-		if strings.Contains(ns, "aletheia preserve") {
-			t.Errorf("NextSteps promete subcomando inexistente: %q", ns)
 		}
 	}
 	if !hasPreserve {
@@ -326,11 +327,6 @@ func TestAchadoIrreversivelEhTipado(t *testing.T) {
 	}
 	if !res.Findings[0].Irreversible {
 		t.Error("memfd: perder o processo destrói a única cópia do binário — precisa ser Irreversible")
-	}
-	for _, ns := range res.Findings[0].NextSteps {
-		if strings.Contains(ns, "aletheia preserve") {
-			t.Error("NextSteps não pode prometer subcomando que não existe neste build")
-		}
 	}
 }
 

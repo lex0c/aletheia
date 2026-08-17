@@ -89,7 +89,7 @@ var revshell = check.Check{
 			fd.NextSteps = []string{
 				"NÃO mate antes de preservar (runbook §6) — e NÃO bloqueie só o IP: " +
 					"C2 por relay não tem IP fixo (runbook §18.1)",
-				"sudo cp /proc/" + strconv.Itoa(p.PID) + "/exe \"$IR/pid-" + strconv.Itoa(p.PID) + ".bin\"",
+				preservarPID(e, p.PID),
 				"isolar na camada de REDE, não no host (runbook §18)",
 			}
 			r.Findings = append(r.Findings, fd)

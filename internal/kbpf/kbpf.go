@@ -690,3 +690,74 @@ func imprimivel(s string) bool {
 	}
 	return true
 }
+
+// BytecodeDePrograma devolve as instruções VERIFICADAS do programa — o que o
+// kernel de fato vai executar, depois de o verificador reescrever o que
+// precisou.
+//
+// # Por que isto existe
+//
+// É a única cópia. Um programa eBPF não tem arquivo em disco, não tem inode,
+// não aparece em /proc/modules e some no próximo boot: se ninguém guardar o
+// bytecode agora, não há amostra para analisar depois. Todo o resto do que esta
+// ferramenta manda preservar é `cp`; isto não é.
+//
+// O protocolo é o de duas etapas do bpf_prog_info: a primeira chamada diz o
+// TAMANHO, a segunda entrega os bytes num buffer nosso. Kernel que restringe a
+// leitura do bytecode — `kptr_restrict`, ou sem CAP_SYS_ADMIN — devolve zero
+// instruções, e a resposta honesta é dizer que não veio, nunca inventar um
+// arquivo vazio.
+func BytecodeDePrograma(id uint32) ([]byte, error) {
+	fd, err := fdPorID(cmdProgGetFDByID, id)
+	if err != nil {
+		return nil, err
+	}
+	defer syscall.Close(fd)
+
+	info, n, err := infoDoFD(fd, 256)
+	if err != nil {
+		return nil, err
+	}
+	// xlated_prog_len fica no deslocamento 20 do bpf_prog_info, e o ponteiro
+	// para onde escrever, no 32.
+	tam := u32(info, n, 20)
+	if tam == 0 {
+		return nil, errSemBytecode
+	}
+
+	buf := make([]byte, tam)
+	le.PutUint32(info[20:], tam)
+	le.PutUint64(info[32:], uint64(uintptr(unsafe.Pointer(&buf[0]))))
+
+	attr := attrInfo{fd: uint32(fd), tamanho: uint32(len(info)), info: ptr(info)}
+	_, _, errno := syscall.Syscall(sysBPF, cmdObjGetInfoByFD,
+		uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
+	runtime.KeepAlive(buf)
+	runtime.KeepAlive(info)
+	if errno != 0 {
+		return nil, errno
+	}
+	// Kernel que recusa entregar o bytecode devolve o buffer intocado. Zerado
+	// inteiro é "não veio", e não "programa vazio" — programa vazio não passa
+	// no verificador.
+	if todoZero(buf) {
+		return nil, errSemBytecode
+	}
+	return buf, nil
+}
+
+const errSemBytecode = erroSimples("o kernel não entregou o bytecode: sem " +
+	"CAP_SYS_ADMIN, ou leitura restrita por kptr_restrict")
+
+type erroSimples string
+
+func (e erroSimples) Error() string { return string(e) }
+
+func todoZero(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
+}

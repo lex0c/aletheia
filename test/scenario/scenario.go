@@ -199,12 +199,19 @@ func Register(s Scenario) {
 	// sendo descoberto pelo operador no meio do incidente. Com ele, cresce o
 	// ruído e a suíte quebra.
 	//
-	// O `watch` fica de fora, e a razão é medida: ali a contagem NÃO é
-	// determinística. O relatório de vigília imprime o que MUDOU a cada ciclo, e
-	// um implante que vai e volta reaparece um número de vezes que depende do
-	// ritmo da amostragem — o K4 mediu 2 numa execução e 4 na seguinte. Um
-	// orçamento fixo ali seria teste instável, que é pior que teste nenhum.
-	if s.Untestable == "" && s.Cmd != "watch" {
+	// Dois subcomandos ficam de fora, por razões diferentes.
+	//
+	// O `watch`: ali a contagem NÃO é determinística. O relatório de vigília
+	// imprime o que MUDOU a cada ciclo, e um implante que vai e volta reaparece
+	// um número de vezes que depende do ritmo da amostragem — o K4 mediu 2 numa
+	// execução e 4 na seguinte. Um orçamento fixo ali seria teste instável, que
+	// é pior que teste nenhum.
+	//
+	// O `preserve`: ele não produz achado NENHUM — a saída dele é manifesto de
+	// coleta. Um `SemAvisos` ali seria verdadeiro por vacuidade, que é
+	// exatamente a armadilha do `MaxWarn: 0` descrita acima: parece proteção e
+	// não confere nada. O que um cenário de preserve afirma vai em ExpectOutput.
+	if s.Untestable == "" && orcamentoDeRuidoFazSentido(s.Cmd) {
 		if _, declarado := s.Orcamento(); !declarado && len(s.Expect) == 0 {
 			panic("cenário " + s.ID + ": não afirma achado nenhum, então ele existe " +
 				"para provar SILÊNCIO — e precisa declarar o orçamento de ruído " +
@@ -216,6 +223,18 @@ func Register(s Scenario) {
 	}
 	registry[s.ID] = s
 }
+
+// orcamentoDeRuidoFazSentido: ver as duas exceções acima. O `watch` conta o que
+// muda, e a contagem depende do ritmo da amostragem; o `preserve` não conta
+// nada, porque não produz achado.
+func orcamentoDeRuidoFazSentido(cmd string) bool {
+	return cmd != "watch" && cmd != "preserve"
+}
+
+// Varredura diz se o cenário ANALISA o host. Só quem analisa tem cobertura a
+// declarar: o `preserve` copia bytes e vai embora, e uma linha de cobertura ali
+// afirmaria uma conclusão que ninguém tirou.
+func (s Scenario) Varredura() bool { return s.Cmd != "preserve" }
 
 // Orcamento devolve o teto de avisos e se ele foi DECLARADO. É a função que
 // separa "este cenário aceita até N avisos" de "ninguém disse nada sobre ruído

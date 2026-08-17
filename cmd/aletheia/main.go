@@ -46,6 +46,7 @@ COMANDOS
   wtf           overview em ~1s: este host está pegando fogo?
   watch         varre em ciclo e reporta só o que MUDAR: o eixo do tempo
   baseline      captura o estado atual como referência para comparar depois
+  preserve      guarda a evidência antes que ela suma. O ÚNICO que escreve
   checks        catálogo: id, §ref, modo, grupo, requires, falsos positivos
   version       versão e hash deste binário
 
@@ -90,6 +91,23 @@ FLAGS DE wtf
   --oneline     UMA linha: veredito + alvos. Para triagem de FROTA por ssh
   --budget D    teto de tempo (padrão 2s). O que estourar vira NÃO VERIFICADO
 
+FLAGS DE preserve
+  --out DIR     onde escrever. OBRIGATÓRIO: este comando não escolhe o lugar.
+                O diretório precisa já existir, e nada nele é sobrescrito
+  --pid N       preserva /proc/N/exe — que ainda abre o binário depois de
+                apagado, e é a ÚNICA cópia quando ele veio de memfd. Repetível
+  --file PATH   preserva um arquivo comum. Repetível
+  --bpf ID      preserva o bytecode do programa eBPF: não existe arquivo para
+                copiar, e ele some no próximo boot (§8). Repetível
+  --mem         dump das regiões ANÔNIMAS dos --pid — onde mora código injetado.
+                Sem ptrace: não para o processo nem seta TracerPid, ao contrário
+                do gcore. Só as anônimas; o que tem arquivo por trás use --file
+  --mem-max S   teto do dump (padrão 512M). O que não couber é DECLARADO
+  --json FILE   manifesto em JSONL ("-" = stdout)
+
+  O manifesto traz o hash da ORIGEM e o da CÓPIA. Divergência não é erro de
+  cópia: é o artefato tendo mudado durante a leitura — e sai com exit 2.
+
 EXIT CODES
   0  OK          zero achados E cobertura completa
   1  WARNING     achado que precisa de olhar humano, OU cobertura incompleta
@@ -98,6 +116,10 @@ EXIT CODES
 
   Exit 0 exige as DUAS condições. Uma execução sem root e sem debugfs não sai
   zero — seria a ferramenta contradizendo o próprio nome.
+
+  No preserve a escala é a mesma, sobre a coleta: 0 guardou tudo o que foi
+  pedido, 1 alguma peça ficou de fora (e está no manifesto), 2 a origem mudou
+  durante a cópia, 3 invocação inválida — nada foi escrito.
 
 LIMITES — leia antes de confiar num resultado limpo
   * "RESULT: OK" significa que nenhum indicador COBERTO disparou. Não é prova
@@ -137,6 +159,8 @@ func main() {
 		os.Exit(runWatch(os.Args[2:]))
 	case "baseline":
 		os.Exit(runBaseline(os.Args[2:]))
+	case "preserve":
+		os.Exit(runPreserve(os.Args[2:]))
 	case "checks":
 		os.Exit(runChecks(os.Args[2:]))
 	case "version":

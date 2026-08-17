@@ -66,8 +66,7 @@ var memfdExec = check.Check{
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"NÃO mate antes de preservar: o binário só existe neste processo (runbook §6)",
-				"sudo cp /proc/" + strconv.Itoa(p.PID) + "/exe \"$IR/pid-" + strconv.Itoa(p.PID) + ".bin\"",
-				"sudo sha256sum /proc/" + strconv.Itoa(p.PID) + "/exe \"$IR/pid-" + strconv.Itoa(p.PID) + ".bin\"",
+				preservarPID(e, p.PID),
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -127,7 +126,7 @@ var exeDeleted = check.Check{
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"o binário continua íntegro em /proc/" + strconv.Itoa(p.PID) + "/exe (runbook §3.14)",
-				"sudo cp /proc/" + strconv.Itoa(p.PID) + "/exe \"$IR/pid-" + strconv.Itoa(p.PID) + ".bin\"",
+				preservarPID(e, p.PID),
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -197,7 +196,7 @@ var kthreadDisguise = check.Check{
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"o nome mente, o exe não (runbook §3.3)",
-				"sudo cp /proc/" + strconv.Itoa(p.PID) + "/exe \"$IR/pid-" + strconv.Itoa(p.PID) + ".bin\"",
+				preservarPID(e, p.PID),
 			}
 			r.Findings = append(r.Findings, fd)
 		}

@@ -125,8 +125,7 @@ var shellDeServico = check.Check{
 			fd.NextSteps = []string{
 				"a linhagem é a evidência: preserve a árvore inteira antes de matar " +
 					"qualquer um (runbook §6)",
-				"sudo cp /proc/" + strconv.Itoa(p.PID) + "/exe \"$IR/pid-" +
-					strconv.Itoa(p.PID) + ".bin\"",
+				preservarPID(e, p.PID),
 				"o PAI é o vetor de entrada: a §16 começa por ele, não pelo shell",
 			}
 			r.Findings = append(r.Findings, fd)

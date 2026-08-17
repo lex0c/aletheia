@@ -45,6 +45,9 @@ type Facts struct {
 	Accounts      []Account      `json:"accounts,omitempty"`
 	Grupos        []Grupo        `json:"groups,omitempty"`
 	Sudoers       []SudoRule     `json:"sudoers,omitempty"`
+	Suid          []SuidFile     `json:"suid,omitempty"`
+	Modules       []ModuleConf   `json:"modules,omitempty"`
+	ModuleFiles   []string       `json:"module_files,omitempty"`
 	MetaAcesso    []ArquivoMeta  `json:"access_meta,omitempty"`
 	Cross         CrossView      `json:"cross_view"`
 

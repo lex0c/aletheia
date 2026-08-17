@@ -215,20 +215,36 @@ func TestCronFrequentPulaOAgendadorDaDistro(t *testing.T) {
 	}
 }
 
-// Quinze minutos é cadência REDONDA, e cadência redonda é o que manutenção
-// legítima usa. O favorito do beacon é o número que não casa com janela
-// nenhuma — a §7.1 cita */7.
-func TestCronFrequentUsaLimiteEstrito(t *testing.T) {
-	mk := func(seg int) *facts.Facts {
+// QUINZE MINUTOS PASSOU A CONTAR, e a mudança tem nome: o Outlaw agenda `*/15`.
+//
+// A versão anterior descartava exatamente 900 segundos, argumentando que
+// cadência redonda é o que manutenção legítima usa. O argumento é bom e a
+// conclusão era errada — malware de verdade usa cadência redonda o tempo todo,
+// e o exemplo estava publicado numa família que faz força bruta em SSH desde
+// 2018.
+//
+// Quem isenta o agendador da distribuição é a checagem de COMANDO, que é
+// precisa e continua valendo. O limiar não deve fazer esse trabalho: fazendo,
+// ele cega a ferramenta para todo agendamento de quinze minutos.
+func TestCronFrequentContaQuinzeMinutos(t *testing.T) {
+	mk := func(seg int, cmd string) *facts.Facts {
 		return &facts.Facts{Cron: []facts.CronEntry{{
 			File: "/etc/cron.d/x", Kind: "dropin", User: "root",
-			IntervalSec: seg, Schedule: "*/n", Cmd: "/usr/local/bin/x"}}}
+			IntervalSec: seg, Schedule: "*/n", Cmd: cmd}}}
 	}
-	if r := cronFrequent.Run(cronFrequent, mk(900), imgEnv()); len(r.Findings) != 0 {
-		t.Error("15 minutos exatos é cadência de manutenção, não de beacon")
+	if r := cronFrequent.Run(cronFrequent, mk(900, "/root/.configrc/b/run"), imgEnv()); len(r.Findings) != 1 {
+		t.Error("*/15 é a cadência do Outlaw e precisa disparar")
 	}
-	if r := cronFrequent.Run(cronFrequent, mk(420), imgEnv()); len(r.Findings) != 1 {
+	if r := cronFrequent.Run(cronFrequent, mk(420, "/usr/local/bin/x"), imgEnv()); len(r.Findings) != 1 {
 		t.Error("*/7 é o favorito do beacon e precisa disparar")
+	}
+	// E o agendador da distribuição continua isento, na mesma cadência.
+	if r := cronFrequent.Run(cronFrequent, mk(900, "run-parts /etc/periodic/15min"), imgEnv()); len(r.Findings) != 0 {
+		t.Error("o `*/15 run-parts /etc/periodic/15min` do Alpine é de fábrica")
+	}
+	// Acima do teto continua fora: uma hora não é beacon.
+	if r := cronFrequent.Run(cronFrequent, mk(3600, "/usr/local/bin/x"), imgEnv()); len(r.Findings) != 0 {
+		t.Error("uma hora está acima do teto do que conta como curto")
 	}
 }
 

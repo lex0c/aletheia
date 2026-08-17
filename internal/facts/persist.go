@@ -144,6 +144,8 @@ func collectPersist(f *Facts, e *env.Env) {
 	collectTriggers(f, e)
 	collectTrust(f, e)
 	collectGitHooks(f, e)
+	collectSuid(f, e)
+	collectModprobe(f, e)
 	// Por último: a pergunta de propriedade precisa dos candidatos que os
 	// coletores acima produziram.
 	collectPkg(f, e)

@@ -1846,3 +1846,110 @@ check inexistente falha.
 
 49 checks, 60 cenários, 85 execuções. Zero achado em host limpo, Debian 12,
 Alpine 3.20, CentOS 7 e Ubuntu 14.04.
+
+---
+
+## Registro — cenários a partir do IMPLANTE, não do catálogo
+
+Correção de método, e ela vale mais que qualquer check deste bloco.
+
+Os cenários anteriores foram escritos olhando o que a ferramenta sabe ver. Isso
+a mede contra ela mesma. Quando o `correlate.persistence_redundant` saiu AVISO
+onde eu esperava CRÍTICO, eu **ajustei a expectativa** — e com isso o cenário
+passou a descrever o comportamento em vez de cobrá-lo.
+
+Os novos invertem a ordem: cada um planta o que a família planta de verdade, e
+o `Expect` diz o que um responder PRECISA saber. Quando a ferramenta não
+informa, o cenário falha — e o que se corrige é a ferramenta.
+
+```
+93  Kinsing        minerador em /tmp, cron que baixa e executa a cada minuto
+94  XorDDoS        malware com forma de BIBLIOTECA, persistência tripla
+95  Outlaw         força bruta em SSH, tudo dentro do home
+96  HiddenWasp     rootkit de userland por ld.so.preload
+97  módulo de kernel  carga no boot e a diretiva `install` do modprobe
+98  retenção       SUID plantado: nem processo, nem conexão, nem agendamento
+```
+
+Na primeira execução, **cinco dos seis falharam**. Nenhuma dessas falhas eu
+teria encontrado escrevendo cenário a partir do catálogo.
+
+### O que estava faltando
+
+**SUID não tinha check nenhum.** A retenção de root mais antiga que existe, e a
+que todo intruso usa depois de escalar. Não deixa processo, conexão nem
+agendamento — e os outros vinte checks de persistência procuram exatamente
+essas três coisas. Precisou de varredura de filesystem, que é um modo de
+procurar que a ferramenta não tinha: os outros coletores vão a lugares
+NOMEADOS e leem o que está lá.
+
+**A diretiva `install` do modprobe.** O nome engana — ela não carrega módulo,
+executa um comando como root sempre que alguém pedir aquele módulo. Fica entre
+dezenas de `blacklist` legítimos, e quem audita "o que roda no boot" olha
+systemd e cron.
+
+**O alvo do gatilho nunca era perguntado.** O XorDDoS põe `/lib/libudev.so` num
+script de cron.hourly; o HiddenWasp põe `/lib/libselinux.so` no rc.local.
+Nenhum baixa nada, nenhum tem pipe para shell, os dois caminhos parecem de
+sistema — a heurística de conteúdo passa batido nos dois, com razão. O que
+denuncia é a pergunta de propriedade sobre o ALVO, e o check já dizia isso nos
+próprios falsos positivos sem usar: *"o que os separa é o caminho do que
+executam e o dono do pacote"*.
+
+**O conteúdo dos diretórios do cron não era lido.** `/etc/cron.hourly/gcc.sh`
+era coletado como agendamento, mas o que ele EXECUTA ficava invisível. O
+XorDDoS depende exatamente dessa indireção.
+
+**`*/15` era ignorado.** Eu tinha endurecido o limiar para `>=` 15 minutos
+argumentando que cadência redonda é manutenção. O argumento é bom e a conclusão
+era errada: o Outlaw agenda `*/15` desde 2018. Quem isenta o agendador da
+distribuição é a checagem de comando, que é precisa — o limiar não devia fazer
+esse trabalho.
+
+### E um defeito latente que só apareceu agora
+
+O join de propriedade mapeava *forma no arquivo → UM caminho*. Com usrmerge,
+`/bin/su` e `/usr/bin/su` geram as mesmas chaves; guardando um valor só, a
+segunda inserção sobrescrevia a primeira e **um binário de sistema saía como
+"nenhum pacote reivindica"**. Nenhum candidato anterior gerava as duas formas —
+a varredura de SUID gerou, e dezenove binários da debian:12 viraram crítico.
+
+O mesmo defeito estava no backend do apk, intocado.
+
+E a normalização de usrmerge era uma TABELA escrita para Debian. O Arch funde
+`/sbin` em `/usr/bin`, o que nenhuma tabela dessas prevê. Trocada por resolver
+o diretório pelos symlinks REAIS do host — exato em vez de adivinhado, e
+funciona em qualquer esquema de fusão. Junto veio o suporte a **pacman**, sem o
+qual a pergunta de propriedade ficava muda em todo host Arch, enfraquecendo
+meia dúzia de checks em silêncio.
+
+### Falsos positivos medidos e fechados
+
+```
+19  debian:12    todo binário SUID do sistema, pelo defeito do join
+25  ubuntu 14.04 scripts de cron.daily da distro, e caminhos que não executam
+12  debian:12    arquivos de config do Docker chegando ao check de BINÁRIO
+21  host Arch    units cujo binário opcional não existe no host
+17  host Arch    /usr/sbin -> bin resolvido contra a raiz em vez do pai
+ 6  host Arch    driver TrueScale da Intel, legítimo e empacotado
+```
+
+Cada um virou uma regra com nome. A que mais se repete: **a pergunta de
+propriedade só vale onde binário mora**. `/etc` é o território da configuração
+local — o gerenciador só reivindica o que ELE entregou ali, e "sem dono" não
+significa nada. Em `/lib` a mesma resposta significa tudo.
+
+### Um limite que ficou escrito em vez de escondido
+
+O check de SUID tem uma nota que diz "e é um interpretador: executar já devolve
+root". Ela reconhece o interpretador pelo NOME — e no cenário 98 não disparou,
+porque `.dbus-helper` é uma cópia de `/bin/sh` e o invasor renomeou. Que é o
+que invasor faz.
+
+A nota serve para o caso descuidado. Quem detectou os três SUID foi a pergunta
+de propriedade e o diretório gravável, e as duas independem do nome.
+
+### Estado
+
+51 checks, 66 cenários, 97 execuções. Zero achado em host limpo, Debian 12,
+Alpine 3.20, CentOS 7 e Ubuntu 14.04.

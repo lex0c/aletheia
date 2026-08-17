@@ -80,6 +80,18 @@ var gatilhosDeDiretorio = []struct{ dir, kind, when string }{
 	{"/etc/dnf/plugins", "pkg_hook", "a cada operação do gerenciador de pacotes"},
 	{"/etc/yum/pluginconf.d", "pkg_hook", "a cada operação do gerenciador de pacotes"},
 	{"/etc/udev/rules.d", "udev", "em evento de dispositivo"},
+
+	// Os diretórios do cron guardam SCRIPTS, e o agendamento sozinho não diz o
+	// que eles executam. O XorDDoS depende exatamente dessa indireção: o cron
+	// aponta para /etc/cron.hourly/gcc.sh, e é o CONTEÚDO do gcc.sh que aponta
+	// para o payload. Sem ler o conteúdo, o alvo real fica invisível.
+	{"/etc/cron.hourly", "cron_script", "de hora em hora"},
+	{"/etc/cron.daily", "cron_script", "uma vez por dia"},
+	{"/etc/cron.weekly", "cron_script", "uma vez por semana"},
+	{"/etc/cron.monthly", "cron_script", "uma vez por mês"},
+	{"/etc/periodic/15min", "cron_script", "a cada quinze minutos"},
+	{"/etc/periodic/hourly", "cron_script", "de hora em hora"},
+	{"/etc/periodic/daily", "cron_script", "uma vez por dia"},
 	{"/etc/pam.d", "pam", "a cada autenticação"},
 	{"/usr/lib/systemd/system-generators", "generator", "em todo boot e reload, ANTES das units"},
 	{"/etc/systemd/system-generators", "generator", "em todo boot e reload, ANTES das units"},

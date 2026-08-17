@@ -64,6 +64,15 @@ var semDonoDePacote = check.Check{
 			if _, gravavel := suspectDir(o.Path); gravavel {
 				continue
 			}
+			// A pergunta deste check é sobre BINÁRIO QUE EXECUTA, e é isso que
+			// o título promete. O arquivo de gatilho entra na coleta porque o
+			// check de gatilho precisa saber se a distribuição o entregou — mas
+			// ele costuma ser CONFIGURAÇÃO, e configuração sem dono de pacote é
+			// rotina: toda imagem de contêiner acrescenta as suas. Na debian:12
+			// isso rendeu doze acusações contra arquivos do próprio Docker.
+			if soVeioDeConfig(o.Onde) {
+				continue
+			}
 
 			sev := check.SevWarn
 			nota := "está em diretório de instalação manual (/usr/local, /opt): " +
@@ -114,4 +123,26 @@ func dirDePacote(p string) bool {
 		}
 	}
 	return false
+}
+
+// soVeioDeConfig diz se o único motivo de perguntarmos por este caminho foi ele
+// ser um arquivo de CONFIGURAÇÃO — e não um binário em execução ou agendado.
+//
+// Esses caminhos entram na coleta porque outros checks precisam saber se a
+// distribuição os entregou. Mas configuração sem dono de pacote é rotina: toda
+// imagem de contêiner acrescenta as suas, e todo host tem as do administrador.
+// Trazê-los para cá foi o que rendeu doze acusações contra arquivos do Docker
+// na debian:12 e uma contra o config de GPU do host.
+var origemDeConfig = map[string]bool{
+	"arquivo de gatilho": true,
+	"config de módulo":   true,
+}
+
+func soVeioDeConfig(onde []string) bool {
+	for _, o := range onde {
+		if !origemDeConfig[o] {
+			return false
+		}
+	}
+	return len(onde) > 0
 }

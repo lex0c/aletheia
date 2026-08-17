@@ -98,11 +98,17 @@ var cronFrequent = check.Check{
 		var r check.Result
 		for i := range f.Cron {
 			c := &f.Cron[i]
-			// `>=` e não `>`: quinze minutos é cadência REDONDA, e cadência
-			// redonda é o que manutenção legítima usa. O favorito do beacon é
-			// justamente o número que não casa com janela nenhuma — a §7.1 cita
-			// */7 (runbook §2.7).
-			if c.IntervalSec == 0 || c.IntervalSec >= maxBeaconSeg {
+			// `>` e não `>=`, e a diferença tem nome: o Outlaw agenda `*/15`.
+			//
+			// A versão anterior usava `>=` argumentando que quinze minutos é
+			// cadência redonda e cadência redonda é manutenção legítima. O
+			// argumento é bom e a conclusão era errada — malware de verdade usa
+			// cadência redonda o tempo todo, e o exemplo estava publicado.
+			//
+			// Quem isenta o agendador da distribuição é a checagem de COMANDO
+			// logo abaixo, que é precisa. O limiar não deve fazer esse trabalho:
+			// fazendo, ele cega a ferramenta para todo agendamento de 15 minutos.
+			if c.IntervalSec == 0 || c.IntervalSec > maxBeaconSeg {
 				continue
 			}
 			// O próprio agendador da distribuição não é anomalia: o Alpine

@@ -119,10 +119,39 @@ var shellStartup = check.Check{
 			if t.Kind != "shell" {
 				continue
 			}
+			// Gatilho ENTREGUE PELA DISTRIBUIÇÃO não é achado.
+			//
+			// /etc/cron.daily/apt e /etc/cron.daily/dpkg fazem coisas que
+			// parecem suspeitas em qualquer heurística de conteúdo — no Ubuntu
+			// 14.04 renderam quinze acusações. O que os separa de um script
+			// acrescentado é a mesma pergunta de sempre: veio de um pacote?
+			//
+			// LIMITE conhecido: isto não vê MODIFICAÇÃO de arquivo empacotado.
+			// Um invasor que acrescenta uma linha ao /etc/cron.daily/apt
+			// mantém o dono de pacote e escapa deste ramo. Detectar isso exige
+			// comparar hash com o pacote, que é outro check e não existe ainda.
+			donoDoGatilho := temDonoDePacote(f, t.File)
+
 			for _, ln := range t.Lines {
 				motivo, sev, ok := execSuspect(linhaExecutavel(ln.Text))
+				if ok && donoDoGatilho {
+					ok = false
+				}
 				if !ok {
-					continue
+					// O PADRÃO DE CONTEÚDO NÃO É A ÚNICA ENTRADA.
+					//
+					// XorDDoS põe `/lib/libudev.so` num script de cron.hourly e
+					// num init.d; HiddenWasp põe `/lib/libselinux.so` no
+					// rc.local. Nenhum baixa nada, nenhum tem pipe para shell, e
+					// os dois caminhos parecem de sistema — `execSuspect` passa
+					// batido nos dois, com razão.
+					//
+					// O que denuncia é a pergunta sobre o ALVO, e ela é a mesma
+					// que este check já citava nos falsos positivos sem usar.
+					motivo, sev, ok = alvoSemDono(f, ln.Text)
+					if !ok {
+						continue
+					}
 				}
 				ev := []string{
 					ln.Text,
@@ -245,14 +274,43 @@ var triggerExec = check.Check{
 			t := &f.Triggers[i]
 			switch t.Kind {
 			case "rc", "initd", "motd", "ssh_rc", "pkg_hook", "generator",
-				"git_hook", "mail", "supervisor":
+				"git_hook", "mail", "supervisor", "cron_script":
 			default:
 				continue
 			}
+			// Gatilho ENTREGUE PELA DISTRIBUIÇÃO não é achado.
+			//
+			// /etc/cron.daily/apt e /etc/cron.daily/dpkg fazem coisas que
+			// parecem suspeitas em qualquer heurística de conteúdo — no Ubuntu
+			// 14.04 renderam quinze acusações. O que os separa de um script
+			// acrescentado é a mesma pergunta de sempre: veio de um pacote?
+			//
+			// LIMITE conhecido: isto não vê MODIFICAÇÃO de arquivo empacotado.
+			// Um invasor que acrescenta uma linha ao /etc/cron.daily/apt
+			// mantém o dono de pacote e escapa deste ramo. Detectar isso exige
+			// comparar hash com o pacote, que é outro check e não existe ainda.
+			donoDoGatilho := temDonoDePacote(f, t.File)
+
 			for _, ln := range t.Lines {
 				motivo, sev, ok := execSuspect(linhaExecutavel(ln.Text))
+				if ok && donoDoGatilho {
+					ok = false
+				}
 				if !ok {
-					continue
+					// O PADRÃO DE CONTEÚDO NÃO É A ÚNICA ENTRADA.
+					//
+					// XorDDoS põe `/lib/libudev.so` num script de cron.hourly e
+					// num init.d; HiddenWasp põe `/lib/libselinux.so` no
+					// rc.local. Nenhum baixa nada, nenhum tem pipe para shell, e
+					// os dois caminhos parecem de sistema — `execSuspect` passa
+					// batido nos dois, com razão.
+					//
+					// O que denuncia é a pergunta sobre o ALVO, e ela é a mesma
+					// que este check já citava nos falsos positivos sem usar.
+					motivo, sev, ok = alvoSemDono(f, ln.Text)
+					if !ok {
+						continue
+					}
 				}
 				ev := []string{
 					ln.Text,
@@ -536,4 +594,44 @@ func alvoDoTrigger(t *facts.Trigger) string {
 		return t.User + ":" + baseDe(t.File)
 	}
 	return t.File
+}
+
+// alvoSemDono responde a pergunta de propriedade sobre o programa que a linha
+// executa. É a entrada estrutural do gatilho: não olha o conteúdo do comando,
+// olha de onde veio o binário.
+func alvoSemDono(f *facts.Facts, linha string) (string, check.Severity, bool) {
+	alvo := facts.PrimeiroCaminhoAbsoluto(linha)
+	// /etc fora: é o território da configuração local, e ali "sem dono de
+	// pacote" é a norma e não sinal.
+	if alvo == "" || strings.HasPrefix(alvo, "/etc/") {
+		return "", 0, false
+	}
+	semDono := caminhosSemDono(f)
+	if !semDono[alvo] {
+		return "", 0, false
+	}
+
+	sev, nota := pesoDoCaminho(alvo)
+	motivo := "executa " + alvo + ", e nenhum pacote reivindica esse arquivo " +
+		"(base: " + f.Pkg.Kind + ") — " + nota
+	// Executar uma BIBLIOTECA é anomalia por si só: `.so` é carregado pelo
+	// ligador, não executado por gatilho. É a forma do XorDDoS.
+	if strings.HasSuffix(alvo, ".so") || strings.Contains(alvo, ".so.") {
+		sev = check.SevCritical
+		motivo += " · e o alvo tem nome de BIBLIOTECA: `.so` é carregado pelo " +
+			"ligador, não executado por gatilho de boot"
+	}
+	return motivo, sev, true
+}
+
+// temDonoDePacote responde se o pacote reivindica o arquivo. Falso quando a
+// base não pôde ser consultada — e aí o ramo de conteúdo continua valendo, que
+// é o comportamento seguro.
+func temDonoDePacote(f *facts.Facts, p string) bool {
+	for i := range f.Ownership {
+		if f.Ownership[i].Path == p {
+			return f.Ownership[i].Owned
+		}
+	}
+	return false
 }

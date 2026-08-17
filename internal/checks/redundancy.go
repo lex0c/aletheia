@@ -190,6 +190,8 @@ func mecanismoDoTrigger(kind string) string {
 		return "hook de pacote"
 	case "generator":
 		return "generator de systemd"
+	case "cron_script":
+		return "script de diretório do cron"
 	case "git_hook":
 		return "hook de git"
 	case "mail":

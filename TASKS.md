@@ -38,7 +38,7 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 
 - [x] **4.1** `facts/systemd` — **baseado em arquivo**: units, timers, `.socket`, `.path`, `*.wants/`, drop-ins
 - [ ] **4.2** cron, `at`, anacron — incluindo extração do intervalo `*/N`
-- [ ] **4.3** SSH — `authorized_keys`, `sshd_config` efetivo, `AuthorizedKeysCommand`, `.ssh/rc`
+- [x] **4.3** SSH — `authorized_keys`, `sshd_config` efetivo, `AuthorizedKeysCommand`, `.ssh/rc`
 - [ ] **4.4** shell startup — lista exata + diff contra `/etc/skel` (contexto, não achado) + `BASH_ENV`
 - [x] **4.5** loader — `ld.so.preload`, `ld.so.conf.d`, `/etc/environment`
 - [ ] **4.6** `rc.local`/`init.d`/generators, PAM, udev, MOTD, hooks de pacote
@@ -1277,3 +1277,96 @@ vez nesta sessão que ela apareceu por um caminho diferente.
 
 Correção dupla: `lookup` trata ENOTDIR como inexistente, e `homeDirs` descarta
 home que não é diretório.
+
+---
+
+## Registro — fase 4.2 e 4.3: cron, at e SSH
+
+Seis checks, 26 no total. São as duas persistências mais COMUNS em invasão real
+— uma linha de crontab e uma chave em `authorized_keys` — e vieram depois de
+systemd só porque o coletor de unit era o mais difícil, não o mais frequente.
+
+Tudo lido de ARQUIVO. Nada de `crontab -l`, nada de `sshd -T`: o binário do host
+é justamente o que pode estar adulterado, e ler arquivo funciona sobre imagem
+montada. O preço está declarado no código — `sshd -T` resolve Match blocks e
+defaults compilados, e a leitura de arquivo não. O que se ganha é ver o que
+está ESCRITO, que é o que alguém plantou.
+
+### O que decidiu o desenho de cada um
+
+```
+cron_suspect    mesma pergunta do unit_exec_suspect, no outro gatilho. O cron é
+                o mais usado dos dois: não precisa de systemd, não precisa de
+                root para o próprio usuário, e uma linha a mais num arquivo de
+                texto não chama atenção
+
+cron_frequent   a cadência do beacon. */7 é o favorito porque sete minutos não
+                casa com nenhuma janela redonda de amostragem (§2.7)
+
+at_job          o gatilho que MAIS escapa: dispara UMA vez, no futuro. Não é
+                recorrente, então não aparece em varredura de periodicidade
+                nenhuma — é assim que um atacante sobrevive à limpeza. E o job
+                guarda o ambiente INTEIRO de quem o criou: o SSH_CONNECTION lá
+                dentro entrega o IP de origem de graça
+
+ssh_forced_     command="..." executa a cada login com aquela chave. Quem tem a
+command         chave não precisa nem de shell, e o authorized_keys continua
+                parecendo um arquivo de chaves comum
+
+sshd_key_source AuthorizedKeysFile e AuthorizedKeysCommand mudam ONDE o sshd
+                procura chave. O segundo é pior: não existe arquivo de chave
+                nenhum para achar
+
+ssh_keys        MANUAL de propósito. "Esta chave é de alguém do time?" não é
+                decidível por máquina — toda chave parece igual. O que a
+                ferramenta pode fazer é montar a lista com o que DECIDE:
+                impressão digital para comparar entre hosts, comentário para
+                reconhecer a origem, data para datar a inserção
+```
+
+A impressão digital é SHA-256 no formato do `ssh-keygen`, calculada nativamente.
+É o melhor IOC de frota que existe: a mesma chave em vários hosts é a mesma
+pessoa, e isso vale mais que hash de binário (§23).
+
+### Dois parsings que decidem o achado
+
+```
+formato de cron   o de SISTEMA tem um campo de usuário a mais que o de usuário.
+                  Confundir faz o nome do usuário virar o começo do comando, e o
+                  comando de verdade some do relatório
+
+opções de chave   vêm ANTES do tipo, separadas por vírgula, e podem conter
+                  espaço dentro de aspas: command="/bin/x -a b",no-pty. Cortar
+                  por espaço perderia metade da opção — que é onde mora o gatilho
+```
+
+### Duas isenções, ambas achadas rodando contra ambiente real
+
+**`AuthorizedKeysCommand` do Arch.** O Manjaro entrega
+`/usr/bin/userdbctl ssh-authorized-keys %u` de fábrica, via
+`sshd_config.d/20-systemd-userdb.conf` — e o parser seguiu os includes
+corretamente, então o achado estava CERTO. Disparar em todo host Arch é ruído.
+Isentadas as integrações de diretório conhecidas (systemd-userdb, SSSD, OS Login
+do GCE, EC2 Instance Connect) **quando o programa está em diretório de sistema**:
+um `userdbctl` em /tmp não herda reputação nenhuma. Mesma regra do runtime com
+JIT.
+
+**O agendador do Alpine.** Contêiner limpo disparava `cron_frequent`: a crontab
+de fábrica tem `*/15 run-parts /etc/periodic/15min`. Duas correções:
+
+```
+run-parts sobre /etc/periodic ou /etc/cron.* é plumbing da distribuição, e o
+que esses diretórios contêm já é coletado como entrada própria
+
+o limite virou ESTRITO: 15 minutos é cadência redonda, e cadência redonda é o
+que manutenção legítima usa. O favorito do beacon é o número que não casa com
+janela nenhuma
+```
+
+Depois das duas: zero falso positivo contra o host real e contra a matriz.
+
+### Estado
+
+26 checks, 59 cenários. Falta da fase 4: 4.4 (shell startup), 4.6 (rc.local,
+PAM, udev, generators), 4.7 (CA plantada, hosts, git hooks, metadata de nuvem),
+4.8 (supervisores e containers).

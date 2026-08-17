@@ -33,6 +33,9 @@ type Facts struct {
 	Loader        Loader         `json:"loader"`
 	Units         []Unit         `json:"units,omitempty"`
 	ToolArtifacts []ToolArtifact `json:"tool_artifacts,omitempty"`
+	Cron          []CronEntry    `json:"cron,omitempty"`
+	SSH           SSHConfig      `json:"ssh"`
+	SSHKeys       []SSHKey       `json:"ssh_keys,omitempty"`
 
 	// PersistDenied é o que a coleta de persistência não pôde LER, por
 	// categoria. Não é o mesmo que "não havia nada" — e sem root, /root e o

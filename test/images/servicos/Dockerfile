@@ -16,6 +16,11 @@
 # erra no servidor porque lá há centenas. Esta imagem existe para dar a ele as
 # centenas.
 #
+# O `python3` entra porque quase todo servidor tem um, e porque ele traz o
+# /usr/lib/python3.N/sitecustomize.py DO PACOTE — que é a contraparte legítima
+# do hook de interpretador. Sem ele, o check só poderia ser exercitado num host
+# onde presença já seria sinal.
+#
 # O `iproute2` não é serviço: é o que os cenários usam para levantar endereço no
 # loopback. Sem ele o `ip addr add` falha calado e o cenário de rede mede outra
 # coisa — foi o que aconteceu na primeira tentativa.
@@ -31,6 +36,7 @@ RUN apt-get update \
       rsyslog \
       ca-certificates \
       iproute2 \
+      python3 \
  && rm -rf /var/lib/apt/lists/*
 
 # Um crontab de sistema legítimo, do jeito que um servidor tem.

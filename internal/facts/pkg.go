@@ -227,6 +227,25 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 		c := &f.Cron[i]
 		add(primeiroToken(c.Cmd), "cron "+baseNome(c.File))
 	}
+	// sitecustomize.py e usercustomize.py são importados pelo python na
+	// inicialização sem ninguém pedir. Acusar a PRESENÇA acusaria toda
+	// instalação de python do mundo — o Debian entrega
+	// /usr/lib/python3.11/sitecustomize.py pelo libpython3.11-minimal. Quem
+	// responde é o gerenciador de pacotes, e por isso eles entram AQUI.
+	for _, p := range hooksDePython(e) {
+		add(p, "hook de inicialização do python")
+	}
+	// E o ALVO de cada hook de interpretador. Sem isto o check de hook não tem
+	// como pesar o que encontrou: `NODE_OPTIONS=--require /opt/app/x.js` numa
+	// unit é configuração de deploy quando o arquivo veio de um pacote, e é
+	// implante quando não veio — e a diferença é a única coisa que separa os
+	// dois. O check perguntava e a resposta era sempre "tem dono", porque
+	// ninguém tinha perguntado.
+	for i := range f.HooksInterp {
+		for _, alvo := range CaminhosDoValor(f.HooksInterp[i].Value) {
+			add(alvo, "hook de interpretador ("+f.HooksInterp[i].Key+")")
+		}
+	}
 	// O ALVO do gatilho, e esta é a que faltava.
 	//
 	// Um gatilho de boot ou de login que executa /lib/libudev.so não casa com

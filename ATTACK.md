@@ -26,6 +26,7 @@ Três rótulos, e o do meio é o que mais informa:
 | T1053.002 At | coberto | `persist.at_job` |
 | T1547.006 Módulo de kernel | parcial | `persist.modprobe_install`, `cross.module_view` — a carga por `modules-load.d` é vista pela propriedade do `.ko`, não por check próprio |
 | T1546.004 Configuração de shell | coberto | `persist.shell_startup`, `persist.bash_env` |
+| T1546.018 Hook de interpretador | coberto | `persist.interpreter_hook` — BASH_ENV, PYTHONPATH, NODE_OPTIONS, PERL5OPT, RUBYOPT, JAVA_TOOL_OPTIONS, e os sitecustomize/usercustomize pela propriedade de pacote. **Veio do corpus externo** |
 | T1546.005 Trap | coberto | `persist.shell_startup` — DEBUG, EXIT e ERR; `trap -` restaura o padrão e não é achado |
 | T1546.016 Hook de instalador | coberto | `persist.trigger_exec` (apt.conf.d, dnf, yum) |
 | T1098.004 Chave SSH autorizada | coberto | `persist.ssh_keys`, `ssh_forced_command`, `sshd_key_source` |
@@ -120,6 +121,41 @@ firewall    tabela vazia é comum e legítima (grupo de segurança da nuvem faz
 ```
 
 ---
+
+## Corpus externo: o que a lista de outra pessoa achou
+
+Os cenários e os checks desta ferramenta têm o mesmo autor, e isso é um risco
+que nenhuma quantidade de cenários próprios corrige: quem escreve os dois olha
+para o mesmo lado. O `atomic-red-team` foi cruzado com este mapa para medir o
+ponto cego.
+
+```
+122   técnicas com teste para Linux no corpus
+ 27   também neste mapa
+ 95   ausentes — e a maioria é COMPORTAMENTO que retrato nenhum vê:
+      rodar `whoami` não deixa artefato, e dizer que isso é lacuna
+      seria confundir o escopo da ferramenta com o do EDR
+ 15   tocam caminho de persistência, e essas são a pergunta de verdade
+```
+
+Uma delas apontou para algo que eu deveria ter deduzido sozinho — **T1546.018,
+hooks de inicialização de interpretador**:
+
+> A ferramenta trata `LD_PRELOAD` como quebra de confiança, com razão: o loader
+> injeta biblioteca em todo processo dinâmico. E nunca fez a MESMA pergunta a
+> python, node, perl, ruby, java e bash, que têm o mesmo mecanismo com outros
+> nomes.
+
+Fechada por `persist.interpreter_hook` e pelos cenários L1–L4. O `BASH_ENV` é o
+mais silencioso da família: nenhum perfil é tocado, nenhuma unit é editada, e
+todo script que o cron dispara passa a executar o hook antes da primeira linha.
+
+O resto das quinze com artefato já tinha check — a checagem por nome de arquivo
+que fiz primeiro dizia que PAM estava descoberto, e a tabela acima mostra
+`persist.pam_exec` desde antes. O único item novo que sobra é o mascaramento de
+unit com `systemctl mask`, que cria um link para `/dev/null`: cai no mesmo
+T1562.001 que já era a lacuna de pior custo/sinal, e continua parado pelo mesmo
+motivo.
 
 ## O que este mapa NÃO diz
 

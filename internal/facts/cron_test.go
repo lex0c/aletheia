@@ -104,3 +104,96 @@ func TestPropriedadeIgnoraDiretorio(t *testing.T) {
 		t.Errorf("o arquivo de verdade tinha que entrar: %v", cs)
 	}
 }
+
+// Os hooks de interpretador são o LD_PRELOAD de quem não é ELF, e a lacuna veio
+// de um corpus EXTERNO: a ferramenta tratava LD_PRELOAD como quebra de
+// confiança e nunca fez a mesma pergunta a python, node, perl ou bash.
+func TestHooksDeInterpretador(t *testing.T) {
+	f := imagem(t, map[string]string{
+		"etc/environment": "PATH=/usr/bin\n" +
+			"BASH_ENV=/opt/.cache/x.sh\n" +
+			"NAO_E_HOOK=/tmp/qualquer\n",
+		"etc/security/pam_env.conf":        "PYTHONSTARTUP DEFAULT=/tmp/.p.py\n",
+		"etc/systemd/system/app.service":   "[Service]\nEnvironment=\"NODE_OPTIONS=--require /opt/app/t.js\"\n",
+		"etc/systemd/system/limpa.service": "[Service]\nEnvironment=LANG=pt_BR.UTF-8\n",
+	})
+
+	achado := map[string]string{}
+	for _, h := range f.HooksInterp {
+		achado[h.Key] = h.Fonte
+	}
+	for _, k := range []string{"BASH_ENV", "PYTHONSTARTUP", "NODE_OPTIONS"} {
+		if achado[k] == "" {
+			t.Errorf("%s não foi coletada: %+v", k, f.HooksInterp)
+		}
+	}
+	if _, tem := achado["NAO_E_HOOK"]; tem {
+		t.Error("variável que não executa código não pode entrar na lista")
+	}
+	if _, tem := achado["LANG"]; tem {
+		t.Error("Environment=LANG numa unit não é hook de interpretador")
+	}
+
+	// GLOBAL é a diferença de peso: /etc/environment vale para toda sessão do
+	// host; Environment= de unit vale para um serviço.
+	for _, h := range f.HooksInterp {
+		global := h.Fonte == "/etc/environment" || h.Fonte == "/etc/security/pam_env.conf"
+		if h.Global != global {
+			t.Errorf("%s em %s: Global=%v, queria %v", h.Key, h.Fonte, h.Global, global)
+		}
+	}
+}
+
+// O ALVO precisa chegar à pergunta de propriedade — é ela que separa "deploy
+// com biblioteca própria" de implante, e é a única coisa que separa.
+func TestAlvoDoHookEntraNaPerguntaDePropriedade(t *testing.T) {
+	raiz := t.TempDir()
+	for _, d := range []string{"opt/app", "etc"} {
+		if err := os.MkdirAll(filepath.Join(raiz, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(raiz, "opt/app/t.js"), []byte("//\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(raiz, "etc/environment"),
+		[]byte("NODE_OPTIONS=--require /opt/app/t.js\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := env.Probe(env.Options{Root: raiz})
+	t.Cleanup(func() { e.Close() })
+
+	f := &Facts{HooksInterp: []HookInterp{
+		{Fonte: "/etc/environment", Key: "NODE_OPTIONS", Value: "--require /opt/app/t.js"},
+	}}
+	cs := candidatosDePropriedade(f, e)
+	if _, tem := cs["/opt/app/t.js"]; !tem {
+		t.Errorf("o alvo do hook não virou candidato a propriedade: %v", cs)
+	}
+}
+
+func TestCaminhosDoValor(t *testing.T) {
+	casos := []struct {
+		v    string
+		quer []string
+	}{
+		{"--require /opt/app/t.js", []string{"/opt/app/t.js"}},
+		{"/a:/b:/c", []string{"/a", "/b", "/c"}},              // PYTHONPATH
+		{"-javaagent:/opt/apm.jar", []string{"/opt/apm.jar"}}, // JAVA_TOOL_OPTIONS
+		{"-Mevil", nil},                    // PERL5OPT sem caminho
+		{"--max-old-space-size=4096", nil}, // o falso positivo comum
+		{"", nil},
+	}
+	for _, c := range casos {
+		got := CaminhosDoValor(c.v)
+		if len(got) != len(c.quer) {
+			t.Errorf("CaminhosDoValor(%q) = %v, queria %v", c.v, got, c.quer)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.quer[i] {
+				t.Errorf("CaminhosDoValor(%q)[%d] = %q, queria %q", c.v, i, got[i], c.quer[i])
+			}
+		}
+	}
+}

@@ -37,7 +37,10 @@ type Facts struct {
 
 	// Persistência vem de ARQUIVO, então existe também em modo image — onde o
 	// kernel é o do analista e ocultamento por rootkit não acontece (§35.6).
-	Loader         Loader                  `json:"loader"`
+	Loader Loader `json:"loader"`
+	// HooksInterp são as variáveis que fazem um interpretador carregar código
+	// de terceiro — o LD_PRELOAD de quem não é ELF.
+	HooksInterp    []HookInterp            `json:"interpreter_hooks,omitempty"`
 	Units          []Unit                  `json:"units,omitempty"`
 	ToolArtifacts  []ToolArtifact          `json:"tool_artifacts,omitempty"`
 	Cron           []CronEntry             `json:"cron,omitempty"`

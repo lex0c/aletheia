@@ -146,6 +146,11 @@ func collectPersist(f *Facts, e *env.Env) {
 	collectGitHooks(f, e)
 	collectSuid(f, e)
 	collectModprobe(f, e)
+	// ANTES do collectPkg: o ALVO de um hook de interpretador é candidato a
+	// propriedade, e é a resposta dessa pergunta que separa configuração de
+	// deploy de implante. Depois do collectPkg ele nunca era perguntado, e o
+	// check pesava tudo como aviso.
+	collectInterpretador(f, e)
 	// Por último: a pergunta de propriedade precisa dos candidatos que os
 	// coletores acima produziram.
 	collectPkg(f, e)

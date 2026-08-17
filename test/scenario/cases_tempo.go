@@ -82,6 +82,9 @@ func init() {
 		// O aviso que sobra é o listener do próprio rig.
 		Exit:           1,
 		MustBeComplete: true,
+		// Orçamento de ruído MEDIDO: o binário plantado produz um aviso, e este
+		// cenário é `scan` — determinístico, ao contrário dos de vigília.
+		MaxWarn: 1,
 	})
 
 	Register(Scenario{
@@ -106,6 +109,8 @@ func init() {
 		},
 		ForbidOutput: []string{"APARECEU", "VOLTOU", "SUMIU"},
 		Exit:         0,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	Register(Scenario{

@@ -59,6 +59,8 @@ func init() {
 			echo 0 > /sys/fs/selinux/enforce`,
 		Forbid: []string{"antiforense.mac_downgraded"},
 		Exit:   -1,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	Register(Scenario{

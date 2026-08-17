@@ -191,21 +191,25 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 	}
 	// O orçamento de ruído. Num host legítimo a ferramenta tem coisas
 	// verdadeiras a dizer, e cada uma delas gasta a atenção do operador.
-	if sc.MaxWarn > 0 {
-		var avisos int
-		var quais []string
-		for _, f := range r.findings {
-			if f.Sev == "WARN" {
-				avisos++
-				quais = append(quais, f.ID+"("+f.Subject+")")
-			}
+	//
+	// A contagem sai SEMPRE no log do teste, mesmo sem orçamento declarado: é
+	// ela que permite escolher o teto de um cenário novo pela medição, em vez
+	// de por opinião. `go test -tags scenarios -v` mostra.
+	var avisos int
+	var quais []string
+	for _, f := range r.findings {
+		if f.Sev == "WARN" {
+			avisos++
+			quais = append(quais, f.ID+"("+f.Subject+")")
 		}
-		if avisos > sc.MaxWarn {
-			t.Errorf("cenário %q: %d avisos, orçamento é %d — num host legítimo o "+
-				"excesso de ruído faz o operador ignorar a saída, e o achado que "+
-				"importa se perde junto\navisos: %v",
-				sc.Desc, avisos, sc.MaxWarn, quais)
-		}
+	}
+	t.Logf("RUÍDO %s: %d aviso(s) %v", sc.ID, avisos, quais)
+
+	if orcamento, declarado := sc.Orcamento(); declarado && avisos > orcamento {
+		t.Errorf("cenário %q: %d avisos, orçamento é %d — num host legítimo o "+
+			"excesso de ruído faz o operador ignorar a saída, e o achado que "+
+			"importa se perde junto\navisos: %v",
+			sc.Desc, avisos, orcamento, quais)
 	}
 
 	if sc.Exit >= 0 && r.exit != sc.Exit {

@@ -111,6 +111,8 @@ func init() {
 			"cred.ssh_private_key",
 		},
 		Exit: 0,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	Register(Scenario{
@@ -124,6 +126,8 @@ func init() {
 		Plant:            `sleep 300 &`,
 		Exit:             1,
 		MustBeIncomplete: true,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	Register(Scenario{
@@ -132,6 +136,8 @@ func init() {
 		Images: minimal,
 		Forbid: []string{"proc.kthread_disguise"},
 		Exit:   0,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	// ---------------------------------------------------------------- positivos
@@ -183,6 +189,8 @@ func init() {
 		Plant:  ``, // o próprio PID 1 do contêiner é o alvo
 		Args:   []string{"-v"},
 		Exit:   -1,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	Register(Scenario{
@@ -328,6 +336,8 @@ func init() {
 		ExpectOutput:     []string{"não pôde ser consultada"},
 		MustBeIncomplete: true,
 		Exit:             1,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	Register(Scenario{
@@ -363,6 +373,8 @@ func init() {
 			"cred.ssh_private_key",
 		},
 		Exit: 0,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	Register(Scenario{
@@ -422,6 +434,8 @@ func init() {
 		CPUs:         "0.5",
 		ExpectOutput: []string{"cota 0.5"},
 		Exit:         -1,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	// ------------------------------------------------------------------- rede
@@ -475,6 +489,8 @@ func init() {
 		// reflete. O que este cenário afirma é o Forbid.
 		Exit:           -1,
 		MustBeComplete: true,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	Register(Scenario{
@@ -520,6 +536,8 @@ func init() {
 		Forbid:         []string{"net.pivot", "correlate.revshell"},
 		Exit:           -1, // idem 41: o /helper do rig não tem dono de pacote
 		MustBeComplete: true,
+		// Orçamento de ruído MEDIDO: o binário do rig e as duas pontas do proxy: medido, não opinado.
+		MaxWarn: 3,
 	})
 
 	Register(Scenario{
@@ -975,6 +993,8 @@ func init() {
 		Plant: `ln -sf /etc/hostname /etc/hostname.link
 			rm -f /etc/os-release && ln -s /nao/existe/os-release /etc/os-release`,
 		Exit: -1,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	Register(Scenario{
@@ -987,6 +1007,8 @@ func init() {
 		Forbid:           []string{"proc.memfd_exec", "proc.exe_deleted", "proc.kthread_disguise"},
 		MustBeIncomplete: true,
 		Exit:             1,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	// ------------------------------------------------------- fora do contêiner
@@ -1034,6 +1056,8 @@ func init() {
 		Forbid:           []string{"proc.kthread_disguise"},
 		MustBeIncomplete: true,
 		Exit:             1,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	// ------------------------------------------------------- kernel de época
@@ -1131,6 +1155,8 @@ func init() {
 		Kernel:         "4.14",
 		Exit:           0,
 		MustBeComplete: true,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	Register(Scenario{

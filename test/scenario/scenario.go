@@ -20,6 +20,11 @@ package scenario
 
 import "sort"
 
+// SemAvisos é o orçamento de ruído ZERO: o cenário exige que a ferramenta
+// fique calada. Não é `MaxWarn: 0`, que é o valor zero do campo e significa
+// "não declarado".
+const SemAvisos = -1
+
 // Mode é como o cenário executa a CLI.
 type Mode int
 
@@ -133,7 +138,7 @@ type Scenario struct {
 	Exit int
 
 	// MaxWarn é o ORÇAMENTO DE RUÍDO: o máximo de avisos que este cenário pode
-	// produzir. Vale só onde foi declarado (0 = não verificar).
+	// produzir.
 	//
 	// Existe por causa de um cenário: um servidor de produção legítimo, com dois
 	// anos de acúmulo — binário instalado à mão, agente de APM com preload,
@@ -144,6 +149,12 @@ type Scenario struct {
 	// ferramenta é usável numa frota. Acima de uma dúzia o operador aprende a
 	// ignorar a saída, e aí o achado que importa se perde junto. Sem este
 	// campo isso seria opinião; com ele é regressão.
+	//
+	// ZERO É "NÃO DECLARADO", e essa distinção custou um defeito silencioso:
+	// três cenários escreviam `MaxWarn: 0` achando que exigiam silêncio, e o
+	// harness — que testava `if sc.MaxWarn > 0` — não conferia nada. Um
+	// orçamento que não é conferido é pior que orçamento nenhum, porque parece
+	// proteção. Para exigir silêncio existe SemAvisos.
 	MaxWarn int
 
 	// Coverage exige que a execução termine reportando cobertura incompleta —
@@ -180,10 +191,43 @@ func Register(s Scenario) {
 	case len(s.Images) == 0 && s.Untestable == "" && s.Mode != VM:
 		panic("cenário " + s.ID + " sem Images")
 	}
+	// Cenário que não afirma achado nenhum existe para provar SILÊNCIO — e
+	// silêncio sem número é opinião.
+	//
+	// É o mesmo invariante do FalsePositives obrigatório no Register do check, e
+	// pela mesma razão: sem ele, "quantos avisos um host legítimo produz" fica
+	// sendo descoberto pelo operador no meio do incidente. Com ele, cresce o
+	// ruído e a suíte quebra.
+	//
+	// O `watch` fica de fora, e a razão é medida: ali a contagem NÃO é
+	// determinística. O relatório de vigília imprime o que MUDOU a cada ciclo, e
+	// um implante que vai e volta reaparece um número de vezes que depende do
+	// ritmo da amostragem — o K4 mediu 2 numa execução e 4 na seguinte. Um
+	// orçamento fixo ali seria teste instável, que é pior que teste nenhum.
+	if s.Untestable == "" && s.Cmd != "watch" {
+		if _, declarado := s.Orcamento(); !declarado && len(s.Expect) == 0 {
+			panic("cenário " + s.ID + ": não afirma achado nenhum, então ele existe " +
+				"para provar SILÊNCIO — e precisa declarar o orçamento de ruído " +
+				"(MaxWarn: N, medido; ou SemAvisos, para exigir silêncio)")
+		}
+	}
 	if _, dup := registry[s.ID]; dup {
 		panic("cenário duplicado: " + s.ID)
 	}
 	registry[s.ID] = s
+}
+
+// Orcamento devolve o teto de avisos e se ele foi DECLARADO. É a função que
+// separa "este cenário aceita até N avisos" de "ninguém disse nada sobre ruído
+// aqui" — e ela existe porque o campo sozinho não conseguia dizer isso.
+func (s Scenario) Orcamento() (int, bool) {
+	switch {
+	case s.MaxWarn == SemAvisos:
+		return 0, true
+	case s.MaxWarn > 0:
+		return s.MaxWarn, true
+	}
+	return 0, false
 }
 
 // All devolve os cenários, ordenados por ID.

@@ -31,7 +31,7 @@ func init() {
 			printf '[Service]\nExecStart=/usr/bin/sh-alt -c true\n' > /etc/systemd/system/alt.service`,
 		// Nenhum dos dois links tem dono, e o alvo final tem. É a forma normal.
 		ForbidOutput:   []string{"sh-alt"},
-		MaxWarn:        0,
+		MaxWarn:        SemAvisos,
 		Exit:           0,
 		MustBeComplete: true,
 	})

@@ -123,6 +123,8 @@ func init() {
 		ExpectOutput:     []string{"CGROUP"},
 		MustBeIncomplete: true,
 		Exit:             -1,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	Register(Scenario{
@@ -204,5 +206,37 @@ func init() {
 			{ID: "kernel.taint_unexplained", Evidence: "não pode ser apagada"},
 		},
 		Exit: 1,
+	})
+}
+
+// P10 é o cenário COMPOSTO desta fase: ele junta a detecção (fase 8) com a
+// caça (fase 5) no mesmo host, e é a única coisa da suíte que prova o pivô de
+// frota para um implante que não tem arquivo.
+//
+// A tag do programa é determinística — o kernel a calcula do bytecode, e o
+// helper carrega sempre as mesmas duas instruções —, então ela funciona como o
+// indicador que veio do host anterior.
+func init() {
+	Register(Scenario{
+		ID:   "P10-tag-de-ebpf-como-indicador",
+		Desc: "a tag do implante em eBPF, trazida do host anterior, encontra o mesmo programa aqui",
+		Mode: VM,
+		// A pergunta que este cenário responde é a da §23, para o tipo de
+		// artefato mais difícil que existe: um programa eBPF não tem caminho,
+		// não tem inode, não tem data de arquivo e some no reboot. A tag é a
+		// única coisa dele que atravessa hosts.
+		//
+		// Os dois achados juntos são o produto: um diz "há algo carregado sem
+		// dono", o outro diz "e é EXATAMENTE o que já vimos no outro host".
+		Setup: `printf 'strings: [a04f5eef06a7f555]\n' > /ioc.yaml
+			/helper bpf socket implante &
+			sleep 1`,
+		Args: []string{"--ioc", "/ioc.yaml"},
+		Expect: []Expect{
+			{ID: "kernel.bpf_unowned", Sev: "CRITICAL", Evidence: "socket_filter"},
+			{ID: "ioc.match", Sev: "CRITICAL", Evidence: "tag do programa eBPF"},
+			{ID: "ioc.match", Subject: "bpf prog id="},
+		},
+		Exit: 2,
 	})
 }

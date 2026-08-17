@@ -67,6 +67,8 @@ func init() {
 		Plant:  rotacaoDoWtmp,
 		Forbid: []string{"antiforense.wtmp_cleared"},
 		Exit:   -1,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 }
 

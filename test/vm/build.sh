@@ -112,6 +112,15 @@ if [ -n "$setup" ]; then
 	fi
 fi
 
+# Os argumentos chegam separados por VÍRGULA porque a linha de comando do kernel
+# não aceita espaço dentro de um parâmetro. Sem esta tradução eles chegam ao
+# aletheia como UM token — `--ioc,/ioc.yaml` vira flag inválida, o binário
+# imprime o uso e o cenário falha com "nenhum achado", que é a mensagem mais
+# enganosa possível.
+if [ -n "${args:-}" ]; then
+	args=$(echo "$args" | tr ',' ' ')
+fi
+
 # Varrer sem privilégio é um CENÁRIO, não um detalhe: metade dos defeitos da
 # primeira revisão só aparecia sem root, e hidepid só esconde de quem NÃO é root.
 #

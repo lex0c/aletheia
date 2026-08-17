@@ -65,5 +65,7 @@ func init() {
 			sleep 0.2`,
 		ExpectOutput: []string{"ÂNCORA", "derivado desta execução", "persist.cron_suspect"},
 		Exit:         2,
+		// Orçamento de ruído MEDIDO: o cron plantado é crítico; o aviso restante é medido.
+		MaxWarn: 1,
 	})
 }

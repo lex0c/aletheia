@@ -3731,3 +3731,89 @@ a mutação morre.
 78 checks, 125 cenários, 191 execuções. `make verify` e `make race` limpos, e as
 sete mutações dirigidas à janela morrem. A fase 5 está fechada: `--ioc` e
 `--since`, que é o que a §23 pedia.
+
+---
+
+## Registro — o orçamento de ruído virou invariante
+
+Este bloco não acrescenta detecção. Acrescenta PROVA de que a detecção que já
+existe não mente — e começou por um defeito que estava escondido dentro da
+própria suíte.
+
+### Três cenários achavam que exigiam silêncio, e nenhum exigia
+
+```go
+if sc.MaxWarn > 0 {   // o harness, antes
+```
+
+`MaxWarn: 0` é o valor zero do campo, e o harness lia zero como "não
+declarado". Os três cenários que escreviam `MaxWarn: 0` — alternatives
+legítimo, fábrica com python, fábrica com serviços — pareciam travar silêncio e
+não travavam nada. **Um orçamento que não é conferido é pior que orçamento
+nenhum, porque parece proteção.**
+
+Agora existe `SemAvisos` para o zero explícito, e `Orcamento()` separa "aceita
+até N" de "ninguém disse nada".
+
+### O número passou a ser medido, não opinado
+
+O harness imprime a contagem de avisos de TODO cenário, com orçamento ou sem:
+
+```
+RUÍDO 80-servidor-legitimo: 6 aviso(s) [integrity.no_package_owner(/usr/local/bin/node) …]
+```
+
+É essa linha que permite escolher o teto de um cenário novo pela medição. Os 25
+orçamentos acrescentados aqui vieram todos dela — nenhum foi arbitrado.
+
+### E virou INVARIANTE, no mesmo lugar dos outros
+
+```go
+// scenario.Register
+cenário sem Expect e sem Untestable  →  precisa declarar orçamento
+```
+
+Um cenário que não afirma achado nenhum existe para provar SILÊNCIO, e silêncio
+sem número é opinião. É a mesma regra do `FalsePositives` obrigatório no
+`check.Register`, e pelo mesmo motivo: sem ela, "quantos avisos um host legítimo
+produz" fica sendo descoberto pelo operador no meio do incidente.
+
+Estado: **29 cenários existem para provar silêncio, e 27 declaram teto** — eram
+4. Vinte e um deles exigem silêncio absoluto.
+
+### O `watch` ficou de fora, e o motivo é medido
+
+O K4 mediu 2 avisos numa execução e 4 na seguinte. O relatório de vigília
+imprime o que MUDOU a cada ciclo, e um implante que vai e volta reaparece um
+número de vezes que depende do ritmo da amostragem. Orçamento fixo ali seria
+teste instável — que é pior que teste nenhum —, então o invariante isenta
+`Cmd: "watch"` e diz por quê.
+
+O K1b continua com teto: ele é o CONTROLE do K1 e roda `scan`, que é
+determinístico.
+
+### O cenário composto, e a lacuna que ele expôs
+
+O `P10` junta as duas metades desta sessão: o implante em eBPF (fase 8) e a caça
+por indicador (fase 5), no mesmo host. E escrevê-lo mostrou que o `--ioc` **não
+varria os fatos de eBPF** — eu tinha dito, ao recomendar a fase 5, que a tag de
+um programa é o IOC de frota mais forte para implante fileless, e o casamento
+não olhava para ela.
+
+A tag é a única coisa de um programa eBPF que atravessa hosts: ele não tem
+caminho, não tem inode, não tem data de arquivo e some no reboot. O kernel a
+calcula do bytecode, então o mesmo implante em duzentos hosts tem a mesma tag.
+Agora ela casa, e o P10 prova com o programa real carregado numa VM.
+
+### E uma armadilha do harness de VM
+
+`Args: []string{"--ioc", "/ioc.yaml"}` chegava ao guest como UM token
+(`--ioc,/ioc.yaml`), porque a linha de comando do kernel não aceita espaço e o
+harness junta com vírgula. O binário imprimia o uso e o cenário falhava com
+"nenhum achado" — a mensagem mais enganosa possível. O `/init` agora traduz a
+vírgula de volta para espaço.
+
+### Estado
+
+78 checks, 126 cenários, 27 orçamentos de ruído declarados. `make verify`,
+`make race` e a suíte inteira limpos.

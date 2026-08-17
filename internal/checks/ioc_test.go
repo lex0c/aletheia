@@ -186,3 +186,24 @@ func TestPrimeiroTokenDeComando(t *testing.T) {
 		}
 	}
 }
+
+// A tag de um programa eBPF é o IOC de frota mais forte que existe para
+// implante fileless: o kernel a calcula do bytecode, e ela não depende de nome,
+// caminho, arquivo nem data — que é tudo o que um programa eBPF não tem.
+func TestIOCCasaTagDeProgramaEBPF(t *testing.T) {
+	e := envComIOC(t, "strings: [a04f5eef06a7f555]\n")
+	f := &facts.Facts{BPF: facts.BPF{Enumerado: true, Programas: []facts.ProgramaBPF{
+		{ID: 47, Tipo: "socket_filter", Nome: "implante", Tag: "a04f5eef06a7f555"},
+	}}}
+	r := indicadorDoIncidente.Run(indicadorDoIncidente, f, e)
+	if len(r.Findings) != 1 {
+		t.Fatalf("achados = %v", r.Findings)
+	}
+	junto := strings.Join(r.Findings[0].Evidence, " | ")
+	if !strings.Contains(junto, "tag do programa eBPF") {
+		t.Errorf("evidência = %q", junto)
+	}
+	if r.Findings[0].Subject != "bpf prog id=47" {
+		t.Errorf("subject = %q", r.Findings[0].Subject)
+	}
+}

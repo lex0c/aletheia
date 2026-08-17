@@ -73,6 +73,7 @@ var indicadorDoIncidente = check.Check{
 		varrerPersistencia(b, f)
 		varrerContas(b, f)
 		varrerChaves(b, f)
+		varrerBPF(b, f)
 
 		r.Findings = b.achados
 		r.Partial = append(r.Partial, f.Partial["ioc"]...)
@@ -278,6 +279,29 @@ func varrerContas(b *caçaIOC, f *facts.Facts) {
 		}
 		b.casar(ioc.Usuario, l.User, "login "+l.User, "registro de login em "+l.QuandoU+
 			" vindo de "+nz(l.Origem, "(local)"))
+	}
+}
+
+// varrerBPF procura o indicador no que está carregado no KERNEL.
+//
+// A tag é o IOC de frota mais forte que existe para implante fileless: o kernel
+// a calcula a partir do bytecode, então o mesmo programa carregado em duzentos
+// hosts tem a mesma tag — e ela não depende de nome, caminho, arquivo nem data,
+// que é tudo o que um programa eBPF não tem.
+//
+// Ela entra como indicador de TEXTO, e não de hash: tem oito bytes, e a lista
+// recusa hash que não seja md5, sha1 ou sha256. Quem a tem escreve
+// `strings: [a04f5eef06a7f555]`.
+func varrerBPF(b *caçaIOC, f *facts.Facts) {
+	for i := range f.BPF.Programas {
+		p := &f.BPF.Programas[i]
+		alvo := "bpf prog id=" + strconv.Itoa(int(p.ID))
+		onde := "programa eBPF carregado no kernel (tipo " + p.Tipo + ")"
+		b.casar(ioc.Texto, p.Tag, alvo, "tag do "+onde)
+		b.casar(ioc.Texto, p.Nome, alvo, "nome do "+onde)
+		for _, pin := range p.Pins {
+			b.casar(ioc.Caminho, pin, alvo, "pin no bpffs do "+onde)
+		}
 	}
 }
 

@@ -104,7 +104,7 @@ func init() {
 		Plant:          `true`,
 		Forbid:         []string{"persist.interpreter_hook"},
 		ForbidOutput:   []string{"sitecustomize.py", "usercustomize.py"},
-		MaxWarn:        0,
+		MaxWarn:        SemAvisos,
 		Exit:           0,
 		MustBeComplete: true,
 	})

@@ -58,6 +58,8 @@ func init() {
 		Forbid:       []string{"ioc.match"},
 		ExpectOutput: []string{"INDICADORES", "1 ip · 1 path · 1 user"},
 		Exit:         -1,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	Register(Scenario{
@@ -74,5 +76,7 @@ func init() {
 		Args:         []string{"--ioc", "/ioc.yaml"},
 		ExpectOutput: []string{"a lista não trouxe indicador nenhum"},
 		Exit:         3,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 }

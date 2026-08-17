@@ -167,6 +167,8 @@ func init() {
 		Plant:  "",
 		Forbid: []string{"antiforense.audit_disabled"},
 		Exit:   0,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 }
 

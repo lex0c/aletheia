@@ -41,7 +41,7 @@ func init() {
 		Images:         servicos,
 		Plant:          `true`,
 		Forbid:         []string{"integrity.no_package_owner"},
-		MaxWarn:        0,
+		MaxWarn:        SemAvisos,
 		Exit:           0,
 		MustBeComplete: true,
 	})

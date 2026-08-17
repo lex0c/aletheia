@@ -51,7 +51,7 @@ Três rótulos, e o do meio é o que mais informa:
 |---|---|---|
 | T1070.003 Apagar histórico | coberto | `antiforense.shell_history` |
 | T1070.006 Timestomp | coberto | `integrity.timestomp` |
-| T1070.002 Apagar logs do sistema | **ausente** | log truncado ou removido não é notado |
+| T1070.002 Apagar logs do sistema | coberto | `antiforense.log_rotation_gap`, `antiforense.wtmp_cleared` |
 | T1014 Rootkit | parcial | `cross.hidden_pid`, `module_view`, `thread_count`, `kernel.ftrace_hook` — e o limite está declarado: se o kernel mente, as fontes mentem juntas |
 | T1036.005 Nome/lugar legítimo | coberto | `proc.kthread_disguise`, `integrity.no_package_owner` |
 | T1564.001 Arquivo oculto | **ausente** | diretório com ponto em `/tmp` e `/var/tmp` não é procurado |
@@ -93,7 +93,7 @@ Três rótulos, e o do meio é o que mais informa:
 O critério é duplo: **frequência em intrusão real** e **detectabilidade a
 partir de um retrato**. Técnica comum que só se vê em fluxo contínuo não entra.
 
-### 1. T1562.012 — auditoria desabilitada
+### ~~1. T1562.012 — auditoria desabilitada~~ — FECHADA
 
 A mais valiosa, e por um motivo que vai além dela mesma: **sem regra de audit,
 o host não registra execução nenhuma**. Não é só uma defesa a menos — é a
@@ -102,16 +102,6 @@ resposta a incidente ficando cega para tudo que aconteceu antes da varredura.
 É a pergunta de CAPACIDADE FORENSE, e é do feitio desta ferramenta: um servidor
 sem auditoria de exec não é um servidor limpo, é um servidor onde não dá para
 saber. Tudo em disco: unit do auditd, `/etc/audit/rules.d`, `/etc/audit/auditd.conf`.
-
-### 2. T1070.002 — logs apagados
-
-Fecha a categoria de anti-forense que o histórico de shell abriu. Log truncado,
-rotacionado fora de hora ou removido é ato deliberado, e o sinal é objetivo:
-arquivo de tamanho zero em `/var/log` num host que tem entradas registradas, e
-falha de sequência no journal.
-
-Cuidado que o check precisa ter: rotação legítima produz arquivo vazio o tempo
-todo, e a diferença está no par arquivo-vazio + host-com-atividade.
 
 ### 3. T1562.001 e T1562.004 — MAC e firewall desligados
 
@@ -123,7 +113,7 @@ permissivo de propósito**, e contêiner não tem firewall próprio. Por isso o
 achado precisa nascer informativo e só subir quando houver outra coisa junto —
 é o mesmo desenho da reivindicação em `/usr/local`.
 
-### 4. T1552.001 — credencial em arquivo
+### 3. T1552.001 — credencial em arquivo
 
 `~/.aws/credentials`, `.env` de aplicação, kubeconfig, token de registro. É o
 que um invasor procura primeiro depois de entrar, e o que define até onde ele
@@ -133,7 +123,7 @@ Vale como INVENTÁRIO, no mesmo molde do `known_hosts`: a ferramenta não sabe
 quais são esperadas, e a superfície de falso positivo é enorme se ela tentar
 julgar.
 
-### 5. T1564.001 — arquivo oculto em diretório temporário
+### 4. T1564.001 — arquivo oculto em diretório temporário
 
 Diretório com ponto em `/tmp`, `/var/tmp` e `/dev/shm`. O velociraptor cobre
 isso, e é barato — a varredura de privilégio já percorre essas árvores.
@@ -141,7 +131,7 @@ isso, e é barato — a varredura de privilégio já percorre essas árvores.
 Sozinho é ruído: `.X11-unix` e `.ICE-unix` são de fábrica. Vale cruzado com
 executável dentro.
 
-### 6. T1546.005 — trap de shell
+### 5. T1546.005 — trap de shell
 
 `trap '...' DEBUG` num arquivo de rc executa a cada comando. Uma linha no
 reconhecimento de configuração de shell, que já é lido.

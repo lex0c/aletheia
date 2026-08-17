@@ -60,6 +60,7 @@ type Facts struct {
 	Destinos       []DestinoConhecido      `json:"known_hosts,omitempty"`
 	Historicos     []HistoricoShell        `json:"shell_history,omitempty"`
 	Audit          Auditoria               `json:"audit"`
+	Logs           []ArquivoDeLog          `json:"logs,omitempty"`
 	MetaAcesso     []ArquivoMeta           `json:"access_meta,omitempty"`
 	Cross          CrossView               `json:"cross_view"`
 

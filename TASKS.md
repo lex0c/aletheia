@@ -2846,3 +2846,60 @@ T1552.001  credencial em arquivo  ~/.aws, .env, kubeconfig — inventário
 T1564.001  arquivo oculto       barato: a varredura já percorre /tmp
 T1546.005  trap de shell        uma linha no reconhecimento que já existe
 ```
+
+---
+
+## Registro — T1070.002: logs apagados
+
+A segunda do `ATTACK.md`, e ela fecha a categoria de anti-forense que o
+histórico de shell abriu.
+
+### A primeira ideia morreu na primeira medição
+
+O sinal óbvio era arquivo de log VAZIO. Medido numa debian:12 recém-criada:
+
+```
+0 /var/log/btmp      0 /var/log/faillog
+0 /var/log/lastlog   0 /var/log/wtmp
+```
+
+**Vazio é o estado normal de sistema novo** — os quatro arquivos de log da
+imagem estão todos zerados. Um check baseado nisso acusaria toda instalação
+limpa do mundo.
+
+### O que sobrou é estrutural, e são duas coisas
+
+**Buraco na rotação.** O logrotate produz sequência contígua e apaga o mais
+ANTIGO quando passa do limite — nunca o do meio. Então `auth.log.1` e
+`auth.log.3.gz` sem o `.2` não vem de rotação: veio de alguém removendo.
+
+Não depende de julgar se um arquivo "deveria" ter conteúdo, e é por isso que
+vale igual em host novo e em host de dez anos.
+
+**Sessão sem registro.** Duas coisas que não podem ser verdade juntas:
+
+```
+/run/utmp tem sessão ABERTA agora
+/var/log/wtmp não tem registro nenhum
+```
+
+Abrir sessão escreve nos dois. Se o histórico está vazio, ele foi zerado DEPOIS
+que a sessão abriu — e é o primeiro arquivo que se apaga, porque é o que datava
+a entrada.
+
+O cruzamento é o que torna isto utilizável: `wtmp` vazio SOZINHO é o estado de
+toda instalação nova.
+
+### E a mesma forma, legítima
+
+Várias distribuições rotacionam o wtmp. Logo depois disso o arquivo vivo está
+vazio COM sessão aberta — exatamente a forma acusada, e inteiramente normal.
+
+O que separa é o `wtmp.1` ao lado, procurado ANTES de acusar. O cenário F3
+existe só para isso: sem ele, o check acusaria todo host na semana da rotação.
+
+### Estado
+
+66 checks, 92 cenários, 138 execuções. `make race` limpo. Zero achado em Debian
+12, Alpine 3.20, Ubuntu 14.04 e CentOS 7 — e nenhum no host real, que tem
+rotação de verdade.

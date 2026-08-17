@@ -62,16 +62,21 @@ type Login struct {
 	// Falhou distingue o que veio do btmp. O formato é o mesmo; o arquivo é
 	// que diz se aquilo foi uma entrada ou uma tentativa recusada.
 	Falhou bool `json:"failed,omitempty"`
+
+	// Agora marca o que veio de /run/utmp — sessão ABERTA neste instante, e não
+	// histórico. A distinção sustenta um cruzamento que nenhuma das duas fontes
+	// faz sozinha: alguém logado agora com o histórico vazio.
+	Agora bool `json:"current,omitempty"`
 }
 
 func collectLogins(f *Facts, e *env.Env) {
 	// wtmp é legível por todos; btmp é 0600 de root, e a diferença precisa
 	// aparecer como lacuna quando a varredura roda sem privilégio — sem isso,
 	// "nenhuma força bruta" sairia igual a "não pude olhar as tentativas".
-	lerUtmp(f, e, "/var/log/wtmp", false)
-	lerUtmp(f, e, "/run/utmp", false)
+	lerUtmp(f, e, "/var/log/wtmp", false, false)
+	lerUtmp(f, e, "/run/utmp", false, true)
 
-	if !lerUtmp(f, e, "/var/log/btmp", true) {
+	if !lerUtmp(f, e, "/var/log/btmp", true, false) {
 		f.denyPersist("login", "/var/log/btmp ilegível (é 0600 de root): "+
 			"tentativas de login RECUSADAS não foram examinadas, e força bruta "+
 			"não pode ser distinguida de ausência dela")
@@ -80,7 +85,7 @@ func collectLogins(f *Facts, e *env.Env) {
 
 // lerUtmp lê os registros mais recentes. Devolve falso quando o arquivo existe
 // e não pôde ser lido — que é diferente de não existir.
-func lerUtmp(f *Facts, e *env.Env, caminho string, falhou bool) bool {
+func lerUtmp(f *Facts, e *env.Env, caminho string, falhou, agora bool) bool {
 	if _, err := e.Lstat(caminho); err != nil {
 		return true // não existe: não é lacuna, é ausência de fonte
 	}
@@ -108,6 +113,7 @@ func lerUtmp(f *Facts, e *env.Env, caminho string, falhou bool) bool {
 			User:   cstr(r[44:76]),
 			Origem: cstr(r[76:332]),
 			Falhou: falhou,
+			Agora:  agora,
 		}
 		if sec := le32(r[340:]); sec > 0 {
 			l.QuandoU = time.Unix(int64(sec), 0).UTC().Format("2006-01-02T15:04:05Z")

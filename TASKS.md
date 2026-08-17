@@ -2353,3 +2353,85 @@ propósito: interseção de baselines de N hosts é um script de dez linhas.
 ### Estado
 
 55 checks, 76 cenários, 114 execuções. `make race` limpo nos dois pacotes.
+
+---
+
+## Registro — o que veio de ler osquery, tracee e velociraptor
+
+Três ferramentas do mesmo espaço, lidas atrás de ideias — não de código: são
+outra linguagem, outra escala e outro modelo de execução.
+
+### Duas coisas extraídas, e a primeira era uma cegueira DENTRO de um check
+
+**Capability em atributo estendido.** O osquery mantém uma tabela de xattr, e
+foi ela que me fez olhar. A varredura de SUID era a resposta desta ferramenta
+para "retenção de root", e ela procurava BIT — que é a metade em desuso:
+
+```
+/usr/bin/ping   -rwxr-xr-x   sem setuid nenhum, e o poder vem de cap_net_raw
+setcap cap_setuid+ep /usr/local/bin/.x     root, e o modo continua 755
+```
+
+Medido no host: dez binários com capability em xattr, e `find -perm -4000` não
+acha um. Um `setcap cap_setuid+ep` cria retenção de root que a varredura recém
+construída como "a resposta" não enxergava.
+
+Coube no check existente porque o discriminador é o mesmo — nenhum pacote
+entregou isto. O que mudou foi o que se procura: privilégio, não bit.
+
+**Atributo imutável.** Veio do artefato `Linux.Forensics.ImmutableFiles` do
+velociraptor, cuja descrição resume o valor: *"às vezes é um sinal forte"*.
+
+O que ele protege aqui não é a detecção — o §24 já pegava o arquivo por não ter
+dono. É o ROTEIRO:
+
+```
+# rm -f /usr/local/sbin/.agent
+rm: cannot remove '/usr/local/sbin/.agent': Operation not permitted
+```
+
+Como root. O roteiro que esta ferramenta imprime manda remover a persistência e
+tirar o bit de privilégio, e contra um arquivo travado todos esses passos falham
+— e falham de um jeito que parece defeito do host, não defesa do implante.
+
+### Uma decisão que a leitura CONFIRMOU em vez de mudar
+
+O osquery lê a base do RPM com **librpm**, biblioteca C. É a razão de a aletheia
+declarar rpm como lacuna em vez de tentar: ler aquilo exigiria cgo, e o binário
+deixaria de ser estático — que é a decisão da SPEC 4, a mesma que faz o cenário
+92 provar que userland trojanizado não muda o resultado.
+
+A lacuna declarada é a escolha certa, e agora tem uma segunda fonte dizendo que
+não há caminho barato.
+
+### O que ficou anotado e NÃO foi feito
+
+```
+ftrace hooks       o tracee lê /sys/kernel/tracing/enabled_functions, que é
+                   arquivo comum (com CAP_SYSLOG). Um hook em getdents64 é
+                   ocultação de arquivo; em tcp4_seq_show, de conexão. Diz
+                   COMO o kernel está mentindo, e complementa o cross-view
+wtmp / utmp        o velociraptor parseia; a aletheia manda o operador olhar
+                   ("confira contra o wtmp") em dezenas de evidências e nunca
+                   olha. Formato binário de registro fixo
+flags de montagem  `nosuid` muda o SIGNIFICADO de um achado de SUID, e hoje a
+                   ferramenta não lê /proc/mounts
+```
+
+Os três são baratos. O primeiro é o de maior valor e o de maior risco de falso
+positivo — bpftrace, kpatch e perf hookam legitimamente.
+
+### Portabilidade, de novo
+
+O número do `FS_IOC_GETFLAGS` **depende da arquitetura**: a macro é
+`_IOR('f', 1, long)`, e `long` tem quatro bytes em 32 bits. Fixar `0x80086601`
+faria a leitura falhar em todo host i686 — em silêncio, devolvendo "sem
+atributo" para arquivos imutáveis.
+
+É o mesmo eixo do `Ctim.Sec`, que já quebrou a compilação 32 bits neste
+projeto. Aqui não quebraria nada: só mentiria.
+
+### Estado
+
+56 checks, 78 cenários, 118 execuções. Zero achado em Debian 12, Alpine 3.20 e
+Ubuntu 14.04.

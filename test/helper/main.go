@@ -169,6 +169,49 @@ func main() {
 		die(cmd.Start())
 		hold()
 
+	case "setcap":
+		// helper setcap /caminho 7      (7 = CAP_SETUID)
+		//
+		// Existe porque a imagem de teste não traz o `setcap` do libcap, e a
+		// forma MODERNA de retenção de root — capability em xattr, sem bit
+		// setuid nenhum — precisa ser plantável para ser testada.
+		//
+		// O formato é o vfs_cap_data do kernel, versão 2, little-endian: magic
+		// com o bit EFETIVO ligado, seguido de permitted e inheritable em
+		// metades baixa e alta.
+		need(4)
+		var bit uint
+		fmt.Sscanf(os.Args[3], "%d", &bit)
+		perm := uint64(1) << bit
+		v := make([]byte, 20)
+		put32(v[0:], 0x02000000|0x000001) // versão 2, efetivo
+		put32(v[4:], uint32(perm))
+		put32(v[12:], uint32(perm>>32))
+		die(syscall.Setxattr(os.Args[2], "security.capability", v, 0))
+
+	case "immutable":
+		// helper immutable /caminho
+		//
+		// Não depende do `chattr`, que vem em pacotes diferentes por
+		// distribuição. O número do ioctl DEPENDE DA ARQUITETURA: a macro é
+		// _IOR('f', 1, long), e long tem 4 bytes em 32 bits.
+		need(3)
+		fh, err := os.OpenFile(os.Args[2], os.O_RDONLY, 0)
+		die(err)
+		get := uintptr(0x80000000 | (unsafe.Sizeof(int(0)) << 16) | ('f' << 8) | 1)
+		set := uintptr(0x40000000 | (unsafe.Sizeof(int(0)) << 16) | ('f' << 8) | 2)
+		var flags uint32
+		if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fh.Fd(), get,
+			uintptr(unsafe.Pointer(&flags))); errno != 0 {
+			die(errno)
+		}
+		flags |= 0x00000010 // FS_IMMUTABLE_FL
+		if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fh.Fd(), set,
+			uintptr(unsafe.Pointer(&flags))); errno != 0 {
+			die(errno)
+		}
+		fh.Close()
+
 	case "rwx":
 		die(mapRWX())
 		hold()
@@ -425,4 +468,8 @@ func die(err error) {
 		fmt.Fprintln(os.Stderr, "helper:", err)
 		os.Exit(1)
 	}
+}
+
+func put32(b []byte, v uint32) {
+	b[0], b[1], b[2], b[3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
 }

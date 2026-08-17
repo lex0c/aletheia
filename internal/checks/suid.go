@@ -18,6 +18,15 @@ func init() { check.Register(suidInesperado) }
 //
 //	cp /bin/bash /usr/local/bin/.x && chmod 4755 /usr/local/bin/.x
 //
+// E a forma MODERNA da mesma coisa, que um `find -perm -4000` não encontra:
+//
+//	setcap cap_setuid+ep /usr/local/bin/.x
+//
+// A capability fica num atributo estendido, o modo do arquivo continua 755, e
+// nenhuma varredura por bit a vê. O /usr/bin/ping das distribuições atuais é
+// exatamente assim — sem setuid, com `cap_net_raw` no xattr. Quem procura só
+// pelo bit está procurando a metade que caiu em desuso.
+//
 // Não deixa processo, não deixa conexão, não deixa agendamento. Sobrevive a
 // reboot, a limpeza de cron e a troca de senha — e nenhum dos outros vinte
 // checks de persistência olha para isto, porque nenhum deles procura o que está
@@ -30,7 +39,7 @@ func init() { check.Register(suidInesperado) }
 var suidInesperado = check.Check{
 	ID:       "persist.suid_unowned",
 	Ref:      "7.11",
-	Title:    "binário com setuid/setgid que nenhum pacote entregou",
+	Title:    "binário que carrega privilégio e nenhum pacote entregou",
 	Group:    "persist",
 	Mode:     check.ModeAuto,
 	Sources:  env.SourceLive | env.SourceImage,
@@ -65,18 +74,30 @@ var suidInesperado = check.Check{
 				continue
 			}
 
-			bits := "setuid"
-			if s.Setuid && s.Setgid {
-				bits = "setuid e setgid"
-			} else if !s.Setuid {
-				bits = "setgid"
-			}
-
 			sev := check.SevWarn
-			ev := []string{
-				s.Path + " tem bit de " + bits,
+			ev := []string{s.Path + " " + comoCarregaPrivilegio(s)}
+
+			// Capability em arquivo é a forma que a varredura por MODO não vê, e
+			// nomear cada uma importa: `cap_net_raw` é um sniffer, `cap_setuid`
+			// é root inteiro, `cap_dac_override` lê e escreve qualquer arquivo.
+			if s.CapPerm != 0 {
+				nomes := capNamesOf(s.CapPerm)
+				ev = append(ev, "capabilities no atributo estendido: "+
+					strings.Join(nomes, " "))
+				if s.CapEfetivo {
+					ev = append(ev, "e com o bit EFETIVO: elas já sobem ativas na "+
+						"execução — o binário não precisa nem pedir")
+				}
+				if equivalenteARoot(s.CapPerm) {
+					sev = check.SevCritical
+					ev = append(ev, "e ao menos uma delas equivale a root: quem "+
+						"executar isto pode virar root por outro caminho")
+				}
 			}
 			switch {
+			case s.CapPerm != 0 && !s.Setuid && !s.Setgid && !gravavel:
+				// A severidade já foi decidida acima pelas capabilities; o modo
+				// não acrescenta nada porque não há bit nenhum.
 			case gravavel:
 				sev = check.SevCritical
 				ev = append(ev, "e está em diretório gravável por qualquer usuário: "+
@@ -151,4 +172,40 @@ func ehInterpretador(p string) bool {
 	b := baseDe(p)
 	b = strings.TrimPrefix(b, ".")
 	return interpretadorConhecido[b]
+}
+
+// comoCarregaPrivilegio descreve a FORMA pela qual o arquivo confere poder. As
+// duas formas coexistem no mesmo arquivo, e o operador precisa saber qual é.
+func comoCarregaPrivilegio(s *facts.SuidFile) string {
+	switch {
+	case s.Setuid && s.Setgid:
+		return "tem bit de setuid e setgid"
+	case s.Setuid:
+		return "tem bit de setuid"
+	case s.Setgid:
+		return "tem bit de setgid"
+	default:
+		return "carrega capability em atributo estendido, SEM bit de setuid"
+	}
+}
+
+// capsEquivalentesARoot são as que dão root por outro caminho. Não é a lista
+// inteira: é a das que um invasor escolhe quando quer o mesmo que o setuid dava.
+// Os nomes vêm da mesma tabela usada nos processos, e ela é SEM o prefixo
+// `cap_` — usar a grafia do `getcap` aqui faria a lista casar com nada, em
+// silêncio, e o check sairia sempre com a severidade menor.
+var capsEquivalentesARoot = map[string]bool{
+	"setuid": true, "setgid": true, "sys_admin": true,
+	"sys_module": true, "sys_ptrace": true, "dac_override": true,
+	"dac_read_search": true, "chown": true, "fowner": true,
+	"sys_rawio": true, "bpf": true, "perfmon": true, "setfcap": true,
+}
+
+func equivalenteARoot(mask uint64) bool {
+	for _, n := range capNamesOf(mask) {
+		if capsEquivalentesARoot[n] {
+			return true
+		}
+	}
+	return false
 }

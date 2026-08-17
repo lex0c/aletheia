@@ -52,6 +52,7 @@ type Facts struct {
 	HashDiff      []HashDivergente        `json:"hash_mismatch,omitempty"`
 	Timestomps    []Timestomp             `json:"timestomps,omitempty"`
 	HashOK        []string                `json:"hash_verified,omitempty"`
+	Atributos     []AtributoInode         `json:"inode_attrs,omitempty"`
 	MetaAcesso    []ArquivoMeta           `json:"access_meta,omitempty"`
 	Cross         CrossView               `json:"cross_view"`
 

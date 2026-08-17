@@ -89,7 +89,14 @@ var suidPular = map[string]bool{
 	"/var/lib/flatpak": true, "/var/lib/snapd": true,
 }
 
-// SuidFile é um executável com bit setuid ou setgid.
+// SuidFile é um executável que CARREGA PRIVILÉGIO — por bit setuid/setgid ou
+// por capability em atributo estendido.
+//
+// As duas formas são a mesma coisa para quem responde a incidente, e só uma
+// delas aparece num `find -perm -4000`. O /usr/bin/ping das distribuições
+// modernas não tem bit setuid nenhum: o poder dele vem de `security.capability`
+// no xattr. Um `setcap cap_setuid+ep /usr/local/bin/.x` cria retenção de root
+// que nenhuma varredura por MODO enxerga.
 type SuidFile struct {
 	Path string `json:"path"`
 
@@ -97,6 +104,12 @@ type SuidFile struct {
 	// diferença muda o peso do achado.
 	Setuid bool `json:"setuid,omitempty"`
 	Setgid bool `json:"setgid,omitempty"`
+
+	// CapPerm é a máscara de capabilities PERMITIDAS gravada no arquivo, e
+	// CapEfetivo diz se elas já sobem efetivas na execução (o `+ep` do setcap).
+	// Zero significa que o arquivo não carrega capability nenhuma.
+	CapPerm    uint64 `json:"cap_permitted,omitempty"`
+	CapEfetivo bool   `json:"cap_effective,omitempty"`
 
 	// UID e GID donos. Um setuid de dono não-root não escala para root — vale
 	// para AQUELA identidade, e isso é outra conversa.
@@ -227,12 +240,22 @@ func varrerSuid(f *Facts, e *env.Env, dir string, prof, teto int, dev uint64, te
 		}
 		setuid := fi.Mode()&os.ModeSetuid != 0
 		setgid := fi.Mode()&os.ModeSetgid != 0
-		if !setuid && !setgid {
+
+		// A capability só é perguntada em arquivo EXECUTÁVEL: xattr em arquivo
+		// que ninguém executa não confere poder a ninguém, e sondar tudo
+		// custaria uma syscall por arquivo do host em vez de por binário.
+		var capPerm uint64
+		var capEf bool
+		if fi.Mode()&0o111 != 0 {
+			capPerm, capEf = capabilityDoArquivo(e, p)
+		}
+		if !setuid && !setgid && capPerm == 0 {
 			continue
 		}
 
 		s := SuidFile{
 			Path: p, Setuid: setuid, Setgid: setgid,
+			CapPerm: capPerm, CapEfetivo: capEf,
 			Size: fi.Size(), UID: -1, GID: -1,
 		}
 		if !fi.ModTime().IsZero() {
@@ -273,4 +296,40 @@ func donoDe(fi fs.FileInfo) (int, int) {
 		return -1, -1
 	}
 	return int(st.Uid), int(st.Gid)
+}
+
+// capabilityDoArquivo lê `security.capability` e devolve a máscara permitida.
+//
+// O formato é o `vfs_cap_data` do kernel, em little-endian:
+//
+//	0..3    magic_etc: versão nos bits altos, flags nos baixos
+//	4..7    permitted, 32 bits baixos
+//	8..11   inheritable, 32 bits baixos
+//	12..15  permitted, 32 bits altos   (a partir da versão 2)
+//	16..19  inheritable, 32 bits altos
+//	20..23  rootid                     (versão 3, namespace de usuário)
+//
+// O bit EFETIVO no magic é o que separa `cap_setuid+p` de `cap_setuid+ep`: com
+// ele, a capability já sobe ativa na execução e o binário não precisa nem
+// pedir. É a diferença entre um programa que PODE elevar e um que JÁ elevou.
+func capabilityDoArquivo(e *env.Env, p string) (uint64, bool) {
+	// Em modo image o caminho é relativo à raiz travada, e o xattr é lido do
+	// arquivo real — a raiz do os.Root não intercepta xattr, então o caminho
+	// precisa ser o do sistema de arquivos.
+	buf := make([]byte, 24)
+	n, err := syscall.Getxattr(e.Path(p), "security.capability", buf)
+	if err != nil || n < 12 {
+		return 0, false
+	}
+	magic := le32(buf[0:])
+	perm := uint64(le32(buf[4:]))
+	if n >= 20 {
+		perm |= uint64(le32(buf[12:])) << 32
+	}
+	const flagEfetivo = 0x000001
+	return perm, magic&flagEfetivo != 0
+}
+
+func le32(b []byte) uint32 {
+	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
 }

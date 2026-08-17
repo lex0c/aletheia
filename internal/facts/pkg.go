@@ -142,8 +142,10 @@ func collectPkg(f *Facts, e *env.Env) {
 		})
 	}
 	// Depois de Ownership estar montado: a comparação de datas só vale nos
-	// arquivos SEM dono de pacote.
+	// arquivos SEM dono de pacote, e os atributos de inode são lidos sobre o
+	// conjunto de que a ferramenta FALA.
 	coletarTimestomp(f, e)
+	coletarAtributos(f, e)
 }
 
 func detectarPkgDB(e *env.Env) PkgDB {

@@ -54,8 +54,8 @@ func writeWtfHeader(w io.Writer, f *facts.Facts, e *env.Env) {
 		// Minerador aparece aqui na hora, e é o comprometimento nº 1 em VM de
 		// nuvem. Sempre com o número de CPUs: 8.02 é catástrofe em 2 e rotina
 		// em 16.
-		b.WriteString(fmt.Sprintf(" · load %.2f %.2f %.2f (%d cpu)",
-			h.Load1, h.Load5, h.Load15, h.NumCPU))
+		b.WriteString(fmt.Sprintf(" · load %.2f %.2f %.2f (%d cpu%s)",
+			h.Load1, h.Load5, h.Load15, h.NumCPU, cotaStr(h)))
 		if h.Load1 > float64(h.NumCPU)*1.5 {
 			b.WriteString(" ⚠")
 		}

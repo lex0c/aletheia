@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"os"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -178,15 +177,12 @@ func collectProcesses(f *Facts, e *env.Env) {
 	//
 	// O teto é baixo de propósito. Este binário roda em host sob incidente,
 	// possivelmente já sobrecarregado, e um scanner que satura a CPU atrapalha
-	// exatamente quem está tentando responder. Em VM de 1 vCPU o resultado é
-	// serial, como antes.
-	workers := runtime.NumCPU()
-	if workers > maxCollectWorkers {
-		workers = maxCollectWorkers
-	}
-	if workers < 1 {
-		workers = 1
-	}
+	// exatamente quem está tentando responder.
+	//
+	// Env.Workers respeita afinidade E cota de cgroup: num contêiner com
+	// --cpus=0.5 abrir oito leitores não acelera nada, só entrega mais trabalho
+	// ao throttling. Em VM de 1 vCPU o resultado é serial, como antes.
+	workers := e.Workers(maxCollectWorkers)
 
 	type slot struct {
 		p       *Process

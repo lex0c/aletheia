@@ -728,3 +728,51 @@ vezes dentro do orçamento do `wtf`.
 
 10 mil processos ≈ 24 MB retidos. Cabe em VM pequena junto com o que já roda
 nela — que é o requisito real, já que a ferramenta chega num host em incidente.
+
+### Cota de cgroup: o que o runtime do Go não enxerga
+
+`runtime.NumCPU()` respeita AFINIDADE — taskset e cpuset já entram na conta. O
+que ele não vê é a cota do CFS: `docker run --cpus=0.5`, limite de CPU de pod,
+`CPUQuota=` de unit. Num contêiner de meia CPU ele reporta as 12 do host, e a
+coleta abriria oito leitores onde cabe um — entregando mais trabalho ao
+throttling num host já sob incidente.
+
+`env.probeCPUQuota` lê os dois formatos e SOBE a hierarquia pegando o menor,
+porque cota é herdada e um pai mais apertado manda no filho:
+
+```
+v2   /sys/fs/cgroup<path>/cpu.max          "50000 100000" · "max 100000" = sem limite
+v1   .../cpu.cfs_quota_us + cpu.cfs_period_us   cota -1 = sem limite
+```
+
+Dentro de contêiner o namespace de cgroup faz o caminho virar `/`, e a
+caminhada termina no primeiro passo — que é exatamente o limite do contêiner.
+
+`Workers()` arredonda a cota para CIMA: com 0,5 CPU o certo é um leitor, não
+zero. Errar para mais entrega trabalho ao throttling; errar para menos só deixa
+a varredura mais lenta.
+
+```
+--cpus=0.5   1 worker    2000 processos em 1,27s
+--cpus=2     2 workers   2000 processos em 0,14s
+--cpus=12    8 (teto)    2000 processos em 0,07s
+```
+
+A cota entra no cabeçalho como CONTEXTO, não como limiar de aviso: o load vem
+de `/proc/loadavg`, que não é isolado por namespace — dentro de contêiner ele
+descreve o HOST, enquanto a cota descreve a fatia deste alvo. Misturar os dois
+num aviso seria comparar coisas diferentes. Exibi-la também é o que torna a
+detecção OBSERVÁVEL, e por isso testável: o cenário `32-cota-de-cpu` roda com
+`--cpus=0.5` e exige `cota 0.5` no relatório.
+
+O harness ganhou `ExpectOutput` para isso — asserção sobre o relatório humano,
+para o que não vira achado. Sem ele, nada garantiria que o operador enxergue o
+que a ferramenta descobriu.
+
+### Onde o orçamento do `wtf` NÃO é cobrado, e por quê
+
+O prazo é verificado na fronteira dos checks, não no meio da coleta. Uma lista
+de processos pela metade quebra correlação: pivô e reverse shell dependem de
+cruzar processo com socket, e cruzar com metade produz conclusão ERRADA, não
+conclusão parcial. Coleta é tudo ou nada, e o que o operador recebe quando ela
+demora é o tempo real impresso no RESULT.

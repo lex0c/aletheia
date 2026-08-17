@@ -288,6 +288,19 @@ func init() {
 		Exit:   1,
 	})
 
+	Register(Scenario{
+		ID:   "32-cota-de-cpu",
+		Desc: "cota de cgroup é lida: o runtime do Go não a enxerga",
+		// `runtime.NumCPU()` respeita AFINIDADE (taskset, cpuset) mas não a
+		// cota do CFS. Num contêiner de meia CPU ele reporta as 12 do host, e
+		// a coleta abriria oito leitores paralelos onde cabe um — entregando
+		// mais trabalho ao throttling num host já sob incidente.
+		Images:       minimal,
+		CPUs:         "0.5",
+		ExpectOutput: []string{"cota 0.5"},
+		Exit:         -1,
+	})
+
 	// ------------------------------------------------------------------- rede
 	//
 	// Os quatro cenários abaixo existem em pares: uma forma que precisa

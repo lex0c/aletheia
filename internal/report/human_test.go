@@ -349,3 +349,33 @@ func TestPadContaRunesNaoBytes(t *testing.T) {
 		t.Errorf("pad devolveu %d runes, quer 10", len([]rune(got)))
 	}
 }
+
+// A cota entra no cabeçalho como CONTEXTO, não como limiar. O load vem de
+// /proc/loadavg, que não é isolado por namespace: dentro de contêiner ele
+// descreve o HOST, enquanto a cota descreve a fatia deste alvo. Misturar os
+// dois num aviso seria comparar coisas diferentes.
+func TestCabecalhoMostraCotaDeCPU(t *testing.T) {
+	rel := func(quota float64) string {
+		fa := &facts.Facts{Host: facts.Host{
+			Hostname: "web-01", NumCPU: 12, Load1: 1.4, CPUQuota: quota,
+		}}
+		var b bytes.Buffer
+		Human(&b, &check.Report{Coverage: check.Coverage{Total: 1, Complete: 1}},
+			fa, testEnv(), Options{})
+		// só o cabeçalho: o corpo do relatório tem ⚠ na contagem por severidade
+		return strings.SplitN(b.String(), "\n", 2)[0]
+	}
+
+	cab := rel(0.5)
+	if !strings.Contains(cab, "(12 cpu · cota 0.5)") {
+		t.Errorf("cabeçalho sem a cota: %q", cab)
+	}
+	if strings.Contains(cab, "⚠") {
+		t.Errorf("load 1.4 em 12 cpu não é aviso: a cota é contexto, não limiar: %q", cab)
+	}
+
+	// Sem cota, o cabeçalho não inventa uma.
+	if cab := rel(0); strings.Contains(cab, "cota") {
+		t.Errorf("host sem cota não pode exibir cota: %q", cab)
+	}
+}

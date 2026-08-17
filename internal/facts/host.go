@@ -19,12 +19,16 @@ type Host struct {
 	// Load com o número de CPUs junto: "load 8.02" é catastrófico em 2 cpu e
 	// normal em 16. Sem o contexto, o alerta vira ruído — justamente no sinal
 	// de minerador, que é o comprometimento nº 1 em VM de nuvem.
-	Load1   float64 `json:"load1,omitempty"`
-	Load5   float64 `json:"load5,omitempty"`
-	Load15  float64 `json:"load15,omitempty"`
-	NumCPU  int     `json:"num_cpu,omitempty"`
-	Uptime  string  `json:"uptime,omitempty"`
-	BootUTC string  `json:"boot_utc,omitempty"`
+	Load1  float64 `json:"load1,omitempty"`
+	Load5  float64 `json:"load5,omitempty"`
+	Load15 float64 `json:"load15,omitempty"`
+	NumCPU int     `json:"num_cpu,omitempty"`
+
+	// CPUQuota é a cota do cgroup em CPUs. Registrada porque muda a leitura do
+	// load: 8.0 em 12 CPUs é rotina, e 8.0 sob cota de 0,5 é um host afogado.
+	CPUQuota float64 `json:"cpu_quota,omitempty"`
+	Uptime   string  `json:"uptime,omitempty"`
+	BootUTC  string  `json:"boot_utc,omitempty"`
 
 	bootTime time.Time
 	hz       int64
@@ -33,6 +37,7 @@ type Host struct {
 func collectHost(f *Facts, e *env.Env) {
 	h := &f.Host
 	h.NumCPU = e.NumCPU
+	h.CPUQuota = e.CPUQuota
 	h.hz = 100 // USER_HZ é 100 no Linux por ABI; sysconf exigiria cgo.
 
 	// Leitura TRAVADA na raiz. Usar os.ReadFile(e.Path(...)) aqui era o
@@ -55,6 +60,7 @@ func collectHost(f *Facts, e *env.Env) {
 		// host do analista. Imprimir "load 0.00 (12 cpu)" seria atribuir à
 		// imagem um dado que não é dela.
 		h.NumCPU = 0
+		h.CPUQuota = 0
 		return
 	}
 

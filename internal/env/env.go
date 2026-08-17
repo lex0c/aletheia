@@ -114,7 +114,13 @@ type Env struct {
 	ToolSHA256  string
 	ToolVersion string
 
+	// NumCPU vem do runtime, que já respeita AFINIDADE (taskset, cpuset).
 	NumCPU int
+
+	// CPUQuota é a cota do cgroup em CPUs — 0,5 num `docker run --cpus=0.5`.
+	// Zero significa sem limite, ou não determinado. É o que o runtime NÃO
+	// enxerga, e é o que decide quantos leitores de /proc abrir.
+	CPUQuota float64
 
 	// root é a raiz travada em modo image. Ver fs.go: prefixar string não
 	// impede symlink absoluto de escapar da imagem.
@@ -178,6 +184,7 @@ func Probe(o Options) *Env {
 		CapReason:   map[string]string{},
 		ToolVersion: o.Version,
 		NumCPU:      runtime.NumCPU(),
+		CPUQuota:    probeCPUQuota(),
 	}
 
 	if o.Root != "" {
@@ -196,6 +203,32 @@ func Probe(o Options) *Env {
 	e.probeCaps()
 	e.probeClock()
 	return e
+}
+
+// Workers devolve quantos leitores concorrentes abrir, respeitando teto,
+// afinidade E cota de cgroup.
+//
+// Arredonda a cota para cima: com 0,5 CPU o certo é UM leitor, não zero — e um
+// leitor sequencial é exatamente o comportamento anterior. Nunca devolve menos
+// que 1.
+func (e *Env) Workers(cap int) int {
+	n := e.NumCPU
+	if e.CPUQuota > 0 {
+		q := int(e.CPUQuota)
+		if float64(q) < e.CPUQuota {
+			q++ // teto
+		}
+		if q < n {
+			n = q
+		}
+	}
+	if n > cap {
+		n = cap
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
 }
 
 func (e *Env) probeSelf() {

@@ -149,6 +149,12 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 			}
 		}
 	}
+	for _, want := range sc.ExpectOutput {
+		if !strings.Contains(r.stderr, want) {
+			t.Errorf("cenário %q: o relatório humano não contém %q.\nsaída:\n%s",
+				sc.Desc, want, r.stderr)
+		}
+	}
 	if sc.Exit >= 0 && r.exit != sc.Exit {
 		t.Errorf("exit = %d, quer %d — o exit code é o que a automação de frota lê\nstderr:\n%s",
 			r.exit, sc.Exit, r.stderr)
@@ -196,6 +202,9 @@ func runLive(t *testing.T, bin, img string, sc scenario.Scenario) result {
 	args := []string{"run", "--rm",
 		"-v", binFor(t, bin, sc) + ":/aletheia:ro",
 		"-v", helper + ":/helper:ro"}
+	if sc.CPUs != "" {
+		args = append(args, "--cpus="+sc.CPUs)
+	}
 	if sc.NoNetwork {
 		args = append(args, "--network=none")
 	}

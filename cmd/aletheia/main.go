@@ -118,7 +118,18 @@ func main() {
 }
 
 // wtfBudget é o teto rígido da SPEC 6.1. O wtf não pode mentir para ser
-// rápido: o que não couber vira NÃO VERIFICADO e sai no rodapé.
+// rápido: o check que não couber vira NÃO VERIFICADO e sai no rodapé.
+//
+// O prazo é cobrado na fronteira dos CHECKS, não no meio da coleta, e isso é
+// deliberado: uma lista de processos pela metade quebra correlação — o pivô e o
+// reverse shell dependem de cruzar processo com socket, e cruzar com metade dos
+// processos produz conclusão errada, não conclusão parcial. Coleta é tudo ou
+// nada; o que o operador recebe quando ela demora é o tempo REAL impresso no
+// RESULT, não um número inventado.
+//
+// Sob cota apertada de cgroup a coleta pode passar do teto. É por isso que a
+// cota entra no cabeçalho: um `wtf` de 5s num contêiner de meia CPU é o
+// ambiente, não a ferramenta.
 const wtfBudget = 2 * time.Second
 
 // runWtf responde uma pergunta diferente do scan — este host está pegando

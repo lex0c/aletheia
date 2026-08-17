@@ -57,7 +57,7 @@ func writeHeader(w io.Writer, f *facts.Facts, e *env.Env) {
 		// load SEMPRE com o número de CPUs: 8.02 é catastrófico em 2 cpu e
 		// normal em 16. Sem o contexto, o alerta vira ruído justamente no
 		// sinal de minerador.
-		l := fmt.Sprintf(" · load %.2f (%d cpu)", h.Load1, h.NumCPU)
+		l := fmt.Sprintf(" · load %.2f (%d cpu%s)", h.Load1, h.NumCPU, cotaStr(h))
 		if h.NumCPU > 0 && h.Load1 > float64(h.NumCPU)*1.5 {
 			l += " ⚠"
 		}
@@ -297,6 +297,17 @@ func pad(s string, n int) string {
 		return s + strings.Repeat(" ", n-r)
 	}
 	return s + " "
+}
+
+// cotaStr mostra a cota de cgroup quando existe. O load vem de /proc/loadavg,
+// que NÃO é isolado por namespace: dentro de contêiner ele descreve o HOST,
+// enquanto a cota descreve a fatia que este alvo recebe. São coisas diferentes,
+// e por isso a cota aparece como contexto e não muda o limiar do aviso.
+func cotaStr(h facts.Host) string {
+	if h.CPUQuota <= 0 {
+		return ""
+	}
+	return " · cota " + strconv.FormatFloat(h.CPUQuota, 'g', 3, 64)
 }
 
 func nz(s, def string) string {

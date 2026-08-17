@@ -96,12 +96,22 @@ type Scenario struct {
 	// criar apelido de endereço, SYS_ADMIN para o unshare.
 	Caps []string
 
+	// CPUs limita a CPU do contêiner (--cpus). Existe para exercitar a leitura
+	// da COTA de cgroup, que o runtime do Go não enxerga: num contêiner de meia
+	// CPU ele continua reportando as do host inteiro.
+	CPUs string
+
 	// NoNetwork tira a rede do contêiner (--network=none). Os cenários de rede
 	// precisam de endereço de escopo PÚBLICO para exercitar a classificação, e a
 	// forma honesta de conseguir isso é criar apelidos em `lo` dentro de um
 	// namespace isolado: o endereço é público para quem classifica, e nenhum
 	// pacote jamais sai da máquina.
 	NoNetwork bool
+
+	// ExpectOutput são substrings que precisam sair no relatório HUMANO. É
+	// para o que não vira achado — cabeçalho, contexto, cobertura. Sem isso,
+	// nada garante que o operador enxergue o que a ferramenta descobriu.
+	ExpectOutput []string
 
 	// Expect precisa aparecer; Forbid não pode aparecer. As proibições são
 	// tão valiosas quanto as expectativas: elas travam confusão entre checks

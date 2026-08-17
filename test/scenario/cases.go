@@ -54,6 +54,23 @@ const agendamentoEChaves = `mkdir -p /etc/cron.d /var/spool/cron/crontabs /root/
 	printf 'AuthorizedKeysCommand /usr/local/sbin/keyfetch\nAuthorizedKeysCommandUser root\n' > /etc/ssh/sshd_config.d/99-x.conf
 	printf 'Port 22\n' > /etc/ssh/sshd_config`
 
+// cadeiaCompleta é uma invasão como ela se parece de VERDADE: não uma forma
+// isolada, mas entrada, payload, persistência REDUNDANTE e canal — cada peça
+// escolhida para parecer legítima sozinha.
+//
+// Este plantio produzia `RESULT: OK — 35/35 checks`. Foi ele que expôs que a
+// suíte tinha viés de sobrevivência: todo cenário positivo plantava um payload
+// que os checks já sabiam ver.
+const cadeiaCompleta = `mkdir -p /root/.ssh /etc/systemd/system/multi-user.target.wants /var/spool/cron/crontabs /usr/local/sbin
+	printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGx3 systemd-timesync@localhost\n' >> /root/.ssh/authorized_keys
+	cp /helper /usr/local/sbin/systemd-oomd-helper
+	printf '[Unit]\n[Service]\nExecStart=/usr/local/sbin/systemd-oomd-helper sleep 300\nRestart=always\n[Install]\nWantedBy=multi-user.target\n' > /etc/systemd/system/systemd-oomd-helper.service
+	ln -sf /etc/systemd/system/systemd-oomd-helper.service /etc/systemd/system/multi-user.target.wants/
+	printf '@reboot /usr/local/sbin/systemd-oomd-helper sleep 300\n' > /var/spool/cron/crontabs/root
+	printf '\n/usr/local/sbin/systemd-oomd-helper sleep 300 &\n' >> /root/.bashrc
+	/usr/local/sbin/systemd-oomd-helper sleep 300 &
+	sleep 0.5`
+
 func init() {
 	// ---------------------------------------------------------------- negativos
 	//
@@ -78,6 +95,9 @@ func init() {
 			"persist.shell_startup", "persist.bash_env", "persist.trigger_exec",
 			"persist.pam_exec", "persist.udev_run",
 			"persist.ca_planted", "persist.hosts_override", "persist.web_prepend",
+			"correlate.persistence_redundant", "integrity.no_package_owner",
+			"priv.uid_zero", "priv.no_password", "priv.service_account_shell",
+			"priv.root_equivalent_group",
 		},
 		Exit: 0,
 	})
@@ -245,7 +265,13 @@ func init() {
 			/usr/bin/node rwx &
 			sleep 0.4`,
 		Forbid: []string{"proc.maps_rwx_anon", "proc.suspicious_path"},
-		Exit:   0,
+		// E o que o catálogo de JIT isenta, a INTEGRIDADE pega: um "node" em
+		// /usr/bin que nenhum pacote reivindica é exatamente a forma de quem
+		// plantou um binário com nome de runtime num diretório de sistema.
+		// Os dois checks se completam em vez de se anular.
+		Expect: []Expect{{ID: "integrity.no_package_owner", Sev: "CRITICAL",
+			Subject: "/usr/bin/node"}},
+		Exit: 2,
 	})
 
 	Register(Scenario{
@@ -266,9 +292,23 @@ func init() {
 	// ------------------------------------------------------- userland de época
 
 	Register(Scenario{
+		ID:   "27-rpm-declara-a-lacuna",
+		Desc: "base de pacotes do rpm é binária: a ferramenta DIZ que não pôde perguntar",
+		// O contrário do silêncio: numa distribuição rpm a propriedade de
+		// pacote não é consultável nativamente, e 63 binários em execução ficam
+		// sem resposta. Reportar isso como "nenhum sem dono" seria a mentira
+		// exata que a ferramenta existe para não contar.
+		Images:           []string{"centos:7"},
+		Forbid:           []string{"integrity.no_package_owner"},
+		ExpectOutput:     []string{"não pôde ser consultada"},
+		MustBeIncomplete: true,
+		Exit:             1,
+	})
+
+	Register(Scenario{
 		ID:     "28-userland-legado-limpo",
 		Desc:   "userland de época intocado não pode produzir achado",
-		Images: legado,
+		Images: []string{"debian:9"},
 		Forbid: []string{
 			"proc.memfd_exec", "proc.exe_deleted", "proc.kthread_disguise",
 			"proc.suspicious_path", "proc.caps_unexpected", "proc.tracer",
@@ -282,6 +322,9 @@ func init() {
 			"persist.shell_startup", "persist.bash_env", "persist.trigger_exec",
 			"persist.pam_exec", "persist.udev_run",
 			"persist.ca_planted", "persist.hosts_override", "persist.web_prepend",
+			"correlate.persistence_redundant", "integrity.no_package_owner",
+			"priv.uid_zero", "priv.no_password", "priv.service_account_shell",
+			"priv.root_equivalent_group",
 		},
 		Exit: 0,
 	})
@@ -390,8 +433,11 @@ func init() {
 			sleep 0.4
 			/helper connect 127.0.0.1:9002 &
 			sleep 0.5`,
-		Forbid:         []string{"correlate.revshell", "net.pivot"},
-		Exit:           0,
+		Forbid: []string{"correlate.revshell", "net.pivot"},
+		// -1: o binário do rig fica em /helper e nenhum pacote o reivindica —
+		// verdade que o integrity.no_package_owner diz com razão, e que o exit
+		// reflete. O que este cenário afirma é o Forbid.
+		Exit:           -1,
 		MustBeComplete: true,
 	})
 
@@ -436,7 +482,7 @@ func init() {
 			/helper connect 51.91.190.241:9001 &
 			sleep 0.5`,
 		Forbid:         []string{"net.pivot", "correlate.revshell"},
-		Exit:           0,
+		Exit:           -1, // idem 41: o /helper do rig não tem dono de pacote
 		MustBeComplete: true,
 	})
 
@@ -602,6 +648,56 @@ func init() {
 			// hook de git sobrevive ao redeploy e não mora em /etc
 			{ID: "persist.trigger_exec", Sev: "CRITICAL", Evidence: "sobrevive ao redeploy"},
 			{ID: "persist.web_prepend", Evidence: "§16"},
+		},
+		Exit: 2,
+	})
+
+	Register(Scenario{
+		ID:   "66-cadeia-completa",
+		Desc: "invasão inteira com peças que parecem legítimas: nome de sistema, caminho de sistema, comando limpo",
+		// Cada peça isolada passa: /usr/local/sbin é caminho de sistema, o nome
+		// imita um serviço do systemd, o comando não baixa nada, a chave SSH
+		// não tem command=. Nenhum check de CAMINHO ou de CONTEÚDO dispara.
+		//
+		// O que denuncia são duas perguntas ESTRUTURAIS, e nenhuma delas olha
+		// nome, caminho ou conteúdo:
+		//
+		//   nenhum pacote reivindica este binário          §24
+		//   três mecanismos diferentes apontam para ele    §7
+		//
+		// Renomear, mover para outro diretório de sistema ou trocar o payload
+		// não muda nenhuma das duas.
+		Images: matriz,
+		Plant:  cadeiaCompleta,
+		Expect: []Expect{
+			{ID: "correlate.persistence_redundant", Sev: "CRITICAL",
+				Subject: "/usr/local/sbin/systemd-oomd-helper", Evidence: "3 mecanismos"},
+			{ID: "integrity.no_package_owner", Subject: "/usr/local/sbin/systemd-oomd-helper"},
+			{ID: "persist.ssh_keys", Sev: "MANUAL"},
+		},
+		// E o roteiro de limpeza precisa sair: sobrando um mecanismo, ele volta.
+		ExpectOutput: []string{"sinais no mesmo alvo", "cp /usr/local/sbin/systemd-oomd-helper"},
+		Exit:         2,
+	})
+
+	Register(Scenario{
+		ID:   "67-privilegio",
+		Desc: "uid 0 disfarçado, senha vazia, conta de serviço com shell e grupo que é root",
+		// É o UID que define o poder, não o nome: `systemd-net` com uid 0 É
+		// root, e auditoria por nome de usuário não veria isso.
+		Images: matriz,
+		Plant: `printf 'systemd-net:x:0:0::/root:/bin/sh\n' >> /etc/passwd
+			printf 'systemd-net::19000:0:99999:7:::\n' >> /etc/shadow
+			printf 'backupd:x:117:117::/var/backups:/bin/bash\n' >> /etc/passwd
+			printf 'docker:x:998:app\n' >> /etc/group
+			sleep 0.2`,
+		Expect: []Expect{
+			{ID: "priv.uid_zero", Sev: "CRITICAL", Subject: "systemd-net",
+				Evidence: "auditoria por NOME"},
+			{ID: "priv.no_password", Sev: "CRITICAL", Subject: "systemd-net"},
+			{ID: "priv.service_account_shell", Sev: "WARN", Subject: "backupd"},
+			{ID: "priv.root_equivalent_group", Sev: "WARN", Subject: "docker",
+				Evidence: "monta o filesystem"},
 		},
 		Exit: 2,
 	})

@@ -206,7 +206,9 @@ func TestHomeQueNaoEhDiretorioNaoViraLacuna(t *testing.T) {
 			}
 		}
 	}
-	if len(f.PersistDenied) != 0 {
-		t.Errorf("host legível não pode declarar lacuna: %v", f.PersistDenied)
+	// A asserção é sobre o /dev/null, não sobre lacuna nenhuma: a fixture não
+	// tem /etc/shadow, e o coletor declara ESSA lacuna com razão.
+	if _, temStartup := f.PersistDenied["startup"]; temStartup {
+		t.Errorf("home legível não pode gerar lacuna de startup: %v", f.PersistDenied["startup"])
 	}
 }

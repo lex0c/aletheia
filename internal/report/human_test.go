@@ -430,3 +430,26 @@ func TestRelatorioMostraAlvoCorrelacionado(t *testing.T) {
 		t.Errorf("o alvo com um sinal só precisa continuar aparecendo:\n%s", out)
 	}
 }
+
+// A deduplicação do bloco de ação é pelo COMANDO, não pela linha: dois checks
+// contribuem o mesmo `cp` com comentários diferentes, e comparar a linha
+// inteira deixava os dois passarem. Foi assim que o defeito voltou depois de
+// corrigido — pela porta do comentário.
+func TestDedupeDoBlocoIgnoraComentario(t *testing.T) {
+	mk := func(id, passo string) check.Finding {
+		fd := f(id, "7", "/usr/local/sbin/x", check.SevCritical)
+		fd.Irreversible = true
+		fd.NextSteps = []string{passo}
+		return fd
+	}
+	r := &check.Report{
+		Findings: []check.Finding{
+			mk("a.b", `sudo cp /usr/local/sbin/x "$IR/"   # o binário é a amostra`),
+			mk("c.d", `sudo cp /usr/local/sbin/x "$IR/"   # a amostra, antes de tudo`),
+		},
+		Coverage: check.Coverage{Total: 2, Complete: 2},
+	}
+	if n := strings.Count(render(r, 0), "cp /usr/local/sbin/x"); n != 1 {
+		t.Errorf("o mesmo comando apareceu %d vezes", n)
+	}
+}

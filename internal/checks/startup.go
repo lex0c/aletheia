@@ -435,11 +435,24 @@ func linhaExecutavel(s string) string {
 			return cmd
 		}
 	}
-	// `export X=/tmp/y` e `VAR=/tmp/y cmd` escondem o caminho depois do "=".
-	if k, v, ok := strings.Cut(s, "="); ok && !strings.ContainsAny(k, " \t/") {
+	// Atribuição só conta quando a variável é EXECUTADA.
+	//
+	// Antes isto valia para qualquer `X=/caminho`, e o valor virava "caminho de
+	// programa": o `/etc/init.d/rsyslog` de qualquer Ubuntu tem
+	// `XCONSOLE=/dev/xconsole`, que é DADO, e virava achado. Variável comum
+	// guarda caminho de arquivo o tempo todo.
+	if k, v, ok := strings.Cut(s, "="); ok && varExecutada[strings.TrimSpace(k)] {
 		return strings.Trim(strings.TrimSpace(v), `"'`)
 	}
 	return s
+}
+
+// varExecutada são as variáveis cujo VALOR o shell executa. Fora desta lista,
+// atribuição é dado.
+var varExecutada = map[string]bool{
+	"BASH_ENV": true, "ENV": true,
+	// roda antes de CADA prompt — é gatilho, não configuração
+	"PROMPT_COMMAND": true,
 }
 
 func defineBashEnv(s string) bool {

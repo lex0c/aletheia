@@ -40,6 +40,12 @@ type Facts struct {
 	CACerts       []CACert       `json:"ca_certs,omitempty"`
 	Hosts         []HostEntry    `json:"hosts,omitempty"`
 	Resolver      Resolver       `json:"resolver"`
+	Pkg           PkgDB          `json:"pkg"`
+	Ownership     []Ownership    `json:"ownership,omitempty"`
+	Accounts      []Account      `json:"accounts,omitempty"`
+	Grupos        []Grupo        `json:"groups,omitempty"`
+	Sudoers       []SudoRule     `json:"sudoers,omitempty"`
+	MetaAcesso    []ArquivoMeta  `json:"access_meta,omitempty"`
 
 	// PersistDenied é o que a coleta de persistência não pôde LER, por
 	// categoria. Não é o mesmo que "não havia nada" — e sem root, /root e o

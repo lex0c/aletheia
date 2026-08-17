@@ -57,7 +57,7 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 
 ## Fase 7 — integridade e privilégio
 
-- [ ] **7.1** `§24` — `dpkg -V`/`rpm -Va` com `origin:tool:*` e rebaixamento
+- [~] **7.1** `§24` — feito NATIVO (dpkg e apk lidos do disco, sem `origin:tool`); rpm declara a lacuna
 - [ ] **7.2** `§25`/`§36` — SUID, capabilities, sudoers, grupos, gravável-executado-por-root
 
 ## Fase 8 — kernel (§35)
@@ -1516,3 +1516,118 @@ A fase 4 fecha aqui no que é legível de arquivo. Ficou de fora, e está
 registrado: `docker diff` e restart policy de container (4.8) precisam falar com
 o runtime, o que pertence à fase 12; e contas na camada de dados (§7.12) exigem
 credencial de banco, que a ferramenta não tem e não deve pedir.
+
+---
+
+## Registro — o que uma invasão REAL expôs
+
+A pergunta foi: **no mundo real, a CLI detecta?** Montei uma cadeia completa em
+vez de uma forma isolada — entrada, payload, persistência redundante e canal,
+cada peça escolhida para parecer legítima sozinha:
+
+```
+entrada       chave SSH acrescentada, sem command=
+payload       /usr/local/sbin/systemd-oomd-helper — nome e caminho plausíveis
+persistência  unit habilitada com Restart=always
+              @reboot no crontab do root
+              linha no /root/.bashrc
+C2            saída para IP público em 443
+```
+
+Resultado com 35 checks: **`RESULT: OK`**. Um achado manual, zero automáticos.
+
+E o pior: **os dados estavam todos coletados**. Duas units referenciando o
+payload, um arquivo de shell, três conexões. A ferramenta tinha tudo para ligar
+os pontos e não tinha check que ligasse.
+
+### O viés de sobrevivência da própria suíte
+
+Os cenários eram realistas por MECANISMO, mas todo cenário positivo plantava um
+payload que os checks já sabiam ver. A suíte provava que os checks disparam no
+que foram desenhados para pegar — não media o que um adversário faz.
+
+### Os dois checks que fecham a cadeia, e por que são estruturais
+
+```
+correlate.persistence_redundant   três mecanismos apontando para o MESMO alvo
+integrity.no_package_owner        nenhum pacote reivindica este binário
+```
+
+Nenhum dos dois olha nome, caminho ou conteúdo. Renomear o binário, movê-lo para
+outro diretório de sistema ou trocar o payload não muda nada — é a mesma
+propriedade que fez `revshell`, `pivot` e `dropin` sobreviverem a todos os
+testes desta sessão.
+
+O primeiro sai do runbook §19: software de pacote se agenda de UM jeito, e quem
+se persiste de vários está se protegendo da SUA limpeza. O achado é o roteiro de
+remoção — sobrando um mecanismo, ele volta.
+
+Depois dos dois: `OK` → `CRITICAL` correlacionado no caminho do payload, com os
+dois sinais se reforçando.
+
+### Integridade: NATIVO, não `dpkg -V`
+
+A SPEC previa chamar o binário do host e marcar `origin:tool`. Mas dpkg e apk
+guardam a lista de arquivos em TEXTO:
+
+```
+dpkg   /var/lib/dpkg/info/*.list     um caminho absoluto por linha
+apk    /lib/apk/db/installed         F: fixa o diretório, R: é o arquivo
+rpm    base binária                  → NÃO SEI, dito em voz alta
+```
+
+Ler texto é mais barato que gerenciar desconfiança: o resultado vale como prova
+e funciona sobre imagem montada. No CentOS a resposta é a lacuna declarada —
+`63 binários em execução NÃO foram verificados` —, e o cenário 27 trava isso.
+
+**A armadilha era o usrmerge.** O dpkg lista `/bin/cat` e o processo roda
+`/usr/bin/cat`. Sem casar as duas grafias, TODO binário de /usr/bin apareceria
+sem dono — falso positivo catastrófico em todo Debian moderno. Testado contra um
+Debian real: 16 de 17 corretos, e o único sem dono é o Go em /usr/local, que de
+fato não veio de pacote.
+
+E a pergunta é estreita de propósito: quem é dono do que está RODANDO ou
+AGENDADO. "Quem é dono de cada arquivo do host" exigiria caminhar tudo.
+
+### §7.9 — é o UID que define o poder, não o nome
+
+O kernel só compara números: `systemd-net` com uid 0 É root. Auditoria por nome
+de usuário acharia uma conta e perderia a outra, que é o ponto do disfarce.
+Quatro checks: uid 0, senha vazia, conta de serviço que ganhou shell, e grupo
+equivalente a root (`docker` monta o filesystem do host — é root por outro
+caminho, e não aparece em auditoria de sudo nem de uid).
+
+### Três falsos positivos, todos achados rodando contra imagem real
+
+```
+XCONSOLE=/dev/xconsole       eu extraía o valor de QUALQUER atribuição como
+(Ubuntu 14.04, rsyslog)      caminho de programa. Agora só variável cujo valor
+                             é EXECUTADO conta: BASH_ENV, ENV, PROMPT_COMMAND
+
+rsyslogd persistido 2×       distribuição em transição do SysV entrega unit E
+(Ubuntu 14.04)               init.d para o mesmo binário. Suprimido quando o
+                             alvo TEM dono de pacote — e onde não dá para
+                             perguntar, o achado sai dizendo isso
+
+disk:x:6:root                o Alpine entrega isso de fábrica. Root num grupo
+(Alpine)                     equivalente a root não informa nada
+```
+
+Depois das três: zero falso positivo em Debian 12, Alpine, CentOS 7, Ubuntu
+14.04 e Debian 9.
+
+### E o bloco de ação voltou a duplicar
+
+Dois checks contribuíam o mesmo `cp` com comentários diferentes, e a
+deduplicação era pela LINHA inteira. Agora é pelo comando. É a segunda vez que
+este defeito volta — da primeira pela paralelização, desta pelo comentário.
+
+### Estado
+
+41 checks, 67 cenários, zero falso positivo. O cenário 66 planta a cadeia
+completa e trava o resultado; o 71 continua documentando o que ainda passa.
+
+Falta, e está medido: varredura de filesystem (§8 — implante largado e não
+executado é invisível), anti-forense (fase 6), egress (3.2), amostragem em
+janela (fase 10) e `--since` (fase 5) — a ferramenta ainda nunca pergunta
+QUANDO.

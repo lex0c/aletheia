@@ -75,6 +75,31 @@ func (r result) has(e scenario.Expect) bool {
 	return false
 }
 
+// semArtefatoDoRig descarta o achado que a SUÍTE cria, não o cenário.
+//
+// O helper é montado em /helper e nenhum pacote o reivindica — o que é
+// verdade, e o `integrity.no_package_owner` está certo em dizer. Mas isso é
+// propriedade do rig, e deixá-lo contar faria todo cenário que usa o helper ter
+// de mentir no exit code esperado.
+//
+// O filtro é DELIBERADAMENTE estreito: um só check, um só caminho. O helper
+// copiado para outro lugar — /usr/bin/node no cenário 18,
+// /usr/local/sbin/... no 66 — continua sendo avaliado, porque ali o caminho é
+// escolha do cenário.
+func (r result) semArtefatoDoRig() result {
+	out := r
+	out.findings = nil
+	for _, f := range r.findings {
+		if f.ID == "integrity.no_package_owner" && f.Subject == "/helper" {
+			continue
+		}
+		out.findings = append(out.findings, f)
+	}
+	// O exit code vem do processo e não pode ser recalculado aqui; quando o
+	// único achado era o artefato, o cenário declara Exit -1.
+	return out
+}
+
 func (r result) ids() []string {
 	var out []string
 	for _, f := range r.findings {
@@ -134,6 +159,7 @@ func TestCenarios(t *testing.T) {
 
 func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 	t.Helper()
+	r = r.semArtefatoDoRig()
 
 	for _, e := range sc.Expect {
 		if !r.has(e) {

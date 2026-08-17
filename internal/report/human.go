@@ -181,15 +181,27 @@ func writeNextSteps(w io.Writer, r *check.Report) {
 	// checks disparam no mesmo PID e cada um contribui o mesmo `cp /proc/N/exe`.
 	// Repetir a linha três vezes transforma uma lista de ações numa parede — e
 	// o bloco existe justamente para ser a lista curta do que fazer AGORA.
+	// A chave da deduplicação é o COMANDO, não a linha: dois checks podem
+	// contribuir o mesmo `cp` com comentários diferentes, e comparar a linha
+	// inteira deixaria os dois passarem. Foi como este defeito voltou depois de
+	// corrigido — pela porta do comentário.
 	var cmds []string
 	vistos := map[string]bool{}
 	for _, fd := range r.Irreversible() {
 		for _, ns := range fd.NextSteps {
-			if strings.HasPrefix(ns, "sudo ") && !vistos[ns] {
-				vistos[ns] = true
-				cmds = append(cmds, ns)
+			if !strings.HasPrefix(ns, "sudo ") {
+				continue
+			}
+			chave := strings.TrimSpace(ns)
+			if i := strings.Index(chave, "#"); i > 0 {
+				chave = strings.TrimSpace(chave[:i])
+			}
+			if vistos[chave] {
 				break
 			}
+			vistos[chave] = true
+			cmds = append(cmds, ns)
+			break
 		}
 	}
 	for i, c := range cmds {

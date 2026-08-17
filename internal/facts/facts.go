@@ -82,7 +82,10 @@ type Facts struct {
 	Segredos       []Segredo               `json:"secret_files,omitempty"`
 	ExecOculto     []string                `json:"hidden_exec,omitempty"`
 	MetaAcesso     []ArquivoMeta           `json:"access_meta,omitempty"`
-	Cross          CrossView               `json:"cross_view"`
+	// HashesIOC só existe quando a execução trouxe hash na lista de
+	// indicadores: é o hash dos arquivos que ESTA varredura examinou.
+	HashesIOC []ArquivoHash `json:"ioc_hashes,omitempty"`
+	Cross     CrossView     `json:"cross_view"`
 
 	// PidsListados é o que o readdir de /proc devolveu — NÃO o que foi lido
 	// com sucesso. A comparação cruzada depende dessa distinção.
@@ -215,6 +218,9 @@ func Collect(e *env.Env) *Facts {
 
 	if e.Has(env.CapFilesystem) {
 		collectPersist(f, e)
+		// Depois de tudo: o conjunto de candidatos a hash é o que os outros
+		// coletores acharem interessante. Só roda com hash na lista.
+		collectHashesIOC(f, e)
 	} else {
 		f.partial("persist", e.Reason(env.CapFilesystem))
 	}

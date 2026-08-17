@@ -234,8 +234,18 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 
 	// A linha de cobertura é obrigatória em TODA execução: sem ela, a agregação
 	// de frota mostra "host sem achados" escondendo que metade não rodou.
-	if r.coverage.ID != "coverage" {
+	//
+	// A exceção é o exit 3, e ela prova a mesma regra pelo outro lado: exit 3 é
+	// ERRO DE INVOCAÇÃO — argumento inválido, --root que não abre, lista de
+	// indicadores que não trouxe indicador nenhum. Ali não houve varredura, e
+	// justamente por isso não pode haver linha de cobertura: uma cobertura
+	// impressa sem varredura seria a mentira que ela existe para impedir.
+	if sc.Exit != 3 && r.coverage.ID != "coverage" {
 		t.Error("JSONL sem linha de cobertura")
+	}
+	if sc.Exit == 3 && r.coverage.ID == "coverage" {
+		t.Error("exit 3 é erro de invocação: não pode haver linha de cobertura, " +
+			"porque varredura nenhuma aconteceu")
 	}
 }
 

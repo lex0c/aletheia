@@ -202,7 +202,7 @@ func parseAuthorizedKey(ln string) SSHKey {
 	k.Type = tipo
 	blob, coment, _ := strings.Cut(strings.TrimSpace(r), " ")
 	k.Comment = strings.TrimSpace(coment)
-	k.Fingerprint = fingerprintSSH(blob)
+	k.Fingerprint = FingerprintSSH(blob)
 	return k
 }
 
@@ -230,7 +230,10 @@ func pareceTipoDeChave(s string) bool {
 // fingerprintSSH devolve o SHA-256 no formato que o ssh-keygen imprime.
 // É o IOC de frota: a mesma chave em vários hosts é a mesma pessoa, e isso vale
 // mais que hash de binário (runbook §23).
-func fingerprintSSH(blob string) string {
+// FingerprintSSH é exportada porque o casamento por indicador (--ioc) precisa
+// derivar a impressão digital da chave que o operador colou, e derivá-la em
+// dois lugares faria as duas divergirem no dia em que o formato mudasse.
+func FingerprintSSH(blob string) string {
 	raw, err := base64.StdEncoding.DecodeString(blob)
 	if err != nil || len(raw) == 0 {
 		return ""

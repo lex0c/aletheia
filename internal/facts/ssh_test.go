@@ -106,16 +106,16 @@ func TestFimDasOpcoesRespeitaAspas(t *testing.T) {
 // O fingerprint é o SHA-256 no formato que o ssh-keygen imprime, porque é assim
 // que o operador vai comparar com o que ele tem em mãos.
 func TestFingerprintNoFormatoDoSshKeygen(t *testing.T) {
-	fp := fingerprintSSH("AAAAC3NzaC1lZDI1NTE5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	fp := FingerprintSSH("AAAAC3NzaC1lZDI1NTE5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if !strings.HasPrefix(fp, "SHA256:") {
 		t.Errorf("o ssh-keygen imprime com prefixo SHA256:, e saiu %q", fp)
 	}
 	// O mesmo blob dá o mesmo fingerprint — é o que torna a comparação entre
 	// hosts possível.
-	if fp != fingerprintSSH("AAAAC3NzaC1lZDI1NTE5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") {
+	if fp != FingerprintSSH("AAAAC3NzaC1lZDI1NTE5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") {
 		t.Error("o fingerprint não é estável")
 	}
-	if fingerprintSSH("") != "" {
+	if FingerprintSSH("") != "" {
 		t.Error("sem blob não há fingerprint a inventar")
 	}
 }

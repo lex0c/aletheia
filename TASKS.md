@@ -47,7 +47,7 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 
 ## Fase 5 — IOC e janela  ▸ o que fecha a §23
 
-- [ ] **5.1** `--ioc` — IPs, hashes, paths, strings, chaves, usuários
+- [x] **5.1** `--ioc` — IPs, hashes, paths, strings, chaves, usuários
 - [ ] **5.2** `--since` transversal, com a regra de default explícita
 
 ## Fase 6 — anti-forense e catálogo
@@ -3536,3 +3536,96 @@ não duplica, e portas diferentes do mesmo processo não se fundem —, e o segu
 existe porque a correção óbvia (agrupar por pid) esconderia a segunda escuta.
 
 O `net.egress_unowned` já agrupava por pid e não tinha o defeito.
+
+---
+
+## Registro — `--ioc`: o primeiro check cuja fonte vem de fora
+
+A fase 5, metade dela. E o que ela muda não é mais um detector: é a DIREÇÃO da
+pergunta.
+
+Todo o catálogo — 77 checks — pergunta "isto tem forma de comprometimento?".
+Este pergunta outra coisa: **este comprometimento, o que já foi confirmado em
+outro host, está aqui?** É a §23 inteira. Sem ela, "rode o mesmo comando em N
+hosts" nunca foi o mesmo que "responda se ESTE incidente está em N hosts".
+
+E ele ataca, por um caminho que nenhum cenário alcança, a fraqueza que o
+`ATTACK.md` registra sobre a suíte: os checks e os cenários têm o mesmo autor.
+Um indicador é conhecimento de TERCEIRO entrando na ferramenta — do relatório de
+CTI, do host irmão já analisado, da amostra coletada ontem.
+
+### O formato, e por que ele não é YAML
+
+A SPEC descreve o arquivo em YAML. Uma biblioteca custaria a **primeira
+dependência do projeto** para ganhar o parse de seis chaves com listas de
+string — e o `go.mod` sem dependência é a mesma decisão que dá o binário
+estático.
+
+O leitor aceita as três formas que uma lista tem na vida real: a inline da SPEC,
+o bloco com `- item`, e a lista crua de um indicador por linha — que é como ela
+chega colada de um relatório. Sem chave, o tipo sai da FORMA: hash antes de
+texto, IP antes de caminho, porque um hash também é um texto válido.
+
+### A regra que decidiu o desenho inteiro
+
+**Toda linha que não for entendida vira aviso visível.**
+
+O pior desfecho desta funcionalidade não é errar um casamento — é o operador
+rodar com uma lista que a ferramenta entendeu pela metade, ler "nada
+encontrado" e concluir que o incidente não chegou neste host. Daí três coisas:
+
+```
+chave escrita errada   vira AVISO, e o indicador NÃO entra como valor solto
+                       (`ipss:` não pode virar uma string chamada "ipss")
+lista sem indicador    erro de invocação, exit 3 — não varredura limpa
+relatório              bloco INDICADORES com o arquivo, o total e a conta por
+                       tipo, do mesmo jeito que a baseline se declara
+```
+
+O cenário R3 trava o exit 3 de ponta a ponta, e ele expôs uma regra do harness
+que valia a pena tornar explícita: exit 3 é erro de INVOCAÇÃO, e ali não pode
+haver linha de cobertura — cobertura impressa sem varredura seria exatamente a
+mentira que ela existe para impedir.
+
+### Hash: o que se compara, e a ordem
+
+Hashear o filesystem inteiro não é triagem, é antivírus. O conjunto é o que a
+§24 já considera interessante, e a medição mostrou que a ORDEM é o que decide:
+
+```
+13.703 candidatos num desktop
+12.412 eram o inventário de módulos da distribuição
+     8 arquivos (navegador, LLVM, driver de vídeo) somavam 1,4 GB
+```
+
+Sem prioridade, o orçamento morria nos módulos antes de chegar nos 1.300 que de
+fato rodam. Com ela, o corte cai onde importa menos — e o motivo diz de que
+nível sobrou, porque "sobrou módulo de distribuição" e "sobrou binário em
+execução" são frases diferentes.
+
+### Uma defesa que só apareceu porque o teste quebrou
+
+A chave SSH casa por **impressão digital**, não por texto: a mesma chave aparece
+com outras opções e outro comentário. O primeiro teste usou um blob de exemplo
+com tamanho quebrado, que não decodifica — e as duas pontas devolveram string
+vazia. Sem a guarda que já estava no código, "vazio == vazio" faria toda chave
+ilegível do host casar com toda chave ilegível da lista.
+
+### E duas mutações mostraram dois testes decorativos meus
+
+```
+dedup do par indicador×lugar   o teste usava dois SUJEITOS diferentes, então
+                               passava com a deduplicação removida
+chave sem impressão digital    não havia teste com blob inválido: a guarda que
+                               protege o caso não estava protegida por nada
+```
+
+Os dois foram refeitos com o caso real — binário setuid que TAMBÉM está em
+execução, e chave que não decodifica — e as oito mutações dirigidas morrem.
+
+### Estado
+
+78 checks, 122 cenários, 186 execuções. `make verify` e `make race` limpos.
+Falta a outra metade da fase 5: o `--since`, que é transversal e precisa de uma
+decisão própria — o que fazer com o achado SEM data. Descartá-lo porque não cabe
+na janela seria a truncagem silenciosa que esta base persegue em todo lugar.

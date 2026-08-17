@@ -21,6 +21,21 @@ type Options struct {
 
 	// Baseline descreve a referência usada, quando houve uma. Nil = nenhuma.
 	Baseline *BaselineInfo
+
+	// IOC descreve a lista de indicadores usada, quando houve uma. Vazio =
+	// nenhuma. É obrigatório dizer: uma varredura que procurou por dez
+	// indicadores e uma que procurou por dois, de uma lista mal entendida,
+	// terminam iguais no papel se ninguém contar quantos entraram.
+	IOC *IOCInfo
+}
+
+// IOCInfo é o que o relatório precisa dizer sobre a lista de indicadores.
+type IOCInfo struct {
+	Arquivo string
+	Total   int
+	Resumo  string
+	// Avisos são as linhas da lista que o leitor NÃO entendeu.
+	Avisos []string
 }
 
 // BaselineInfo é o que o relatório precisa dizer sobre a referência usada.
@@ -43,6 +58,7 @@ type BaselineInfo struct {
 func Human(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, o Options) {
 	writeHeader(w, f, e)
 	writeBaseline(w, o.Baseline)
+	writeIOC(w, o.IOC)
 
 	if o.Verbose > 0 {
 		writeVerbose(w, r, o)
@@ -489,6 +505,24 @@ func writeBaseline(w io.Writer, b *BaselineInfo) {
 	}
 	for _, m := range b.Ressalvas {
 		fmt.Fprintf(w, "            ⚠ %s\n", Safe(m))
+	}
+	fmt.Fprintln(w)
+}
+
+// writeIOC declara a lista usada, pelo mesmo motivo do bloco de baseline: quem
+// muda o resultado da execução precisa ser examinável.
+//
+// O número é o que importa. Uma lista de quarenta linhas que produziu dois
+// indicadores — porque a chave estava escrita errada — deixa a varredura com
+// cara de limpa, e o operador conclui que o incidente não chegou neste host.
+func writeIOC(w io.Writer, i *IOCInfo) {
+	if i == nil {
+		return
+	}
+	fmt.Fprintf(w, "INDICADORES %s · %d carregado(s): %s\n",
+		Safe(i.Arquivo), i.Total, Safe(i.Resumo))
+	for _, a := range i.Avisos {
+		fmt.Fprintf(w, "            ⚠ NÃO entendido: %s\n", Safe(a))
 	}
 	fmt.Fprintln(w)
 }

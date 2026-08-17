@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lex0c/aletheia/internal/ioc"
 	"github.com/lex0c/aletheia/internal/kbpf"
 )
 
@@ -125,6 +126,12 @@ type Env struct {
 	// enxerga, e é o que decide quantos leitores de /proc abrir.
 	CPUQuota float64
 
+	// IOC são os indicadores DESTE incidente, quando o operador os informou
+	// (SPEC 6.4). Ficam aqui e não em Facts por uma razão de contrato: Facts é
+	// o retrato do HOST, e a lista não é fato do host — é o que esta execução
+	// está procurando, do mesmo jeito que --root é de onde ela olha.
+	IOC *ioc.Lista
+
 	// BPFSemMecanismo diz que este kernel não tem O QUE enumerar — a bpf(2) não
 	// existe. É diferente de "não me deixaram olhar", e a diferença decide se a
 	// ausência degrada a cobertura ou não.
@@ -182,6 +189,7 @@ func (e *Env) Reason(c Cap) string {
 type Options struct {
 	Root    string
 	Version string
+	IOC     *ioc.Lista
 }
 
 // Probe inspeciona o ambiente uma única vez.
@@ -191,6 +199,7 @@ func Probe(o Options) *Env {
 		Now:         time.Now().UTC(),
 		CapReason:   map[string]string{},
 		ToolVersion: o.Version,
+		IOC:         o.IOC,
 		NumCPU:      runtime.NumCPU(),
 		CPUQuota:    probeCPUQuota(),
 	}

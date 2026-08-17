@@ -667,6 +667,25 @@ severidade                  achado por IOC é CRITICAL: não é heurística, é 
 origin                      native — casamento contra dado já lido
 ```
 
+O formato acima é o que a ferramenta lê, e ela **não traz um parser de YAML**:
+uma biblioteca custaria a primeira dependência do projeto para ganhar o parse de
+seis chaves com listas de string. O leitor aceita as três formas que uma lista de
+incidente tem na vida real, e o que ele não entende ele **imprime**:
+
+```
+formas aceitas   `ips: [a, b]` · bloco com `- item` · um indicador por linha,
+                 classificado pela FORMA quando o tipo não vem dito
+não entendido    chave desconhecida e linha que não classifica viram AVISO no
+                 relatório e cobertura PARCIAL no check — nunca silêncio
+lista vazia      erro de invocação (exit 3): uma varredura que segue limpa com
+                 uma lista que ninguém entendeu é a pior saída possível
+hash             comparado contra os arquivos que a varredura examinou, em ordem
+                 de prioridade (o que roda antes do inventário de módulos), com
+                 orçamento declarado quando corta
+chave            casa por IMPRESSÃO DIGITAL, não por texto: a mesma chave aparece
+                 com outras opções e outro comentário
+```
+
 > É o que transforma a §23 de "rode o mesmo comando em N hosts" em "responda se **este** comprometimento está em N hosts".
 
 ### 6.5. `--since` — a janela de investigação

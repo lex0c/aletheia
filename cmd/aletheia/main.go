@@ -21,6 +21,7 @@ import (
 	_ "github.com/lex0c/aletheia/internal/checks" // registra os checks
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
+	"github.com/lex0c/aletheia/internal/ioc"
 	"github.com/lex0c/aletheia/internal/report"
 )
 
@@ -55,7 +56,11 @@ FLAGS DE scan E wtf
                 de severidade e CONTINUA no relatório, com a data
 
 FLAGS DE scan
-  --only G,G    escopo por subsistema: proc net persist priv integrity kernel app cloud
+  --ioc FILE    casa os indicadores DESTE incidente contra o que foi coletado
+                (§23). Aceita "ips: [a, b]", bloco com "- item", ou um indicador
+                por linha; o tipo é deduzido pela forma quando não vem dito.
+                Achado por indicador é CRÍTICO — e vale o que a lista valer
+  --only G,G    escopo por subsistema: proc net persist priv integrity kernel app cloud ioc
   --mode M      auto | manual
   -v, -vv       evidência por achado / + INFO e detalhe de cobertura
 
@@ -243,6 +248,7 @@ func runScan(args []string, wtf bool) int {
 		verbose  = fs.Bool("v", false, "evidência por achado")
 		verbose2 = fs.Bool("vv", false, "+ INFO e detalhe de cobertura")
 		base     = fs.String("baseline", "", "comparar com a baseline em FILE")
+		iocFile  = fs.String("ioc", "", "casar os indicadores DESTE incidente, do arquivo FILE")
 	)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
@@ -260,7 +266,15 @@ func runScan(args []string, wtf bool) int {
 		}
 	}
 
-	e := env.Probe(env.Options{Root: *root, Version: version})
+	// A lista é carregada ANTES do probe, e falhar aqui é falhar alto: quem
+	// pediu `--ioc` pediu uma caça, e uma execução que ignora o arquivo em
+	// silêncio devolve "nada encontrado" para quem acha que procurou.
+	lista, code := carregarIOC(*iocFile)
+	if code != 0 {
+		return code
+	}
+
+	e := env.Probe(env.Options{Root: *root, Version: version, IOC: lista})
 	defer e.Close()
 	if e.Source == env.SourceImage && !e.Has(env.CapFilesystem) {
 		fmt.Fprintf(os.Stderr, "não foi possível abrir --root com raiz travada: %v\n", e.RootErr)
@@ -311,7 +325,9 @@ func runScan(args []string, wtf bool) int {
 	if *jsonOut == "-" {
 		humanOut = os.Stderr
 	}
-	report.Human(humanOut, r, f, e, report.Options{Verbose: v, Baseline: bl})
+	report.Human(humanOut, r, f, e, report.Options{
+		Verbose: v, Baseline: bl, IOC: infoIOC(lista),
+	})
 
 	if *jsonOut != "" {
 		if code := writeJSONL(*jsonOut, r, f, e, bl); code != 0 {
@@ -320,6 +336,44 @@ func runScan(args []string, wtf bool) int {
 	}
 
 	return r.Exit()
+}
+
+// carregarIOC lê a lista de indicadores, ou falha alto.
+//
+// Os três desfechos são diferentes e todos são ditos:
+//
+//	arquivo não abre   erro: o operador apontou para o lugar errado
+//	lista vazia        erro: um arquivo que não produziu indicador nenhum é o
+//	                   pior caso — a varredura seguiria limpa e ele leria
+//	                   "nada encontrado" achando que procurou
+//	linhas estranhas   segue, e o relatório IMPRIME o que não foi entendido
+func carregarIOC(caminho string) (*ioc.Lista, int) {
+	if caminho == "" {
+		return nil, 0
+	}
+	l, err := ioc.Carregar(caminho)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "--ioc: %v\n", err)
+		if l != nil {
+			for _, a := range l.Avisos {
+				fmt.Fprintf(os.Stderr, "  %s\n", a)
+			}
+			fmt.Fprintln(os.Stderr, "  formatos aceitos: `ips: [a, b]`, bloco com `- item`, "+
+				"ou um indicador por linha")
+		}
+		return nil, 3
+	}
+	return l, 0
+}
+
+func infoIOC(l *ioc.Lista) *report.IOCInfo {
+	if l == nil {
+		return nil
+	}
+	return &report.IOCInfo{
+		Arquivo: l.Arquivo, Total: len(l.Itens),
+		Resumo: l.Resumo(), Avisos: l.Avisos,
+	}
 }
 
 // aplicarBaseline carrega e aplica a baseline, ou falha alto.

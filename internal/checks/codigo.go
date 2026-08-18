@@ -1,0 +1,125 @@
+package checks
+
+import (
+	"strconv"
+
+	"github.com/lex0c/aletheia/internal/check"
+	"github.com/lex0c/aletheia/internal/env"
+	"github.com/lex0c/aletheia/internal/facts"
+)
+
+func init() { check.Register(codigoBackdoor) }
+
+// codigoBackdoor — runbook §24, §16.
+//
+// A peneira de webshell. Um sink de execução aplicado a entrada de request —
+// `echo \`$_REQUEST[0]\“, `eval($_POST[x])`, `system($_GET[cmd])` — é o padrão
+// de maior sinal que existe em código servido: nenhum framework faz isso, e é a
+// linha exata que um invasor acrescenta a um arquivo que já roda.
+//
+// A postura é a mesma do resto da ferramenta, e o check a diz em voz alta:
+// PENEIRA, NÃO PROVA. Pega o webshell comum — a maioria dos reais é copiada de
+// padrão conhecido — e erra o ofuscado a fundo, porque `ev`.`al` e cadeia de
+// `chr()` derrotam regex. Um achado diz "leia este trecho", e o que dá peso não
+// é o padrão sozinho: é o cruzamento com "este arquivo MUDOU", que sai do mtime.
+//
+// Por isso a data acompanha cada achado: um padrão num arquivo alterado na
+// janela do incidente é outra conversa, e a janela do relatório o traz à tona.
+var codigoBackdoor = check.Check{
+	ID:       "app.code_backdoor",
+	Ref:      "24",
+	Title:    "padrão de backdoor em código servido (PHP/JS/Python)",
+	Group:    "app",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Wtf:      true,
+	FalsePositives: []string{
+		"framework e template usam eval, base64_decode e system legitimamente — " +
+			"por isso um sink SEM entrada de request sai como aviso (leia), não " +
+			"como crítico. O crítico exige a co-ocorrência sink+entrada, que " +
+			"quase não tem uso legítimo",
+		"é PENEIRA, não prova: pega o webshell comum e ERRA o ofuscado a fundo " +
+			"(`ev`.`al`, chr() em cadeia, decodificação empilhada). Um match é " +
+			"'leia este trecho', não veredito",
+		"árvore de dependência (vendor, node_modules) NÃO é varrida — o custo " +
+			"de I/O é proibitivo e ela está em quase todo host —, então um shell " +
+			"escondido ali passa. É limite conhecido, não lacuna do host; se " +
+			"suspeitar, varra a árvore com um scan direcionado. Payload acima de " +
+			"2 MB também fica de fora, e esse SIM a cobertura declara",
+		"reconhecer por padrão é trivial de burlar. O que separa backdoor de " +
+			"uso legítimo é o arquivo ter MUDADO — cruze com o mtime e com o " +
+			"git (runbook §16)",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		var r check.Result
+		for i := range f.CodigoSuspeito {
+			cs := &f.CodigoSuspeito[i]
+
+			// A severidade do arquivo é a do seu match mais forte.
+			maxTier := 0
+			for _, m := range cs.Matches {
+				if m.Tier > maxTier {
+					maxTier = m.Tier
+				}
+			}
+			// Tier 1 sozinho — um eval, um pickle.loads — aparece legitimamente
+			// em quase todo código, e sai como INFO: observação para quem audita
+			// a fundo (-vv), não alarme. Só a co-ocorrência sink+entrada (tier 2)
+			// é crítica. Foi medido: num host de dev, tier 1 rendia 50 avisos e
+			// zero deles era backdoor.
+			sev := check.SevInfo
+			if maxTier >= 2 {
+				sev = check.SevCritical
+			}
+
+			ev := []string{
+				cs.Path + " — código " + cs.Lang + " com padrão de execução suspeito",
+			}
+			if maxTier >= 2 {
+				ev = append(ev, "TIER 2: sink de execução sobre entrada de request, "+
+					"ou eval de conteúdo decodificado — a forma que quase não tem "+
+					"uso legítimo")
+			} else {
+				ev = append(ev, "TIER 1: construção que MERECE leitura (eval, "+
+					"create_function, decodificação) — sozinha NÃO acusa (é comum "+
+					"em código legítimo), e por isso sai como observação. O que a "+
+					"promove é o arquivo ter MUDADO: cruze com o mtime e o git")
+			}
+			// Os matches, com linha e trecho: é o que o operador lê.
+			mostrados := cs.Matches
+			if len(mostrados) > 6 {
+				mostrados = mostrados[:6]
+			}
+			for _, m := range mostrados {
+				ev = append(ev, cs.Path+":"+strconv.Itoa(m.Linha)+" — "+m.Regra+
+					"\n      "+m.Trecho)
+			}
+			if len(cs.Matches) > len(mostrados) {
+				ev = append(ev, "e mais "+strconv.Itoa(len(cs.Matches)-len(mostrados))+
+					" linha(s) no mesmo arquivo")
+			}
+			ev = append(ev, "PENEIRA, não prova: pega o comum, erra o ofuscado. "+
+				"Leia o arquivo e compare com o que deveria estar lá")
+
+			fd := self.F(sev, cs.Path, "", ev...)
+			if cs.ModUTC != "" {
+				fd.Quando, fd.QuandoFonte = cs.ModUTC, "mtime do arquivo de código"
+			}
+			fd.NextSteps = []string{
+				"leia o trecho: um sink sobre $_GET/$_POST/req/request roda o que o " +
+					"atacante enviar",
+				"o ctime do arquivo data quando a linha entrou, mesmo que o resto " +
+					"pareça antigo (runbook §9)",
+				"se o diretório é um repo git, `git log -p -- " + check.Arg(cs.Path) +
+					"` mostra o commit que a acrescentou — e `git diff` o que não foi " +
+					"commitado (runbook §16)",
+				"procure o mesmo padrão nos outros hosts da frota: num só é " +
+					"comprometimento, em vários pode ser código legítimo esquisito (§23)",
+			}
+			r.Findings = append(r.Findings, fd)
+		}
+		r.Partial = append(r.Partial, f.PersistDenied["codigo"]...)
+		return r
+	},
+}

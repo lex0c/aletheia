@@ -69,6 +69,10 @@ type Facts struct {
 	// relatório de tempo dizer por que ela demorou.
 	SuidDirs     int `json:"suid_dirs,omitempty"`
 	SuidArquivos int `json:"suid_files,omitempty"`
+
+	// CodigoSuspeito são arquivos de código com padrão de backdoor. Peneira, não
+	// prova — o check pesa cada um com o mtime.
+	CodigoSuspeito []CodigoSuspeito `json:"suspect_code,omitempty"`
 	// Vigias é quem observa ARQUIVO por inotify ou fanotify. É a resposta para
 	// "removi o backdoor e ele voltou": quem recria o arquivo apagado precisa
 	// saber que ele sumiu, e é assim que sabe.
@@ -273,6 +277,10 @@ func Collect(e *env.Env) *Facts {
 		// justifica o batimento.
 		e.Stage("varredura de filesystem")
 		collectPersist(f, e)
+		// Depois da persistência: a varredura de código reusa os web roots e
+		// procura backdoor em PHP/JS/Python. Peneira declarada, com teto.
+		e.Stage("varredura de código")
+		collectCodigo(f, e)
 		// DEPOIS da persistência: a pergunta "quem pode reescrever o que root
 		// executa" precisa da lista do que root executa, e ela sai dali.
 		collectAlvosDeRoot(f, e)

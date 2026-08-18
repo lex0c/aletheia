@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -134,7 +135,7 @@ INFO — a pergunta que vem ANTES do veredito
   a repetição quando ela tem forma conhecida (cron que se sobrepõe, pool).
 
 FLAGS DE collect E analyze
-  collect --out F [--root PATH] [--ignore PATH]   escreve o dump ("-" = stdout)
+  collect --out F [--root PATH] [--ignore PATH] [--all-fs]   escreve o dump ("-" = stdout)
   analyze DUMP [--ioc F] [--since S] [--only G,G] [--mode M] [--baseline F]
                [--json F] [-v|-vv]
 
@@ -347,6 +348,21 @@ func (l *listaCaminhos) Set(v string) error {
 	return nil
 }
 
+// ignoreRecusado recusa `--ignore /`: ignorar a raiz esvaziaria a varredura, e
+// aceitar isso em silêncio faria o operador achar que excluiu algo quando na
+// verdade desligou tudo. Erro de invocação, não host suspeito.
+func ignoreRecusado(ignore listaCaminhos) bool {
+	for _, p := range ignore {
+		for _, item := range strings.Split(p, ",") {
+			if filepath.Clean(strings.TrimSpace(item)) == "/" {
+				fmt.Fprintln(os.Stderr, "--ignore /: isso esvaziaria a varredura — recusado")
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func runWtf(args []string) int {
 	fs := flag.NewFlagSet("wtf", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -369,6 +385,9 @@ func runWtf(args []string) int {
 			fmt.Fprintf(os.Stderr, "--root: %s não é um diretório acessível\n", *root)
 			return 3
 		}
+	}
+	if ignoreRecusado(ignore) {
+		return 3
 	}
 
 	// O relógio começa a contar ANTES da coleta: a coleta é a parte cara, e um
@@ -480,6 +499,9 @@ func runScan(args []string, wtf bool) int {
 	janela, err := check.ParseJanela(*since, time.Now().UTC())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "--since %q: %v\n", *since, err)
+		return 3
+	}
+	if ignoreRecusado(ignore) {
 		return 3
 	}
 

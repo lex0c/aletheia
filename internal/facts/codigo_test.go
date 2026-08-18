@@ -892,3 +892,29 @@ func TestValidateFileRebaixaSoOInclude(t *testing.T) {
 		}
 	}
 }
+
+// A varredura para na profundidade-teto, e isso é DECLARADO — não pode sumir em
+// silêncio, senão "nenhum backdoor" quando o que houve foi não descer.
+func TestProfundidadeViraLacunaDeclarada(t *testing.T) {
+	salvo := maxCodigoDepth
+	maxCodigoDepth = 2
+	defer func() { maxCodigoDepth = salvo }()
+
+	raiz := t.TempDir()
+	fundo := raiz + "/data/a/b/c/d/shell.php" // mais fundo que 2 níveis
+	if err := os.MkdirAll(filepathDir(fundo), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fundo, []byte("<?php eval($_GET[0]);"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	defer e.Close()
+	f := &Facts{}
+	collectCodigo(f, e)
+
+	msgs := strings.Join(f.PersistDenied["codigo"], " | ")
+	if !strings.Contains(msgs, "não desceu além") {
+		t.Errorf("a profundidade-teto tinha de virar lacuna declarada, veio: %q", msgs)
+	}
+}

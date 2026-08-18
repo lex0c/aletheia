@@ -37,6 +37,7 @@ func runCollect(args []string) int {
 		root   = fs.String("root", "", "coletar de imagem montada em PATH")
 		out    = fs.String("out", "", "arquivo do dump ('-' = stdout) — obrigatório")
 		noProg = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
+		allFS  = fs.Bool("all-fs", false, "coletar código na FS montada INTEIRA (a partir de /), não só os web roots")
 	)
 	var ignore listaCaminhos
 	fs.Var(&ignore, "ignore", "excluir caminho da varredura de FS (repetível): --ignore /data/xmls")
@@ -56,6 +57,10 @@ func runCollect(args []string) int {
 		}
 	}
 
+	if ignoreRecusado(ignore) {
+		return 3
+	}
+
 	e := env.Probe(env.Options{Root: *root, Version: version})
 	defer e.Close()
 	if e.Source == env.SourceImage && !e.Has(env.CapFilesystem) {
@@ -63,6 +68,7 @@ func runCollect(args []string) int {
 		return 3
 	}
 	e.Ignorar(ignore)
+	e.CodigoTudo = *allFS
 
 	aoInterromper()
 	prog := progress.New(os.Stderr, time.Now(), *noProg)

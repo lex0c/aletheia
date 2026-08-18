@@ -206,6 +206,10 @@ func collectSuid(f *Facts, e *env.Env) {
 	}
 
 	for _, raiz := range suidRaizes {
+		// --ignore do operador: nem a raiz é tocada (nem o Lstat dela).
+		if e.Ignorado(raiz) {
+			continue
+		}
 		// Raiz que é SYMLINK não entra.
 		//
 		// Com usrmerge, /bin, /sbin e /lib apontam para dentro de /usr. Entrar
@@ -281,6 +285,7 @@ func collectSuid(f *Facts, e *env.Env) {
 		f.denyPersist("suid", "a varredura de SUID não atravessou montagem: "+
 			strings.Join(lista, ", ")+" NÃO foram examinados")
 	}
+	declararIgnore(f, e, "suid")
 	// Ordem estável: a fila é consumida por vários trabalhadores, e sem isto o
 	// relatório mudaria de forma entre execuções idênticas.
 	sort.Slice(f.Suid, func(i, j int) bool { return f.Suid[i].Path < f.Suid[j].Path })

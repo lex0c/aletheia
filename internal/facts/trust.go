@@ -196,6 +196,7 @@ func collectGitHooks(f *Facts, e *env.Env) {
 			strconv.Itoa(maxGitDirs)+" diretórios ou orçamento de tempo do wtf): "+
 			"o excedente NÃO foi avaliado")
 	}
+	declararIgnore(f, e, "githook")
 }
 
 func procurarHooks(f *Facts, e *env.Env, dir string, prof int, vistos *int, truncado *bool) {

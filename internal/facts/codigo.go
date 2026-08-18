@@ -1410,12 +1410,13 @@ func trecho(linha string) string {
 // a leitura dos arquivos de código, e os dois são limitados. Como toda
 // varredura da ferramenta, o teto é DECLARADO: parar em silêncio diria "nenhum
 // backdoor" quando o que houve foi parar antes.
-const (
-	maxCodigoDepth = 12
-	// Teto por arquivo: um webshell cabe em bytes; um bundle minificado de 40 MB
-	// é ruído e custo. O que passar disso é dito.
-	maxCodigoBytes = 2 << 20
-)
+// Teto por arquivo: um webshell cabe em bytes; um bundle minificado de 40 MB é
+// ruído e custo. O que passar disso é dito.
+const maxCodigoBytes = 2 << 20
+
+// maxCodigoDepth é o teto de profundidade — freio contra laço por symlink, e
+// declarado quando bate. var (não const) só para o teste baixá-lo.
+var maxCodigoDepth = 12
 
 // maxCodigoDirs e maxCodigoArquivos são o teto POR RAIZ. São var, não const,
 // só para o teste poder baixá-los e exercitar a exaustão sem plantar 20 mil
@@ -1477,6 +1478,7 @@ type varreduraCodigo struct {
 	arquivos          int
 	truncado          bool
 	tempo             bool
+	profundidade      bool
 	grandesPulados    int
 	dirsIlegiveis     int
 	arquivosIlegiveis int
@@ -1551,6 +1553,7 @@ func collectCodigo(f *Facts, e *env.Env) {
 		varrerCodigo(f, e, r, 0, &porRaiz, vistos, pularAbs)
 		st.truncado = st.truncado || porRaiz.truncado
 		st.tempo = st.tempo || porRaiz.tempo
+		st.profundidade = st.profundidade || porRaiz.profundidade
 		st.grandesPulados += porRaiz.grandesPulados
 		st.dirsIlegiveis += porRaiz.dirsIlegiveis
 		st.arquivosIlegiveis += porRaiz.arquivosIlegiveis
@@ -1569,6 +1572,12 @@ func collectCodigo(f *Facts, e *env.Env) {
 		f.denyPersist("codigo", "a varredura de código parou pelo orçamento de "+
 			"tempo: o que faltou NÃO foi analisado — rode `scan` sem teto")
 	}
+	if st.profundidade {
+		f.denyPersist("codigo", "a varredura de código não desceu além de "+
+			itoa(maxCodigoDepth)+" níveis: código MAIS FUNDO que isso NÃO foi "+
+			"analisado — um webshell aninhado muito fundo passa. Aponte "+
+			"`scan --root` na subárvore suspeita")
+	}
 	if st.grandesPulados > 0 {
 		f.denyPersist("codigo", itoa(st.grandesPulados)+" arquivo(s) de código "+
 			"acima de 2 MB NÃO foram analisados (minificado ou payload grande): "+
@@ -1584,15 +1593,25 @@ func collectCodigo(f *Facts, e *env.Env) {
 			"foram listados e não puderam ser LIDOS (permissão): um backdoor num "+
 			"deles passa, e a ausência de achado ali é desconhecimento, não resposta")
 	}
-	if ig := e.Ignorados(); len(ig) > 0 {
-		mostra := append([]string{}, ig...)
-		if len(mostra) > 8 {
-			mostra = append(mostra[:8:8], "…")
-		}
-		f.denyPersist("codigo", "--ignore: "+itoa(len(ig))+" caminho(s) foram "+
-			"EXCLUÍDOS da varredura por sua escolha ("+strings.Join(mostra, ", ")+
-			"): um backdoor lá dentro NÃO foi procurado")
+	declararIgnore(f, e, "codigo")
+}
+
+// declararIgnore anota, na cobertura do check dado, os caminhos que o operador
+// excluiu com --ignore. Toda varredura de FS que honra e.Ignorado precisa
+// declarar isto: excluir e ler "limpo" sobre o excluído é a cegueira silenciosa
+// que a ferramenta combate. Chamado por código, SUID e git-hooks.
+func declararIgnore(f *Facts, e *env.Env, check string) {
+	ig := e.Ignorados()
+	if len(ig) == 0 {
+		return
 	}
+	mostra := append([]string{}, ig...)
+	if len(mostra) > 8 {
+		mostra = append(mostra[:8:8], "…")
+	}
+	f.denyPersist(check, "--ignore: "+itoa(len(ig))+" caminho(s) foram EXCLUÍDOS "+
+		"da varredura por sua escolha ("+strings.Join(mostra, ", ")+"): o que "+
+		"havia neles NÃO foi procurado")
 }
 
 func varrerCodigo(f *Facts, e *env.Env, raiz string, prof int, st *varreduraCodigo, vistos, pularAbs map[string]bool) {
@@ -1649,13 +1668,14 @@ func varrerCodigo(f *Facts, e *env.Env, raiz string, prof int, st *varreduraCodi
 			if at.dir == "/" { // raiz do --all-fs: evita a barra dupla "//data"
 				p = "/" + n
 			}
+			// Caminho absoluto excluído — ANTES de qualquer stat: --ignore do
+			// operador, ou pseudo-FS e montagem de REDE no --all-fs. Checar antes
+			// do IsDir é o que impede TOCAR (e pendurar em) uma montagem de rede.
+			// Distinto do pularNoCodigo, que casa por NOME.
+			if pularAbs[p] || e.Ignorado(p) {
+				continue
+			}
 			if e.IsDir(p) {
-				// Caminho absoluto excluído: --ignore do operador, ou pseudo-FS e
-				// montagem de rede no modo --all-fs. Distinto do pularNoCodigo, que
-				// casa por NOME. e.Ignorado cobre o --ignore mesmo no modo de lista.
-				if pularAbs[p] || e.Ignorado(p) {
-					continue
-				}
 				// As mesmas árvores que só geram profundidade e ruído. vendor e
 				// node_modules TAMBÉM podem esconder shell — mas varrê-los inteiros
 				// é o custo que acabamos de medir, então ficam de fora e isso é dito.
@@ -1709,6 +1729,10 @@ func varrerCodigo(f *Facts, e *env.Env, raiz string, prof int, st *varreduraCodi
 			f.CodigoSuspeito = append(f.CodigoSuspeito, cs)
 		}
 		for _, p := range subdirs {
+			if at.prof+1 > maxCodigoDepth {
+				st.profundidade = true // código mais fundo que o teto: DECLARADO
+				continue
+			}
 			fila = append(fila, pendente{p, at.prof + 1})
 		}
 	}

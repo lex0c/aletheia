@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -117,6 +118,11 @@ type Env struct {
 	// examinou, em vez de estourar o "~2s" que o wtf promete. É a mesma lacuna
 	// da truncagem por contagem, disparada pelo relógio.
 	WalkDeadline time.Time
+
+	// stageMarks registra QUANDO cada estágio de coleta começou, para o CLI
+	// poder dizer onde o tempo foi quando a coleta é lenta. Só a goroutine da
+	// coleta chama Stage (ela é sequencial), então não precisa de lock.
+	stageMarks []stageMark
 
 	// Progress recebe o nome do estágio de coleta atual, para o CLI mostrar que
 	// a varredura longa não travou. nil = silêncio, e é o padrão: nada em
@@ -427,10 +433,44 @@ func (e *Env) WalkExpired() bool {
 	return e != nil && !e.WalkDeadline.IsZero() && time.Now().After(e.WalkDeadline)
 }
 
-// Stage anuncia o estágio atual da coleta, se houver quem escute. No-op quando
-// Progress é nil, que é o caso de todo caminho que não seja o CLI interativo.
+// stageMark é o instante em que um estágio de coleta começou.
+type stageMark struct {
+	nome string
+	em   time.Time
+}
+
+// StageDur é a duração medida de um estágio.
+type StageDur struct {
+	Nome string
+	Dur  time.Duration
+}
+
+// Stage anuncia o estágio atual da coleta: marca o tempo (para o relatório de
+// onde o tempo foi) e avisa o progresso, se houver.
 func (e *Env) Stage(name string) {
-	if e != nil && e.Progress != nil {
+	if e == nil {
+		return
+	}
+	e.stageMarks = append(e.stageMarks, stageMark{name, time.Now()})
+	if e.Progress != nil {
 		e.Progress.Stage(name)
 	}
+}
+
+// Timings devolve quanto cada estágio levou, usando fim como o término do
+// último. Ordenado do mais caro para o mais barato: o gargalo vem primeiro.
+func (e *Env) Timings(fim time.Time) []StageDur {
+	if e == nil || len(e.stageMarks) == 0 {
+		return nil
+	}
+	out := make([]StageDur, 0, len(e.stageMarks))
+	for i, m := range e.stageMarks {
+		termino := fim
+		if i+1 < len(e.stageMarks) {
+			termino = e.stageMarks[i+1].em
+		}
+		out = append(out, StageDur{m.nome, termino.Sub(m.em)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Dur > out[j].Dur })
+	return out
 }

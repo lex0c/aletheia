@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/lex0c/aletheia/internal/env"
@@ -234,6 +235,8 @@ func collectSuid(f *Facts, e *env.Env) {
 
 	trab.rodar(e.Workers(maxSuidWorkers))
 
+	f.SuidDirs = trab.visitados
+	f.SuidArquivos = int(trab.arquivos.Load())
 	f.Donos = consolidarDonos(trab.donos)
 	if trab.donos.estourou {
 		f.denyPersist("suid", "mais de "+strconv.Itoa(maxDonosDistintos)+
@@ -305,7 +308,11 @@ type varredura struct {
 	// subdiretórios, e parar antes dele perderia galhos inteiros em silêncio.
 	ativos int
 
-	visitados      int
+	visitados int
+	// arquivos statados. atomic.Int64 e não int64 cru: no i686 uma operação
+	// atômica de 64 bits sobre campo desalinhado ENTRA EM PÂNICO, e o tipo
+	// cuida do alinhamento sozinho. O cenário de 32 bits pegou exatamente isso.
+	arquivos       atomic.Int64
 	limite         int
 	truncado       bool
 	profundoDemais bool
@@ -489,7 +496,10 @@ func (v *varredura) visitar(t tarefaDir) {
 			continue
 		}
 
-		// Só AQUI vale a syscall: modo, tamanho e dono só existem no stat.
+		// Só AQUI vale a syscall: modo, tamanho e dono só existem no stat. É o
+		// custo dominante num FS grande — um stat por arquivo regular —, e por
+		// isso é aqui que se conta, para o relatório de tempo dizer QUANTOS.
+		v.arquivos.Add(1)
 		fi, err := v.e.Lstat(p)
 		if err != nil {
 			continue

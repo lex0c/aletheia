@@ -65,8 +65,11 @@ func runCollect(args []string) int {
 	prog := progress.New(os.Stderr, time.Now(), *noProg)
 	e.Progress = prog
 	defer prog.Stop()
+	coletaInicio := time.Now()
 	f := facts.Collect(e)
+	coletaFim := time.Now()
 	prog.Stop() // a linha some antes de o dump começar a sair
+	relatarTempoDeColeta(e, f, coletaInicio, coletaFim)
 	d := dump.De(e, f)
 
 	// O hash é calculado DURANTE a escrita, e não relendo o arquivo depois.

@@ -301,6 +301,31 @@ func aoInterromper() {
 	}()
 }
 
+// relatarTempoDeColeta diz, no stderr, ONDE o tempo da coleta foi — mas só
+// quando ela foi lenta. Num host rápido não aparece; num FS grande responde
+// "por que demorou" sem o operador ter de adivinhar, e aponta a saída.
+func relatarTempoDeColeta(e *env.Env, f *facts.Facts, inicio, fim time.Time) {
+	total := fim.Sub(inicio)
+	if total < 3*time.Second {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\ncoleta levou %s — onde o tempo foi:\n", total.Round(time.Second))
+	for _, t := range e.Timings(fim) {
+		if t.Dur < 100*time.Millisecond {
+			continue
+		}
+		linha := fmt.Sprintf("  %-24s %s", t.Nome, t.Dur.Round(time.Millisecond))
+		if t.Nome == "varredura de filesystem" && f.SuidArquivos > 0 {
+			linha += fmt.Sprintf("  (%d arquivos em %d diretórios)", f.SuidArquivos, f.SuidDirs)
+		}
+		fmt.Fprintln(os.Stderr, linha)
+	}
+	if f.SuidArquivos > 200000 {
+		fmt.Fprintln(os.Stderr, "  → varredura pesada. `scan --fs-budget 30s` a limita "+
+			"no tempo, e a lacuna do que faltou é declarada")
+	}
+}
+
 func runWtf(args []string) int {
 	fs := flag.NewFlagSet("wtf", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -438,7 +463,9 @@ func runScan(args []string, wtf bool) int {
 	prog := progress.New(os.Stderr, time.Now(), *noProg)
 	e.Progress = prog
 	defer prog.Stop()
+	coletaInicio := time.Now()
 	f := facts.Collect(e)
+	coletaFim := time.Now()
 
 	sel := check.Selection{Mode: *mode, Wtf: wtf}
 	if *only != "" {
@@ -468,6 +495,7 @@ func runScan(args []string, wtf bool) int {
 	// dois tornava `scan --json - > out.jsonl` um arquivo inválido, que é como a
 	// agregação de frota consome a saída.
 	prog.Stop() // a linha some antes do relatório nascer
+	relatarTempoDeColeta(e, f, coletaInicio, coletaFim)
 	return emitir(r, f, e, saida{
 		baseline: *base,
 		janela:   janela,

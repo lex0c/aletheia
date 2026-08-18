@@ -65,6 +65,10 @@ type Facts struct {
 	Sudoers       []SudoRule      `json:"sudoers,omitempty"`
 	Suid          []SuidFile      `json:"suid,omitempty"`
 	Donos         []DonoDeArquivo `json:"file_owners,omitempty"`
+	// SuidDirs e SuidArquivos medem o CUSTO da varredura de filesystem, para o
+	// relatório de tempo dizer por que ela demorou.
+	SuidDirs     int `json:"suid_dirs,omitempty"`
+	SuidArquivos int `json:"suid_files,omitempty"`
 	// Vigias é quem observa ARQUIVO por inotify ou fanotify. É a resposta para
 	// "removi o backdoor e ele voltou": quem recria o arquivo apagado precisa
 	// saber que ele sumiu, e é assim que sabe.
@@ -218,6 +222,7 @@ func Collect(e *env.Env) *Facts {
 		Source:        e.Source.String(),
 	}
 
+	e.Stage("host")
 	collectHost(f, e)
 	// Antes de tudo que interpreta caminho: a tabela de montagem diz se o bit
 	// setuid de um arquivo é inerte e se algo executa de um diretório.

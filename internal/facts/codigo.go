@@ -55,9 +55,15 @@ const (
 )
 
 const (
-	phpSinks  = `eval|assert|system|exec|shell_exec|passthru|popen|proc_open|pcntl_exec|call_user_func|call_user_func_array|array_map`
-	phpInclui = `include|include_once|require|require_once`
-	jsSinks   = `exec|execSync|spawn|spawnSync|execFile`
+	// Sinks que executam o próprio ARGUMENTO: input dentro da chamada é o
+	// perigo. call_user_func/array_map saíram daqui de propósito — eles
+	// executam o CALLBACK (1º arg), não o argumento, e ficam num padrão à
+	// parte: `call_user_func('trim', $_POST)` não é RCE (função fixa), só
+	// `call_user_func($_GET['f'], ...)` é.
+	phpSinks     = `eval|assert|system|exec|shell_exec|passthru|popen|proc_open|pcntl_exec`
+	phpCallbacks = `call_user_func|call_user_func_array|array_map|array_filter|usort|array_walk`
+	phpInclui    = `include|include_once|require|require_once`
+	jsSinks      = `exec|execSync|spawn|spawnSync|execFile`
 )
 
 // mustDup compila e entra em pânico no init se o padrão for inválido.
@@ -78,15 +84,31 @@ type defsCodigo struct {
 
 var defsPHP = defsCodigo{
 	direto: []regraDeCodigo{
-		mustDup(2, "shell via crase sobre entrada de request", "`[^`]*"+phpRemota),
+		// Crase: exclui caractere de CONTROLE do meio. Sem isso, `[^`]*`
+		// atravessava um blob binário (lzw_decompress("…")) até topar com um
+		// $_GET por acaso — quatro falsos positivos num ad.php de Adminer.
+		mustDup(2, "shell via crase sobre entrada de request", "`[^`\\x00-\\x1f]{0,120}"+phpRemota),
 		mustDup(2, "sink de execução sobre entrada de request", `\b(?:`+phpSinks+`)\s*\(\s*[^;]{0,160}`+phpRemota),
+		// Callback nomeado pelo REQUEST: o 1º arg é o que executa.
+		// `call_user_func($_GET['f'], …)` é RCE; `call_user_func('trim', $_POST)`
+		// não é (função fixa), e por isso o request tem de ser o PRIMEIRO arg.
+		mustDup(2, "callback nomeado pelo request — executa função escolhida pelo atacante",
+			`\b(?:`+phpCallbacks+`)\s*\(\s*@?\s*`+phpRemota),
 		mustDup(2, "include/require sobre entrada de request — LFI/RFI", `\b(?:`+phpInclui+`)\b\s*\(?\s*[^;]{0,160}`+phpRemota),
 		mustDup(2, "unserialize sobre entrada de request — injeção de objeto", `\bunserialize\s*\(\s*[^;]{0,160}`+phpRemota),
 		mustDup(2, "função nomeada pelo request (chamada dinâmica)", phpRemota+`\s*\(`),
 		mustDup(2, "eval de conteúdo decodificado — assinatura de webshell",
 			`\b(?:eval|assert)\s*\(\s*@?\s*(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|hex2bin|convert_uudecode)\b`),
-		mustDup(2, "preg_replace com modificador /e — executa o replacement",
-			`\bpreg_replace\s*\(\s*['"][^'"]{1,200}/[a-zA-DF-Z]*e[a-zA-DF-Z]*['"]`),
+		// preg_replace /e é CRÍTICO em DUAS formas: com entrada de request na
+		// chamada, OU com um SINK no replacement (o /e executa o replacement,
+		// então `system("\1")` roda comando no que casou). O que NÃO é crítico é
+		// o /e com replacement FIXO de encoding — `'='.sprintf('%02X',ord('\1'))`
+		// do quoted-printable do PHPMailer antigo —, que cai em tier 1 abaixo.
+		// Isso matou quatro falsos positivos de PHPMailer sem perder o RCE.
+		mustDup(2, "preg_replace /e sobre entrada de request — executa o replacement",
+			`\bpreg_replace\s*\(\s*['"][^'"]{1,200}/[a-zA-DF-Z]*e[a-zA-DF-Z]*['"][^;]{0,200}`+phpRemota),
+		mustDup(2, "preg_replace /e com sink no replacement — RCE",
+			"\\bpreg_replace\\s*\\(\\s*['\"][^'\"]{1,200}/[a-zA-DF-Z]*e[a-zA-DF-Z]*['\"]\\s*,\\s*[^;]{0,80}(?:\\b(?:system|exec|shell_exec|passthru|eval|assert|popen|proc_open|passthru)\\b|`)"),
 		// LOCAL — mesmo sink, entrada de argv/env: não é atacante remoto. TIER 1.
 		mustDup(1, "sink de execução sobre entrada LOCAL (argv/env)", `\b(?:`+phpSinks+`)\s*\(\s*[^;]{0,160}`+phpLocal),
 	},
@@ -97,6 +119,10 @@ var defsPHP = defsCodigo{
 		mustDup(1, "create_function — equivale a eval, obsoleto e favorito de shell", `\bcreate_function\s*\(`),
 		mustDup(1, "decodificação empilhada", `\b(?:base64_decode|gzinflate|gzuncompress)\s*\(\s*(?:base64_decode|gzinflate|gzuncompress|str_rot13)\b`),
 		mustDup(1, "eval presente", `\beval\s*\(`),
+		// preg_replace /e sem entrada de request: deprecado e perigoso se o
+		// subject vier a ser controlado, mas o idioma de encoding (PHPMailer) é
+		// legítimo. Vale ler, não é crítico.
+		mustDup(1, "preg_replace com modificador /e (deprecado)", `\bpreg_replace\s*\(\s*['"][^'"]{1,200}/[a-zA-DF-Z]*e[a-zA-DF-Z]*['"]`),
 		mustDup(1, "blob base64 longo embutido no código", `['"][A-Za-z0-9+/]{200,}={0,2}['"]`),
 	},
 }

@@ -280,3 +280,40 @@ func TestEntradaLocalNaoEhCritica(t *testing.T) {
 		}
 	}
 }
+
+// Falsos positivos MEDIDOS num host real (Climatempo): o check gritava no
+// PHPMailer e no Adminer, afogando dois webshells de verdade. Cada um violava a
+// co-ocorrência de um jeito diferente, e cada correção está travada aqui.
+func TestFalsosPositivosDeHostReal(t *testing.T) {
+	// NÃO podem ser tier 2:
+	naoCrit := map[string]string{
+		// PHPMailer: /e com replacement FIXO (quoted-printable), sem request.
+		"phpmailer preg /e": `$encoded = preg_replace("/([^A-Za-z0-9!*+\/ -])/e", "'='.sprintf('%02X', ord('\\1'))", $encoded);`,
+		// callback FIXO com request só como dado: trim não executa o $_POST.
+		"call_user_func fixo": `call_user_func('trim', $_POST['x']);`,
+		"array_map fixo":      `array_map('idf_escape', $w["columns"]); if($_GET["x"]){}`,
+		// crase dentro de blob binário (lzw_decompress): controle barra o span.
+		"crase em binário": "lzw_decompress(\"\x00\x00\x00`\x01\x16\x06$_GET\x04\");",
+	}
+	for nome, src := range naoCrit {
+		if ms := analisarConteudo(src, "php"); tem(ms, 2, "") {
+			t.Errorf("FALSO POSITIVO: %q virou tier 2: %+v", nome, ms)
+		}
+	}
+	// e o /e FIXO ainda sai como tier 1 (vale ler, não alarma):
+	if ms := analisarConteudo(`preg_replace("/x/e", "sprintf('%02X', ord('\\1'))", $s);`, "php"); !tem(ms, 1, "/e") {
+		t.Errorf("preg_replace /e sem input continua sendo observação (tier 1): %+v", ms)
+	}
+
+	// DEVEM continuar tier 2 (o callback e o /e COM request são RCE de verdade):
+	crit := map[string]string{
+		"callback pelo request": `call_user_func($_GET['f'], $_GET['a']);`,
+		"preg /e com request":   `preg_replace('/(.*)/e', $_GET['r'], $s);`,
+		"webshell eval":         `<?php eval($_GET[0]);`,
+	}
+	for nome, src := range crit {
+		if ms := analisarConteudo(src, "php"); !tem(ms, 2, "") {
+			t.Errorf("VERDADEIRO POSITIVO perdido: %q deixou de ser tier 2: %+v", nome, ms)
+		}
+	}
+}

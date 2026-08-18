@@ -25,6 +25,7 @@ package scenario
 //	A8  listener fechado no accept  a direção inferida invertida — e ela ERRAVA
 //	A9  nome de integração no /usr/local  a allowlist do sshd dada de graça
 //	A10 run-parts para diretório próprio  isenção por prefixo, coleta por lista
+//	A11 runtime com JIT em /usr/local     duas listas de "diretório de sistema"
 
 func init() {
 	Register(Scenario{
@@ -336,6 +337,32 @@ func init() {
 			// e o script lá dentro passa a ser coletado — ele herda o gatilho
 			// da linha que o executa, e por isso aparece com a MESMA cadência
 			{ID: "persist.cron_frequent", Evidence: "/etc/cron.backup/sync"},
+		},
+		Exit: -1,
+		// Orçamento MEDIDO.
+		MaxWarn: 3,
+	})
+
+	Register(Scenario{
+		ID:   "A11-jit-em-usr-local-nao-herda-isencao",
+		Desc: "binário chamado `node` em /usr/local/bin: a isenção de JIT casava \"/usr/\" inteiro, e /usr/local está dentro",
+		// A MESMA forma do A9, no outro check — e foi o A9 que revelou o
+		// padrão: as isenções decidem reputação por CAMINHO, e havia DUAS
+		// listas de "diretório de sistema" que discordavam. A do runtime com
+		// JIT casava "/usr/" inteiro; a do AuthorizedKeysCommand listava
+		// subdiretórios. O comentário da segunda dizia "mesma regra do runtime
+		// com JIT", e não era.
+		//
+		// /usr/local é onde quem conseguiu root escreve. Reputação de pacote
+		// não se herda de um diretório que existe justamente para receber o que
+		// não vem de pacote.
+		Images: matriz,
+		Plant: `mkdir -p /usr/local/bin
+			cp /helper /usr/local/bin/node
+			/usr/local/bin/node rwx &
+			sleep 0.5`,
+		Expect: []Expect{
+			{ID: "proc.maps_rwx_anon", Evidence: "rwx sem arquivo"},
 		},
 		Exit: -1,
 		// Orçamento MEDIDO.

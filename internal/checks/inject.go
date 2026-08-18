@@ -296,23 +296,11 @@ var jitRuntimes = map[string]bool{
 	"beam.smp": true, "erl": true, "qemu-system-x86_64": true,
 }
 
-var systemDirs = []string{"/usr/", "/opt/", "/snap/", "/nix/store/", "/var/lib/flatpak/", "/app/"}
-
 func isJITRuntime(p *facts.Process) bool {
-	if p.Exe == "" {
+	if p.Exe == "" || !diretorioDeSistema(p.Exe) {
 		return false
 	}
-	inSystem := false
-	for _, d := range systemDirs {
-		if strings.HasPrefix(p.Exe, d) {
-			inSystem = true
-			break
-		}
-	}
-	if !inSystem {
-		return false
-	}
-	return jitRuntimes[p.Exe[strings.LastIndexByte(p.Exe, '/')+1:]]
+	return jitRuntimes[baseDe(p.Exe)]
 }
 
 // containerMarkers são os caminhos de cgroup que os runtimes escrevem. Um

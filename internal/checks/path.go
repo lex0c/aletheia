@@ -135,3 +135,39 @@ func hasDir(path, dir string) bool { return strings.HasPrefix(path, dir) }
 func isHome(path string) bool {
 	return strings.HasPrefix(path, "/home/") || strings.HasPrefix(path, "/root/")
 }
+
+// diretorioDeSistema diz se o caminho está numa árvore governada pelo
+// gerenciador de pacotes — e portanto se o binário ali herda alguma reputação.
+//
+// UMA definição, usada por toda isenção que decide reputação por caminho.
+// Havia duas e elas discordavam: a do runtime com JIT casava "/usr/" inteiro,
+// a do AuthorizedKeysCommand listava subdiretórios. O comentário da segunda
+// dizia "mesma regra do runtime com JIT" — e não era.
+//
+// A discordância tinha consequência medida: um binário chamado `node` em
+// /usr/local/bin herdava a isenção de JIT porque "/usr/" casa "/usr/local/".
+//
+// /usr/local é EXCLUÍDO apesar de estar sob /usr. A FHS o reserva ao
+// administrador LOCAL: é onde quem conseguiu root escreve, e todo o resto
+// desta ferramenta o trata assim — "sem dono ali é a norma". Reputação de
+// pacote não se herda de um diretório que existe para receber o que não vem de
+// pacote.
+//
+// LIMITE: isto é reputação por CAMINHO, que é o discriminador fraco. O forte é
+// a pergunta de propriedade — "que pacote entregou este arquivo?" —, e ela nem
+// sempre tem resposta (base RPM não é consultável). Onde houver resposta, ela
+// deveria mandar.
+func diretorioDeSistema(p string) bool {
+	if p == "" || strings.HasPrefix(p, "/usr/local/") {
+		return false
+	}
+	for _, d := range []string{
+		"/usr/", "/bin/", "/sbin/", "/lib/", "/lib64/",
+		"/opt/", "/snap/", "/nix/store/", "/var/lib/flatpak/", "/app/",
+	} {
+		if strings.HasPrefix(p, d) {
+			return true
+		}
+	}
+	return false
+}

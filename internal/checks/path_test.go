@@ -82,3 +82,34 @@ func TestSuspiciousPathContaExeIlegivelComoParcial(t *testing.T) {
 		t.Errorf("a contagem precisa aparecer: %q", r.Partial[0])
 	}
 }
+
+// UMA definição de "diretório em que um binário herda reputação de pacote".
+//
+// Havia duas e elas discordavam: a do runtime com JIT casava "/usr/" inteiro,
+// a do AuthorizedKeysCommand listava subdiretórios — e o comentário da segunda
+// dizia "mesma regra do runtime com JIT". A consequência foi medida: um binário
+// chamado `node` em /usr/local/bin herdava a isenção de JIT, porque "/usr/"
+// casa "/usr/local/".
+func TestUsrLocalNaoHerdaReputacaoDePacote(t *testing.T) {
+	naoHerda := []string{
+		"/usr/local/bin/node",       // o caso medido
+		"/usr/local/sbin/userdbctl", // a mesma forma no outro check
+		"/tmp/node", "/home/lex/node", "/dev/shm/x", "",
+	}
+	for _, p := range naoHerda {
+		if diretorioDeSistema(p) {
+			t.Errorf("%q não pode herdar reputação: a FHS reserva /usr/local ao "+
+				"administrador local, e é onde quem conseguiu root escreve", p)
+		}
+	}
+	herda := []string{
+		"/usr/lib/node", "/usr/bin/userdbctl", "/usr/libexec/sss_ssh_authorizedkeys",
+		"/opt/aws/bin/eic_run_authorized_keys", "/bin/sh", "/snap/x/bin/y",
+		"/nix/store/abc/bin/node", "/var/lib/flatpak/x", "/app/node",
+	}
+	for _, p := range herda {
+		if !diretorioDeSistema(p) {
+			t.Errorf("%q está em árvore de pacote e precisa herdar", p)
+		}
+	}
+}

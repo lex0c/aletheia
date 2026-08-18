@@ -290,27 +290,10 @@ func keyCommandConhecido(cmd string) bool {
 	if !strings.HasPrefix(bin, "/") {
 		return false
 	}
-	// /usr/local/bin NÃO entra, e a ausência dele é o ponto.
-	//
-	// A FHS reserva /usr/local ao administrador LOCAL: é o diretório que quem
-	// conseguiu root escreve, e o resto desta ferramenta o trata assim — "sem
-	// dono ali é a norma". Tê-lo na lista dava a isenção de graça: um
-	// `/usr/local/bin/userdbctl` plantado herdava a reputação do systemd, e o
-	// programa que decide QUEM ENTRA na máquina saía com RESULT OK e cobertura
-	// 89/89. Medido num contêiner, antes desta linha existir.
-	//
-	// Nenhuma das quatro integrações instala ali: userdbctl e
-	// sss_ssh_authorizedkeys vêm de /usr/bin ou /usr/libexec, o do GCE de
-	// /usr/bin, e o da AWS de /opt/aws/bin.
-	emSistema := false
-	for _, d := range []string{"/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/",
-		"/usr/libexec/", "/usr/lib/", "/opt/aws/bin/"} {
-		if strings.HasPrefix(bin, d) {
-			emSistema = true
-			break
-		}
-	}
-	if !emSistema {
+	// A MESMA definição do runtime com JIT — agora de verdade. O comentário
+	// acima já dizia isso quando as duas listas eram diferentes, e uma delas
+	// aceitava /usr/local.
+	if !diretorioDeSistema(bin) {
 		return false
 	}
 	_, ok := keyCommandConhecidos[baseDe(bin)]

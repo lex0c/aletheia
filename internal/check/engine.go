@@ -60,6 +60,12 @@ type Report struct {
 	// foram rebaixados nesta execução.
 	TrustBroken []string
 
+	// KernelTrustBroken lista as demonstrações de que o KERNEL entregou visões
+	// inconsistentes. Quando não está vazio, toda ausência de achado nesta
+	// execução foi respondida por uma fonte desqualificada — ver
+	// invalidarAusencias.
+	KernelTrustBroken []string
+
 	// CriticosForaDaJanela conta os achados CRÍTICOS que a janela removeu.
 	//
 	// Existe para o exit code, e a razão é a promessa central da ferramenta:
@@ -69,12 +75,38 @@ type Report struct {
 	CriticosForaDaJanela int
 }
 
-// trustBreakers são os IDs cujo disparo invalida a confiança em qualquer
-// resultado vindo de binário do host. É a propriedade emergente de ter Origin
-// no modelo (SPEC 7.5).
+// trustBreakers são os IDs cujo disparo invalida a confiança em resultado vindo
+// de binário do host. É a propriedade emergente de ter Origin no modelo
+// (SPEC 7.5).
 var trustBreakers = map[string]string{
 	"persist.ld_preload_global": "/etc/ld.so.preload presente: o loader injeta biblioteca em todo processo dinâmico",
 	"proc.ld_preload_env":       "LD_PRELOAD definido no environ de um processo",
+}
+
+// kernelBreakers são os IDs cujo disparo mostra que o KERNEL entregou visões
+// INCONSISTENTES de si mesmo.
+//
+// A diferença para os de cima é a fonte, e ela muda o que fica inválido. Um
+// LD_PRELOAD invalida o que veio de binário do host; um kernel que se
+// contradiz invalida tudo que foi lido ATRAVÉS dele — /proc, /sys, tracefs,
+// bpf(2) e o próprio filesystem, que ele também serve.
+//
+// E o efeito que importa não é sobre os achados: é sobre as AUSÊNCIAS. "vi
+// algo estranho" continua valendo depois disto — vale mais, aliás. "não vi
+// nada estranho" deixa de valer, porque quem responderia já demonstrou
+// responder o que quer.
+//
+// Só entram aqui os checks cuja natureza é COMPARAR duas visões e achá-las
+// discordantes. Um achado de conteúdo (módulo estranho, hook de ftrace) é
+// motivo para desconfiar do host; não é demonstração de que a interface mente.
+var kernelBreakers = map[string]string{
+	"cross.bpf_hidden": "um programa eBPF existe e a enumeração do kernel não o mostrou: " +
+		"a interface que responde por eBPF omitiu um objeto que ela mesma entrega quando perguntada direto",
+	"cross.hidden_pid": "um PID responde a /proc/<pid> e não apareceu na listagem de /proc: " +
+		"a mesma interface deu duas respostas incompatíveis",
+	"cross.module_view": "um módulo aparece em /proc/modules e não em /sys/module: " +
+		"as duas visões do kernel sobre a própria lista de módulos discordam",
+	"cross.thread_count": "o número de threads declarado no status não bate com o diretório de tasks",
 }
 
 // runGuarded isola a falha de um check. Um defeito em um não pode calar os
@@ -113,6 +145,9 @@ func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 	f.Index()
 
 	r := &Report{Coverage: Coverage{Total: len(checks)}}
+	// completos guarda os checks que rodaram e nada acharam. Se o kernel se
+	// contradisser mais adiante, é a ausência DELES que deixa de valer.
+	var completos []Check
 
 	// Coleta VOLÁTIL não sustenta check nenhum, e a recusa é em voz alta.
 	//
@@ -195,10 +230,15 @@ func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 			})
 		} else {
 			r.Coverage.Complete++
+			completos = append(completos, c)
 		}
 	}
 
 	r.applyTrustDowngrade()
+	// Depois do trust de userland e ANTES da resolução de atores: se o kernel
+	// se contradisse, a ausência de achado em todo o resto deixa de ser
+	// resposta.
+	r.invalidarAusencias(e.Source, completos)
 	// Depois de TODOS os checks, porque a resolução precisa ver os achados uns
 	// dos outros — é um achado nomear o caminho que autoriza a fusão.
 	resolverAtores(r, f)
@@ -231,6 +271,64 @@ func (r *Report) applyTrustDowngrade() {
 			r.Findings[i].Downgraded = true
 		}
 	}
+}
+
+// invalidarAusencias transforma "não achei" em "não posso saber" depois que o
+// kernel demonstrou entregar visões inconsistentes de si mesmo.
+//
+// É a tese central da ferramenta aplicada um nível acima. A cobertura já
+// separa "não achei" de "não consegui olhar"; falta o terceiro estado, que só
+// existe quando a AUTORIDADE que respondeu foi desqualificada: olhei, ela
+// respondeu, e a resposta não vale.
+//
+// Vale para o modo LIVE inteiro, e não só para os checks de /proc. Um kernel
+// que mente sobre a lista de PIDs também serve o VFS: o `openat` que lê
+// /etc/crontab passa por ele. O único modo que sobrevive é o de imagem
+// montada, onde o kernel é o do analista (§35.6).
+func (r *Report) invalidarAusencias(fonte env.Source, completos []Check) {
+	var motivos []string
+	for _, f := range r.Findings {
+		if f.Sev < SevCritical {
+			continue
+		}
+		if m, ok := kernelBreakers[f.ID]; ok {
+			motivos = append(motivos, m)
+		}
+	}
+	if len(motivos) == 0 || fonte != env.SourceLive {
+		return
+	}
+	r.KernelTrustBroken = dedupe(motivos)
+
+	// Os que NÃO produziram achado deixam de contar como completos: a ausência
+	// deles foi respondida por uma fonte desqualificada.
+	comAchado := map[string]bool{}
+	for _, f := range r.Findings {
+		comAchado[f.ID] = true
+	}
+	razao := "o kernel demonstrou entregar visões inconsistentes de si mesmo nesta " +
+		"execução: a AUSÊNCIA de achado aqui foi respondida por ele, e não vale como resposta"
+	for _, c := range completos {
+		if comAchado[c.ID] {
+			continue // achado positivo continua valendo, e vale mais
+		}
+		r.Coverage.Partial = append(r.Coverage.Partial, Partial{
+			ID: c.ID, Ref: c.Ref, Reasons: []string{razao},
+		})
+		r.Coverage.Complete--
+	}
+}
+
+func dedupe(ss []string) []string {
+	visto := map[string]bool{}
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if !visto[s] {
+			visto[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (r *Report) sortFindings() {

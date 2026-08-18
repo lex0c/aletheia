@@ -647,3 +647,26 @@ func TestResumoDizQuantasFicaramDeFora(t *testing.T) {
 		t.Errorf("e o caminho para ver o resto: %q", got)
 	}
 }
+
+// O bloco mais forte que este relatório imprime: depois que o kernel se
+// contradisse, ele não rebaixa achado — ele invalida AUSÊNCIA. Precisa dizer as
+// três coisas: o que continua valendo, o que deixou de valer, e para onde ir.
+func TestBlocoDeKernelContraditorioDizOQueFazer(t *testing.T) {
+	r := &check.Report{
+		KernelTrustBroken: []string{"um PID responde a /proc/<pid> e não apareceu na listagem"},
+	}
+	var b bytes.Buffer
+	writeResult(&b, r)
+	got := b.String()
+
+	for _, quer := range []string{
+		"O KERNEL SE CONTRADISSE",
+		"Os ACHADOS acima continuam valendo",
+		"O que deixou de valer é a AUSÊNCIA",
+		"scan --root",
+	} {
+		if !strings.Contains(got, quer) {
+			t.Errorf("o bloco precisa conter %q:\n%s", quer, got)
+		}
+	}
+}

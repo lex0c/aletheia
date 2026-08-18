@@ -479,6 +479,25 @@ func writeResult(w io.Writer, r *check.Report) {
 			fmt.Fprintln(w, "  · "+Safe(t))
 		}
 	}
+	// O bloco do KERNEL vem por último e é o mais forte que este relatório
+	// imprime: ele não rebaixa achado, ele invalida AUSÊNCIA. Depois dele,
+	// "nenhum outro processo oculto" deixa de ser uma frase que se possa dizer.
+	if len(r.KernelTrustBroken) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "════ O KERNEL SE CONTRADISSE ══════════════════════════════════════")
+		for _, t := range r.KernelTrustBroken {
+			fmt.Fprintln(w, "  · "+Safe(t))
+		}
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "  Os ACHADOS acima continuam valendo — valem mais, aliás: alguém teve")
+		fmt.Fprintln(w, "  trabalho de esconder algo. O que deixou de valer é a AUSÊNCIA de")
+		fmt.Fprintln(w, "  achado em todo o resto: quem responderia já demonstrou responder o")
+		fmt.Fprintln(w, "  que quer. Cada check silencioso foi movido para cobertura parcial.")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "  Daqui em diante nenhuma conclusão NEGATIVA deste host vale sobre este")
+		fmt.Fprintln(w, "  host. Varra a IMAGEM de fora (`aletheia scan --root`), onde o kernel")
+		fmt.Fprintln(w, "  é o seu, e adquira a memória pelo hipervisor se ele existir (§35.6).")
+	}
 }
 
 // --- utilitários de formatação ---

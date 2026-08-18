@@ -1290,7 +1290,12 @@ func init() {
 		},
 		Untestable: "exige um rootkit que esconda processo, thread, módulo ou " +
 			"programa eBPF. Carregar um LKM de ocultação na suíte trocaria a " +
-			"garantia de um check pela perda de controle sobre o ambiente de teste.",
+			"garantia de um check pela perda de controle sobre o ambiente de teste. " +
+			"O mesmo vale para o efeito que estes quatro têm sobre a CONFIANÇA: " +
+			"quando um deles dispara, a ausência de achado em todos os outros " +
+			"deixa de valer e a cobertura é rebaixada em bloco. Essa lógica está " +
+			"coberta por teste unitário no motor (invalidarAusencias); provar o " +
+			"encadeamento inteiro aqui esbarra na mesma recusa.",
 	})
 
 	Register(Scenario{

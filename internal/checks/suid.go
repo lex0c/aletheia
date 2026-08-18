@@ -38,7 +38,7 @@ func init() { check.Register(suidInesperado) }
 // pacote reivindica quase não tem explicação inocente.
 var suidInesperado = check.Check{
 	ID:       "persist.suid_unowned",
-	Ref:      "7.11",
+	Ref:      "25",
 	Title:    "binário que carrega privilégio e nenhum pacote entregou",
 	Group:    "persist",
 	Mode:     check.ModeAuto,

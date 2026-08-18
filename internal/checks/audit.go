@@ -36,7 +36,7 @@ func init() { check.Register(auditoriaNeutralizada) }
 // nenhuma distribuição, e várias das que trazem o pacote não o configuram.
 var auditoriaNeutralizada = check.Check{
 	ID:       "antiforense.audit_disabled",
-	Ref:      "21",
+	Ref:      "11",
 	Title:    "capacidade de registrar execução neste host",
 	Group:    "persist",
 	Mode:     check.ModeAuto,

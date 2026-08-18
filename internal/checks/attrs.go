@@ -28,7 +28,7 @@ func init() { check.Register(arquivoImutavel) }
 // remoção: sem ele, todo o resto do roteiro é inócuo.
 var arquivoImutavel = check.Check{
 	ID:       "integrity.immutable_flag",
-	Ref:      "7.11",
+	Ref:      "21",
 	Title:    "arquivo travado por atributo de inode: a remoção falha até ele sair",
 	Group:    "integrity",
 	Mode:     check.ModeAuto,

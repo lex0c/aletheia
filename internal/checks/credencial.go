@@ -28,7 +28,7 @@ func init() {
 // tudo que essa chave alcança.
 var chavePrivadaSemSenha = check.Check{
 	ID:       "cred.ssh_private_key",
-	Ref:      "7.5",
+	Ref:      "12.3",
 	Title:    "chave SSH privada em disco: para onde este host consegue ir",
 	Group:    "priv",
 	Mode:     check.ModeAuto,
@@ -102,7 +102,7 @@ var chavePrivadaSemSenha = check.Check{
 // e a diferença aparece aqui e em nenhum outro lugar.
 var alcanceDoHost = check.Check{
 	ID:       "cred.known_hosts",
-	Ref:      "23",
+	Ref:      "12.4",
 	Title:    "alcance deste host: para onde ele já se conectou",
 	Group:    "priv",
 	Mode:     check.ModeAuto,
@@ -194,7 +194,7 @@ var alcanceDoHost = check.Check{
 // DESLIGADO é objetivo.
 var historicoDesligado = check.Check{
 	ID:       "antiforense.shell_history",
-	Ref:      "21",
+	Ref:      "13",
 	Title:    "histórico de shell desligado ou desviado: rastro apagado de propósito",
 	Group:    "persist",
 	Mode:     check.ModeAuto,

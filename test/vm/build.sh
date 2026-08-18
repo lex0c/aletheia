@@ -196,6 +196,11 @@ sleep 5
 INIT
 chmod 0755 "$rootfs/init"
 
-( cd "$rootfs" && find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -1 ) > "$out/initramfs$sfx.gz"
+# `-R 0:0` não é detalhe: o rootfs é extraído por usuário comum, e sem isto o
+# guest inteiro nasce com o uid de quem rodou o build — `/etc/passwd` com dono
+# 1000, `/bin/sh` com dono 1000. Um guest assim não parece um Linux nenhum, e a
+# distorção ficou invisível até um check PERGUNTAR quem é o dono dos arquivos
+# que o root executa (§36.4): ele recusou responder, e tinha razão.
+( cd "$rootfs" && find . -print0 | cpio --null -o --format=newc -R 0:0 2>/dev/null | gzip -1 ) > "$out/initramfs$sfx.gz"
 
 echo "initramfs ($arch): $out/initramfs$sfx.gz ($(du -h "$out/initramfs$sfx.gz" | cut -f1))"

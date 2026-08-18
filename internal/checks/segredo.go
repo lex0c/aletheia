@@ -31,7 +31,7 @@ func init() { check.Register(credencialEmArquivo) }
 // ticket — cria exposição em vez de reduzir.
 var credencialEmArquivo = check.Check{
 	ID:       "cred.secret_file",
-	Ref:      "23",
+	Ref:      "12.3",
 	Title:    "credencial em arquivo: até onde este host alcança",
 	Group:    "priv",
 	Mode:     check.ModeAuto,

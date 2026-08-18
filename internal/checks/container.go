@@ -39,7 +39,7 @@ func init() { check.Register(fronteiraDeContainer) }
 // para isso.
 var fronteiraDeContainer = check.Check{
 	ID:       "proc.container_boundary",
-	Ref:      "24",
+	Ref:      "38.1",
 	Title:    "processo cruza a fronteira entre contêiner e host",
 	Group:    "proc",
 	Mode:     check.ModeAuto,

@@ -62,10 +62,17 @@ type Facts struct {
 	Sudoers       []SudoRule     `json:"sudoers,omitempty"`
 	Suid          []SuidFile     `json:"suid,omitempty"`
 	Modules       []ModuleConf   `json:"modules,omitempty"`
+	// AlvosDeRoot são os caminhos que algo executa COMO ROOT, com o que o inode
+	// diz sobre quem pode alterá-los (runbook §36.4).
+	AlvosDeRoot []AlvoDeRoot `json:"root_targets,omitempty"`
 	// Helpers são os programas que o KERNEL invoca sozinho: modprobe,
 	// core_pattern, uevent_helper e binfmt_misc.
 	Helpers     []HelperDoKernel `json:"kernel_helpers,omitempty"`
 	ModuleFiles []string         `json:"module_files,omitempty"`
+	// Repos são os repositórios git encontrados sob as árvores de aplicação. O
+	// coletor de hooks já os visita; guardar o caminho é o que permite entregar
+	// a verificação de integridade da §16 com o `-C` preenchido.
+	Repos []string `json:"git_repos,omitempty"`
 	// Carregados são os módulos que o kernel tem DENTRO dele agora, cada um
 	// confrontado com o arquivo que deveria explicá-lo.
 	Carregados []ModuloCarregado `json:"loaded_modules,omitempty"`
@@ -233,6 +240,9 @@ func Collect(e *env.Env) *Facts {
 
 	if e.Has(env.CapFilesystem) {
 		collectPersist(f, e)
+		// DEPOIS da persistência: a pergunta "quem pode reescrever o que root
+		// executa" precisa da lista do que root executa, e ela sai dali.
+		collectAlvosDeRoot(f, e)
 		// DEPOIS da persistência, que é quem varre /lib/modules: a pergunta
 		// "que arquivo entregou este módulo?" precisa da lista de arquivos, e
 		// respondê-la antes diria "nenhum" em todo host — a pior forma de falso

@@ -34,7 +34,7 @@ const minFalhasParaForcaBruta = 10
 // entrega o quadro; quem reconhece é o time.
 var inventarioDeLogin = check.Check{
 	ID:       "auth.login_inventory",
-	Ref:      "13",
+	Ref:      "12",
 	Title:    "inventário de entradas registradas no host",
 	Group:    "priv",
 	Mode:     check.ModeAuto,
@@ -130,7 +130,7 @@ var inventarioDeLogin = check.Check{
 // com endereço e horário, e é o começo da linha do tempo da §16.
 var forcaBrutaComSucesso = check.Check{
 	ID:       "auth.bruteforce_success",
-	Ref:      "13",
+	Ref:      "12.5",
 	Title:    "origem que falhou muitas vezes conseguiu entrar",
 	Group:    "priv",
 	Mode:     check.ModeAuto,

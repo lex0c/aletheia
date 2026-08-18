@@ -33,7 +33,7 @@ func init() { check.Register(macRebaixado) }
 // o achado mora na divergência.
 var macRebaixado = check.Check{
 	ID:       "antiforense.mac_downgraded",
-	Ref:      "21",
+	Ref:      "34.9",
 	Title:    "SELinux configurado para enforcing e rodando em permissivo",
 	Group:    "priv",
 	Mode:     check.ModeAuto,

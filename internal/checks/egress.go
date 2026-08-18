@@ -42,7 +42,7 @@ func init() {
 // o firewall de saída é rígido mas o de entrada tem um furo.
 var escutaSemDono = check.Check{
 	ID:       "net.listener_unowned",
-	Ref:      "4.2",
+	Ref:      "14",
 	Title:    "porta exposta para fora por binário que nenhum pacote entregou",
 	Group:    "net",
 	Mode:     check.ModeAuto,
@@ -166,7 +166,7 @@ var escutaSemDono = check.Check{
 // contorna sem empacotar o implante.
 var saidaSemDono = check.Check{
 	ID:       "net.egress_unowned",
-	Ref:      "4.3",
+	Ref:      "2.1",
 	Title:    "conexão para endereço público a partir de binário que nenhum pacote entregou",
 	Group:    "net",
 	Mode:     check.ModeAuto,

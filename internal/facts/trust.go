@@ -213,6 +213,7 @@ func procurarHooks(f *Facts, e *env.Env, dir string, prof int, vistos *int, trun
 			continue
 		}
 		if n == ".git" {
+			f.Repos = append(f.Repos, dir)
 			lerHooks(f, e, p+"/hooks")
 			continue
 		}

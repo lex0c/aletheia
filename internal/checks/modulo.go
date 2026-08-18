@@ -209,7 +209,7 @@ func nz2(prefixo, v string) string {
 // incidente, no host que ele não conhece.
 var protecaoDoKernel = check.Check{
 	ID:       "kernel.protection_context",
-	Ref:      "34",
+	Ref:      "35.7",
 	Title:    "o que este kernel permite a si mesmo: assinatura, lockdown, IMA",
 	Group:    "kernel",
 	Mode:     check.ModeAuto,

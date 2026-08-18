@@ -33,7 +33,7 @@ func init() {
 // funciona em host novo e em host de dez anos igual.
 var rotacaoComBuraco = check.Check{
 	ID:       "antiforense.log_rotation_gap",
-	Ref:      "21",
+	Ref:      "10",
 	Title:    "falta uma geração no meio da rotação de log: alguém removeu",
 	Group:    "persist",
 	Mode:     check.ModeAuto,
@@ -126,7 +126,7 @@ var rotacaoComBuraco = check.Check{
 // de toda instalação nova, e acusá-lo seria acusar todo contêiner do mundo.
 var sessaoSemRegistro = check.Check{
 	ID:       "antiforense.wtmp_cleared",
-	Ref:      "21",
+	Ref:      "12",
 	Title:    "há sessão aberta e nenhum registro de login: o histórico foi zerado",
 	Group:    "persist",
 	Mode:     check.ModeAuto,

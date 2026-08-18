@@ -29,10 +29,13 @@ import (
 // função de builtin sai SEM tag. Então a tag é a marca de módulo CARREGÁVEL, e
 // uma tag que /proc/modules nega é um módulo que carregou e mente sobre isso.
 //
-// Provado em VM (test/vm/ftrace-hidden-module.sh): um módulo que se desencadeia
-// da lista some de /proc/modules e permanece anotado em
-// available_filter_functions. E medido em host real: 239 tags, todas presentes
-// em /proc/modules — a direção não tem falso positivo de fábrica.
+// Provado em VM (test/vm/ftrace-hidden-module.sh), e a prova é a forte: um
+// módulo escondido das DUAS interfaces que o crossview clássico compara — fora
+// de /proc/modules por list_del E fora de /sys/module por kobject_del — continua
+// anotado em available_filter_functions, e a aletheia rodando dentro do host o
+// reporta como CRITICAL. Nenhuma das duas técnicas toca no registro do ftrace.
+// E medido em host real: 239 tags, todas presentes em /proc/modules — a direção
+// não tem falso positivo de fábrica.
 //
 // O custo é declarado: o arquivo tem dezenas de milhares de linhas, e a leitura
 // guarda só o conjunto de tags distintas.

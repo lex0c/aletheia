@@ -16,6 +16,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/list.h>
+#include <linux/kobject.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("prova de que o ftrace retem modulo escondido - aletheia");
@@ -29,12 +30,21 @@ static int __init evil_init(void)
 {
 	evil_marcador();
 	pr_info("evil: carregado, esconder=%d\n", esconder);
-	if (esconder) {
-		// A técnica clássica: sai da lista encadeada que gera /proc/modules.
-		// O registro do ftrace (ftrace_pages) e a árvore de resolução de
-		// símbolo (mod_tree) NÃO são tocados aqui — só em free_module.
+	if (esconder >= 1) {
+		// Nível 1 — a técnica clássica: sai da lista encadeada que gera
+		// /proc/modules. O registro do ftrace (ftrace_pages) e a árvore de
+		// resolução de símbolo (mod_tree) NÃO são tocados aqui — só em
+		// free_module.
 		list_del(&THIS_MODULE->list);
 		pr_info("evil: fora de /proc/modules\n");
+	}
+	if (esconder >= 2) {
+		// Nível 2 — some TAMBÉM de /sys/module. Com os dois, o módulo está
+		// escondido das duas interfaces que o crossview clássico compara, e o
+		// achado da aletheia só pode vir do ftrace. É o que torna esta a prova
+		// forte, e não uma dedução: kobject_del não toca no ftrace tampouco.
+		kobject_del(&THIS_MODULE->mkobj.kobj);
+		pr_info("evil: fora de /sys/module\n");
 	}
 	return 0;
 }

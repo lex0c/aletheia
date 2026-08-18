@@ -4,8 +4,9 @@
 #
 # Duas perguntas, e a segunda é a que importa para a ferramenta:
 #
-#   1. Um LKM que se esconde com `list_del(&THIS_MODULE->list)` some de
-#      /proc/modules — mas o kernel ainda o delata em available_filter_functions?
+#   1. Um LKM que se esconde das DUAS interfaces que o crossview clássico
+#      compara — some de /proc/modules (list_del) E de /sys/module (kobject_del)
+#      — ainda é delatado pelo kernel em available_filter_functions?
 #   2. A aletheia, rodando DENTRO desse host, transforma isso num achado?
 #
 # A (1) é sobre o kernel; a (2) é sobre a ferramenta. Testes unitários cobrem a
@@ -100,9 +101,10 @@ echo "baseline_enderecos_crus=$(grep -cE '^0x' $T/available_filter_functions)"
 /aletheia scan --json /tmp/limpo.jsonl >/dev/null 2>&1
 echo "aletheia_limpo_cross_module=$(dump /tmp/limpo.jsonl)"
 
-# --- esconde o módulo: some de /proc/modules, fica no ftrace ---
-insmod /evil.ko esconder=1
+# --- esconde o módulo das DUAS interfaces do crossview clássico; o ftrace fica ---
+insmod /evil.ko esconder=2
 echo "proc_modules_tem_evil=$(grep -c '^evil ' /proc/modules)"
+echo "sys_module_tem_evil=$(ls /sys/module/ | grep -c '^evil$')"
 echo "ftrace_tem_evil=$(grep -c 'evil_marcador \[evil\]' $T/available_filter_functions)"
 
 # --- PARTE 2b: a aletheia com o módulo ESCONDIDO. tem de disparar. ---
@@ -136,6 +138,7 @@ falhou=0
 # o kernel
 [ "$(get baseline_enderecos_crus)" = "0" ]   || { echo "FALHOU: baseline tinha endereço cru"; falhou=1; }
 [ "$(get proc_modules_tem_evil)" = "0" ]      || { echo "FALHOU: evil não se escondeu de /proc/modules"; falhou=1; }
+[ "$(get sys_module_tem_evil)" = "0" ]        || { echo "FALHOU: evil não se escondeu de /sys/module — a prova forte exige as DUAS"; falhou=1; }
 [ "$(get ftrace_tem_evil)" -ge 1 ] 2>/dev/null || { echo "FALHOU: ftrace NÃO reteve o módulo escondido"; falhou=1; }
 
 # a ferramenta — o controle negativo primeiro
@@ -145,7 +148,8 @@ falhou=0
 [ "$(get aletheia_oculto_critical)" -ge 1 ] 2>/dev/null || { echo "FALHOU: o achado não é CRITICAL"; falhou=1; }
 
 if [ "$falhou" = 0 ]; then
-	echo "OK — host limpo cala; módulo escondido vira cross.module_view CRITICAL nomeando 'evil'."
+	echo "OK — módulo escondido de /proc/modules E /sys/module; host limpo cala; e"
+	echo "     a aletheia o pega pelo ftrace: cross.module_view CRITICAL nomeando 'evil'."
 	exit 0
 fi
 exit 1

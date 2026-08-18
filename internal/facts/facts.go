@@ -34,6 +34,9 @@ type Facts struct {
 	Host      Host      `json:"host"`
 	Processes []Process `json:"processes,omitempty"`
 	Sockets   []Socket  `json:"sockets,omitempty"`
+	// LimitesRede são os tetos contra os quais a contagem de conexões vale
+	// alguma coisa. Ver LimitesDeRede.
+	LimitesRede LimitesDeRede `json:"net_limits,omitempty"`
 	// SocketsBrutos são os que leem PACOTE e não conexão: AF_PACKET e raw.
 	// Ficam fora de Sockets de propósito — não têm par remoto, não têm estado
 	// e nenhum check de conexão faz pergunta que caiba neles.
@@ -220,6 +223,10 @@ func Collect(e *env.Env) *Facts {
 		// Depois dos processos: o dono de cada socket sai do join com os fds
 		// que o coletor de processo já leu.
 		collectSockets(f, e)
+		// Os tetos da rede, que são o que transforma "há 400 conexões" em "e o
+		// próximo connect vai falhar" — a mesma diferença que o RLIMIT_NPROC
+		// faz no censo de processos.
+		collectLimitesDeRede(f, e)
 		// E os que leem PACOTE, que não aparecem em tabela de conexão nenhuma:
 		// é por eles que um filtro de socket eBPF órfão continua vivo.
 		collectSocketsBrutos(f, e)
@@ -290,6 +297,7 @@ func CollectVolatile(e *env.Env) *Facts {
 	if e.Has(env.CapProcfs) {
 		collectProcesses(f, e)
 		collectSockets(f, e)
+		collectLimitesDeRede(f, e)
 	} else {
 		f.partial("proc", e.Reason(env.CapProcfs))
 	}

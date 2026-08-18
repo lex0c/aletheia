@@ -51,7 +51,7 @@ COMANDOS
   analyze       só analisa: roda os checks sobre um retrato, do lado limpo
   preserve      guarda a evidência antes que ela suma — inclusive tráfego
                 (--pcap). O ÚNICO que escreve
-  info          responde sobre UM alvo: process, ip, port, file
+  info          responde sobre UM alvo: process, net, ip, port, file
   checks        catálogo: id, §ref, modo, grupo, requires, falsos positivos
   version       versão e hash deste binário
 
@@ -99,6 +99,7 @@ FLAGS DE wtf
 INFO — a pergunta que vem ANTES do veredito
   aletheia info process         censo: quem roda o quê, e contra que TETO
   aletheia info process 812     o dossiê de um processo
+  aletheia info net             censo de rede: o que expõe, com quem fala, contra que TETO
   aletheia info ip 51.91.190.241
   aletheia info port 4100
   aletheia info file /usr/sbin/nginx

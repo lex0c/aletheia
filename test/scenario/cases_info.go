@@ -9,6 +9,7 @@ package scenario
 //
 //	I1  o censo, com o teto e o padrão nomeados
 //	I2  o dossiê de um processo cujo nome mente
+//	I3  o censo de REDE, com o leque de saída nomeado
 
 func init() {
 	Register(Scenario{
@@ -66,6 +67,43 @@ func init() {
 			// O passo seguinte já vem preenchido com o pid.
 			"preserve --out",
 		},
+		Exit: 0,
+	})
+
+	Register(Scenario{
+		ID:   "I3-censo-de-rede-com-leque",
+		Desc: "um processo abrindo conexão para dez endereços na MESMA porta: o censo agrupa por executável e NOMEIA o leque",
+		// A forma de varredura e de movimento lateral. Numa saída de `ss` são
+		// dez linhas idênticas exceto pelo IP, e a forma some no meio delas.
+		//
+		// Os destinos são aliases de loopback: 127.0.0.0/8 inteiro chega no
+		// mesmo listener, e é assim que se planta destinos DISTINTOS dentro de
+		// um contêiner sem rede de mentira.
+		Images: []string{"debian:12"},
+		Cmd:    "info",
+		Args:   []string{"net"},
+		Plant: `/helper listen 0.0.0.0:22 &
+			sleep 0.3
+			/helper connect 127.0.0.2:22 127.0.0.3:22 127.0.0.4:22 127.0.0.5:22 \
+				127.0.0.6:22 127.0.0.7:22 127.0.0.8:22 127.0.0.9:22 \
+				127.0.0.10:22 127.0.0.11:22 &
+			sleep 1`,
+		ExpectOutput: []string{
+			"CENSO DE REDE",
+			// A escuta, com o bind — que é o que decide se é superfície.
+			"ESCUTANDO",
+			"fora de loopback",
+			// O agrupamento por executável: dez conexões são UMA linha.
+			"por executável, e não por conexão",
+			"/helper",
+			// E a frase que nenhum `ss` dá.
+			"PADRÃO RECONHECIDO",
+			"LEQUE DE SAÍDA",
+			"10 endereços na porta 22",
+			"movimento lateral",
+			"SSH",
+		},
+		// O censo não conclui nada: não há achado, e portanto não há exit != 0.
 		Exit: 0,
 	})
 }

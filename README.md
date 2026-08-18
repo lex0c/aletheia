@@ -158,6 +158,7 @@ sudo aletheia preserve --out "$IR" --pid 812 --mem
 ```sh
 aletheia info process              # censo: quem roda o quê, e contra que TETO
 aletheia info process 812          # o dossiê de um processo
+aletheia info net                  # censo de rede: o que expõe, e contra que TETO
 aletheia info ip 51.91.190.241
 aletheia info port 4100
 aletheia info file /usr/sbin/nginx

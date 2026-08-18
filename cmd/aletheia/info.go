@@ -52,6 +52,7 @@ func runInfo(args []string) int {
 		fmt.Fprintln(os.Stderr, "  aletheia info process 812")
 		fmt.Fprintln(os.Stderr, "  aletheia info ip 51.91.190.241")
 		fmt.Fprintln(os.Stderr, "  aletheia info port 4100")
+		fmt.Fprintln(os.Stderr, "  aletheia info net")
 		fmt.Fprintln(os.Stderr, "  aletheia info file /usr/sbin/nginx")
 		return 3
 	}
@@ -91,6 +92,15 @@ func runInfo(args []string) int {
 			return 3
 		}
 		return dossie(w, *jsonOut, info.Processo(f, pid))
+	case "net", "rede":
+		if alvo != "" {
+			fmt.Fprintln(os.Stderr, "info net não recebe alvo — para um endereço "+
+				"use `info ip`, para uma porta use `info port`")
+			return 3
+		}
+		c := info.CensoDaRede(f)
+		escreverCensoDeRede(w, c)
+		return comJSON(*jsonOut, c, 0)
 	case "ip", "addr", "endereco", "endereço":
 		if alvo == "" {
 			fmt.Fprintln(os.Stderr, "info ip: informe o endereço")
@@ -111,7 +121,7 @@ func runInfo(args []string) int {
 		}
 		return dossie(w, *jsonOut, info.Arquivo(f, alvo))
 	}
-	fmt.Fprintf(os.Stderr, "info: assunto desconhecido %q — use process, ip, port ou file\n", assunto)
+	fmt.Fprintf(os.Stderr, "info: assunto desconhecido %q — use process, net, ip, port ou file\n", assunto)
 	return 3
 }
 
@@ -331,4 +341,88 @@ func comJSON(destino string, v any, code int) int {
 		return 3
 	}
 	return code
+}
+
+// escreverCensoDeRede imprime o retrato na ordem em que as perguntas aparecem:
+// o que a máquina EXPÕE, com quem ela fala, contra que teto, e que forma isso
+// tem.
+func escreverCensoDeRede(w io.Writer, c *info.CensoDeRede) {
+	fmt.Fprintf(w, "CENSO DE REDE · %d socket(s) · %d escuta(s) · %d executável(is) falando para fora\n",
+		c.Total, len(c.Escutas), len(c.Saida))
+	if c.SemDono > 0 {
+		fmt.Fprintf(w, "  ⚠ %d socket(s) sem dono identificado: sem root, o fd de "+
+			"processo alheio é ilegível.\n    Eles EXISTEM — o que falta é o nome de quem os segura\n", c.SemDono)
+	}
+	fmt.Fprintln(w)
+
+	if len(c.Escutas) > 0 {
+		fmt.Fprintln(w, "ESCUTANDO — o que esta máquina expõe")
+		fmt.Fprintf(w, "  %-6s %-6s %-24s %s\n", "porta", "proto", "endereço", "processo")
+		for _, l := range c.Escutas {
+			quem := l.Executavel
+			if l.DonoDesconhecido {
+				quem = "(dono não identificado)"
+			}
+			marca := ""
+			if l.Exposta {
+				marca = "  ⚠ fora de loopback"
+			}
+			nome := report.Safe(corta1(quem, 44))
+			if l.Sockets > 1 {
+				// SO_REUSEPORT: é UMA escuta dividida, e não N portas abertas.
+				// O contador vai DEPOIS do corte, ou o corte come justamente a
+				// informação que explica por que a linha não se repete.
+				nome += " ×" + strconv.Itoa(l.Sockets)
+			}
+			fmt.Fprintf(w, "  %-6d %-6s %-24s %s%s\n", l.Porta, report.Safe(l.Proto),
+				report.Safe(corta1(l.Bind, 24)), nome, marca)
+		}
+		fmt.Fprintln(w)
+	}
+
+	if len(c.Saida) > 0 {
+		fmt.Fprintln(w, "FALANDO PARA FORA — por executável, e não por conexão")
+		fmt.Fprintf(w, "  %8s %9s %9s  %s\n", "conexões", "destinos", "públicos", "executável")
+		for _, fl := range c.Saida {
+			fmt.Fprintf(w, "  %8d %9d %9d  %s\n", fl.Conexoes, fl.Destinos, fl.Publicos,
+				report.Safe(corta1(fl.Executavel, 56)))
+		}
+		fmt.Fprintln(w)
+	}
+
+	if len(c.Entrada) > 0 {
+		fmt.Fprintln(w, "CONECTARAM AQUI — por origem")
+		for _, e := range c.Entrada {
+			fmt.Fprintf(w, "    %6d  %s\n", e.N, report.Safe(e.Rotulo))
+		}
+		fmt.Fprintln(w)
+	}
+
+	if len(c.Tetos) > 0 {
+		fmt.Fprintln(w, "TETOS — é contra eles que a contagem vale alguma coisa")
+		for _, t := range c.Tetos {
+			pct := 0
+			if t.Teto > 0 {
+				pct = t.Uso * 100 / t.Teto
+			}
+			fmt.Fprintf(w, "  %-18s %8d de %-9d (%d%%)\n", t.Nome, t.Uso, t.Teto, pct)
+			// A explicação do que acontece ao encher só sai quando encher é
+			// perto: impressa sempre, ela vira aviso de rotina e some do olhar
+			// justamente na execução em que importaria.
+			if t.Perto {
+				fmt.Fprintf(w, "    ⛔ a menos de 10%% do teto — %s\n", t.Nota)
+			}
+		}
+		fmt.Fprintln(w)
+	}
+
+	for _, p := range c.Padroes {
+		fmt.Fprintf(w, "PADRÃO RECONHECIDO — %s · %d\n", strings.ToUpper(p.Tipo), p.N)
+		fmt.Fprintf(w, "  %s\n", report.Safe(p.Alvo))
+		fmt.Fprintf(w, "  %s\n\n", report.Safe(p.Detalhe))
+	}
+
+	fmt.Fprintln(w, "Isto é um retrato, não um veredito: `aletheia scan` é quem conclui,")
+	fmt.Fprintln(w, "e traz os falsos positivos de cada achado junto. Conexão de vida curta")
+	fmt.Fprintln(w, "não está aqui — quem vê o eixo do tempo é `aletheia watch`.")
 }

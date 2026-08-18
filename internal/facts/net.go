@@ -301,3 +301,92 @@ func isCGNAT(ip net.IP) bool {
 	v4 := ip.To4()
 	return v4 != nil && v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127
 }
+
+// LimitesDeRede são os tetos que decidem quando a PRÓXIMA conexão falha.
+//
+// Existem pela mesma razão do RLIMIT_NPROC no censo de processos: contar
+// conexão é fácil, e sozinho não diz nada. O que responde "por que o connect
+// está falhando" é a contagem CONTRA o teto — e os dois tetos abaixo são os
+// que produzem as duas falhas que o operador encontra no meio do incidente:
+//
+//	nf_conntrack cheio    o kernel DERRUBA pacote e escreve "table full" no
+//	                      dmesg. O sintoma é perda intermitente que não
+//	                      aparece em log de aplicação nenhum
+//	porta efêmera acaba   connect() falha com EADDRNOTAVAIL, e TIME-WAIT é o
+//	                      que come a faixa: cada conexão fechada segura a
+//	                      porta por 60s
+type LimitesDeRede struct {
+	// Conntrack só existe quando o módulo está carregado — em host sem
+	// firewall nem NAT ele não está, e isso é resposta e não lacuna.
+	ConntrackCount int  `json:"conntrack_count,omitempty"`
+	ConntrackMax   int  `json:"conntrack_max,omitempty"`
+	ConntrackLido  bool `json:"conntrack_read,omitempty"`
+
+	// A faixa de porta efêmera é o teto de conexões de SAÍDA simultâneas por
+	// par (ip de origem, ip:porta de destino).
+	PortaEfemeraMin int  `json:"ephemeral_port_min,omitempty"`
+	PortaEfemeraMax int  `json:"ephemeral_port_max,omitempty"`
+	FaixaLida       bool `json:"ephemeral_range_read,omitempty"`
+}
+
+// FaixaEfemera é quantas portas de origem existem. Zero quando não foi lida —
+// e zero NÃO pode ser tratado como "não há portas".
+func (l LimitesDeRede) FaixaEfemera() int {
+	if !l.FaixaLida || l.PortaEfemeraMax < l.PortaEfemeraMin {
+		return 0
+	}
+	return l.PortaEfemeraMax - l.PortaEfemeraMin + 1
+}
+
+func collectLimitesDeRede(f *Facts, e *env.Env) {
+	l := &f.LimitesRede
+	// O conntrack mudou de lugar entre kernels: sondar os dois evita depender
+	// de versão.
+	for _, p := range []string{
+		"/proc/sys/net/netfilter/nf_conntrack_count",
+		"/proc/sys/nf_conntrack_count",
+	} {
+		b, err := e.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if n, ok := inteiroDe(string(b)); ok {
+			l.ConntrackCount, l.ConntrackLido = n, true
+			break
+		}
+	}
+	if l.ConntrackLido {
+		for _, p := range []string{
+			"/proc/sys/net/netfilter/nf_conntrack_max",
+			"/proc/sys/nf_conntrack_max",
+		} {
+			b, err := e.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			if n, ok := inteiroDe(string(b)); ok {
+				l.ConntrackMax = n
+				break
+			}
+		}
+	}
+
+	if b, err := e.ReadFile("/proc/sys/net/ipv4/ip_local_port_range"); err == nil {
+		campos := strings.Fields(string(b))
+		if len(campos) == 2 {
+			min, ok1 := inteiroDe(campos[0])
+			max, ok2 := inteiroDe(campos[1])
+			if ok1 && ok2 {
+				l.PortaEfemeraMin, l.PortaEfemeraMax, l.FaixaLida = min, max, true
+			}
+		}
+	}
+}
+
+func inteiroDe(s string) (int, bool) {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}

@@ -338,7 +338,9 @@ func TestSummarizeAgrupaMotivos(t *testing.T) {
 		"sem root: /etc/shadow invisível",
 		"debugfs não montado",
 	}, 3)
-	if !strings.Contains(got, "sem root: 2") {
+	// `2× sem root`, e não `sem root: 2`: a razão já tem dois-pontos dentro
+	// dela, e o segundo faria a contagem parecer parte do texto.
+	if !strings.Contains(got, "2× sem root") {
 		t.Errorf("motivos repetidos devem ser contados: %q", got)
 	}
 }
@@ -600,5 +602,48 @@ func TestBlocoDeAlvoContaOCorteSobreLinhasCompactadas(t *testing.T) {
 	// 8 linhas cobrem 10+7 = 17 achados; sobram 5.
 	if !strings.Contains(out, "e mais 5 sinal(is)") {
 		t.Errorf("o corte tem que contar o que sobrou de verdade:\n%s", out)
+	}
+}
+
+// A linha de COBERTURA fabricava categoria.
+//
+// summarize cortava a razão no primeiro ":" ou "(" para inventar um rótulo, e
+// o parêntese chega cedo demais em português: "2 arquivo(s) com dono de pacote
+// NÃO puderam ser comparados por hash (…)" virava a categoria "2 arquivo", com
+// contagem ao lado. Saía na seção que é a promessa central desta ferramenta uma
+// linha que não se lê.
+func TestResumoDeCoberturaNaoInventaCategoria(t *testing.T) {
+	razoes := []string{
+		"2 arquivo(s) com dono de pacote NÃO puderam ser comparados por hash (a base não declara)",
+		"não estamos como root: environ e /etc/shadow ficam invisíveis",
+		"não estamos como root: environ e /etc/shadow ficam invisíveis",
+		"não estamos como root: environ e /etc/shadow ficam invisíveis",
+	}
+	got := summarize(razoes, 3)
+
+	if strings.Contains(got, "2 arquivo:") {
+		t.Errorf("cortar no parêntese inventou a categoria \"2 arquivo\": %q", got)
+	}
+	// A razão que degradou MAIS checks vem primeiro: é ela que o operador
+	// resolve para recuperar mais cobertura de uma vez.
+	if !strings.HasPrefix(got, "3× não estamos como root") {
+		t.Errorf("a razão dominante precisa vir primeiro, com a contagem: %q", got)
+	}
+	// E o corte precisa DIZER que houve corte.
+	if !strings.Contains(got, "…") {
+		t.Errorf("corte sem reticências esconde que houve corte: %q", got)
+	}
+}
+
+// Quando há mais razões que o teto, o número das que ficaram de fora sai junto
+// — e o caminho para vê-las também. "…" sozinho não diz quantas.
+func TestResumoDizQuantasFicaramDeFora(t *testing.T) {
+	razoes := []string{"a", "b", "c", "d", "e"}
+	got := summarize(razoes, 3)
+	if !strings.Contains(got, "+2 outras") {
+		t.Errorf("faltou o número do que ficou de fora: %q", got)
+	}
+	if !strings.Contains(got, "-v") {
+		t.Errorf("e o caminho para ver o resto: %q", got)
 	}
 }

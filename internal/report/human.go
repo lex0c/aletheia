@@ -6,6 +6,7 @@ package report
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -491,26 +492,53 @@ func reasonsOf(ncs []check.NotChecked) []string {
 }
 
 // summarize agrupa motivos repetidos: "sem root: 14 · debugfs não montado: 2".
+// summarize agrupa as razões pela CAUSA e conta quantos checks cada uma
+// degradou.
+//
+// A causa é o que vem antes do primeiro ":", que nestas mensagens é separador
+// de rótulo: "não estamos como root: environ, dono de socket …" agrupa com
+// qualquer outra que comece igual, e o operador lê UMA causa com peso em vez de
+// quarenta e oito linhas quase iguais.
+//
+// O corte era no primeiro ":" OU "(" — e o parêntese chega cedo demais em
+// português. "2 arquivo(s) com dono de pacote NÃO puderam ser comparados por
+// hash (…)" virava a categoria "2 arquivo", com contagem ao lado: uma linha que
+// não se lê, na seção que é a promessa central desta ferramenta. Só o ":"
+// separa rótulo; o parêntese cai dentro da palavra.
 func summarize(reasons []string, max int) string {
 	count := map[string]int{}
-	var order []string
+	var ordem []string
 	for _, r := range reasons {
-		short := r
-		if i := strings.IndexAny(short, ":("); i > 0 {
-			short = strings.TrimSpace(short[:i])
+		causa := r
+		if i := strings.IndexByte(causa, ':'); i > 0 {
+			causa = strings.TrimSpace(causa[:i])
 		}
-		if _, ok := count[short]; !ok {
-			order = append(order, short)
+		if _, ok := count[causa]; !ok {
+			ordem = append(ordem, causa)
 		}
-		count[short]++
+		count[causa]++
 	}
+	// A razão que degradou MAIS checks primeiro: é ela que o operador resolve
+	// para recuperar mais cobertura de uma vez. Empate pelo texto, para que
+	// duas execuções idênticas saiam iguais.
+	sort.SliceStable(ordem, func(i, j int) bool {
+		if count[ordem[i]] != count[ordem[j]] {
+			return count[ordem[i]] > count[ordem[j]]
+		}
+		return ordem[i] < ordem[j]
+	})
+
 	var parts []string
-	for i, s := range order {
+	for i, s := range ordem {
 		if i >= max {
-			parts = append(parts, "…")
+			parts = append(parts, "… (+"+strconv.Itoa(len(ordem)-max)+" outras — `-v` lista cada uma)")
 			break
 		}
-		parts = append(parts, s+": "+strconv.Itoa(count[s]))
+		p := corta(s, 52)
+		if count[s] > 1 {
+			p = strconv.Itoa(count[s]) + "× " + p
+		}
+		parts = append(parts, p)
 	}
 	return strings.Join(parts, " · ")
 }

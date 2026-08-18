@@ -429,6 +429,7 @@ func donosDpkg(f *Facts, e *env.Env, cand map[string][]string, donos map[string]
 				donos[alvo] = strings.TrimSuffix(n, ".list")
 			}
 		}
+		f.scannerFoiAteOFim(sc, "pkg", "/var/lib/dpkg/info/"+n)
 	}
 }
 
@@ -472,6 +473,7 @@ func donosApk(f *Facts, e *env.Env, cand map[string][]string, donos map[string]s
 			}
 		}
 	}
+	f.scannerFoiAteOFim(sc, "pkg", "/lib/apk/db/installed")
 }
 
 // formasUsrMerge devolve as grafias equivalentes de um caminho sob usrmerge.
@@ -654,5 +656,6 @@ func donosPacman(f *Facts, e *env.Env, cand map[string][]string, donos map[strin
 				donos[alvo] = dir
 			}
 		}
+		f.scannerFoiAteOFim(sc, "pkg", "/var/lib/pacman/local/"+dir+"/files")
 	}
 }

@@ -1,6 +1,9 @@
 package facts
 
 import (
+	"errors"
+	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -85,12 +88,25 @@ type Login struct {
 }
 
 func collectLogins(f *Facts, e *env.Env) {
-	// wtmp é legível por todos; btmp é 0600 de root, e a diferença precisa
-	// aparecer como lacuna quando a varredura roda sem privilégio — sem isso,
-	// "nenhuma força bruta" sairia igual a "não pude olhar as tentativas".
-	lerUtmp(f, e, "/var/log/wtmp", false, false)
-	lerUtmp(f, e, "/run/utmp", false, true)
+	// O wtmp costuma ser legível por todos, mas o CIS Benchmark manda pôr 0640
+	// nele, e essa recomendação é seguida. Quando ela foi seguida, uma
+	// varredura sem root lia zero registro — e zero registro de login com
+	// sessão aberta agora é a forma EXATA do achado antiforense de histórico
+	// zerado. A ferramenta fabricava um CRITICAL irreversível de permissão
+	// negada: acusava o defensor endurecido de ter apagado o próprio rastro.
+	if f.HistoricoDeLoginLido = lerUtmp(f, e, "/var/log/wtmp", false, false); !f.HistoricoDeLoginLido {
+		f.denyPersist("login", "/var/log/wtmp não pôde ser lido: o HISTÓRICO de "+
+			"login não foi examinado, e sem ele não se pode afirmar nada sobre "+
+			"ele estar vazio")
+	}
+	if !lerUtmp(f, e, "/run/utmp", false, true) {
+		f.denyPersist("login", "/run/utmp não pôde ser lido: as sessões ABERTAS "+
+			"agora não foram examinadas")
+	}
 
+	// btmp é 0600 de root em toda distribuição, e a diferença precisa aparecer
+	// como lacuna quando a varredura roda sem privilégio — sem isso, "nenhuma
+	// força bruta" sairia igual a "não pude olhar as tentativas".
 	if !lerUtmp(f, e, "/var/log/btmp", true, false) {
 		f.denyPersist("login", "/var/log/btmp ilegível (é 0600 de root): "+
 			"tentativas de login RECUSADAS não foram examinadas, e força bruta "+
@@ -100,37 +116,50 @@ func collectLogins(f *Facts, e *env.Env) {
 
 // lerUtmp lê os registros mais recentes. Devolve falso quando o arquivo existe
 // e não pôde ser lido — que é diferente de não existir.
+//
+// A leitura é do FIM do arquivo, por duas razões que se somam: numa triagem o
+// que interessa é o recente, e o wtmp de um servidor de anos passa do teto de
+// leitura do env — o que devolveria zero registro com cara de histórico
+// zerado, que é precisamente o achado que este arquivo alimenta.
 func lerUtmp(f *Facts, e *env.Env, caminho string, falhou, agora bool) bool {
-	if _, err := e.Lstat(caminho); err != nil {
+	fi, err := e.Lstat(caminho)
+	if err != nil {
 		return true // não existe: não é lacuna, é ausência de fonte
 	}
-	b, err := e.ReadFile(caminho)
-	if err != nil {
-		return false
+	if fi.Mode()&os.ModeSymlink != 0 {
+		if fi, err = e.Stat(caminho); err != nil {
+			return false
+		}
 	}
 
-	tam, ok := tamanhoDoRegistro(b)
+	tam, ok := tamanhoDoRegistro(fi.Size())
 	if !ok {
 		// Nem 384 nem 400 dividem o arquivo: é outro layout, ou o arquivo está
 		// truncado. Adivinhar aqui produziria um inventário de login inventado,
 		// que é pior que nenhum.
-		f.denyPersist("login", baseNome(caminho)+" tem "+itoa(len(b))+
+		f.denyPersist("login", baseNome(caminho)+" tem "+itoa(int(fi.Size()))+
 			" bytes, que não é múltiplo de nenhum dos dois tamanhos conhecidos "+
 			"de registro utmp (384 e 400): o arquivo NÃO foi interpretado")
 		return true
 	}
 
-	// Do FIM para o começo: o interessante numa triagem é o mais recente, e
-	// ler o arquivo inteiro de um servidor antigo é desperdício.
-	n := len(b) / tam
-	inicio := 0
+	n := int(fi.Size() / int64(tam))
+	pular := 0
 	if n > maxRegistrosLogin {
-		inicio = n - maxRegistrosLogin
-		f.denyPersist("login", baseNome(caminho)+" tem "+itoa(n)+
-			" registros e foram lidos os "+itoa(maxRegistrosLogin)+
-			" mais recentes: o que veio antes NÃO foi examinado")
+		pular = n - maxRegistrosLogin
+		n = maxRegistrosLogin
+		f.denyPersist("login", baseNome(caminho)+" tem mais de "+
+			itoa(maxRegistrosLogin)+" registros e foram lidos os "+
+			itoa(maxRegistrosLogin)+" mais recentes: o que veio antes NÃO foi "+
+			"examinado")
 	}
-	for i := inicio; i < n; i++ {
+	b, err := lerFatia(e, caminho, int64(pular)*int64(tam), n*tam)
+	if err != nil {
+		return false
+	}
+	n = len(b) / tam // o arquivo pode ter encolhido entre o stat e a leitura
+
+	for i := 0; i < n; i++ {
 		r := b[i*tam : (i+1)*tam]
 		l := Login{
 			Tipo:   int(int16(le16(r[0:]))),
@@ -153,6 +182,35 @@ func lerUtmp(f *Facts, e *env.Env, caminho string, falhou, agora bool) bool {
 	}
 	return true
 }
+
+// lerFatia lê `quanto` bytes a partir de `de`. Existe porque o utmp é o único
+// formato aqui em que a parte que interessa está no FIM e o começo pode ser
+// grande demais para caber no teto de leitura.
+func lerFatia(e *env.Env, caminho string, de int64, quanto int) ([]byte, error) {
+	rc, err := e.Open(caminho)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	if de > 0 {
+		s, ok := rc.(io.Seeker)
+		if !ok {
+			return nil, errSemSeek
+		}
+		if _, err := s.Seek(de, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
+	b := make([]byte, quanto)
+	lidos, err := io.ReadFull(rc, b)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return nil, err
+	}
+	return b[:lidos], nil
+}
+
+var errSemSeek = errors.New("o arquivo não aceita posicionamento: a cauda não " +
+	"pôde ser lida")
 
 // cstr corta a string no primeiro NUL. Os campos do utmp são buffers de
 // tamanho fixo preenchidos com zero, e usar o buffer inteiro traria lixo do
@@ -196,9 +254,15 @@ func itoa(n int) string {
 // dois dividem — arquivo vazio, ou um múltiplo comum como 2400 bytes — vence o
 // que casa com a arquitetura em que este binário roda, que é a resposta certa em
 // todo host que não teve o arquivo copiado de outra máquina.
-func tamanhoDoRegistro(b []byte) (int, bool) {
-	c32 := len(b)%tamUtmp32 == 0
-	c64 := len(b)%tamUtmp64 == 0
+func tamanhoDoRegistro(tamanho int64) (int, bool) {
+	if tamanho < 0 {
+		return 0, false
+	}
+	// Arquivo VAZIO divide os dois e vence o nativo, com ok: wtmp zerado é o
+	// estado de toda instalação nova e de todo contêiner. Chamar isso de
+	// formato desconhecido poria uma lacuna em cada varredura do mundo.
+	c32 := tamanho%tamUtmp32 == 0
+	c64 := tamanho%tamUtmp64 == 0
 	switch {
 	case c32 && c64:
 		return tamanhoNativoDeUtmp, true

@@ -104,7 +104,7 @@ func verificarHashes(f *Facts, e *env.Env, donos map[string]string) {
 	desviados := map[string]bool{}
 	switch f.Pkg.Kind {
 	case "dpkg":
-		esperados = hashesDpkg(e, porPacote)
+		esperados = hashesDpkg(f, e, porPacote)
 		// Os conffiles ficam FORA dos .md5sums — o dpkg os guarda no status,
 		// num campo próprio, porque são feitos para o administrador editar.
 		//
@@ -112,7 +112,7 @@ func verificarHashes(f *Facts, e *env.Env, donos map[string]string) {
 		// a cobertura saía degradada em toda varredura de Debian. Pior: são
 		// justamente /etc/init.d, /etc/pam.d e /etc/cron.* — os gatilhos de
 		// execução, que é onde a modificação importa.
-		conffilesDpkg(e, esperados, donos)
+		conffilesDpkg(f, e, esperados, donos)
 		// DIVERSÃO é o mecanismo pelo qual um pacote move o arquivo de outro,
 		// de propósito e COM REGISTRO. O arquivo no caminho original passa a ser
 		// de outro pacote, e o hash do original nunca mais confere — é legítimo,
@@ -120,9 +120,9 @@ func verificarHashes(f *Facts, e *env.Env, donos map[string]string) {
 		// do Ubuntu 14.04 desvia o /sbin/initctl exatamente assim.
 		desviados = removerDesviados(e, esperados)
 	case "apk":
-		esperados = hashesApk(e, porPacote)
+		esperados = hashesApk(f, e, porPacote)
 	case "pacman":
-		esperados = hashesPacman(e, porPacote)
+		esperados = hashesPacman(f, e, porPacote)
 	default:
 		return
 	}
@@ -313,7 +313,7 @@ type hashRef struct {
 
 // hashesDpkg lê os .md5sums dos pacotes envolvidos. Formato: "hash  caminho",
 // com o caminho SEM barra inicial.
-func hashesDpkg(e *env.Env, porPacote map[string][]string) map[string]hashRef {
+func hashesDpkg(f *Facts, e *env.Env, porPacote map[string][]string) map[string]hashRef {
 	out := map[string]hashRef{}
 	for pkg, caminhos := range porPacote {
 		// LISTA, e não valor único. É a TERCEIRA vez que este defeito aparece
@@ -350,6 +350,7 @@ func hashesDpkg(e *env.Env, porPacote map[string][]string) map[string]hashRef {
 				out[alvo] = hashRef{hash: h, algo: "md5"}
 			}
 		}
+		f.scannerFoiAteOFim(sc, "hash", "/var/lib/dpkg/info/"+pkg+".md5sums")
 	}
 	return out
 }
@@ -357,7 +358,7 @@ func hashesDpkg(e *env.Env, porPacote map[string][]string) map[string]hashRef {
 // hashesApk lê a linha Z: que segue cada R:. O valor é `Q1` mais o SHA1 em
 // base64 — não é hexadecimal, e comparar sem decodificar daria divergência em
 // todo arquivo.
-func hashesApk(e *env.Env, porPacote map[string][]string) map[string]hashRef {
+func hashesApk(f *Facts, e *env.Env, porPacote map[string][]string) map[string]hashRef {
 	out := map[string]hashRef{}
 	// Lista pelo mesmo motivo do backend do dpkg: duas grafias do mesmo arquivo
 	// colidem sob usrmerge, e guardar um valor só perde uma delas.
@@ -403,12 +404,13 @@ func hashesApk(e *env.Env, porPacote map[string][]string) map[string]hashRef {
 			}
 		}
 	}
+	f.scannerFoiAteOFim(sc, "hash", "/lib/apk/db/installed")
 	return out
 }
 
 // hashesPacman lê o mtree do pacote, que é gzip. As linhas úteis têm
 // `sha256digest=`, e o caminho vem com `./` na frente e com escapes de octal.
-func hashesPacman(e *env.Env, porPacote map[string][]string) map[string]hashRef {
+func hashesPacman(f *Facts, e *env.Env, porPacote map[string][]string) map[string]hashRef {
 	out := map[string]hashRef{}
 	for pkg, caminhos := range porPacote {
 		// Lista, pelo mesmo motivo dos outros dois backends.
@@ -420,7 +422,8 @@ func hashesPacman(e *env.Env, porPacote map[string][]string) map[string]hashRef 
 				quer[k] = append(quer[k], c)
 			}
 		}
-		b, err := e.ReadFile("/var/lib/pacman/local/" + pkg + "/mtree")
+		mtree := "/var/lib/pacman/local/" + pkg + "/mtree"
+		b, err := e.ReadFile(mtree)
 		if err != nil {
 			continue
 		}
@@ -452,6 +455,7 @@ func hashesPacman(e *env.Env, porPacote map[string][]string) map[string]hashRef 
 				}
 			}
 		}
+		f.scannerFoiAteOFim(sc, "hash", mtree)
 		zr.Close()
 	}
 	return out
@@ -538,7 +542,7 @@ func datasDe(fi fs.FileInfo) (time.Time, time.Time, bool) {
 //	 /etc/adduser.conf cc3493ecd2d09837ffdcc3e25fdfff18
 //
 // A linha começa com espaço, e é isso que a separa dos outros campos.
-func conffilesDpkg(e *env.Env, out map[string]hashRef, donos map[string]string) {
+func conffilesDpkg(f *Facts, e *env.Env, out map[string]hashRef, donos map[string]string) {
 	b, err := e.ReadFile("/var/lib/dpkg/status")
 	if err != nil {
 		return
@@ -569,6 +573,7 @@ func conffilesDpkg(e *env.Env, out map[string]hashRef, donos map[string]string) 
 		// hash continua valendo para comparação.
 		out[caminho] = hashRef{hash: campos[1], algo: "md5", conf: true}
 	}
+	f.scannerFoiAteOFim(sc, "hash", "/var/lib/dpkg/status")
 }
 
 // removerDesviados tira da comparação os caminhos que o dpkg desviou.

@@ -145,6 +145,26 @@ var sessaoSemRegistro = check.Check{
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
 
+		// O achado inteiro se apoia numa AUSÊNCIA, e ausência só vale como
+		// evidência quando a fonte foi olhada. O CIS Benchmark manda pôr 0640
+		// no wtmp; onde essa recomendação foi seguida e a varredura roda sem
+		// root, o histórico saía vazio por permissão — e a ferramenta acusava
+		// o defensor endurecido de ter apagado o próprio rastro, num CRITICAL
+		// marcado como irreversível.
+		if !f.HistoricoDeLoginLido {
+			// A lacuna é declarada mesmo quando a coleta não deixou motivo —
+			// é o caso de um JSON de `collect` antigo, anterior a este campo.
+			// Calar sem declarar trocaria o falso positivo por um falso
+			// negativo, que é o mesmo erro pelo outro lado.
+			if motivos := f.PersistDenied["login"]; len(motivos) > 0 {
+				r.Partial = append(r.Partial, motivos...)
+			} else {
+				r.Partial = append(r.Partial, "o histórico de login (/var/log/wtmp) "+
+					"não foi examinado: nada se pode afirmar sobre ele estar vazio")
+			}
+			return r
+		}
+
 		var abertas, historico int
 		var quem []string
 		for i := range f.Logins {

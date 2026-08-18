@@ -35,7 +35,7 @@ func TestUtmpDosDoisTamanhos(t *testing.T) {
 		for _, u := range []string{"deploy", "root", "app"} {
 			b = append(b, registro(tam, u, quando)...)
 		}
-		got, ok := tamanhoDoRegistro(b)
+		got, ok := tamanhoDoRegistro(int64(len(b)))
 		if !ok || got != tam {
 			t.Fatalf("tamanho %d: detectou %d (ok=%v)", tam, got, ok)
 		}
@@ -49,13 +49,13 @@ func TestUtmpDosDoisTamanhos(t *testing.T) {
 // Arquivo que não é múltiplo de nenhum dos dois layouts NÃO é interpretado: um
 // inventário de login inventado é pior que nenhum.
 func TestUtmpDeTamanhoDesconhecidoNaoEhChutado(t *testing.T) {
-	if _, ok := tamanhoDoRegistro(make([]byte, 999)); ok {
+	if _, ok := tamanhoDoRegistro(999); ok {
 		t.Error("999 bytes não é múltiplo de 384 nem de 400: não dá para interpretar")
 	}
 	// E quando os dois dividem, vence o layout da arquitetura em que este
 	// binário roda — a resposta certa em todo host que não teve o arquivo
 	// copiado de outra máquina.
-	if got, ok := tamanhoDoRegistro(nil); !ok || got != tamanhoNativoDeUtmp {
+	if got, ok := tamanhoDoRegistro(0); !ok || got != tamanhoNativoDeUtmp {
 		t.Errorf("arquivo vazio: detectou %d, queria o nativo %d", got, tamanhoNativoDeUtmp)
 	}
 }

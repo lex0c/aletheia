@@ -106,6 +106,14 @@ type Facts struct {
 	HashesIOC []ArquivoHash `json:"ioc_hashes,omitempty"`
 	Cross     CrossView     `json:"cross_view"`
 
+	// HistoricoDeLoginLido diz se /var/log/wtmp foi de fato examinado.
+	//
+	// Existe porque o achado de histórico zerado se apoia numa AUSÊNCIA, e
+	// ausência só é evidência quando a fonte foi olhada. Sem este campo, um
+	// wtmp em 0640 — que é o que o CIS Benchmark manda — produzia um CRITICAL
+	// irreversível de anti-forense a partir de permissão negada.
+	HistoricoDeLoginLido bool `json:"login_history_read,omitempty"`
+
 	// PidsListados é o que o readdir de /proc devolveu — NÃO o que foi lido
 	// com sucesso. A comparação cruzada depende dessa distinção.
 	PidsListados []int `json:"-"`

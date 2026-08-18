@@ -3,6 +3,7 @@ package facts
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,7 +50,7 @@ func TestHashesDpkg(t *testing.T) {
 			"d41d8cd98f00b204e9800998ecf8427e  usr/bin/dash\n" +
 			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  usr/share/doc/dash/copyright\n",
 	})
-	got := hashesDpkg(e, map[string][]string{"dash:amd64": {"/usr/bin/dash"}})
+	got := hashesDpkg(&Facts{}, e, map[string][]string{"dash:amd64": {"/usr/bin/dash"}})
 
 	h, ok := got["/usr/bin/dash"]
 	if !ok {
@@ -75,7 +76,7 @@ func TestHashesDpkgSobUsrMerge(t *testing.T) {
 		"bin":                            "<link:usr/bin>",
 		"var/lib/dpkg/info/dash.md5sums": "d41d8cd98f00b204e9800998ecf8427e  usr/bin/dash\n",
 	})
-	got := hashesDpkg(e, map[string][]string{"dash": {"/bin/dash", "/usr/bin/dash"}})
+	got := hashesDpkg(&Facts{}, e, map[string][]string{"dash": {"/bin/dash", "/usr/bin/dash"}})
 
 	for _, forma := range []string{"/bin/dash", "/usr/bin/dash"} {
 		if h, ok := got[forma]; !ok || h.hash == "" {
@@ -96,7 +97,7 @@ func TestHashesApk(t *testing.T) {
 			"R:busybox\n" +
 			"Z:Q1vZcb7IgUmVZFihD8nF7LPrmd1FI=\n",
 	})
-	got := hashesApk(e, map[string][]string{"busybox": {"/usr/bin/busybox"}})
+	got := hashesApk(&Facts{}, e, map[string][]string{"busybox": {"/usr/bin/busybox"}})
 
 	h, ok := got["/usr/bin/busybox"]
 	if !ok {
@@ -117,7 +118,7 @@ func TestHashesApkIgnoraAlgoritmoDesconhecido(t *testing.T) {
 		"usr/bin/busybox":      "x",
 		"lib/apk/db/installed": "P:busybox\nF:usr/bin\nR:busybox\nZ:Q2abcdef==\n",
 	})
-	got := hashesApk(e, map[string][]string{"busybox": {"/usr/bin/busybox"}})
+	got := hashesApk(&Facts{}, e, map[string][]string{"busybox": {"/usr/bin/busybox"}})
 	if len(got) != 0 {
 		t.Errorf("prefixo desconhecido não pode virar hash: %v", got)
 	}
@@ -127,10 +128,10 @@ func TestHashesApkIgnoraAlgoritmoDesconhecido(t *testing.T) {
 // é o chamador que precisa saber que não houve comparação.
 func TestHashesSemBaseDePacote(t *testing.T) {
 	e := rootfs(t, map[string]string{"usr/bin/x": "x"})
-	if got := hashesDpkg(e, map[string][]string{"p": {"/usr/bin/x"}}); len(got) != 0 {
+	if got := hashesDpkg(&Facts{}, e, map[string][]string{"p": {"/usr/bin/x"}}); len(got) != 0 {
 		t.Errorf("sem md5sums não há hash: %v", got)
 	}
-	if got := hashesApk(e, map[string][]string{"p": {"/usr/bin/x"}}); len(got) != 0 {
+	if got := hashesApk(&Facts{}, e, map[string][]string{"p": {"/usr/bin/x"}}); len(got) != 0 {
 		t.Errorf("sem base do apk não há hash: %v", got)
 	}
 }
@@ -211,7 +212,7 @@ func TestConffilesDpkg(t *testing.T) {
 		"/etc/crontab":         "cron",
 	}
 	out := map[string]hashRef{}
-	conffilesDpkg(e, out, donos)
+	conffilesDpkg(&Facts{}, e, out, donos)
 
 	for caminho, quer := range map[string]string{
 		"/etc/ssh/sshd_config": "1111111111111111111111111111111a",
@@ -246,7 +247,7 @@ func TestConffilesDpkg(t *testing.T) {
 		"var/lib/dpkg/status": "Package: x\nConffiles:\n /etc/x.conf abc\n",
 	})
 	out2 := map[string]hashRef{}
-	conffilesDpkg(e2, out2, map[string]string{})
+	conffilesDpkg(&Facts{}, e2, out2, map[string]string{})
 	if len(out2) != 0 {
 		t.Errorf("entrou conffile que ninguém perguntou: %v", out2)
 	}
@@ -329,5 +330,38 @@ func TestAlvoFinalNaoTravaEmCiclo(t *testing.T) {
 	case <-feito: // qualquer resposta serve; o que importa é TERMINAR
 	case <-time.After(5 * time.Second):
 		t.Fatal("ciclo de links travou a resolução")
+	}
+}
+
+// bufio.Scanner para em SILÊNCIO numa linha maior que o buffer, e o laço acaba
+// como se o arquivo tivesse terminado. Numa base de referência de hash isso é
+// evasão: quem consegue escrever uma linha comprida no começo do arquivo
+// derruba a verificação de tudo que vem depois, e o relatório sai dizendo que
+// nada divergiu.
+func TestLinhaCompridaNaBaseDeHashViraLacunaENaoFimDeArquivo(t *testing.T) {
+	// 128 KiB numa linha só: acima do buffer de 64 KiB do leitor de .md5sums.
+	entulho := strings.Repeat("A", 128*1024)
+	raiz := t.TempDir()
+	dir := filepath.Join(raiz, "var/lib/dpkg/info")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	corpo := entulho + "\n" +
+		"d41d8cd98f00b204e9800998ecf8427e  usr/bin/dash\n"
+	if err := os.WriteFile(filepath.Join(dir, "dash.md5sums"), []byte(corpo), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := env.Probe(env.Options{Root: raiz})
+	t.Cleanup(func() { e.Close() })
+
+	f := &Facts{}
+	got := hashesDpkg(f, e, map[string][]string{"dash": {"/usr/bin/dash"}})
+	if len(got) != 0 {
+		t.Fatalf("a linha depois do entulho não podia ter sido lida: %v", got)
+	}
+	if len(f.PersistDenied["hash"]) == 0 {
+		t.Error("o corte silencioso da base de referência não foi declarado: " +
+			"sem hash esperado, o arquivo sai como não verificado, e não " +
+			"verificado com cara de íntegro é o pior resultado possível")
 	}
 }

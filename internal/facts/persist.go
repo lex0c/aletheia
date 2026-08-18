@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"bufio"
 	"errors"
 	"os"
 	"sort"
@@ -687,4 +688,21 @@ func (f *Facts) lerNegando(e *env.Env, cat, path string) ([]byte, bool) {
 		return nil, false
 	}
 	return b, true
+}
+
+// scannerFoiAteOFim declara LACUNA quando a leitura por linhas parou ANTES do
+// fim do arquivo.
+//
+// `bufio.Scanner` para em silêncio numa linha maior que o buffer e o laço
+// termina como se o arquivo tivesse acabado. Nas bases de referência de pacote
+// isso não é detalhe: quem consegue escrever uma linha comprida no
+// /var/lib/dpkg/status derruba a verificação de TODOS os arquivos listados
+// depois dela, e o resultado sai como "nada divergiu".
+func (f *Facts) scannerFoiAteOFim(sc *bufio.Scanner, cat, caminho string) bool {
+	if err := sc.Err(); err != nil {
+		f.denyPersist(cat, caminho+" não foi lido até o fim ("+err.Error()+
+			"): o que vinha depois NÃO entrou na comparação")
+		return false
+	}
+	return true
 }

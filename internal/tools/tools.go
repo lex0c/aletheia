@@ -59,7 +59,14 @@ type Family struct {
 
 	Env   []string // prefixos de variável
 	Paths []string // "~" é expandido para cada home do passwd DO ALVO
-	Bins  []string // basename de executável
+	Bins  []string // basename de executável, casado INTEIRO
+
+	// BinsPrefixo é para o executável cujo nome carrega sufixo VARIÁVEL —
+	// identificador de organização, de tenant ou de versão. O Explorer do
+	// runZero se instala como `runzero-agent-<uuid da organização>`, e um
+	// catálogo que só casa nome inteiro passa direto por ele: o sufixo muda em
+	// cada instalação, e é exatamente por isso que ele não pode ser a chave.
+	BinsPrefixo []string
 }
 
 // All é o catálogo.
@@ -76,6 +83,35 @@ var All = []Family{
 		Env:   []string{"GSOCKET_", "GS_"},
 		Paths: []string{"~/.config/gsocket", "~/.gsocket", "/etc/gsocket"},
 		Bins:  []string{"gs-netcat", "gsocket", "gs-sftp", "gs-mount"},
+	},
+
+	// ------------------------------------------- descoberta e mapeamento de REDE
+	//
+	// Aqui a capacidade não é acesso: é CONHECIMENTO. Quem mapeia a rede interna
+	// está respondendo "para onde eu vou daqui", e o resultado desse mapeamento
+	// é o que decide o resto do incidente. Encontrar isto num host invadido
+	// muda a pergunta de "o que foi feito nesta máquina" para "o que já foi
+	// aprendido sobre TODAS as outras" — e o inventário que a ferramenta
+	// produziu já saiu daqui.
+	{
+		Name: "runZero Explorer",
+		// Produto legítimo, e comum: é scanner de inventário de ativos, com
+		// licença gratuita para redes pequenas. Numa VM de aplicação, porém,
+		// ele não tem por que estar — quem faz inventário de rede o instala em
+		// host de gestão, não num servidor web.
+		Risk: RiskAlto,
+		Nota: "scanner de DESCOBERTA de rede: varre faixa inteira, identifica " +
+			"serviço e sistema operacional e monta inventário. Num host de gestão " +
+			"é a função dele; numa VM de aplicação invadida é reconhecimento " +
+			"interno pronto (§23). Ele usa SYN e socket RAW, então a varredura " +
+			"quase não deixa conexão ESTABELECIDA para se ver depois — procure o " +
+			"socket de pacote (§2.6) e a CAPABILITY de rede (§3.7), e trate o " +
+			"resultado do scan como EXFILTRADO: o inventário sobe para o serviço",
+		Env:   []string{"RUNZERO_"},
+		Paths: []string{"/opt/runzero", "/etc/runzero", "/var/log/runzero.log", "/var/log/runzero.err"},
+		Bins:  []string{"runzero-agent.bin", "runzero", "runzero-explorer"},
+		// O nome real de instalação: `runzero-agent-<uuid da organização>`.
+		BinsPrefixo: []string{"runzero-agent-"},
 	},
 
 	// ------------------------------------------------------ túnel de INGRESSO

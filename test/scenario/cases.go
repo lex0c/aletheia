@@ -980,6 +980,39 @@ func init() {
 		Exit: 2,
 	})
 
+	Register(Scenario{
+		ID:   "73b-scanner-de-rede-em-vm-invadida",
+		Desc: "o Explorer do runZero rodando numa VM de aplicação: a capacidade não é acesso, é CONHECIMENTO da rede interna",
+		// A pergunta que originou esta entrada: invasor entra numa VM e roda um
+		// scanner de inventário para mapear a rede interna. Encontrá-lo muda a
+		// pergunta de "o que foi feito nesta máquina" para "o que já foi
+		// aprendido sobre TODAS as outras" — e o resultado do scan já saiu daqui.
+		//
+		// O nome de instalação carrega o UUID DA ORGANIZAÇÃO
+		// (`runzero-agent-<uuid>`), e ele muda a cada instalação. Um catálogo
+		// que só casa nome inteiro passava direto por isso em todo host real —
+		// é o cenário que trava o casamento por PREFIXO.
+		Images: matriz,
+		Plant: `mkdir -p /opt/runzero/bin /etc/runzero
+			cp /helper /opt/runzero/bin/runzero-agent-c1f4a2e0-9b3d-4a71-8f22-5e6d0b1c7a93
+			printf 'token=abc\n' > /etc/runzero/config
+			/opt/runzero/bin/runzero-agent-c1f4a2e0-9b3d-4a71-8f22-5e6d0b1c7a93 sleep 300 &
+			sleep 0.4`,
+		Expect: []Expect{
+			// config em disco — a rota que funciona em imagem montada
+			{ID: "tool.artifact", Subject: "runZero Explorer"},
+			// e o binário com o uuid no nome, que é o que o prefixo pega
+			{ID: "tool.binary", Subject: "runZero Explorer"},
+			{ID: "tool.binary", Evidence: "inventário"},
+		},
+		// -v porque a asserção é sobre a NOTA da família, e evidência só sai
+		// no relatório detalhado. É ela que direciona: onde procurar o rastro
+		// de uma varredura que quase não deixa conexão para trás.
+		Args:         []string{"-v"},
+		ExpectOutput: []string{"socket de pacote", "EXFILTRADO", "reconhecimento interno"},
+		Exit:         2,
+	})
+
 	// ---------------------------------------------------------------- modo image
 
 	Register(Scenario{

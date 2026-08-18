@@ -226,6 +226,14 @@ func familyByBin(bin string) (tools.Family, bool) {
 				return f, true
 			}
 		}
+		// Sufixo variável: o Explorer do runZero se instala como
+		// `runzero-agent-<uuid>`, e o uuid muda a cada organização. Casar só
+		// nome inteiro passaria direto por ele em toda instalação real.
+		for _, pre := range f.BinsPrefixo {
+			if len(bin) > len(pre) && strings.HasPrefix(bin, pre) {
+				return f, true
+			}
+		}
 	}
 	return tools.Family{}, false
 }

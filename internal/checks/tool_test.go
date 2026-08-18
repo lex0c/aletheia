@@ -171,3 +171,42 @@ func TestArtefatoDeclaraCaminhoIlegivel(t *testing.T) {
 		t.Error("e a cobertura da execução não pode sair completa")
 	}
 }
+
+// O Explorer do runZero se instala como `runzero-agent-<uuid da organização>`,
+// e o uuid muda a cada instalação. Um catálogo que só casa nome INTEIRO passa
+// direto por ele em todo host real — o sufixo é justamente o que não pode ser
+// a chave.
+func TestBinarioComSufixoVariavelEhReconhecido(t *testing.T) {
+	f := &facts.Facts{Processes: []facts.Process{{
+		PID: 900,
+		Exe: "/opt/runzero/bin/runzero-agent-c1f4a2e0-9b3d-4a71-8f22-5e6d0b1c7a93",
+	}}}
+	f.Index()
+	r := check.Run([]check.Check{toolBinary}, f, testEnv())
+	if len(r.Findings) == 0 {
+		t.Fatal("o Explorer com uuid no nome precisa ser reconhecido: o sufixo " +
+			"muda a cada organização, e é por isso que ele não serve de chave")
+	}
+	if !temEvidencia(r, "runZero") {
+		t.Errorf("a família precisa ser nomeada: %v", evidencias(r))
+	}
+}
+
+// E o prefixo não pode virar peneira: um nome que apenas COMEÇA parecido, sem
+// nada depois, não é o binário.
+func TestPrefixoNaoCasaNomeIncompleto(t *testing.T) {
+	f := &facts.Facts{Processes: []facts.Process{
+		{PID: 901, Exe: "/usr/bin/runzero-agent-"},
+		{PID: 902, Exe: "/usr/bin/runzero-agentic-coisa"},
+	}}
+	f.Index()
+	r := check.Run([]check.Check{toolBinary}, f, testEnv())
+	for _, ev := range evidencias(r) {
+		if strings.Contains(ev, "pid=901") {
+			t.Errorf("prefixo SEM sufixo não é instalação nenhuma: %q", ev)
+		}
+		if strings.Contains(ev, "pid=902") {
+			t.Errorf("`runzero-agentic-coisa` só começa parecido: %q", ev)
+		}
+	}
+}

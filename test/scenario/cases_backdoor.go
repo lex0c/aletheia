@@ -25,8 +25,6 @@ func init() {
 			// o trecho e a linha, que é o que o operador lê
 			{ID: "app.code_backdoor", Evidence: "$_REQUEST[0]"},
 			{ID: "app.code_backdoor", Evidence: "crase sobre entrada"},
-			// a honestidade do check precisa sair junto
-			{ID: "app.code_backdoor", Evidence: "PENEIRA"},
 		},
 		// painel.php (eval puro) é INFO e some no padrão; limpo.php não gera
 		// nada. Nenhum dos dois pode alarmar — é o que separa peneira de ruído.

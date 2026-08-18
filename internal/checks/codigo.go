@@ -82,21 +82,12 @@ var codigoBackdoor = check.Check{
 				sev = check.SevCritical
 			}
 
-			ev := []string{
-				cs.Path + " — código " + cs.Lang + " com padrão de execução suspeito",
-			}
-			if maxTier >= 2 {
-				ev = append(ev, "TIER 2: sink de execução sobre entrada de request, "+
-					"ou eval de conteúdo decodificado — a forma que quase não tem "+
-					"uso legítimo")
-			} else {
-				ev = append(ev, "TIER 1: construção que MERECE leitura (eval, "+
-					"create_function, decodificação, dispatch preso a allowlist) — "+
-					"sozinha NÃO acusa (é comum em código legítimo), e por isso sai "+
-					"como observação. O que a promove é o arquivo ter MUDADO: cruze "+
-					"com o mtime e o git")
-			}
-			// Os matches, com linha e trecho: é o que o operador lê.
+			// A evidência é só o SINAL: os matches, com linha e trecho. O título
+			// já diz o que é, a severidade sai no marcador, e a caveat (PENEIRA)
+			// e a guia (→) saem no bloco FP e nos próximos-passos — uma vez por
+			// check, não repetidas em cada achado. O tier sai no rótulo do match
+			// (um tier-1 diz "dispatch, não execução arbitrária" ali mesmo).
+			var ev []string
 			mostrados := cs.Matches
 			if len(mostrados) > 6 {
 				mostrados = mostrados[:6]
@@ -109,8 +100,6 @@ var codigoBackdoor = check.Check{
 				ev = append(ev, "e mais "+strconv.Itoa(len(cs.Matches)-len(mostrados))+
 					" linha(s) no mesmo arquivo")
 			}
-			ev = append(ev, "PENEIRA, não prova: pega o comum, erra o ofuscado. "+
-				"Leia o arquivo e compare com o que deveria estar lá")
 
 			fd := self.F(sev, cs.Path, "", ev...)
 			if cs.ModUTC != "" {

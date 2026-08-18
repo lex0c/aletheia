@@ -113,3 +113,69 @@ func TestSemMedidaValeOPrefixo(t *testing.T) {
 		t.Error("/usr/bin não é árvore gravável nem por aproximação")
 	}
 }
+
+// Camada de imagem de contêiner NÃO é este host.
+//
+// Cada camada traz o conjunto setuid inteiro de uma distribuição — su, mount,
+// passwd, sudo —, nenhum é reivindicado pelo gerenciador do host (correto: não
+// foi ele que os entregou), e o ctime é o da extração enquanto o mtime é o da
+// construção do pacote meses antes. Os três sinais disparam juntos em cada
+// binário de cada camada.
+//
+// Num desktop com containerd isso deu 310 CRÍTICOS. Um relatório com 310
+// críticos falsos não é ruim: é um relatório que ninguém lê. docker, podman e
+// lxc já estavam na lista de exclusão; containerd — que é o armazenamento do
+// Docker moderno e de todo Kubernetes — faltava.
+func TestCamadaDeImagemDeContainerNaoEhVarrida(t *testing.T) {
+	raiz := t.TempDir()
+	// A forma real do containerd, e um SUID de verdade fora dela como controle.
+	camada := filepath.Join(raiz,
+		"var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/50165/fs/usr/bin")
+	fora := filepath.Join(raiz, "usr/local/sbin")
+	for _, d := range []string{camada, fora} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		x := filepath.Join(d, "su")
+		if err := os.WriteFile(x, []byte("ELF"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(x, 0o755|os.ModeSetuid); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	e := env.Probe(env.Options{Root: raiz})
+	t.Cleanup(func() { e.Close() })
+	f := Collect(e)
+
+	for _, s := range f.Suid {
+		if strings.Contains(s.Path, "containerd") {
+			t.Errorf("camada de imagem entrou na varredura: %s", s.Path)
+		}
+	}
+	// E o controle: fora da camada, o SUID continua sendo achado. Sem esta
+	// asserção o teste passaria com a varredura inteira quebrada.
+	var achouControle bool
+	for _, s := range f.Suid {
+		if s.Path == "/usr/local/sbin/su" {
+			achouControle = true
+		}
+	}
+	if !achouControle {
+		t.Fatalf("o SUID FORA da camada precisa continuar aparecendo: %+v", f.Suid)
+	}
+
+	// E pular é decisão, que se DECLARA: voltar em silêncio faria a varredura
+	// estreitar o próprio escopo sem dizer.
+	var citou bool
+	for _, m := range f.PersistDenied["suid"] {
+		if strings.Contains(m, "containerd") && strings.Contains(m, "--root") {
+			citou = true
+		}
+	}
+	if !citou {
+		t.Errorf("a árvore pulada não foi declarada, nem o caminho para varrê-la: %v",
+			f.PersistDenied["suid"])
+	}
+}

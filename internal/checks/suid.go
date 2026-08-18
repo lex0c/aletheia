@@ -52,12 +52,21 @@ var suidInesperado = check.Check{
 			"cada um pelo nome",
 		"compilação local em /usr/local a partir de fonte que instala setuid " +
 			"(alguns pacotes de rede fazem isso) cai aqui e é legítima",
-		"LIMITE de escopo, e ele tem três partes. A varredura não atravessa " +
+		"LIMITE de escopo, e ele tem QUATRO partes. A varredura não atravessa " +
 			"montagem: montagem de rede e volume externo ficam fora, e isso é " +
 			"declarado quando acontece. Ela não desce em árvore de dependência " +
 			"e cache (node_modules, .cache, .git, site-packages e semelhantes), " +
-			"que é o que a torna viável num home de desenvolvedor. E dentro de " +
-			"/home e /root ela desce no máximo cinco níveis",
+			"que é o que a torna viável num home de desenvolvedor. Dentro de " +
+			"/home e /root ela desce no máximo cinco níveis. E ela não entra em " +
+			"/usr/share/{doc,man,locale,icons,fonts} nem em /usr/src, que são " +
+			"documentação e dado — exclusão FIXA, igual em toda máquina",
+		"ARMAZENAMENTO DE IMAGEM de contêiner fica fora, e isso é declarado " +
+			"quando a árvore existe: /var/lib/{docker,containerd,containers,lxc}, " +
+			"rancher e k0s guardam o filesystem de OUTRAS máquinas em camadas. " +
+			"Cada camada traz o conjunto setuid inteiro de uma distribuição, " +
+			"nenhum reivindicado pelo gerenciador DESTE host — varrê-las daqui " +
+			"dava trezentos críticos falsos num desktop. A forma certa de olhar " +
+			"uma camada é `aletheia scan --root <camada>`, onde o kernel é o seu",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result

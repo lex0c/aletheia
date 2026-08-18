@@ -86,14 +86,50 @@ var pularPorNome = map[string]bool{
 	".mozilla": true,
 }
 
-// suidPular são árvores dentro das raízes que só geram custo. /usr/share é
-// documentação e dado; /var/lib/docker é o filesystem de outros contêineres,
-// que não é este host.
-var suidPular = map[string]bool{
+// As árvores que a varredura de SUID não percorre.
+//
+// Por que a exclusão de imagem é necessária, medido num desktop com containerd: cada
+// camada de imagem traz o conjunto setuid inteiro de uma distribuição — su,
+// mount, passwd, sudo, chsh, chfn, gpasswd —, nenhum deles é reivindicado pelo
+// pacman do host (correto: não foi o pacman que os entregou), e o ctime é o da
+// extração da camada enquanto o mtime é o da construção do pacote meses antes.
+// Os três sinais disparam juntos em cada binário de cada camada. Vinte
+// snapshots renderam 310 CRÍTICOS, e um relatório com 310 críticos falsos não
+// é um relatório ruim: é um relatório que ninguém lê.
+//
+// containerd FALTAVA nesta lista, e é o armazenamento do Docker moderno e de
+// todo Kubernetes — docker, podman e lxc estavam aqui desde o começo.
+//
+// O que se perde é DECLARADO: um implante plantado dentro de uma camada de
+// imagem não é procurado aqui. Ele é problema da imagem, e a imagem se varre
+// como imagem — `aletheia scan --root <camada>`, onde o kernel é o do analista
+// (§35.6).
+//
+// São DOIS motivos diferentes, e a diferença decide se o pulo vira lacuna
+// declarada ou não.
+//
+// suidPularCusto é conteúdo DESTE host que só gera custo: documentação, dado de
+// localização, fonte. A exclusão é fixa, igual em toda máquina, e está escrita
+// no limite de escopo do próprio check — do mesmo jeito que node_modules e
+// .cache estão. Declará-la a cada execução tornaria "cobertura completa"
+// impossível em todo host do mundo, e o sinal do exit code morreria junto.
+var suidPularCusto = map[string]bool{
 	"/usr/share/doc": true, "/usr/share/man": true, "/usr/share/locale": true,
 	"/usr/src": true, "/usr/share/icons": true, "/usr/share/fonts": true,
-	"/var/lib/docker": true, "/var/lib/containers": true, "/var/lib/lxc": true,
+}
+
+// suidPularImagem é armazenamento de imagem de contêiner: o filesystem de
+// OUTRAS máquinas, empilhado em camadas dentro deste disco. Isto SIM vira
+// lacuna declarada — a árvore existe, não foi examinada, e há uma forma certa
+// de examiná-la que o relatório precisa dizer.
+var suidPularImagem = map[string]bool{
+	"/var/lib/docker": true, "/var/lib/containerd": true,
+	"/var/lib/containers": true, "/var/lib/lxc": true, "/var/lib/lxd": true,
 	"/var/lib/flatpak": true, "/var/lib/snapd": true,
+	// k3s e k0s embutem o próprio containerd numa árvore própria.
+	"/var/lib/rancher": true, "/var/lib/k0s": true,
+	// buildkit guarda as camadas intermediárias de build, com a mesma forma.
+	"/var/lib/buildkit": true,
 }
 
 // SuidFile é um executável que CARREGA PRIVILÉGIO — por bit setuid/setgid ou
@@ -206,6 +242,14 @@ func collectSuid(f *Facts, e *env.Env) {
 			strconv.Itoa(maxSuidDepthHome)+" níveis dentro de /home e /root: "+
 			"SUID mais fundo que isso NÃO foi procurado")
 	}
+	if len(trab.puladas) > 0 {
+		sort.Strings(trab.puladas)
+		f.denyPersist("suid", "a varredura de SUID NÃO entrou em "+
+			strconv.Itoa(len(trab.puladas))+" árvore(s) de armazenamento de imagem "+
+			"de contêiner: "+resumoCaminhos(trab.puladas)+" — o conteúdo delas é o "+
+			"filesystem de OUTRAS máquinas, e se varre como imagem "+
+			"(`aletheia scan --root <camada>`), onde o kernel é o do analista")
+	}
 	if len(trab.negados) > 0 {
 		sort.Strings(trab.negados)
 		f.denyPersist("suid", "a varredura de SUID não conseguiu abrir "+
@@ -253,6 +297,10 @@ type varredura struct {
 	truncado       bool
 	profundoDemais bool
 	outroFS        []string
+
+	// puladas são as árvores excluídas de propósito — ver suidPularImagem. Elas
+	// existem no disco e NÃO foram examinadas, e isso precisa aparecer.
+	puladas []string
 
 	// negados são os diretórios que a varredura não conseguiu ABRIR. Sem esta
 	// lista, um galho inteiro sumia com a mesma cara de galho sem SUID — e
@@ -309,7 +357,17 @@ func (v *varredura) terminou() {
 }
 
 func (v *varredura) visitar(t tarefaDir) {
-	if suidPular[t.dir] {
+	if suidPularCusto[t.dir] {
+		return
+	}
+	if suidPularImagem[t.dir] {
+		// Pular o filesystem de outra máquina é decisão, e decisão se DECLARA.
+		// Voltar em silêncio fazia a varredura estreitar o próprio escopo sem
+		// dizer — o mesmo erro que esta ferramenta existe para não cometer,
+		// cometido do lado de dentro dela.
+		v.mu.Lock()
+		v.puladas = append(v.puladas, t.dir)
+		v.mu.Unlock()
 		return
 	}
 

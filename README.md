@@ -216,7 +216,9 @@ aletheia scan --root /mnt/imagem
 ```
 
 Exit 0 exige as **duas** condições. Uma execução sem root e sem debugfs não sai
-zero — seria a ferramenta contradizendo o próprio nome.
+zero — seria a ferramenta contradizendo o próprio nome. Vale igual para o
+`watch`: uma vigília que passou a noite sem enxergar não termina dizendo que a
+noite foi tranquila.
 
 ---
 
@@ -254,9 +256,9 @@ e perde a imunidade a `LD_PRELOAD` e a binário de sistema trojanizado.
 ## Como isto é testado
 
 ```
-81 checks       cada um declara os próprios falsos positivos — é invariante de
+88 checks       cada um declara os próprios falsos positivos — é invariante de
                 registro, não disciplina: sem eles o programa nem inicia
-145 cenários    a CLI de verdade, contra /proc de verdade: debian 12 e alpine
+151 cenários    a CLI de verdade, contra /proc de verdade: debian 12 e alpine
                 como matriz, centos 7 e debian 9 para userland de época (rpm,
                 systemd de outra geração), e microVM com kernel PRÓPRIO — 3.18,
                 4.14 e i686 — para o que contêiner nenhum alcança, porque
@@ -272,8 +274,16 @@ incluindo o silêncio. Um check que nunca foi visto CALAR não foi demonstrado.
 
 ## Documentação
 
-| arquivo | o que é |
-| --- | --- |
-| [`SPEC.md`](SPEC.md) | a especificação: o que é, o que não é, e por quê |
-| [`TASKS.md`](TASKS.md) | o registro de cada unidade de trabalho — as decisões e os defeitos que a suíte achou |
-| [`ATTACK.md`](ATTACK.md) | cobertura contra a matriz Linux do MITRE ATT&CK — e a lista de LACUNAS, que é o produto que importa ali |
+O registro das decisões é o **histórico do git**. Cada commit diz o que mudou,
+o que aquilo quebrava antes e por que a correção é essa — inclusive os defeitos
+que a suíte achou e os que só apareceram rodando a ferramenta no host de quem a
+escreveu.
+
+```sh
+git log                       # a história, com o porquê de cada unidade
+aletheia checks               # o catálogo: id, §ref, requires, falsos positivos
+aletheia <comando> --help     # as flags, que são documentação e não saída gerada
+```
+
+O `--help` e o `checks` são a referência de uso: eles vivem no binário, então
+não têm como divergir dele.

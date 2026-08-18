@@ -10,6 +10,7 @@ package scenario
 //	I1  o censo, com o teto e o padrão nomeados
 //	I2  o dossiê de um processo cujo nome mente
 //	I3  o censo de REDE, com o leque de saída nomeado
+//	I4  a varredura de PORTAS, que entrava com o rótulo benigno de "pool"
 
 func init() {
 	Register(Scenario{
@@ -105,5 +106,41 @@ func init() {
 		},
 		// O censo não conclui nada: não há achado, e portanto não há exit != 0.
 		Exit: 0,
+	})
+
+	Register(Scenario{
+		ID:   "I4-varredura-de-portas-nao-eh-pool",
+		Desc: "um processo abrindo dezesseis PORTAS do mesmo host: é varredura, e entrava como pool de conexão",
+		// A forma transposta do leque, e a que um scanner produz. Ela era
+		// rotulada como "pool — a forma normal de cliente de banco", porque a
+		// condição do pool olhava só o número de ENDEREÇOS distintos e
+		// dezesseis portas do mesmo host somam um endereço.
+		//
+		// O defeito apareceu rodando um scan de portas contra o próprio
+		// loopback e lendo a saída — não numa revisão de código.
+		Images: []string{"debian:12"},
+		Cmd:    "info",
+		Args:   []string{"net"},
+		Plant: `for p in 1521 2375 3306 3389 5432 5601 5900 6379 7001 8080 9200 9300 11211 15672 27017 8443; do
+				/helper listen 127.0.0.1:$p &
+			done
+			sleep 0.5
+			/helper connect 127.0.0.1:1521 127.0.0.1:2375 127.0.0.1:3306 \
+				127.0.0.1:3389 127.0.0.1:5432 127.0.0.1:5601 127.0.0.1:5900 \
+				127.0.0.1:6379 127.0.0.1:7001 127.0.0.1:8080 127.0.0.1:9200 \
+				127.0.0.1:9300 127.0.0.1:11211 127.0.0.1:15672 127.0.0.1:27017 \
+				127.0.0.1:8443 &
+			sleep 1`,
+		ExpectOutput: []string{
+			"VARREDURA DE PORTAS",
+			"16 portas distintas",
+			"cliente legítimo fala com duas ou três portas de um host",
+			// As portas alcançadas dizem o que a varredura procurava.
+			"3306",
+			"27017",
+		},
+		// E o rótulo benigno NÃO pode sair: era ele o defeito.
+		ForbidOutput: []string{"POOL"},
+		Exit:         0,
 	})
 }

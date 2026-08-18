@@ -114,25 +114,6 @@ func TestLequeDeServicoVemAntesDoDeWeb(t *testing.T) {
 	}
 }
 
-// Muitas conexões para UM destino é pool, não leque — e a diferença manda o
-// operador para lugares opostos.
-func TestMuitasConexoesParaUmDestinoEhPool(t *testing.T) {
-	var socks []facts.Socket
-	for i := 0; i < 30; i++ {
-		socks = append(socks, sockOut(800, "10.0.0.9", 5432, facts.ScopePrivate))
-	}
-	f := hostComRede(socks, []facts.Process{
-		{PID: 800, Exe: "/usr/bin/app", Comm: "app"},
-	})
-	c := CensoDaRede(f)
-	if len(c.Padroes) != 1 || c.Padroes[0].Tipo != "pool" {
-		t.Fatalf("padrões = %+v", c.Padroes)
-	}
-	if c.Saida[0].Destinos != 1 {
-		t.Errorf("trinta conexões para um endereço são UM destino: %+v", c.Saida[0])
-	}
-}
-
 // SO_REUSEPORT: um serviço divide a porta entre vários descritores, e o `ss`
 // imprime uma linha por descritor. Um nginx com doze workers parecia doze
 // portas abertas.
@@ -239,4 +220,66 @@ func itoaT(n int) string {
 		return string(rune('0' + n))
 	}
 	return string(rune('0'+n/10)) + string(rune('0'+n%10))
+}
+
+// A varredura de PORTAS entrava como "pool" — o rótulo BENIGNO.
+//
+// A condição do pool olhava só o número de ENDEREÇOS distintos, e dezesseis
+// portas do mesmo host somam um endereço. A ferramenta dava nome de cliente de
+// banco para a forma exata de um scanner. Foi achado rodando um scan de portas
+// contra o próprio loopback e lendo a saída.
+func TestVarreduraDePortasNaoEhChamadaDePool(t *testing.T) {
+	portas := []int{1521, 2375, 3306, 3389, 5432, 5601, 5900, 6379, 7001, 8080,
+		9200, 9300, 11211, 15672, 27017, 8443}
+	var socks []facts.Socket
+	for _, p := range portas {
+		socks = append(socks, sockOut(900, "10.0.0.9", p, facts.ScopePrivate))
+	}
+	f := hostComRede(socks, []facts.Process{{PID: 900, Exe: "/opt/scanner/bin/explorer"}})
+
+	c := CensoDaRede(f)
+	var varredura, pool *Padrao
+	for i := range c.Padroes {
+		switch c.Padroes[i].Tipo {
+		case "varredura de portas":
+			varredura = &c.Padroes[i]
+		case "pool":
+			pool = &c.Padroes[i]
+		}
+	}
+	if pool != nil {
+		t.Errorf("dezesseis PORTAS de um host não são pool de conexão: %+v", pool)
+	}
+	if varredura == nil {
+		t.Fatalf("padrões = %+v", c.Padroes)
+	}
+	if varredura.N != len(portas) {
+		t.Errorf("N = %d, queria %d", varredura.N, len(portas))
+	}
+	// As portas alcançadas dizem o que a varredura PROCURAVA, e é isso que
+	// separa inventário de caça a banco exposto.
+	if !strings.Contains(varredura.Detalhe, "3306") {
+		t.Errorf("a amostra de portas precisa aparecer: %q", varredura.Detalhe)
+	}
+	// E o agrupamento continua: um destino, mesmo com dezesseis endpoints.
+	if c.Saida[0].Destinos != 1 || c.Saida[0].Endpoints != len(portas) {
+		t.Errorf("destinos=%d endpoints=%d — são os dois números que separam as "+
+			"três formas", c.Saida[0].Destinos, c.Saida[0].Endpoints)
+	}
+}
+
+// E o pool de verdade continua sendo pool: mesmo endereço E mesma porta.
+func TestPoolDeVerdadeEhMesmoEndpoint(t *testing.T) {
+	var socks []facts.Socket
+	for i := 0; i < 30; i++ {
+		socks = append(socks, sockOut(800, "10.0.0.9", 5432, facts.ScopePrivate))
+	}
+	f := hostComRede(socks, []facts.Process{{PID: 800, Exe: "/usr/bin/app"}})
+	c := CensoDaRede(f)
+	if len(c.Padroes) != 1 || c.Padroes[0].Tipo != "pool" {
+		t.Fatalf("padrões = %+v", c.Padroes)
+	}
+	if !c.Padroes[0].Comum {
+		t.Error("pool é a forma normal de cliente de banco: precisa vir marcado")
+	}
 }

@@ -3,6 +3,7 @@ package info
 import (
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/lex0c/aletheia/internal/facts"
 )
@@ -67,11 +68,17 @@ type Escuta struct {
 type Falante struct {
 	Executavel string
 	Conexoes   int
-	// Destinos é quantos endereços DISTINTOS — é a diferença entre um pool
-	// (muitas conexões, um destino) e um leque (uma conexão, muitos destinos).
-	Destinos int
-	Publicos int
-	Portas   []Contagem
+	// Destinos é quantos ENDEREÇOS distintos, e Endpoints quantos pares
+	// endereço:porta distintos. Os dois números juntos é que separam as três
+	// formas, e usar só o primeiro rotulava varredura de porta como pool:
+	//
+	//	pool       muitas conexões, UM endpoint      (10.0.0.9:5432)
+	//	leque      muitos destinos, uma porta        (N hosts na 22)
+	//	varredura  UM destino, muitas portas         (10.0.0.9 em 16 portas)
+	Destinos  int
+	Endpoints int
+	Publicos  int
+	Portas    []Contagem
 }
 
 // TetoDeRede é um limite com a ocupação medida contra ele.
@@ -102,8 +109,14 @@ var portasDeWeb = map[int]bool{80: true, 443: true, 8080: true, 8443: true}
 // leque. Abaixo disso é uso normal — dois ou três destinos é qualquer cliente.
 const minLeque = 8
 
-// minPool é quantas conexões para o MESMO destino antes de chamar de pool.
+// minPool é quantas conexões para o MESMO endpoint antes de chamar de pool.
 const minPool = 8
+
+// minVarredura é quantas portas DISTINTAS no mesmo destino antes de chamar de
+// varredura. Cliente legítimo fala com duas ou três portas de um host —
+// aplicação mais métricas, banco mais réplica. Oito é a faixa em que a
+// explicação inocente acaba.
+const minVarredura = 8
 
 // CensoDaRede monta o retrato. É puro sobre os fatos: os mesmos números saem de
 // um host vivo e de um retrato coletado semanas atrás.
@@ -116,6 +129,8 @@ func CensoDaRede(f *facts.Facts) *CensoDeRede {
 	escutas := map[string]*Escuta{}
 	destinosDe := map[string]map[string]bool{}
 	portasDe := map[string]map[int]int{}
+	endpointsDe := map[string]map[string]bool{}
+	portasPorIP := map[string]map[string]map[int]bool{}
 
 	for i := range f.Sockets {
 		s := &f.Sockets[i]
@@ -157,6 +172,8 @@ func CensoDaRede(f *facts.Facts) *CensoDeRede {
 				porExe[exe] = fl
 				destinosDe[exe] = map[string]bool{}
 				portasDe[exe] = map[int]int{}
+				endpointsDe[exe] = map[string]bool{}
+				portasPorIP[exe] = map[string]map[int]bool{}
 			}
 			fl.Conexoes++
 			if s.PeerScope == facts.ScopePublic {
@@ -164,6 +181,11 @@ func CensoDaRede(f *facts.Facts) *CensoDeRede {
 			}
 			destinosDe[exe][s.PeerIP] = true
 			portasDe[exe][s.PeerPort]++
+			endpointsDe[exe][s.Peer()] = true
+			if portasPorIP[exe][s.PeerIP] == nil {
+				portasPorIP[exe][s.PeerIP] = map[int]bool{}
+			}
+			portasPorIP[exe][s.PeerIP][s.PeerPort] = true
 		case facts.DirIn:
 			if s.PeerIP != "" {
 				origens[s.PeerIP]++
@@ -176,6 +198,7 @@ func CensoDaRede(f *facts.Facts) *CensoDeRede {
 	}
 	for exe, fl := range porExe {
 		fl.Destinos = len(destinosDe[exe])
+		fl.Endpoints = len(endpointsDe[exe])
 		fl.Portas = ordenarContagens(portasNomeadas(portasDe[exe]))
 		c.Saida = append(c.Saida, *fl)
 	}
@@ -207,7 +230,7 @@ func CensoDaRede(f *facts.Facts) *CensoDeRede {
 	c.PorEstado = ordenarContagens(mapaParaContagens(estados))
 	c.Entrada = ordenarContagens(mapaParaContagens(origens))
 	c.Tetos = tetosDaRede(f, estados)
-	c.Padroes = padroesDeRede(f, porExe, destinosDe, portasDe)
+	c.Padroes = padroesDeRede(f, porExe, portasDe, portasPorIP)
 	return c
 }
 
@@ -246,8 +269,8 @@ func tetosDaRede(f *facts.Facts, estados map[string]int) []TetoDeRede {
 func padroesDeRede(
 	f *facts.Facts,
 	porExe map[string]*Falante,
-	destinosDe map[string]map[string]bool,
 	portasDe map[string]map[int]int,
+	portasPorIP map[string]map[string]map[int]bool,
 ) []Padrao {
 	var out []Padrao
 	exes := make([]string, 0, len(porExe))
@@ -277,13 +300,37 @@ func padroesDeRede(
 			})
 		}
 
-		// POOL: muitas conexões para o MESMO destino.
-		if fl := porExe[exe]; fl.Conexoes >= minPool && fl.Destinos == 1 {
+		// VARREDURA DE PORTAS: um destino, muitas PORTAS distintas.
+		//
+		// É a forma transposta do leque, e é a que um scanner produz. Ela
+		// entrava aqui como "pool" — o rótulo BENIGNO —, porque a condição do
+		// pool olhava só o número de endereços distintos e dezesseis portas do
+		// mesmo host somam um endereço. A ferramenta dava nome de cliente de
+		// banco para a forma exata de uma varredura.
+		for _, ip := range ordenarChaves(portasPorIP[exe]) {
+			portas := portasPorIP[exe][ip]
+			if len(portas) < minVarredura {
+				continue
+			}
 			out = append(out, Padrao{
-				Tipo:    "pool",
-				Alvo:    exe + " → " + strconv.Itoa(fl.Conexoes) + " conexões a um destino só",
-				N:       fl.Conexoes,
-				Detalhe: "muitas conexões para UM destino é pool de conexão, e é a forma normal de cliente de banco, de fila e de cache",
+				Tipo: "varredura de portas",
+				Alvo: exe + " → " + strconv.Itoa(len(portas)) + " portas distintas em " + ip,
+				N:    len(portas),
+				Detalhe: "muitas PORTAS num mesmo destino é a forma de varredura: " +
+					"cliente legítimo fala com duas ou três portas de um host, não com " +
+					"dezenas. " + amostraDePortas(portas),
+			})
+		}
+
+		// POOL: muitas conexões para o MESMO endpoint — endereço E porta.
+		if fl := porExe[exe]; fl.Conexoes >= minPool && fl.Endpoints == 1 {
+			out = append(out, Padrao{
+				Tipo:  "pool",
+				Alvo:  exe + " → " + strconv.Itoa(fl.Conexoes) + " conexões a um endereço:porta só",
+				N:     fl.Conexoes,
+				Comum: true,
+				Detalhe: "muitas conexões para UM endpoint é pool de conexão, e é a " +
+					"forma normal de cliente de banco, de fila e de cache",
 			})
 		}
 	}
@@ -387,4 +434,38 @@ func exeDoPID(f *facts.Facts, pid int) string {
 		return p.Comm
 	}
 	return ""
+}
+
+// ordenarChaves dá ordem fixa a um mapa por endereço: sem isto, duas execuções
+// do mesmo retrato listam os padrões embaralhados.
+func ordenarChaves(m map[string]map[int]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// amostraDePortas nomeia algumas das portas alcançadas. São elas que dizem o
+// que a varredura procurava — a lista de um scanner de inventário e a de quem
+// caça banco exposto não se parecem.
+func amostraDePortas(portas map[int]bool) string {
+	ns := make([]int, 0, len(portas))
+	for p := range portas {
+		ns = append(ns, p)
+	}
+	sort.Ints(ns)
+	const teto = 10
+	corte := ns
+	sufixo := ""
+	if len(ns) > teto {
+		corte = ns[:teto]
+		sufixo = " …"
+	}
+	partes := make([]string, 0, len(corte))
+	for _, p := range corte {
+		partes = append(partes, strconv.Itoa(p))
+	}
+	return "portas: " + strings.Join(partes, " ") + sufixo
 }

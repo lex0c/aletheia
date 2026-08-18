@@ -64,7 +64,11 @@ type Facts struct {
 	Grupos        []Grupo        `json:"groups,omitempty"`
 	Sudoers       []SudoRule     `json:"sudoers,omitempty"`
 	Suid          []SuidFile     `json:"suid,omitempty"`
-	Modules       []ModuleConf   `json:"modules,omitempty"`
+	// Vigias é quem observa ARQUIVO por inotify ou fanotify. É a resposta para
+	// "removi o backdoor e ele voltou": quem recria o arquivo apagado precisa
+	// saber que ele sumiu, e é assim que sabe.
+	Vigias  []Vigia      `json:"file_watchers,omitempty"`
+	Modules []ModuleConf `json:"modules,omitempty"`
 	// AlvosDeRoot são os caminhos que algo executa COMO ROOT, com o que o inode
 	// diz sobre quem pode alterá-los (runbook §36.4).
 	AlvosDeRoot []AlvoDeRoot `json:"root_targets,omitempty"`
@@ -270,6 +274,13 @@ func Collect(e *env.Env) *Facts {
 		collectHashesIOC(f, e)
 	} else {
 		f.partial("persist", e.Reason(env.CapFilesystem))
+	}
+
+	// POR ÚLTIMO: quem vigia arquivo precisa dos fds já lidos E do inventário
+	// de caminhos que os outros coletores montaram — é contra ele que os
+	// inodes observados ganham nome.
+	if e.Has(env.CapProcfs) {
+		collectVigias(f, e)
 	}
 
 	f.Index()

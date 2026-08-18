@@ -1013,6 +1013,57 @@ func init() {
 		Exit:         2,
 	})
 
+	Register(Scenario{
+		ID:   "74-vigia-de-arquivo-que-recria",
+		Desc: "processo sem dono de pacote vigiando /etc/cron.d: é assim que o backdoor removido volta",
+		// A frase que este check existe para explicar: "removi o backdoor e ele
+		// voltou". Quem recria o arquivo apagado precisa SABER que ele sumiu, e
+		// vigia o DIRETÓRIO — que é o que sobrevive ao `rm`.
+		//
+		// O vigia não abre porta, não tem cron e não tem unit: nenhum outro
+		// check desta ferramenta o alcança.
+		Images: matriz,
+		// Os dois diretórios são CRIADOS antes: um watch em caminho ausente
+		// falha, e o helper morre em vez de fingir que vigiou — foi assim que
+		// a primeira versão deste cenário passou por não ter vigia nenhum.
+		Plant: `mkdir -p /usr/local/sbin /etc/cron.d /etc/ssh
+			cp /helper /usr/local/sbin/.sync
+			/usr/local/sbin/.sync vigia /etc/cron.d /etc/ssh &
+			sleep 0.5`,
+		Expect: []Expect{
+			{ID: "persist.file_watch", Sev: "CRITICAL", Evidence: "/etc/cron.d"},
+			{ID: "persist.file_watch", Evidence: "nenhum pacote reivindica"},
+		},
+		// O passo que evita o "voltou" é NextStep, e NextStep só sai no
+		// relatório detalhado — a asserção precisa do -v para alcançá-lo.
+		Args:         []string{"-v"},
+		ExpectOutput: []string{"ANTES de apagar", "recriá-lo antes de a próxima linha"},
+		Exit:         2,
+	})
+
+	Register(Scenario{
+		ID:   "74b-vigia-fora-de-persistencia-nao-acusa",
+		Desc: "o contrapeso: o MESMO binário sem dono, vigiando cache em vez de persistência, não pode virar achado",
+		// Metade nenhuma basta sozinha, e este cenário trava a que dá para
+		// construir num contêiner: sem alvo de PERSISTÊNCIA não há achado.
+		//
+		// Vigiar arquivo é comum — systemd, portais de desktop, indexadores e
+		// agentes de configuração fazem isso o tempo todo. Um check que
+		// acusasse o ESTADO encheria o relatório em todo host com interface
+		// gráfica, e um check que fala sempre é um check que ninguém lê.
+		Images: matriz,
+		Plant: `mkdir -p /usr/local/sbin /var/cache/app
+			cp /helper /usr/local/sbin/.sync
+			/usr/local/sbin/.sync vigia /var/cache/app &
+			sleep 0.5`,
+		Forbid: []string{"persist.file_watch"},
+		Exit:   -1,
+		// Orçamento de ruído MEDIDO: o binário sem dono em /usr/local/sbin
+		// continua sendo achado de propriedade (§24), e isso é correto — o que
+		// este cenário afirma é o silêncio do §7.12.
+		MaxWarn: 2,
+	})
+
 	// ---------------------------------------------------------------- modo image
 
 	Register(Scenario{

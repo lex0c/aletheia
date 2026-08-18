@@ -299,6 +299,14 @@ func main() {
 		die(mapRWX())
 		hold()
 
+	case "vigia":
+		// Um watch de inotify nos caminhos dados. É a forma do "removi e
+		// voltou": quem recria o arquivo apagado precisa saber que ele sumiu, e
+		// vigia o DIRETÓRIO, que sobrevive ao `rm`.
+		need(3)
+		die(vigiarArquivos(os.Args[2:]))
+		hold()
+
 	case "pacote":
 		die(pacoteSemBPF())
 		hold()
@@ -592,4 +600,22 @@ func die(err error) {
 
 func put32(b []byte, v uint32) {
 	b[0], b[1], b[2], b[3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
+}
+
+// vigiarArquivos abre um inotify e registra um watch por caminho. O descritor
+// fica aberto enquanto o processo viver — é o que a varredura enxerga em
+// /proc/<pid>/fdinfo.
+func vigiarArquivos(caminhos []string) error {
+	fd, err := syscall.InotifyInit1(0)
+	if err != nil {
+		return err
+	}
+	for _, c := range caminhos {
+		// IN_CREATE|IN_DELETE|IN_MOVED_TO: exatamente o que interessa a quem
+		// espera o arquivo sumir para recriá-lo.
+		if _, err := syscall.InotifyAddWatch(fd, c, 0x100|0x200|0x80); err != nil {
+			return err
+		}
+	}
+	return nil
 }

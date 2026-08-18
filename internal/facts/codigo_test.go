@@ -776,3 +776,92 @@ func TestAllFSAlcancaForaDosWebRoots(t *testing.T) {
 		t.Fatalf("--all-fs tinha de alcançar o docroot fora da lista: %+v", f2.CodigoSuspeito)
 	}
 }
+
+// A precisão de taint da 5ª rodada, medida contra WordPress core e o review:
+// propagação var→var (FN), coerção numérica (sanitizador provável), callback
+// indexado por registro (FP do wp-admin), guard in_array com OR (FN), e a
+// chamada dinâmica do JS (que não é RCE).
+
+// Propagação: `request -> var -> var -> sink` é fluxo, e passava. `$x=f($x)`
+// MANTÉM taint (webshell base64), só coerção numérica limpa.
+func TestPropagacaoDeTaintEntreVariaveis(t *testing.T) {
+	crit := map[string]string{
+		"alias simples":    "<?php\n$a=$_GET['cmd'];\n$b=$a;\nsystem($b);",
+		"alias em cadeia":  "<?php\n$a=$_POST['c'];\n$b=$a;\n$c=$b;\nsystem($c);",
+		"decode preserva":  "<?php\n$x=$_POST['x'];\n$x=base64_decode($x);\neval($x);",
+		"funcao nao limpa": "<?php\n$x=$_GET['x'];\n$x=str_rot13($x);\nsystem($x);",
+	}
+	for n, src := range crit {
+		if !tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("%s: fluxo request->var->var->sink É crítico: %+v", n, analisarConteudo(src, "php"))
+		}
+	}
+	naoCrit := map[string]string{
+		// reatribuído a valor limpo
+		"limpo literal": "<?php\n$x=$_GET['x'];\n$x='date';\nsystem($x);",
+		// coerção numérica prova que virou número — mata injeção
+		"intval":        "<?php\n$id=intval($_GET['id']);\ninclude(\"p$id.php\");",
+		"number_format": "<?php\n$x=$_GET['n'];\n$x=number_format($x,0,\"\",\"\");\neval($x);",
+		"cast int":      "<?php\n$n=(int)$_GET['n'];\nsystem($n);",
+	}
+	for n, src := range naoCrit {
+		if tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("%s: valor limpo/numérico NÃO é crítico: %+v", n, analisarConteudo(src, "php"))
+		}
+	}
+}
+
+// Callback indexado por REGISTRO (`$reg[$_GET]`) é dispatch, não RCE — o FP do
+// wp-admin/admin.php do WordPress core. Mas o request DIRETO no callable é RCE.
+func TestCallbackIndexadoPorRegistro(t *testing.T) {
+	wp := "<?php\n$importer=$_GET['import'];\nif(!isset($wp_importers[$importer])||!is_callable($wp_importers[$importer][2])){exit;}\ncall_user_func($wp_importers[$importer][2]);"
+	if tem(analisarConteudo(wp, "php"), 2, "") {
+		t.Errorf("call_user_func sobre registro indexado por request é dispatch, não RCE: %+v", analisarConteudo(wp, "php"))
+	}
+	if !tem(analisarConteudo(wp, "php"), 1, "dispatch") {
+		t.Errorf("mas continua merecendo leitura (tier 1): %+v", analisarConteudo(wp, "php"))
+	}
+	// o callable DIRETO do request continua RCE:
+	for _, src := range []string{
+		`<?php call_user_func($_GET['f'], $a);`,
+		`<?php $fn=$_GET['f']; call_user_func($fn);`,
+		`<?php call_user_func("action".$_POST['a']);`, // WSO
+	} {
+		if !tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("callable derivado direto do request É RCE: %q -> %+v", src, analisarConteudo(src, "php"))
+		}
+	}
+}
+
+// in_array sob OR não é guard: o atacante entra pelo outro lado do `||`.
+func TestInArrayComOrNaoRebaixa(t *testing.T) {
+	src := "<?php\n$fn=$_GET['fn'];\nif(in_array($fn,['a','b']) || $_GET['bypass']){ $fn(); }"
+	if !tem(analisarConteudo(src, "php"), 2, "") {
+		t.Errorf("in_array || bypass NÃO é guard, continua RCE: %+v", analisarConteudo(src, "php"))
+	}
+	// mas o in_array sozinho continua rebaixando:
+	ok := "<?php\n$fn=$_GET['fn'];\nif(in_array($fn,['a','b'],true)){ $fn(); }"
+	if tem(analisarConteudo(ok, "php"), 2, "") {
+		t.Errorf("in_array sozinho ainda é guard: %+v", analisarConteudo(ok, "php"))
+	}
+}
+
+// JS: `fn()` onde fn é string do request NÃO é RCE (string não é chamável).
+func TestJSChamadaDinamicaNaoEhCritica(t *testing.T) {
+	if tem(analisarConteudo("const fn = req.query.fn;\nfn();", "js"), 2, "") {
+		t.Error("chamada dinâmica de variável em JS não é RCE (string não roda)")
+	}
+	// mas os sinks reais de JS continuam:
+	if !tem(analisarConteudo("eval(req.body.payload)", "js"), 2, "") {
+		t.Error("eval(req.body) em JS continua crítico")
+	}
+}
+
+// wp-admin/plugins.php: `$s(` dentro de `'%2$s (...'` (aspa simples) não é
+// chamada — a visão de taint apaga o interior da aspa simples.
+func TestPlaceholderSprintfNaoEhChamadaDinamica(t *testing.T) {
+	src := "<?php\n$s = $_REQUEST['s'];\necho sprintf('%1$s by %2$s (x)', $a, $b);"
+	if tem(analisarConteudo(src, "php"), 2, "") {
+		t.Errorf("$s dentro de string de formato não é chamada dinâmica: %+v", analisarConteudo(src, "php"))
+	}
+}

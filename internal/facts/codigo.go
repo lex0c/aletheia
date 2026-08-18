@@ -96,6 +96,12 @@ type defsCodigo struct {
 	// variáveis usadas dentro dos argumentos de um sink.
 	atribui *regexp.Regexp
 	varTok  *regexp.Regexp
+	// sanNum casa um RHS que é COERÇÃO NUMÉRICA (`intval`, `number_format`,
+	// `(int)`…): o resultado é um número, o que mata injeção de código/caminho
+	// mesmo sobre $_GET. É a ÚNICA sanitização reconhecida — coerção numérica é
+	// prova, função genérica não é (o review foi explícito: `$x=f($x)` mantém
+	// taint, senão um `$x=base64_decode($x)` de webshell escaparia).
+	sanNum *regexp.Regexp
 	// dynAbre casa uma CHAMADA por variável, `$var(` ou `var(`, capturando o
 	// nome no grupo 1 — para pegar `$fn = $_GET['f']; $fn(...)`. `new $var()` é
 	// instanciação (vulnerabilidade de object injection, não backdoor) e é
@@ -130,6 +136,7 @@ var defsPHP = defsCodigo{
 	atribui:  regexp.MustCompile(`(\$\w+)\s*=\s*([^;]{0,400})`),
 	varTok:   regexp.MustCompile(`\$\w+`),
 	dynAbre:  regexp.MustCompile(`(\$\w+)\s*\(`),
+	sanNum:   regexp.MustCompile(`^\s*@?\s*(?:\(\s*(?:int|integer|float|double|real|bool|boolean)\s*\)|(?:intval|floatval|doubleval|boolval|number_format|count|sizeof|strlen|mb_strlen|abs|intdiv|round|ceil|floor|hexdec|bindec|octdec|ip2long|crc32)\s*\()`),
 	// `switch ($do) {` e `in_array($fn, ` — o resto da validação (rótulos
 	// literais, ausência de `default`, lista fixa) é feita no motor.
 	switchAbre: regexp.MustCompile(`\bswitch\s*\(\s*(\$\w+)\s*\)\s*\{`),
@@ -159,13 +166,16 @@ var defsPHP = defsCodigo{
 }
 
 var defsJS = defsCodigo{
-	sinkAbre:   regexp.MustCompile(`\b(?:eval|` + jsSinks + `)\s*\(|new\s+Function\s*\(|\bvm\.run\w+\s*\(`),
-	inputRem:   regexp.MustCompile(jsRemota),
-	inputLoc:   regexp.MustCompile(jsLocal),
-	atribui:    regexp.MustCompile(`\b(\w+)\s*=\s*([^;\n]{0,400})`),
-	varTok:     regexp.MustCompile(`\b\w+\b`),
-	dynAbre:    regexp.MustCompile(`\b(\w+)\s*\(`),
+	sinkAbre: regexp.MustCompile(`\b(?:eval|` + jsSinks + `)\s*\(|new\s+Function\s*\(|\bvm\.run\w+\s*\(`),
+	inputRem: regexp.MustCompile(jsRemota),
+	inputLoc: regexp.MustCompile(jsLocal),
+	atribui:  regexp.MustCompile(`\b(\w+)\s*=\s*([^;\n]{0,400})`),
+	varTok:   regexp.MustCompile(`\b\w+\b`),
+	// SEM dynAbre em JS: `fn()` onde fn é string do request NÃO é RCE — string
+	// não é chamável em JS (dá TypeError). O `$fn()` do PHP é que roda a função
+	// nomeada. Manter dynAbre aqui só rendia FP (`const fn=req.query.fn; fn()`).
 	switchAbre: regexp.MustCompile(`\bswitch\s*\(\s*(\w+)\s*\)\s*\{`),
+	sanNum:     regexp.MustCompile(`^\s*(?:Number|parseInt|parseFloat)\s*\(`),
 	suspeito: []regraDeCodigo{
 		mustDup(1, "eval presente", `\beval\s*\(`),
 		mustDup(1, "new Function — eval por outro nome", `new\s+Function\s*\(`),
@@ -179,6 +189,7 @@ var defsPy = defsCodigo{
 	inputLoc: regexp.MustCompile(pyLocal),
 	atribui:  regexp.MustCompile(`\b(\w+)\s*=\s*([^;\n]{0,400})`),
 	varTok:   regexp.MustCompile(`\b\w+\b`),
+	sanNum:   regexp.MustCompile(`^\s*(?:int|float|len|abs|round|ord)\s*\(`),
 	suspeito: []regraDeCodigo{
 		mustDup(1, "exec/eval presente", `\b(?:eval|exec)\s*\(`),
 		mustDup(1, "subprocess com shell=True", `\bsubprocess\.\w+\s*\([^;\n]{0,200}shell\s*=\s*True`),
@@ -256,7 +267,10 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	// Comentário vira espaço (mesmo tamanho em bytes, quebras preservadas): os
 	// offsets continuam apontando para a linha certa no ORIGINAL, e um padrão
 	// dentro de `// exemplo: eval($_GET)` deixa de casar.
-	masc, crases := mascararComentarios(conteudo, lang)
+	// mascSig vê o interior das strings (blob base64, /e, crase); masc apaga o
+	// interior das aspas SIMPLES — é a visão que o motor de taint usa, para não
+	// casar `$var(` nem `$_GET` escritos dentro de uma string literal.
+	mascSig, masc, crases := mascararComentarios(conteudo, lang)
 
 	// Um achado por linha, o de maior tier: sink+entrada crítico ganha do eval
 	// solto na mesma linha.
@@ -284,9 +298,20 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 		atrib          bool
 		nome           string // atribuição: a var
 		classe         int    // atribuição: 2 remota | 1 local | 0 limpa
-		remDir, locDir bool   // sink: entrada direta no argumento balanceado
+		remDir, locDir bool   // sink: entrada direta na IDENTIDADE do callable
 		vars           []string
 		rotulo         string
+		// Callback (`call_user_func($reg[$k])`): a IDENTIDADE do callable é a
+		// base, sem subscrito. idxVars/idxRem guardam o que reachou o ÍNDICE: se
+		// só o índice é request, é dispatch por registro (tier 1), não execução
+		// arbitrária. Foi o FP do wp-admin/admin.php do WordPress core.
+		callback bool
+		idxVars  []string
+		idxRem   bool
+		// Atribuição: as variáveis do RHS, para propagar taint. `$b = $a` leva o
+		// taint de $a a $b; `$x = base64_decode($x)` o MANTÉM. Sem isto, um
+		// webshell `request -> var -> var -> sink` passava (FN pior que os FPs).
+		rhsVars []string
 	}
 	var evs []evento
 
@@ -305,13 +330,21 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 		if strings.HasPrefix(rhs, "=") || strings.HasPrefix(rhs, ">") {
 			continue
 		}
+		// Coerção numérica limpa o taint mesmo sobre $_GET: `intval($_GET['id'])`
+		// é um número, não roda código nem atravessa caminho. Única sanitização
+		// reconhecida — e sem propagar var do RHS.
+		if def.sanNum != nil && def.sanNum.MatchString(rhs) {
+			evs = append(evs, evento{off: m[0], atrib: true, nome: masc[m[2]:m[3]], classe: 0})
+			continue
+		}
 		classe := 0
 		if def.inputRem.MatchString(rhs) {
 			classe = 2
 		} else if def.inputLoc.MatchString(rhs) {
 			classe = 1
 		}
-		evs = append(evs, evento{off: m[0], atrib: true, nome: masc[m[2]:m[3]], classe: classe})
+		evs = append(evs, evento{off: m[0], atrib: true, nome: masc[m[2]:m[3]],
+			classe: classe, rhsVars: def.varTok.FindAllString(rhs, -1)})
 	}
 	// argCb 0 = o sink executa os argumentos inteiros; 1 ou 2 = só aquele
 	// argumento é a função executada (o callback).
@@ -325,10 +358,21 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 		if argCb > 0 {
 			args = argNoTopo(args, argCb)
 		}
-		e := evento{off: loc[0], vars: def.varTok.FindAllString(args, -1), rotulo: rotulo}
-		if def.inputRem.MatchString(args) {
+		e := evento{off: loc[0], rotulo: rotulo}
+		ident := args
+		if argCb > 0 {
+			// O que o callback EXECUTA é a base do callable, não o índice.
+			// `$wp_importers[$importer][2]` chama a entrada REGISTRADA em
+			// $wp_importers; $importer só a seleciona.
+			e.callback = true
+			e.idxVars = def.varTok.FindAllString(args, -1)
+			e.idxRem = def.inputRem.MatchString(args)
+			ident = semSubscritos(args)
+		}
+		e.vars = def.varTok.FindAllString(ident, -1)
+		if def.inputRem.MatchString(ident) {
 			e.remDir = true
-		} else if def.inputLoc.MatchString(args) {
+		} else if def.inputLoc.MatchString(ident) {
 			e.locDir = true
 		}
 		evs = append(evs, e)
@@ -377,7 +421,25 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	taint := map[string]marca{}
 	for _, e := range evs {
 		if e.atrib {
-			taint[e.nome] = marca{classe: e.classe, esc: escopos.em(e.off)}
+			esc := escopos.em(e.off)
+			classe := e.classe
+			// Propaga o taint das variáveis do RHS: `$b = $a` contamina $b, e
+			// `$x = f($x)` mantém $x — não tratamos função como sanitizador
+			// (o review foi explícito). Só do MESMO escopo, para não casar
+			// homônimas de funções diferentes.
+			for _, v := range e.rhsVars {
+				if v == e.nome {
+					if mk := taint[v]; mk.classe > classe {
+						classe = mk.classe // `$x = f($x)`: o $x ANTERIOR
+					}
+					continue
+				}
+				if mk := taint[v]; mk.classe > classe &&
+					(mk.esc == esc || escopos.importa(masc, esc, v)) {
+					classe = mk.classe
+				}
+			}
+			taint[e.nome] = marca{classe: classe, esc: esc}
 			continue
 		}
 		switch {
@@ -414,6 +476,25 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 					maior, rotulo = classe, rot
 				}
 			}
+			// Callback cuja IDENTIDADE está limpa mas o ÍNDICE é request: é
+			// dispatch por registro indexado pelo request (roteador, tabela de
+			// handlers registrados) — o atacante escolhe QUAL entrada roda, não
+			// executa o que quiser. Merece leitura (tier 1), não crítico.
+			if maior == 0 && e.callback {
+				idx := e.idxRem
+				for _, v := range e.idxVars {
+					if idx {
+						break
+					}
+					if mk := taint[v]; mk.classe >= 1 && (mk.esc == aqui || escopos.importa(masc, aqui, v)) {
+						idx = true
+					}
+				}
+				if idx {
+					maior, rotulo = 1, "callback indexado por request num registro "+
+						"(dispatch por chave, não execução arbitrária)"
+				}
+			}
 			if maior > 0 {
 				registrar(e.off, maior, rotulo)
 			}
@@ -430,19 +511,20 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 		if crases[i+1]-crases[i] > maxSpanCrase {
 			continue // par improvável: comando de shell não tem esse tamanho
 		}
-		if def.inputRem.MatchString(masc[crases[i]+1 : crases[i+1]]) {
+		if def.inputRem.MatchString(mascSig[crases[i]+1 : crases[i+1]]) {
 			registrar(crases[i], 2, "shell via crase sobre entrada de request")
 		}
 	}
 
-	// Construções fechadas (/e, include, ofuscação) — ordem-independentes.
+	// Construções fechadas (/e, include, ofuscação) — ordem-independentes. Leem
+	// a visão de ASSINATURA: o /e e o blob base64 moram DENTRO da string.
 	for _, r := range def.especiais {
-		for _, loc := range r.re.FindAllStringIndex(masc, -1) {
+		for _, loc := range r.re.FindAllStringIndex(mascSig, -1) {
 			registrar(loc[0], r.tier, r.rotulo)
 		}
 	}
 	for _, r := range def.suspeito {
-		for _, loc := range r.re.FindAllStringIndex(masc, -1) {
+		for _, loc := range r.re.FindAllStringIndex(mascSig, -1) {
 			registrar(loc[0], 1, r.rotulo)
 		}
 	}
@@ -798,6 +880,14 @@ func corpoDaCondicao(s string, pos int) (int, int) {
 		switch c {
 		case '\'', '"', '`':
 			str = c
+		case '|':
+			// `in_array(...) || $_GET['x']`: o OR deixa o corpo alcançável SEM
+			// a allowlist ser verdadeira. Não é guard — o atacante entra pelo
+			// outro lado. Sem certeza de que a lista é condição NECESSÁRIA, não
+			// rebaixa.
+			if prof == 0 && i+1 < limite && s[i+1] == '|' {
+				return -1, -1
+			}
 		case '(':
 			prof++
 		case ';', '{':
@@ -995,6 +1085,50 @@ func argNoTopo(args string, n int) string {
 	return ""
 }
 
+// semSubscritos apaga o conteúdo dos colchetes `[...]` de uma expressão, deixando
+// só a IDENTIDADE base. `$reg[$k]` -> `$reg`: para um callback, o que executa é
+// o que está no registro, não a chave. Pula string para um `]` dentro de "a]b"
+// não fechar cedo.
+func semSubscritos(s string) string {
+	b := []byte(s)
+	prof := 0
+	var str byte
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		if str != 0 {
+			if prof > 0 {
+				b[i] = ' '
+			}
+			if c == '\\' {
+				i++
+			} else if c == str {
+				str = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			if prof > 0 {
+				b[i] = ' '
+			}
+			str = c
+		case '[':
+			prof++
+			b[i] = ' '
+		case ']':
+			if prof > 0 {
+				prof--
+			}
+			b[i] = ' '
+		default:
+			if prof > 0 {
+				b[i] = ' '
+			}
+		}
+	}
+	return string(b)
+}
+
 // mascararComentarios troca comentário e INTERIOR de string por espaço,
 // preservando tamanho em bytes e quebras de linha — os offsets continuam
 // apontando para a linha certa no original.
@@ -1011,12 +1145,31 @@ func argNoTopo(args string, n int) string {
 // mascarador devolve TAMBÉM os offsets das crases que viu em posição de código:
 // só essas são shell_exec. A que aparece dentro de "..." é aspa de identificador
 // do MySQL, e quem sabe distinguir as duas é esta máquina de estados.
-func mascararComentarios(s, lang string) (string, []int) {
+//
+// Devolve DUAS visões, do mesmo tamanho em bytes:
+//
+//	masc     comentário apagado, interior de STRING visível — para os padrões de
+//	         ASSINATURA (blob base64, preg_replace /e), que leem dentro da string.
+//	mascCod  também apaga o interior de string ASPA-SIMPLES — para o motor de
+//	         TAINT. Aspa simples NÃO interpola em PHP/JS/Python, então `$s` lá
+//	         dentro é texto literal, não variável: apagá-lo mata o falso positivo
+//	         de `$s(` casado dentro de `'%1$s (...'` (medido no wp-admin do
+//	         WordPress) e o `$_GET` escrito dentro de uma string de log. A aspa
+//	         DUPLA fica visível nas duas, porque em PHP ela INTERPOLA — `system("ls
+//	         $_GET[x]")` é sink sobre request de verdade.
+func mascararComentarios(s, lang string) (masc, mascCod string, crases []int) {
 	b := []byte(s)
+	bc := append([]byte(nil), b...) // a visão do taint: aspa simples apagada
 	n := len(b)
 	branco := func(i int) {
 		if i < n && b[i] != '\n' {
 			b[i] = ' '
+			bc[i] = ' '
+		}
+	}
+	brancoCod := func(i int) {
+		if i < n && bc[i] != '\n' {
+			bc[i] = ' ' // só na visão do taint
 		}
 	}
 	const (
@@ -1038,7 +1191,6 @@ func mascararComentarios(s, lang string) (string, []int) {
 	if lang == "php" && strings.Contains(s, "<?") {
 		st = foraPHP
 	}
-	var crases []int
 	for i := 0; i < n; i++ {
 		c := b[i]
 		switch st {
@@ -1107,13 +1259,17 @@ func mascararComentarios(s, lang string) (string, []int) {
 				branco(i)
 			}
 		case aspaS:
-			// Dentro de string NÃO se branqueia (o blob base64 embutido e o
-			// conteúdo precisam ficar visíveis); só se rastreia o estado para o
-			// comentário não começar aqui. O escape pula o próximo char.
+			// Em masc o interior fica visível (blob base64, /e); em mascCod ele é
+			// apagado, porque aspa simples não interpola e o taint não deve ver
+			// `$var` nem `$_GET` escritos ali como código. O escape pula o char.
 			if c == '\\' {
+				brancoCod(i)
+				brancoCod(i + 1)
 				i++
 			} else if c == '\'' {
 				st = norm
+			} else {
+				brancoCod(i)
 			}
 		case aspaD:
 			if c == '\\' {
@@ -1129,7 +1285,8 @@ func mascararComentarios(s, lang string) (string, []int) {
 			}
 		}
 	}
-	return string(b), crases
+	masc, mascCod = string(b), string(bc)
+	return masc, mascCod, crases
 }
 
 // pulaHeredoc devolve o offset do FIM de um heredoc/nowdoc que começa no `<<<`
@@ -1320,12 +1477,12 @@ func collectCodigo(f *Facts, e *env.Env) {
 				rede = append(rede, m.Ponto+" ("+m.Tipo+")")
 			}
 		}
-		if len(rede) > 0 {
+		if n := len(rede); n > 0 {
 			sort.Strings(rede)
 			if len(rede) > 6 {
 				rede = append(rede[:6:6], "…")
 			}
-			f.denyPersist("codigo", "--all-fs: "+itoa(len(rede))+" montagem(ns) de "+
+			f.denyPersist("codigo", "--all-fs: "+itoa(n)+" montagem(ns) de "+
 				"REDE NÃO foram varridas (podem pendurar a varredura, e não são a FS "+
 				"deste host): "+strings.Join(rede, ", ")+". Aponte `scan --root` nelas "+
 				"se precisar")

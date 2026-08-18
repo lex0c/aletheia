@@ -76,10 +76,39 @@ Este binário **vira artefato na sua timeline**: é um ELF estático, fora de
 pacote, com `ctime` de agora — e a própria ferramenta vai reportá-lo assim para
 quem varrer o host depois.
 
-O certo é baixar numa máquina limpa e copiar para o alvo (`scp`, disco, `cat`
-por SSH). Baixar direto no host suspeito acrescenta uma conexão de rede e um
-arquivo novo à cena que você está tentando ler. E, em qualquer um dos casos,
-registre caminho e hash no war log (§39.3):
+O certo é baixar numa máquina limpa, conferir o hash **lá**, e só então copiar
+para o alvo. Baixar direto no host suspeito acrescenta uma conexão de rede e um
+arquivo novo à cena que você está tentando ler.
+
+```sh
+# na máquina LIMPA, depois do sha256sum -c da seção acima
+BIN=aletheia-linux-amd64
+
+# 1. scp — a rota comum. O destino NÃO é /tmp: ele é gravável por todos, e
+#    num host suspeito isso é uma janela para trocarem o binário entre a
+#    cópia e a execução
+scp "$BIN" ir@web01:~/aletheia
+ssh ir@web01 'chmod +x ~/aletheia'
+
+# 2. cat por SSH — quando não há scp nem sftp do outro lado
+ssh ir@web01 'cat > ~/aletheia && chmod +x ~/aletheia' < "$BIN"
+
+# 3. disco — quando o host não deve receber conexão NENHUMA, e o mesmo
+#    volume vai levar o --out do preserve de volta
+cp "$BIN" /mnt/externo/ir/
+```
+
+O disco tem uma vantagem que as outras duas rotas não têm: rodando o binário de
+lá, nenhum arquivo novo entra no filesystem do alvo — o artefato fica no seu
+volume, e não na timeline que você veio ler.
+
+```sh
+sudo /mnt/externo/ir/aletheia-linux-amd64 version
+```
+
+Em qualquer uma das três, confira o hash **de novo no alvo** e registre caminho
+e hash no war log (§39.3). A cópia é mais um lugar onde o arquivo pode mudar, e
+conferir só na origem não cobre isso:
 
 ```sh
 aletheia version     # imprime versão, caminho real e sha256 do próprio binário

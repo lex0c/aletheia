@@ -201,6 +201,7 @@ func collectSuid(f *Facts, e *env.Env) {
 		f:      f,
 		fila:   make([]tarefaDir, 0, 256),
 		limite: maxSuidDirs,
+		donos:  novoAcumuladorDeDonos(),
 	}
 
 	for _, raiz := range suidRaizes {
@@ -232,6 +233,13 @@ func collectSuid(f *Facts, e *env.Env) {
 	f.devPorPonto()
 
 	trab.rodar(e.Workers(maxSuidWorkers))
+
+	f.Donos = consolidarDonos(trab.donos)
+	if trab.donos.estourou {
+		f.denyPersist("suid", "mais de "+strconv.Itoa(maxDonosDistintos)+
+			" identidades distintas donas de arquivo: as excedentes NÃO foram "+
+			"contadas, e um dono sem conta pode estar entre elas")
+	}
 
 	if trab.truncado {
 		f.denyPersist("suid", "a varredura de SUID parou em "+
@@ -302,6 +310,11 @@ type varredura struct {
 	// existem no disco e NÃO foram examinadas, e isso precisa aparecer.
 	puladas []string
 
+	// donos acumula toda identidade numérica vista como dono de arquivo. Sai
+	// de graça: o stat que decide setuid já foi feito, e o uid vem no mesmo
+	// struct.
+	donos *acumuladorDeDonos
+
 	// negados são os diretórios que a varredura não conseguiu ABRIR. Sem esta
 	// lista, um galho inteiro sumia com a mesma cara de galho sem SUID — e
 	// /home costuma ser 0700 por usuário, que é justamente onde um setuid
@@ -357,6 +370,7 @@ func (v *varredura) terminou() {
 }
 
 func (v *varredura) visitar(t tarefaDir) {
+	var donosLocais resumoDeDonos
 	if suidPularCusto[t.dir] {
 		return
 	}
@@ -463,6 +477,17 @@ func (v *varredura) visitar(t tarefaDir) {
 		setuid := fi.Mode()&os.ModeSetuid != 0
 		setgid := fi.Mode()&os.ModeSetgid != 0
 
+		// O DONO de todo arquivo regular, e não só dos que têm privilégio: quem
+		// procura conta apagada procura o rastro que ela deixou em disco, e ele
+		// quase nunca está num binário setuid. O custo é zero — o stat acima já
+		// aconteceu.
+		if u, g := donoDe(fi); u >= 0 {
+			exec := fi.Mode()&0o111 != 0
+			sis := ehArvoreDeSistema(p)
+			donosLocais.ver(false, u, exec, sis, p)
+			donosLocais.ver(true, g, exec, sis, p)
+		}
+
 		// EXECUTÁVEL DENTRO DE DIRETÓRIO OCULTO, em árvore temporária.
 		//
 		// A varredura já percorre /tmp, /var/tmp e /dev/shm, então isto sai de
@@ -503,12 +528,14 @@ func (v *varredura) visitar(t tarefaDir) {
 	// Um bloqueio por DIRETÓRIO e não por entrada: com doze trabalhadores e
 	// centenas de milhares de arquivos, travar por arquivo transformaria o
 	// paralelismo em fila.
-	if len(novos) > 0 || len(achados) > 0 || len(fora) > 0 || len(achadosOcultos) > 0 {
+	if len(novos) > 0 || len(achados) > 0 || len(fora) > 0 ||
+		len(achadosOcultos) > 0 || len(donosLocais.itens) > 0 {
 		v.mu.Lock()
 		v.fila = append(v.fila, novos...)
 		v.f.Suid = append(v.f.Suid, achados...)
 		v.f.ExecOculto = append(v.f.ExecOculto, achadosOcultos...)
 		v.outroFS = append(v.outroFS, fora...)
+		v.donos.juntar(donosLocais.itens)
 		v.mu.Unlock()
 	}
 }

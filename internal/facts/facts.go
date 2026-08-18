@@ -48,22 +48,23 @@ type Facts struct {
 	Loader Loader `json:"loader"`
 	// HooksInterp são as variáveis que fazem um interpretador carregar código
 	// de terceiro — o LD_PRELOAD de quem não é ELF.
-	HooksInterp   []HookInterp   `json:"interpreter_hooks,omitempty"`
-	Units         []Unit         `json:"units,omitempty"`
-	ToolArtifacts []ToolArtifact `json:"tool_artifacts,omitempty"`
-	Cron          []CronEntry    `json:"cron,omitempty"`
-	SSH           SSHConfig      `json:"ssh"`
-	SSHKeys       []SSHKey       `json:"ssh_keys,omitempty"`
-	Triggers      []Trigger      `json:"triggers,omitempty"`
-	CACerts       []CACert       `json:"ca_certs,omitempty"`
-	Hosts         []HostEntry    `json:"hosts,omitempty"`
-	Resolver      Resolver       `json:"resolver"`
-	Pkg           PkgDB          `json:"pkg"`
-	Ownership     []Ownership    `json:"ownership,omitempty"`
-	Accounts      []Account      `json:"accounts,omitempty"`
-	Grupos        []Grupo        `json:"groups,omitempty"`
-	Sudoers       []SudoRule     `json:"sudoers,omitempty"`
-	Suid          []SuidFile     `json:"suid,omitempty"`
+	HooksInterp   []HookInterp    `json:"interpreter_hooks,omitempty"`
+	Units         []Unit          `json:"units,omitempty"`
+	ToolArtifacts []ToolArtifact  `json:"tool_artifacts,omitempty"`
+	Cron          []CronEntry     `json:"cron,omitempty"`
+	SSH           SSHConfig       `json:"ssh"`
+	SSHKeys       []SSHKey        `json:"ssh_keys,omitempty"`
+	Triggers      []Trigger       `json:"triggers,omitempty"`
+	CACerts       []CACert        `json:"ca_certs,omitempty"`
+	Hosts         []HostEntry     `json:"hosts,omitempty"`
+	Resolver      Resolver        `json:"resolver"`
+	Pkg           PkgDB           `json:"pkg"`
+	Ownership     []Ownership     `json:"ownership,omitempty"`
+	Accounts      []Account       `json:"accounts,omitempty"`
+	Grupos        []Grupo         `json:"groups,omitempty"`
+	Sudoers       []SudoRule      `json:"sudoers,omitempty"`
+	Suid          []SuidFile      `json:"suid,omitempty"`
+	Donos         []DonoDeArquivo `json:"file_owners,omitempty"`
 	// Vigias é quem observa ARQUIVO por inotify ou fanotify. É a resposta para
 	// "removi o backdoor e ele voltou": quem recria o arquivo apagado precisa
 	// saber que ele sumiu, e é assim que sabe.

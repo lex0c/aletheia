@@ -41,8 +41,13 @@ const maxLogDirs = 200
 func collectLogs(f *Facts, e *env.Env) {
 	var anda func(dir string, prof int)
 	visitados := 0
+	truncou := false
 	anda = func(dir string, prof int) {
-		if prof > 3 || visitados > maxLogDirs {
+		if visitados > maxLogDirs {
+			truncou = true
+			return
+		}
+		if prof > 3 {
 			return
 		}
 		visitados++
@@ -64,6 +69,15 @@ func collectLogs(f *Facts, e *env.Env) {
 	}
 	if e.IsDir("/var/log") {
 		anda("/var/log", 0)
+	}
+	if truncou {
+		// O inventário de log alimenta o buraco de rotação (§10), e "nenhum
+		// buraco" com a varredura cortada é a mesma frase que "não olhei". Sete
+		// dos nove tetos desta coleta já declaravam; este e o de bibliotecas
+		// mapeadas eram os dois que cortavam calados.
+		f.partial("logs", "a varredura de diretórios de log parou em "+
+			strconv.Itoa(maxLogDirs)+": o que estiver além NÃO foi inventariado, "+
+			"e buraco de rotação lá dentro não pôde ser visto")
 	}
 	sort.Slice(f.Logs, func(i, j int) bool {
 		if f.Logs[i].Base != f.Logs[j].Base {

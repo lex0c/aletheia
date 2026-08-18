@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -818,11 +819,19 @@ func readMaps(p *Process) {
 		return
 	}
 	defer fh.Close()
+	lerMaps(p, fh)
+}
 
-	sc := bufio.NewScanner(fh)
+// lerMaps percorre o maps EM FLUXO. Separado de readMaps pela mesma razão de
+// parseCgroup: o que decide alguma coisa aqui é o parsing e os TETOS, e
+// exercitá-los pelo /proc de verdade exigiria um processo com cento e trinta
+// bibliotecas para responder uma pergunta de contagem.
+func lerMaps(p *Process, r io.Reader) {
+	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 8192), 64*1024)
 
 	oddSeen := map[string]bool{}
+	libsTruncadas := false
 	n := 0
 	for sc.Scan() {
 		if n >= maxMapLines {
@@ -866,6 +875,16 @@ func readMaps(p *Process) {
 		// então nada mais a torna candidata à pergunta de propriedade.
 		if len(p.MapsLibs) < maxMapsLibs {
 			p.MapsLibs = append(p.MapsLibs, ps)
+		} else if !libsTruncadas {
+			// O comentário acima diz que esta é a ÚNICA fonte que torna uma
+			// biblioteca candidata à pergunta de propriedade — ela não executa,
+			// então nada mais a traz. Descartar em silêncio apaga a pergunta
+			// junto, e é exatamente a forma do Ebury: a libssh trocada NO LUGAR
+			// dela, com o nome certo.
+			libsTruncadas = true
+			p.Truncated = append(p.Truncated, "mais de "+strconv.Itoa(maxMapsLibs)+
+				" bibliotecas mapeadas: as demais NÃO entraram na pergunta de "+
+				"propriedade, e biblioteca não tem outra fonte que a torne candidata")
 		}
 		if isLibDir(ps) {
 			continue

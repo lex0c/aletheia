@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -235,5 +236,40 @@ func TestLacunaDeModuloExigeModuloCarregado(t *testing.T) {
 	declararLacunaDeModulos(f)
 	if len(f.Partial["modulo"]) != 0 {
 		t.Errorf("em contêiner a comparação não se aplica: %v", f.Partial["modulo"])
+	}
+}
+
+// Todo teto que corta precisa DIZER que cortou.
+//
+// A varredura por classe achou dois que não diziam, entre nove. O de
+// bibliotecas mapeadas é o pior dos dois: o comentário do próprio código diz
+// que aquela lista é a ÚNICA fonte que torna uma biblioteca candidata à
+// pergunta de propriedade — ela não executa, então nada mais a traz. Descartar
+// em silêncio apaga a pergunta junto, e é exatamente a forma do Ebury: a libssh
+// trocada NO LUGAR dela, com o nome certo.
+func TestTetoDeBibliotecasMapeadasDeclaraOCorte(t *testing.T) {
+	p := &Process{PID: 1}
+	// Uma linha de maps por biblioteca, além do teto.
+	var b strings.Builder
+	for i := 0; i < maxMapsLibs+5; i++ {
+		fmt.Fprintf(&b, "7f00%04x000-7f00%04x000 r-xp 00000000 08:01 100 /opt/app/lib%d.so\n", i, i, i)
+	}
+	lerMaps(p, strings.NewReader(b.String()))
+
+	if len(p.MapsLibs) != maxMapsLibs {
+		t.Errorf("guardou %d bibliotecas, o teto é %d", len(p.MapsLibs), maxMapsLibs)
+	}
+	var disse bool
+	for _, tr := range p.Truncated {
+		if strings.Contains(tr, "pergunta de propriedade") {
+			disse = true
+		}
+	}
+	if !disse {
+		t.Errorf("o corte não foi declarado: %v", p.Truncated)
+	}
+	// E declara UMA vez, não uma por biblioteca descartada.
+	if n := len(p.Truncated); n != 1 {
+		t.Errorf("declarou %d vezes: cinco descartes são um corte", n)
 	}
 }

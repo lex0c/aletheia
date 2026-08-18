@@ -50,6 +50,15 @@ var codigoBackdoor = check.Check{
 		"reconhecer por padrão é trivial de burlar. O que separa backdoor de " +
 			"uso legítimo é o arquivo ter MUDADO — cruze com o mtime e com o " +
 			"git (runbook §16)",
+		"três construções REBAIXAM de crítico para aviso, e cada uma é um " +
+			"buraco declarado: (a) entrada presa a uma allowlist literal " +
+			"(`switch` de `case` literais, `in_array` de lista fixa) — se a " +
+			"lista incluir algo perigoso, o crítico não sai; (b) contaminação e " +
+			"sink em FUNÇÕES diferentes do mesmo arquivo PHP, que é coincidência " +
+			"de nome e não fluxo — a não ser por `global`/`use`, que o motor " +
+			"segue; (c) crase dentro de string, que em PHP é aspa de " +
+			"identificador de banco, não shell_exec. Fluxo por sessão, banco ou " +
+			"variável de outro arquivo NÃO é seguido em caso nenhum",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
@@ -82,9 +91,10 @@ var codigoBackdoor = check.Check{
 					"uso legítimo")
 			} else {
 				ev = append(ev, "TIER 1: construção que MERECE leitura (eval, "+
-					"create_function, decodificação) — sozinha NÃO acusa (é comum "+
-					"em código legítimo), e por isso sai como observação. O que a "+
-					"promove é o arquivo ter MUDADO: cruze com o mtime e o git")
+					"create_function, decodificação, dispatch preso a allowlist) — "+
+					"sozinha NÃO acusa (é comum em código legítimo), e por isso sai "+
+					"como observação. O que a promove é o arquivo ter MUDADO: cruze "+
+					"com o mtime e o git")
 			}
 			// Os matches, com linha e trecho: é o que o operador lê.
 			mostrados := cs.Matches

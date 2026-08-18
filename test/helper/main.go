@@ -169,6 +169,23 @@ func main() {
 		die(dupOntoStdio(c))
 		hold()
 
+	case "accept-fecha":
+		// A mesma entrega de conexão do inetd, com uma diferença: o socket de
+		// ESCUTA é fechado depois do accept.
+		//
+		// É o que derruba a inferência de direção. O kernel não registra em
+		// /proc/net/tcp quem iniciou a conexão; a ferramenta deduz olhando se a
+		// porta local também está em LISTEN. Sem o listener, uma conexão de
+		// ENTRADA fica indistinguível de uma de saída — e a estrutura de
+		// reverse shell (stdio no mesmo socket) passa a casar.
+		need(3)
+		ln := mustListen(os.Args[2])
+		c, err := ln.Accept()
+		die(err)
+		die(ln.Close())
+		die(dupOntoStdio(c))
+		hold()
+
 	case "accept":
 		// Mesma estrutura, direção oposta: é assim que systemd (StandardInput=
 		// socket) e inetd entregam a conexão. O socket de ESCUTA fica aberto,

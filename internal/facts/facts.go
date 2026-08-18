@@ -226,11 +226,11 @@ func Collect(e *env.Env) *Facts {
 		collectProcesses(f, e)
 		// Depois dos processos: o dono de cada socket sai do join com os fds
 		// que o coletor de processo já leu.
-		collectSockets(f, e)
-		// Os tetos da rede, que são o que transforma "há 400 conexões" em "e o
-		// próximo connect vai falhar" — a mesma diferença que o RLIMIT_NPROC
-		// faz no censo de processos.
+		// Os limites vêm ANTES dos sockets: além de serem os tetos que
+		// transformam "há 400 conexões" em "e o próximo connect vai falhar",
+		// a faixa de porta efêmera é INSUMO da inferência de direção.
 		collectLimitesDeRede(f, e)
+		collectSockets(f, e)
 		// E os que leem PACOTE, que não aparecem em tabela de conexão nenhuma:
 		// é por eles que um filtro de socket eBPF órfão continua vivo.
 		collectSocketsBrutos(f, e)
@@ -307,8 +307,8 @@ func CollectVolatile(e *env.Env) *Facts {
 	collectHost(f, e)
 	if e.Has(env.CapProcfs) {
 		collectProcesses(f, e)
-		collectSockets(f, e)
 		collectLimitesDeRede(f, e)
+		collectSockets(f, e)
 	} else {
 		f.partial("proc", e.Reason(env.CapProcfs))
 	}

@@ -22,6 +22,7 @@ package scenario
 //	A5  ativação por socket         o backdoor só nasce quando alguém conecta
 //	A6  dentro de um runtime JIT    a isenção que existe para calar o ruído
 //	A7  sob uma unit de systemd     o ponto cego declarado do §3.15
+//	A8  listener fechado no accept  a direção inferida invertida — e ela ERRAVA
 
 func init() {
 	Register(Scenario{
@@ -242,6 +243,40 @@ func init() {
 		// sendo achado de propriedade (§24), e isso é correto — o que este
 		// cenário afirma é o silêncio do §3.10 acompanhado da lacuna.
 		MaxWarn: 2,
+	})
+
+	Register(Scenario{
+		ID:   "A8-listener-fechado-inverte-a-direcao",
+		Desc: "serviço que fecha o listener depois do accept: a inferência de direção invertia, e o §17 acusava uma conexão de ENTRADA",
+		// ATAQUE À INFERÊNCIA, e este achou um FALSO POSITIVO — não um falso
+		// negativo.
+		//
+		// O kernel não registra em /proc/net/tcp quem iniciou a conexão. A
+		// dedução é "a porta local também está em LISTEN, logo é entrada", e
+		// ela cai quando o serviço fecha o listener depois de aceitar. Sem o
+		// listener, uma conexão de ENTRADA fica indistinguível de uma de saída
+		// — e a estrutura de reverse shell (stdio no mesmo socket) passa a
+		// casar. Medido antes da correção: `correlate.revshell` sobre um
+		// serviço estilo inetd, que é software legítimo e comum.
+		//
+		// O desempate é a faixa de porta efêmera: quem conecta recebe porta de
+		// origem dentro dela, quem é conectado atende numa porta de fora. Não
+		// depende de o listener continuar aberto.
+		Images: matriz,
+		Plant: `mkdir -p /usr/local/sbin
+			cp /helper /usr/local/sbin/servico
+			/usr/local/sbin/servico accept-fecha 0.0.0.0:8080 &
+			sleep 0.4
+			/helper connect 127.0.0.1:8080 &
+			sleep 1`,
+		// A conexão é de ENTRADA e precisa continuar sendo lida assim, mesmo
+		// sem listener nenhum na tabela.
+		Forbid: []string{"correlate.revshell"},
+		Exit:   -1,
+		// Orçamento de ruído MEDIDO: o binário sem dono em /usr/local/sbin
+		// continua sendo achado de propriedade (§24) e a escuta some junto com
+		// o listener — o que este cenário afirma é o silêncio do §17.
+		MaxWarn: 3,
 	})
 
 }

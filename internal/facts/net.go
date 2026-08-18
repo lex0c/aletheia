@@ -143,6 +143,22 @@ func collectSockets(f *Facts, e *env.Env) {
 		case listening[s.LocalPort]:
 			s.Dir = DirIn
 		case s.PeerIP != "":
+			// Aqui a porta local NÃO está em LISTEN, e a leitura óbvia é
+			// "fomos nós que conectamos". Ela erra num caso real: um serviço
+			// que FECHA o listener depois do accept — inetd, e qualquer
+			// programa que aceita uma conexão e sai de escuta. Sem o listener,
+			// uma conexão de ENTRADA fica indistinguível de uma de saída, e a
+			// estrutura de reverse shell (§17) passa a casar. Medido num
+			// contêiner: `correlate.revshell` disparou sobre um serviço.
+			//
+			// A faixa de porta EFÊMERA desempata sem depender do listener. Quem
+			// conecta recebe porta de origem dentro da faixa; quem é conectado
+			// atende numa porta de fora dela. Local fora + peer dentro é
+			// entrada, e o kernel não precisa ter registrado nada.
+			if d, ok := direcaoPelaFaixa(f.LimitesRede, s.LocalPort, s.PeerPort); ok {
+				s.Dir = d
+				break
+			}
 			s.Dir = DirOut
 		default:
 			s.Dir = DirUnknown
@@ -389,4 +405,33 @@ func inteiroDe(s string) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// direcaoPelaFaixa desempata a direção pela faixa de porta efêmera, quando a
+// tabela de escuta não responde.
+//
+// O kernel não registra em /proc/net/tcp quem iniciou a conexão. A dedução
+// principal é "a porta local também está em LISTEN, logo é entrada", e ela cai
+// quando o serviço fecha o listener depois de aceitar.
+//
+// A faixa não depende disso: `connect()` tira a porta de origem de
+// ip_local_port_range, e `accept()` devolve uma conexão cuja porta LOCAL é a do
+// serviço — que fica fora da faixa, ou ninguém conseguiria se ligar a ela de
+// forma previsível.
+//
+// Só responde quando o par é assimétrico. Com as duas portas dentro da faixa —
+// C2 escutando numa porta alta é o caso — não há o que deduzir, e devolver
+// "não sei" é melhor que devolver metade de uma moeda.
+func direcaoPelaFaixa(l LimitesDeRede, local, peer int) (Direction, bool) {
+	if !l.FaixaLida || local == 0 || peer == 0 {
+		return "", false
+	}
+	dentro := func(p int) bool { return p >= l.PortaEfemeraMin && p <= l.PortaEfemeraMax }
+	switch {
+	case !dentro(local) && dentro(peer):
+		return DirIn, true
+	case dentro(local) && !dentro(peer):
+		return DirOut, true
+	}
+	return "", false
 }

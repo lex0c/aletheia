@@ -35,6 +35,12 @@ var revshell = check.Check{
 			"essa forma, por design — descartados aqui pela DIREÇÃO: neles o socket é " +
 			"de ENTRADA, num reverse shell é de SAÍDA",
 		"sem root o dono do socket é invisível, e o achado não pode ser formado",
+		"a DIREÇÃO é inferida, e não lida: o kernel não registra quem iniciou a " +
+			"conexão. A dedução principal é a tabela de escuta, e ela cai quando " +
+			"o serviço FECHA o listener depois de aceitar — inetd faz isso. A " +
+			"faixa de porta efêmera desempata esse caso; quando as DUAS portas " +
+			"caem dentro da faixa (C2 escutando em porta alta) não há o que " +
+			"deduzir, e a conexão é tratada como de saída",
 		"LIMITE de fonte: são lidas as tabelas TCP e UDP. Implante que usa UDP " +
 			"com sendto() sem connect() não expõe o destino em /proc/net/udp — a " +
 			"porta local aparece, o peer não. Socket RAW e unix não são lidos",

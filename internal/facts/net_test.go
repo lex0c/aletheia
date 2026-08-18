@@ -143,3 +143,44 @@ func TestExposicaoLocalEhOOpostoDoEscopoDePeer(t *testing.T) {
 		}
 	}
 }
+
+// A direção NÃO está registrada pelo kernel. A dedução principal — "a porta
+// local também está em LISTEN, logo é entrada" — cai quando o serviço fecha o
+// listener depois de aceitar, e aí uma conexão de ENTRADA vira reverse shell no
+// relatório. Foi medido num contêiner: `correlate.revshell` disparou sobre um
+// serviço estilo inetd.
+//
+// A faixa de porta efêmera desempata sem depender da tabela de escuta.
+func TestDirecaoPelaFaixaDesempataSemOListener(t *testing.T) {
+	l := LimitesDeRede{PortaEfemeraMin: 32768, PortaEfemeraMax: 60999, FaixaLida: true}
+	casos := []struct {
+		nome        string
+		local, peer int
+		quer        Direction
+		decide      bool
+	}{
+		// Serviço que aceitou e fechou o listener: local é a porta do serviço,
+		// peer é efêmera do cliente.
+		{"conexão aceita por serviço", 8080, 45123, DirIn, true},
+		// Reverse shell: local efêmera, peer é a porta do C2.
+		{"conexão iniciada daqui", 51234, 443, DirOut, true},
+		// C2 numa porta alta: as duas dentro da faixa, e não há o que deduzir.
+		// Devolver metade de uma moeda seria pior que dizer "não sei".
+		{"as duas efêmeras", 51234, 45123, "", false},
+		{"as duas de serviço", 80, 443, "", false},
+	}
+	for _, c := range casos {
+		got, ok := direcaoPelaFaixa(l, c.local, c.peer)
+		if ok != c.decide || (ok && got != c.quer) {
+			t.Errorf("%s (%d→%d): (%q,%v), queria (%q,%v)",
+				c.nome, c.local, c.peer, got, ok, c.quer, c.decide)
+		}
+	}
+	// Sem a faixa lida não se deduz nada — e zero não é porta.
+	if _, ok := direcaoPelaFaixa(LimitesDeRede{}, 8080, 45123); ok {
+		t.Error("sem ip_local_port_range lido não há faixa para comparar")
+	}
+	if _, ok := direcaoPelaFaixa(l, 0, 45123); ok {
+		t.Error("porta zero não é porta")
+	}
+}

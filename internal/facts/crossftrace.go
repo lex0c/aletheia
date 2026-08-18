@@ -37,9 +37,20 @@ import (
 // O custo é declarado: o arquivo tem dezenas de milhares de linhas, e a leitura
 // guarda só o conjunto de tags distintas.
 func cruzarModulosFtrace(f *Facts, e *env.Env) {
-	// Sem a lista de /proc/modules não há com o que cruzar. O coletor de
-	// crossview já declarou a lacuna se ela existir.
-	if len(f.Cross.ModProc) == 0 {
+	// VAZIO não é ILEGÍVEL, e a diferença é o achado.
+	//
+	// A guarda ingênua era `len(ModProc) == 0 → volta`. Ela confundia as duas
+	// coisas, e a VM da prova pegou: num host mínimo, depois que o módulo se
+	// esconde, /proc/modules fica VAZIO — nenhum outro módulo carregado —, e a
+	// guarda pulava a comparação exatamente quando o módulo oculto era a única
+	// coisa a achar. É a mesma confusão entre "não há" e "não consegui ver" que
+	// a ferramenta inteira existe para não cometer.
+	//
+	// Por isso a leitura é feita AQUI, para saber se /proc/modules pôde ser
+	// lido, e não deduzida de a lista estar vazia. Ilegível é lacuna; vazio e
+	// legível é uma resposta com a qual se cruza.
+	if _, ok := readTrim("/proc/modules"); !ok {
+		// O coletor de crossview já declarou esta lacuna; não a duplico.
 		return
 	}
 

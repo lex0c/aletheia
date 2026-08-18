@@ -155,3 +155,14 @@ func TestModulosSoNoFtraceNormalizaHifen(t *testing.T) {
 		t.Errorf("mesmo módulo, grafias diferentes: %v", got)
 	}
 }
+
+// O caso que a VM da prova pegou e o teste não tinha: o módulo escondido é o
+// ÚNICO — /proc/modules vazio, ftrace com uma tag. A regra tem de acusar, e não
+// tratar lista vazia como "nada a comparar". Confundir vazio com ilegível
+// deixaria passar justamente o host mínimo onde o oculto não tem vizinho.
+func TestModuloEscondidoSozinhoComProcVazio(t *testing.T) {
+	got := ModulosSoNoFtrace([]string{"evil"}, nil)
+	if len(got) != 1 || !strings.Contains(got[0], "evil") {
+		t.Fatalf("proc vazio e uma tag no ftrace é um módulo oculto: %v", got)
+	}
+}

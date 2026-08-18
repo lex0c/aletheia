@@ -119,6 +119,10 @@ type defsCodigo struct {
 	// interna ENXERGA a variável de fora, e apagar o taint ali seria perder
 	// fluxo de verdade.
 	escopoAbre *regexp.Regexp
+	// guardaCaminho casa `validate_file($v)` — o validador de caminho do WP, que
+	// bloqueia `../`. Grupo 1 = a var validada. Rebaixa um include DELA de LFI
+	// arbitrário para confinado (tier 1). Só PHP.
+	guardaCaminho *regexp.Regexp
 	// especiais são construções fechadas casadas direto (crase, /e, include…);
 	// suspeito é tier 1.
 	especiais []regraDeCodigo
@@ -139,8 +143,9 @@ var defsPHP = defsCodigo{
 	sanNum:   regexp.MustCompile(`^\s*@?\s*(?:\(\s*(?:int|integer|float|double|real|bool|boolean)\s*\)|(?:intval|floatval|doubleval|boolval|number_format|count|sizeof|strlen|mb_strlen|abs|intdiv|round|ceil|floor|hexdec|bindec|octdec|ip2long|crc32)\s*\()`),
 	// `switch ($do) {` e `in_array($fn, ` — o resto da validação (rótulos
 	// literais, ausência de `default`, lista fixa) é feita no motor.
-	switchAbre: regexp.MustCompile(`\bswitch\s*\(\s*(\$\w+)\s*\)\s*\{`),
-	listaAbre:  regexp.MustCompile(`\bin_array\s*\(\s*(\$\w+)\s*,\s*`),
+	switchAbre:    regexp.MustCompile(`\bswitch\s*\(\s*(\$\w+)\s*\)\s*\{`),
+	listaAbre:     regexp.MustCompile(`\bin_array\s*\(\s*(\$\w+)\s*,\s*`),
+	guardaCaminho: regexp.MustCompile(`\b(?:validate_file|validate_plugin)\s*\(\s*(\$\w+)`),
 	// `[^{;]` não atravessa o `{` do corpo nem o `;` de um método abstrato:
 	// o `{` casado é sempre o que ABRE a função.
 	escopoAbre: regexp.MustCompile(`\bfunction\b[^{;]{0,300}\{`),
@@ -289,7 +294,13 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	// marca é o taint de uma variável: a classe e em que FUNÇÃO ela foi
 	// contaminada — o escopo é resolvido na hora da atribuição, porque os
 	// eventos vêm em ordem de offset e o cursor só anda para a frente.
-	type marca struct{ classe, esc int }
+	// pathSafe: a variável passou por um validador de CAMINHO do WP
+	// (validate_file/validate_plugin), que bloqueia `../`. Torna um include
+	// dela confinado (não LFI arbitrário) — mas NÃO sanitiza system/eval.
+	type marca struct {
+		classe, esc int
+		pathSafe    bool
+	}
 
 	// Um evento é uma atribuição (marca/limpa taint de uma var) ou um sink (que
 	// pode receber entrada DIRETA nos argumentos, ou uma variável tainted).
@@ -312,6 +323,11 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 		// taint de $a a $b; `$x = base64_decode($x)` o MANTÉM. Sem isto, um
 		// webshell `request -> var -> var -> sink` passava (FN pior que os FPs).
 		rhsVars []string
+		// guardaCam: `validate_file($v)` — marca $v como validado para CAMINHO a
+		// partir deste offset. ehInclude: o sink é include/require (só nele o
+		// validador de caminho rebaixa).
+		guardaCam bool
+		ehInclude bool
 	}
 	var evs []evento
 
@@ -358,7 +374,7 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 		if argCb > 0 {
 			args = argNoTopo(args, argCb)
 		}
-		e := evento{off: loc[0], rotulo: rotulo}
+		e := evento{off: loc[0], rotulo: rotulo, ehInclude: ehSinkInclude(nome)}
 		ident := args
 		if argCb > 0 {
 			// O que o callback EXECUTA é a base do callable, não o índice.
@@ -379,6 +395,16 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	}
 	for _, loc := range def.sinkAbre.FindAllStringIndex(masc, -1) {
 		adicionarSink(loc, 0, "sink de execução sobre entrada de request")
+	}
+	// Validador de CAMINHO do WordPress: `validate_file($v)`/`validate_plugin($v)`
+	// bloqueia `../`. Um webshell nunca decora `include($_GET)` com isso, então
+	// a presença sobre a var é sinal de código de framework guardado. Marca a
+	// var como validada para caminho a partir daqui; um include DELA depois vira
+	// tier 1 (confinado), enquanto system/eval sobre ela seguem críticos.
+	if def.guardaCaminho != nil {
+		for _, m := range def.guardaCaminho.FindAllStringSubmatchIndex(masc, -1) {
+			evs = append(evs, evento{off: m[0], guardaCam: true, nome: masc[m[2]:m[3]]})
+		}
 	}
 	const rotCb = "callback nomeado pelo request — executa função escolhida pelo atacante"
 	if def.cbArg1 != nil {
@@ -420,6 +446,14 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	sort.Slice(evs, func(i, j int) bool { return evs[i].off < evs[j].off })
 	taint := map[string]marca{}
 	for _, e := range evs {
+		if e.guardaCam {
+			// só marca se a var já está contaminada; validar valor limpo é no-op.
+			if mk, ok := taint[e.nome]; ok && mk.classe > 0 {
+				mk.pathSafe = true
+				taint[e.nome] = mk
+			}
+			continue
+		}
 		if e.atrib {
 			esc := escopos.em(e.off)
 			classe := e.classe
@@ -467,9 +501,16 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 					// escritos ali, não o que o atacante mandar. Continua
 					// merecendo leitura (tier 1) — a lista pode crescer, ou
 					// conter algo que não devia —, mas não é execução arbitrária.
-					if dentroDeGuarda(guardas, v, e.off) {
+					switch {
+					case dentroDeGuarda(guardas, v, e.off):
 						classe, rot = 1, "entrada de request PRESA a allowlist literal "+
 							"(switch/in_array) antes do sink — dispatch, não execução arbitrária"
+					case e.ehInclude && mk.pathSafe:
+						// include de caminho já validado (validate_file bloqueia
+						// `../`): confinado ao diretório, não LFI arbitrário. Só
+						// vale para include — system/eval sobre a var seguem tier 2.
+						classe, rot = 1, "include de caminho VALIDADO por validate_file "+
+							"(sem `../`) — LFI mitigado, não execução arbitrária"
 					}
 				}
 				if classe > maior {
@@ -1688,6 +1729,13 @@ var fsDeRede = map[string]bool{
 var pularNoCodigo = map[string]bool{
 	"node_modules": true, "vendor": true, ".git": true, ".cache": true,
 	".svn": true, "bower_components": true, ".npm": true,
+}
+
+// ehSinkInclude diz se o nome do sink casado é include/require — o único sink em
+// que um validador de caminho (validate_file) rebaixa: ele confina o path, mas
+// não sanitiza comando nem código.
+func ehSinkInclude(nome string) bool {
+	return strings.Contains(nome, "include") || strings.Contains(nome, "require")
 }
 
 // isWordByte responde se o byte faz parte de um identificador.

@@ -865,3 +865,30 @@ func TestPlaceholderSprintfNaoEhChamadaDinamica(t *testing.T) {
 		t.Errorf("$s dentro de string de formato não é chamada dinâmica: %+v", analisarConteudo(src, "php"))
 	}
 }
+
+// validate_file/validate_plugin do WordPress rebaixam um include de LFI
+// arbitrário para confinado — o último FP recorrente do wp-admin (admin.php:192,
+// update.php:87). Escopo estrito: SÓ include/require, e SÓ quando o validador
+// aparece sobre a var. system/eval sobre a mesma var, e include sem validador,
+// seguem críticos.
+func TestValidateFileRebaixaSoOInclude(t *testing.T) {
+	naoCrit := map[string]string{
+		"admin.php:192":   "<?php\n$importer=$_GET['import'];\nif(validate_file($importer)){wp_redirect('x');exit;}\ninclude(ABSPATH.\"wp-admin/import/$importer.php\");",
+		"validate_plugin": "<?php\n$pl=$_GET['plugin'];\nif(validate_plugin($pl)){exit;}\ninclude(WP_PLUGIN_DIR.'/'.$pl);",
+	}
+	for n, src := range naoCrit {
+		if tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("%s: include de caminho validado é confinado, não crítico: %+v", n, analisarConteudo(src, "php"))
+		}
+	}
+	crit := map[string]string{
+		"include sem validador (LFI real)": "<?php\n$p=$_GET['page'];\ninclude(\"pages/$p.php\");",
+		"system sobre var validada":        "<?php\n$c=$_GET['c'];\nif(validate_file($c)){exit;}\nsystem($c);",
+		"eval sobre var validada":          "<?php\n$c=$_GET['c'];\nif(validate_file($c)){exit;}\neval($c);",
+	}
+	for n, src := range crit {
+		if !tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("%s: validate_file NÃO sanitiza isto, continua crítico: %+v", n, analisarConteudo(src, "php"))
+		}
+	}
+}

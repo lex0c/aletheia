@@ -84,6 +84,25 @@ var pidOculto = check.Check{
 			}
 			r.Findings = append(r.Findings, fd)
 		}
+		for _, d := range f.Cross.ModFtraceDiff {
+			fd := self.F(check.SevCritical, d, "", []string{
+				d,
+				"o ftrace registra a função rastreável de um módulo no " +
+					"CARREGAMENTO e só a libera no descarregamento real: um módulo " +
+					"que se desencadeia da lista para sumir do /proc/modules não " +
+					"limpa esse registro",
+				"e é a interface que o crossview de sysfs não alcança — ali o " +
+					"módulo escondido é indistinguível de um embutido no kernel " +
+					"(runbook §35.3)",
+			}...)
+			fd.NextSteps = []string{
+				"`grep \"[<nome>]\" /sys/kernel/tracing/available_filter_functions` " +
+					"lista as funções que o módulo escondido ainda expõe",
+				"a partir daqui, resultado vindo deste host não vale como prova: " +
+					"analise a imagem DE FORA (runbook §35.6)",
+			}
+			r.Findings = append(r.Findings, fd)
+		}
 		r.Partial = append(r.Partial, f.Partial["cross"]...)
 		return r
 	},
@@ -146,9 +165,14 @@ var threadOculta = check.Check{
 // da lista encadeada para sumir do /proc/modules costuma esquecer do sysfs — e
 // o contrário também acontece.
 //
-// Só uma direção é reportada: carregado no /proc e AUSENTE do sysfs. A direção
-// oposta é ruído — módulo embutido no kernel aparece no sysfs e nunca no
-// /proc/modules.
+// Duas comparações alimentam este check. A primeira é /proc/modules × sysfs,
+// só na direção "carregado no /proc e ausente do sysfs" — a oposta é ruído,
+// porque módulo embutido no kernel aparece no sysfs e nunca no /proc/modules.
+//
+// A segunda cobre o ponto cego da primeira: um LKM que faz list_del some do
+// /proc/modules mas fica no sysfs, e ali é indistinguível de um builtin. O
+// ftrace desfaz o empate — a função rastreável do módulo continua anotada com o
+// nome dele mesmo depois do list_del, e builtin não leva anotação de módulo.
 var moduloDivergente = check.Check{
 	ID:       "cross.module_view",
 	Ref:      "35.3",
@@ -164,6 +188,9 @@ var moduloDivergente = check.Check{
 			"cuida disso. Divergência real aqui é rara",
 		"a direção oposta — presente no sysfs e ausente do /proc/modules — é " +
 			"módulo EMBUTIDO no kernel, e não é reportada",
+		"a comparação com o ftrace só reporta tag presente no ftrace e ausente " +
+			"do /proc/modules; o contrário — módulo sem função rastreável, que " +
+			"não aparece no ftrace — é normal e não é achado",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
@@ -176,6 +203,25 @@ var moduloDivergente = check.Check{
 			}...)
 			fd.NextSteps = []string{
 				"compare com um kernel do mesmo pacote em host limpo",
+				"a partir daqui, resultado vindo deste host não vale como prova: " +
+					"analise a imagem DE FORA (runbook §35.6)",
+			}
+			r.Findings = append(r.Findings, fd)
+		}
+		for _, d := range f.Cross.ModFtraceDiff {
+			fd := self.F(check.SevCritical, d, "", []string{
+				d,
+				"o ftrace registra a função rastreável de um módulo no " +
+					"CARREGAMENTO e só a libera no descarregamento real: um módulo " +
+					"que se desencadeia da lista para sumir do /proc/modules não " +
+					"limpa esse registro",
+				"e é a interface que o crossview de sysfs não alcança — ali o " +
+					"módulo escondido é indistinguível de um embutido no kernel " +
+					"(runbook §35.3)",
+			}...)
+			fd.NextSteps = []string{
+				"`grep \"[<nome>]\" /sys/kernel/tracing/available_filter_functions` " +
+					"lista as funções que o módulo escondido ainda expõe",
 				"a partir daqui, resultado vindo deste host não vale como prova: " +
 					"analise a imagem DE FORA (runbook §35.6)",
 			}

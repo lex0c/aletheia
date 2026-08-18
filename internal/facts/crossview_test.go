@@ -97,3 +97,61 @@ func TestNormalizaModulo(t *testing.T) {
 		}
 	}
 }
+
+// A extração de tags é o coração do cruzamento: função de builtin sai SEM tag e
+// não pode virar módulo, função de módulo sai COM tag e conta uma vez só por
+// mais que apareça.
+func TestTagsDeModuloDoFtrace(t *testing.T) {
+	texto := `vfs_read
+vfs_write
+nf_conntrack_lock [nf_conntrack]
+nf_conntrack_find [nf_conntrack]
+ext4_file_open [ext4]
+evil_marcador [evil]
+__x64_sys_read
+`
+	got := tagsDeModuloDoFtrace(texto)
+	quer := []string{"evil", "ext4", "nf_conntrack"}
+	if len(got) != len(quer) {
+		t.Fatalf("tags = %v, queria %v", got, quer)
+	}
+	for i := range quer {
+		if got[i] != quer[i] {
+			t.Errorf("tags = %v, queria %v (ordenado, sem duplicar)", got, quer)
+		}
+	}
+}
+
+// O achado: uma tag no ftrace que /proc/modules nega. É a assinatura do LKM que
+// se desencadeia da lista — provado em VM, ver test/vm/ftrace-hidden-module.sh.
+func TestModuloEscondidoApareceSoNoFtrace(t *testing.T) {
+	ftrace := []string{"nf_conntrack", "ext4", "evil"}
+	proc := []string{"nf_conntrack", "ext4"} // evil se removeu daqui
+	got := ModulosSoNoFtrace(ftrace, proc)
+	if len(got) != 1 {
+		t.Fatalf("diff = %v, queria 1", got)
+	}
+	if !strings.Contains(got[0], "evil") {
+		t.Errorf("o módulo escondido precisa ser nomeado: %q", got[0])
+	}
+}
+
+// A direção OPOSTA é normal e não pode virar achado. Um módulo carregado sem
+// função rastreável — muitos são assim — está em /proc/modules e não no ftrace.
+// Acusar isso encheria todo host de falso positivo.
+func TestModuloSemFuncaoRastreavelNaoEhAchado(t *testing.T) {
+	ftrace := []string{"ext4"}
+	proc := []string{"ext4", "sem_ftrace_algum", "outro"}
+	if got := ModulosSoNoFtrace(ftrace, proc); len(got) != 0 {
+		t.Errorf("estar em /proc e não no ftrace é normal: %v", got)
+	}
+}
+
+// Hífen e sublinhado são o MESMO módulo nas duas fontes, como no crossview de
+// sysfs. Sem normalizar, `nf-conntrack` no ftrace contra `nf_conntrack` no proc
+// inventaria um módulo escondido a cada host.
+func TestModulosSoNoFtraceNormalizaHifen(t *testing.T) {
+	if got := ModulosSoNoFtrace([]string{"nf-conntrack"}, []string{"nf_conntrack"}); len(got) != 0 {
+		t.Errorf("mesmo módulo, grafias diferentes: %v", got)
+	}
+}

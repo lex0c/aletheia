@@ -7,7 +7,7 @@ GOFLAGS := -trimpath
 # LD_PRELOAD e a binário de sistema trojanizado (SPEC 4).
 export CGO_ENABLED = 0
 
-.PHONY: all build helper vm-image test lint verify clean dist scenarios images fixtures vm-kernels arches
+.PHONY: all build helper vm-image test lint verify clean dist scenarios images fixtures vm-kernels vm-ftrace-proof arches
 
 all: verify
 
@@ -86,6 +86,13 @@ vm-image: build helper arches
 # pulados com o motivo dito — nunca passam em silêncio. Não escreve em /boot.
 vm-kernels:
 	./test/vm/kernels.sh
+
+# vm-ftrace-proof prova, bootando um kernel de verdade, que available_filter_functions
+# retém um módulo que se escondeu de /proc/modules — a terceira interface do
+# check cross.module_view. Compila o módulo num contêiner e o carrega SÓ dentro
+# do QEMU descartável; o kernel do host nunca é tocado. Exige docker e qemu.
+vm-ftrace-proof:
+	./test/vm/ftrace-hidden-module.sh
 
 # Servidor legado de 32 bits ainda existe. Cross-compilar custa segundos e é a
 # única forma de provar que a ferramenta roda lá — tamanho de int e número de

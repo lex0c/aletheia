@@ -65,6 +65,14 @@ type CrossView struct {
 	ModProc []string `json:"modules_proc,omitempty"`
 	ModSys  []string `json:"modules_sys,omitempty"`
 	ModDiff []string `json:"modules_only_in_one,omitempty"`
+
+	// A TERCEIRA interface: os módulos que o ftrace conhece por terem função
+	// rastreável. Independente das outras duas — o registro do ftrace só é
+	// limpo no descarregamento REAL, não quando um módulo se desencadeia da
+	// lista. ModFtraceDiff é o que está anotado no ftrace e nega estar em
+	// /proc/modules.
+	ModFtrace     []string `json:"modules_ftrace,omitempty"`
+	ModFtraceDiff []string `json:"modules_ftrace_hidden,omitempty"`
 }
 
 func collectCrossView(f *Facts, e *env.Env) {
@@ -86,6 +94,7 @@ func collectCrossView(f *Facts, e *env.Env) {
 	cruzarThreads(f)
 	sondarPids(f, visiveis, maior)
 	cruzarModulos(f)
+	cruzarModulosFtrace(f, e)
 }
 
 // cruzarPPID é a comparação mais barata que existe, e a mais precisa.

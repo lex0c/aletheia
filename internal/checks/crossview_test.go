@@ -85,3 +85,37 @@ func TestPidOcultoDeclaraTruncamento(t *testing.T) {
 		t.Error("sondagem truncada precisa virar cobertura parcial")
 	}
 }
+
+// O achado do ftrace vira CRÍTICO e nomeia o módulo. É a via que pega o LKM que
+// o crossview de sysfs não pega — ver test/vm/ftrace-hidden-module.sh.
+func TestModuloEscondidoNoFtraceViraCritico(t *testing.T) {
+	f := &facts.Facts{Cross: facts.CrossView{
+		ModFtraceDiff: []string{"evil tem função rastreável no ftrace e NÃO está em /proc/modules"},
+	}}
+	r := moduloDivergente.Run(moduloDivergente, f, testEnv())
+	if len(r.Findings) != 1 {
+		t.Fatalf("achados = %v", r.Findings)
+	}
+	if r.Findings[0].Sev != check.SevCritical {
+		t.Errorf("sev = %v, queria crítico", r.Findings[0].Sev)
+	}
+	if !strings.Contains(r.Findings[0].Subject, "evil") {
+		t.Errorf("o módulo precisa ser nomeado no subject: %q", r.Findings[0].Subject)
+	}
+	if !strings.Contains(strings.Join(r.Findings[0].NextSteps, " "), "available_filter_functions") {
+		t.Error("o passo seguinte precisa apontar para a interface que ainda tem o módulo")
+	}
+}
+
+// As duas vias de módulo coexistem sem se atropelar: sysfs e ftrace são
+// achados distintos, e um host com os dois problemas reporta os dois.
+func TestAsDuasViasDeModuloConvivem(t *testing.T) {
+	f := &facts.Facts{Cross: facts.CrossView{
+		ModDiff:       []string{"rk está em /proc/modules e NÃO em /sys/module"},
+		ModFtraceDiff: []string{"evil tem função rastreável no ftrace e NÃO está em /proc/modules"},
+	}}
+	r := moduloDivergente.Run(moduloDivergente, f, testEnv())
+	if len(r.Findings) != 2 {
+		t.Fatalf("as duas vias são achados separados: %v", r.Findings)
+	}
+}

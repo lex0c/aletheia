@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -53,6 +54,7 @@ func runInfo(args []string) int {
 		fmt.Fprintln(os.Stderr, "  aletheia info ip 51.91.190.241")
 		fmt.Fprintln(os.Stderr, "  aletheia info port 4100")
 		fmt.Fprintln(os.Stderr, "  aletheia info net")
+		fmt.Fprintln(os.Stderr, "  aletheia info git [caminho]")
 		fmt.Fprintln(os.Stderr, "  aletheia info file /usr/sbin/nginx")
 		return 3
 	}
@@ -92,6 +94,25 @@ func runInfo(args []string) int {
 			return 3
 		}
 		return dossie(w, *jsonOut, info.Processo(f, pid))
+	case "git", "repo":
+		caminho := alvo
+		if caminho == "" {
+			caminho = "."
+		}
+		abs, err := filepath.Abs(caminho)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "info git: %v\n", err)
+			return 3
+		}
+		r := facts.LerRepoGit(f, e, abs)
+		if r == nil {
+			fmt.Fprintf(os.Stderr, "info git: %s não é um repositório git "+
+				"(nem .git nem objects/ ali dentro)\n", abs)
+			return 3
+		}
+		c := info.CensoDoGit(r)
+		escreverCensoDeGit(w, c)
+		return comJSON(*jsonOut, c, 0)
 	case "net", "rede":
 		if alvo != "" {
 			fmt.Fprintln(os.Stderr, "info net não recebe alvo — para um endereço "+
@@ -121,7 +142,7 @@ func runInfo(args []string) int {
 		}
 		return dossie(w, *jsonOut, info.Arquivo(f, alvo))
 	}
-	fmt.Fprintf(os.Stderr, "info: assunto desconhecido %q — use process, net, ip, port ou file\n", assunto)
+	fmt.Fprintf(os.Stderr, "info: assunto desconhecido %q — use process, net, git, ip, port ou file\n", assunto)
 	return 3
 }
 
@@ -168,6 +189,10 @@ func fatosParaInfo(de, root, assunto string) (*facts.Facts, *env.Env, int) {
 func precisaDeDisco(assunto string) bool {
 	switch assunto {
 	case "file", "arquivo", "path":
+		return true
+	case "git", "repo":
+		// O repositório é lido à parte, mas a coleta completa dá o que o
+		// relatório usa em volta: hostname, data e o passwd que nomeia uids.
 		return true
 	}
 	return false
@@ -432,4 +457,107 @@ func escreverCensoDeRede(w io.Writer, c *info.CensoDeRede) {
 	fmt.Fprintln(w, "Isto é um retrato, não um veredito: `aletheia scan` é quem conclui,")
 	fmt.Fprintln(w, "e traz os falsos positivos de cada achado junto. Conexão de vida curta")
 	fmt.Fprintln(w, "não está aqui — quem vê o eixo do tempo é `aletheia watch`.")
+}
+
+// escreverCensoDeGit imprime o retrato do repositório na ordem em que as
+// perguntas aparecem: o que EXECUTA, o que foi REESCRITO, o que está
+// ESCONDIDO, e quando.
+func escreverCensoDeGit(w io.Writer, c *info.CensoDeGit) {
+	fmt.Fprintf(w, "CENSO DE REPOSITÓRIO · %s\n", report.Safe(c.Dir))
+	if c.HEAD != "" {
+		fmt.Fprintf(w, "  HEAD %s\n", report.Safe(corta1(c.HEAD, 72)))
+	}
+	for _, r := range c.Remotes {
+		fmt.Fprintf(w, "  remoto %-10s %s\n", report.Safe(corta1(r.Nome, 10)),
+			report.Safe(corta1(r.URL, 60)))
+	}
+	fmt.Fprintf(w, "  %d ref(s) · %d objeto(s) solto(s) · %d pack(s) · %d movimento(s) de reflog\n",
+		c.Refs, c.ObjetosSoltos, c.Packs, c.Movimentos)
+	fmt.Fprintln(w)
+
+	if len(c.Identidades) > 0 {
+		fmt.Fprintln(w, "QUEM MOVEU REF AQUI — pelo reflog, que registra quem rodou o comando")
+		for i, id := range c.Identidades {
+			if i >= 8 {
+				fmt.Fprintf(w, "    … e mais %d — a lista completa sai no `--json`\n",
+					len(c.Identidades)-8)
+				break
+			}
+			fmt.Fprintf(w, "    %6d  %s\n", id.N, report.Safe(corta1(id.Rotulo, 60)))
+		}
+		fmt.Fprintln(w, "  o autor do COMMIT é campo livre e se escolhe; isto é quem rodou o git")
+		fmt.Fprintln(w)
+	}
+
+	if len(c.Executa) > 0 {
+		fmt.Fprintln(w, "O QUE ESTE REPOSITÓRIO EXECUTA — config é código, e ela não mora em /etc")
+		for _, o := range c.Executa {
+			fmt.Fprintf(w, "  %s = %s\n", report.Safe(o.Chave), report.Safe(corta1(o.Valor, 56)))
+			fmt.Fprintf(w, "      %s\n", report.Safe(o.Motivo))
+		}
+		fmt.Fprintln(w)
+	}
+
+	if len(c.Hooks) > 0 {
+		onde := ".git/hooks"
+		if c.HooksRedirecionados != "" {
+			onde = c.HooksRedirecionados + "  ⚠ REDIRECIONADO por core.hooksPath"
+		}
+		fmt.Fprintf(w, "HOOKS em %s\n", report.Safe(onde))
+		for _, h := range c.Hooks {
+			marca := ""
+			if !h.Executavel {
+				// Hook sem bit de execução NÃO roda. Dizer isso evita mandar o
+				// operador investigar um arquivo inerte.
+				marca = "  (sem bit de execução: NÃO roda)"
+			}
+			fmt.Fprintf(w, "  %-22s %7d bytes  %s%s\n", report.Safe(corta1(h.Nome, 22)),
+				h.Tamanho, report.Safe(nz(h.ModUTC, "sem data")), marca)
+		}
+		fmt.Fprintln(w)
+	}
+
+	if len(c.Reescritas) > 0 {
+		fmt.Fprintf(w, "HISTÓRICO REESCRITO — %d de %d movimento(s) do reflog\n",
+			len(c.Reescritas), c.Movimentos)
+		for i, r := range c.Reescritas {
+			if i >= 10 {
+				fmt.Fprintf(w, "  … e mais %d — o reflog completo sai no `--json`\n",
+					len(c.Reescritas)-10)
+				break
+			}
+			fmt.Fprintf(w, "  %s  %-16s %s\n", report.Safe(nz(r.QuandoU, "sem data")),
+				report.Safe(corta1(r.Acao, 16)), report.Safe(corta1(r.Quem, 34)))
+			fmt.Fprintf(w, "      %s\n", report.Safe(r.Msg))
+			fmt.Fprintf(w, "      %s   # o que estava lá ANTES\n", report.Safe(r.Recupera))
+		}
+		fmt.Fprintln(w)
+	}
+
+	for _, p := range c.Padroes {
+		cab := "PADRÃO RECONHECIDO"
+		if p.Comum {
+			cab = "PADRÃO RECONHECIDO (forma também comum em uso legítimo)"
+		}
+		fmt.Fprintf(w, "%s — %s · %d\n", cab, strings.ToUpper(p.Tipo), p.N)
+		fmt.Fprintf(w, "  %s\n", report.Safe(p.Alvo))
+		fmt.Fprintf(w, "  %s\n\n", report.Safe(p.Detalhe))
+	}
+
+	if c.IndexUTC != "" || c.HeadUTC != "" {
+		fmt.Fprintf(w, "TEMPO · índice escrito em %s · HEAD movido em %s\n",
+			report.Safe(nz(c.IndexUTC, "sem data")), report.Safe(nz(c.HeadUTC, "sem data")))
+		fmt.Fprintln(w, "  compare com a janela do incidente (runbook §9)")
+		fmt.Fprintln(w)
+	}
+
+	for _, l := range c.Lacunas {
+		fmt.Fprintf(w, "LACUNA · %s\n", report.Safe(l))
+	}
+	if len(c.Lacunas) > 0 {
+		fmt.Fprintln(w)
+	}
+
+	fmt.Fprintln(w, "Isto é um retrato, não um veredito: nada aqui foi lido com `git` —")
+	fmt.Fprintln(w, "tudo saiu de arquivo, porque o git do host pode ser o implante.")
 }

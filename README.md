@@ -303,9 +303,9 @@ e perde a imunidade a `LD_PRELOAD` e a binário de sistema trojanizado.
 ## Como isto é testado
 
 ```
-89 checks       cada um declara os próprios falsos positivos — é invariante de
+90 checks       cada um declara os próprios falsos positivos — é invariante de
                 registro, não disciplina: sem eles o programa nem inicia
-157 cenários    a CLI de verdade, contra /proc de verdade: debian 12 e alpine
+163 cenários    a CLI de verdade, contra /proc de verdade: debian 12 e alpine
                 como matriz, centos 7 e debian 9 para userland de época (rpm,
                 systemd de outra geração), e microVM com kernel PRÓPRIO — 3.18,
                 4.14 e i686 — para o que contêiner nenhum alcança, porque

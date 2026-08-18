@@ -94,7 +94,7 @@ var arquivoDePacoteAlterado = check.Check{
 			fd := self.F(sev, d.Path, "", ev...)
 			fd.Irreversible = true
 			fd.NextSteps = []string{
-				"sudo cp " + d.Path + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
+				"sudo cp " + check.Arg(d.Path) + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
 				"baixe o pacote " + d.Pacote + " de um espelho e compare os dois " +
 					"binários FORA deste host",
 				"a partir daqui, resposta vinda deste host não vale como prova: " +

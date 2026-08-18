@@ -43,6 +43,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/lex0c/aletheia/internal/env"
@@ -458,7 +459,21 @@ func (c *Coletor) copiar(origem, nome, tipo string) (Item, error) {
 		err = cerr
 	}
 	if err != nil {
+		// O PARCIAL SAI DO DIRETÓRIO. Deixá-lo ali era pior que a falha: um
+		// arquivo com cara de preservado, sem linha no manifesto e fora do
+		// Integro() — e, na retentativa depois de liberar espaço, o `destino`
+		// recusava por ErrExiste "para não apagar a evidência anterior", sobre
+		// um arquivo que não era evidência nenhuma.
+		os.Remove(destino)
 		return Item{}, err
+	}
+	// O teto de 4 GB precisa ser DITO. Sem isto o manifesto trazia o hash de um
+	// prefixo declarado como hash da origem: quem comparasse com o arquivo
+	// original meses depois veria divergência sem explicação.
+	if n >= maxArquivoBin {
+		return Item{}, fmt.Errorf("o arquivo tem %d bytes ou mais e o teto de cópia "+
+			"é %d: NÃO foi preservado inteiro, e um hash de pedaço não serve de "+
+			"cadeia de custódia", n, int64(maxArquivoBin))
 	}
 
 	item := Item{
@@ -523,7 +538,23 @@ func (c *Coletor) escrever(nome string, dados []byte, tipo, origem string) (Item
 	if err != nil {
 		return Item{}, err
 	}
-	if err := os.WriteFile(destino, dados, 0o600); err != nil {
+	// O_EXCL|O_NOFOLLOW, e não os.WriteFile: aquele é O_CREATE|O_TRUNC, segue
+	// symlink e trunca o alvo. Num `$IR` que fica no próprio host — que é o
+	// caso do README e dos passos que a ferramenta imprime — um implante que
+	// observe o diretório e crie `bpf-42.xlated.bin -> /etc/ld.so.preload`
+	// entre o Lstat e a escrita faz esta ferramenta escrever FORA de --out,
+	// num arquivo de sistema. As outras três escritas já usavam O_EXCL; esta
+	// era a exceção.
+	fh, err := os.OpenFile(destino, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return Item{}, err
+	}
+	_, err = fh.Write(dados)
+	if cerr := fh.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(destino)
 		return Item{}, err
 	}
 	soma := sha256.Sum256(dados)

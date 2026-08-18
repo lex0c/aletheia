@@ -652,3 +652,39 @@ func homeDirs(e *env.Env) []string {
 	}
 	return out
 }
+
+// listarNegando lista um diretório e registra LACUNA quando não consegue.
+//
+// `ReadDirNames` devolve nada para "não existe" e nada para "sem permissão", e
+// as duas respostas são opostas. É dessa confusão que sai o pior erro que esta
+// ferramenta pode cometer: dizer que não há crontab de usuário nenhum quando o
+// spool é 1730 root:crontab e a varredura rodou sem root.
+func (f *Facts) listarNegando(e *env.Env, cat, dir string) []string {
+	ents, err := e.ReadDir(dir)
+	if err != nil {
+		if env.EhLacuna(err) {
+			f.denyPersist(cat, dir+" não pôde ser listado ("+env.MotivoDoErro(err)+
+				"): o que estiver lá dentro NÃO entrou na varredura")
+		}
+		return nil
+	}
+	nomes := make([]string, 0, len(ents))
+	for _, ent := range ents {
+		nomes = append(nomes, ent.Name())
+	}
+	return nomes
+}
+
+// lerNegando lê um arquivo e registra LACUNA quando não consegue. O par de
+// listarNegando, pela mesma razão: diretório legível com arquivo ilegível
+// dentro some tão silenciosamente quanto o diretório inteiro negado.
+func (f *Facts) lerNegando(e *env.Env, cat, path string) ([]byte, bool) {
+	b, err := e.ReadFile(path)
+	if err != nil {
+		if env.EhLacuna(err) {
+			f.denyPersist(cat, path+" não pôde ser lido ("+env.MotivoDoErro(err)+")")
+		}
+		return nil, false
+	}
+	return b, true
+}

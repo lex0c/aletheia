@@ -47,41 +47,59 @@ type CronEntry struct {
 	ModUTC string `json:"mod_utc,omitempty"`
 }
 
-// cronSpoolDirs cobre as duas convenções: Debian põe em crontabs/, RHEL põe
-// direto. Sondar as duas evita depender de detecção de distribuição.
-var cronSpoolDirs = []string{"/var/spool/cron/crontabs", "/var/spool/cron"}
+// cronSpoolDirs cobre as três convenções: Debian põe em crontabs/, RHEL põe
+// direto, e o busybox crond do Alpine põe em /etc/crontabs — que não é spool
+// nenhum, é /etc. Sondar as três evita depender de detecção de distribuição.
+//
+// O Alpine importa mais do que a fatia dele de servidores sugere: é a base da
+// maioria das imagens de contêiner, então um agendamento plantado ali é
+// exatamente o que se procura numa imagem sob suspeita.
+var cronSpoolDirs = []string{
+	"/var/spool/cron/crontabs", "/var/spool/cron", "/etc/crontabs",
+}
 
+// cronRunParts são os diretórios de script solto. A segunda metade é do
+// busybox: o Alpine não tem /etc/cron.daily, tem /etc/periodic/daily — e sem
+// esses quatro caminhos a varredura de um contêiner Alpine devolvia zero
+// agendamentos com ar de resposta.
 var cronRunParts = []string{
 	"/etc/cron.hourly", "/etc/cron.daily", "/etc/cron.weekly", "/etc/cron.monthly",
+	"/etc/periodic/15min", "/etc/periodic/hourly", "/etc/periodic/daily",
+	"/etc/periodic/weekly", "/etc/periodic/monthly",
 }
 
 var atSpoolDirs = []string{"/var/spool/cron/atjobs", "/var/spool/at"}
 
 func collectCron(f *Facts, e *env.Env) {
 	// /etc/crontab e /etc/cron.d/*: formato de SISTEMA, com campo de usuário.
-	f.Cron = append(f.Cron, parseCronFile(e, "/etc/crontab", "system", "")...)
-	for _, n := range e.ReadDirNames("/etc/cron.d") {
-		f.Cron = append(f.Cron, parseCronFile(e, "/etc/cron.d/"+n, "dropin", "")...)
+	f.Cron = append(f.Cron, parseCronFile(f, e, "/etc/crontab", "system", "")...)
+	for _, n := range f.listarNegando(e, "cron", "/etc/cron.d") {
+		f.Cron = append(f.Cron, parseCronFile(f, e, "/etc/cron.d/"+n, "dropin", "")...)
 	}
 
 	// Spool por usuário: sem campo de usuário, o dono é o NOME do arquivo.
+	//
+	// É AQUI que a varredura sem root cega: o spool do Debian é 1730
+	// root:crontab, e listá-lo falha com EACCES. Sem declarar essa negativa, a
+	// ferramenta relatava zero crontab de usuário — a mesma saída de um host
+	// que realmente não tem nenhum.
 	for _, dir := range cronSpoolDirs {
-		for _, n := range e.ReadDirNames(dir) {
+		for _, n := range f.listarNegando(e, "cron", dir) {
 			p := dir + "/" + n
 			if e.IsDir(p) {
 				continue // /var/spool/cron/crontabs dentro de /var/spool/cron
 			}
-			f.Cron = append(f.Cron, parseCronFile(e, p, "user", n)...)
+			f.Cron = append(f.Cron, parseCronFile(f, e, p, "user", n)...)
 		}
 	}
 
 	// cron.hourly e amigos: script solto, sem gatilho na própria linha.
 	for _, dir := range cronRunParts {
-		for _, n := range e.ReadDirNames(dir) {
+		for _, n := range f.listarNegando(e, "cron", dir) {
 			p := dir + "/" + n
 			f.Cron = append(f.Cron, CronEntry{
 				File: p, Kind: "dir", Cmd: p,
-				Schedule:    strings.TrimPrefix(dir, "/etc/cron."),
+				Schedule:    periodo(dir),
 				IntervalSec: runPartsInterval(dir),
 				ModUTC:      modUTC(e, p),
 			})
@@ -95,13 +113,13 @@ func collectCron(f *Facts, e *env.Env) {
 // o AMBIENTE INTEIRO de quem o criou — daí o parsing de export.
 func collectAt(f *Facts, e *env.Env) {
 	for _, dir := range atSpoolDirs {
-		for _, n := range e.ReadDirNames(dir) {
+		for _, n := range f.listarNegando(e, "cron", dir) {
 			p := dir + "/" + n
 			if e.IsDir(p) {
 				continue
 			}
-			b, err := e.ReadFile(p)
-			if err != nil {
+			b, ok := f.lerNegando(e, "cron", p)
+			if !ok {
 				continue
 			}
 			ent := CronEntry{File: p, Kind: "at", ModUTC: modUTC(e, p)}
@@ -136,9 +154,9 @@ func collectAt(f *Facts, e *env.Env) {
 //
 // Confundir os dois faz o nome do usuário virar o começo do comando, e o
 // comando de verdade some do relatório.
-func parseCronFile(e *env.Env, path, kind, user string) []CronEntry {
-	b, err := e.ReadFile(path)
-	if err != nil {
+func parseCronFile(f *Facts, e *env.Env, path, kind, user string) []CronEntry {
+	b, ok := f.lerNegando(e, "cron", path)
+	if !ok {
 		return nil
 	}
 	mod := modUTC(e, path)
@@ -298,16 +316,37 @@ func intervalDeUnidade(i int) int {
 	}
 }
 
+// periodo é o nome da cadência dentro do caminho. As duas convenções o põem no
+// último elemento, uma depois de ponto e a outra depois de barra:
+//
+//	/etc/cron.daily      →  daily
+//	/etc/periodic/daily  →  daily
+func periodo(dir string) string {
+	nome := dir[strings.LastIndexByte(dir, '/')+1:]
+	if i := strings.IndexByte(nome, '.'); i >= 0 {
+		nome = nome[i+1:]
+	}
+	return nome
+}
+
+// runPartsInterval traduz a cadência para segundos. Ele responde à §2.7 — a
+// frequência com que aquilo dispara —, e o `default` aqui é perigoso: qualquer
+// diretório fora da lista virava "mensal", o que faria um job de 15 em 15
+// minutos aparecer como o mais lento do host em vez do mais rápido.
 func runPartsInterval(dir string) int {
-	switch dir {
-	case "/etc/cron.hourly":
+	switch periodo(dir) {
+	case "15min":
+		return 900
+	case "hourly":
 		return 3600
-	case "/etc/cron.daily":
+	case "daily":
 		return 86400
-	case "/etc/cron.weekly":
+	case "weekly":
 		return 604800
-	default:
+	case "monthly":
 		return 2592000
+	default:
+		return 0 // não sei a cadência: 0 é "não determinado", e não "mensal"
 	}
 }
 

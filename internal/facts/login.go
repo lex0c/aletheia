@@ -25,10 +25,25 @@ import (
 // que funcionou, e nenhuma das duas metades diz isso sozinha.
 
 const (
-	// tamRegistroUtmp é fixo e igual em 32 e 64 bits: os campos de tempo e
-	// sessão são int32 por compatibilidade, de propósito, então a estrutura
-	// não muda de tamanho com a arquitetura.
-	tamRegistroUtmp = 384
+	// Os DOIS tamanhos de `struct utmp` que existem em Linux.
+	//
+	// O de 384 bytes é o do x86 com glibc, onde `ut_session` é int32 e o
+	// `ut_tv` é um par de int32 — mantidos assim de propósito, para compat
+	// binária com o utmp de 32 bits. É o que se mede compilando em x86_64 e
+	// também com -m32, e foi por isso que 384 passou por universal aqui.
+	//
+	// Ele NÃO é universal. Em arquitetura sem esse legado (arm64, e qualquer
+	// uma com __WORDSIZE_TIME64_COMPAT32 == 0) e na musl inteira, `ut_session`
+	// é long e o `ut_tv` é um `struct timeval` de verdade: 400 bytes, com o
+	// segundo do timestamp no offset 344 e 64 bits de largura.
+	//
+	// Ler um wtmp de 400 com passo de 384 não falha: produz registros
+	// desalinhados, com usuário vindo do meio de outro campo e timestamp
+	// sempre zero — e como o ReadFile teve sucesso, nenhuma lacuna é
+	// declarada. Um servidor arm64 ou Alpine reportava inventário de login
+	// inventado, silenciosamente.
+	tamUtmp32 = 384
+	tamUtmp64 = 400
 
 	// maxRegistrosLogin limita a leitura aos mais RECENTES. Um wtmp de servidor
 	// antigo tem centenas de milhares de registros, e o que interessa a uma
@@ -94,9 +109,20 @@ func lerUtmp(f *Facts, e *env.Env, caminho string, falhou, agora bool) bool {
 		return false
 	}
 
+	tam, ok := tamanhoDoRegistro(b)
+	if !ok {
+		// Nem 384 nem 400 dividem o arquivo: é outro layout, ou o arquivo está
+		// truncado. Adivinhar aqui produziria um inventário de login inventado,
+		// que é pior que nenhum.
+		f.denyPersist("login", baseNome(caminho)+" tem "+itoa(len(b))+
+			" bytes, que não é múltiplo de nenhum dos dois tamanhos conhecidos "+
+			"de registro utmp (384 e 400): o arquivo NÃO foi interpretado")
+		return true
+	}
+
 	// Do FIM para o começo: o interessante numa triagem é o mais recente, e
 	// ler o arquivo inteiro de um servidor antigo é desperdício.
-	n := len(b) / tamRegistroUtmp
+	n := len(b) / tam
 	inicio := 0
 	if n > maxRegistrosLogin {
 		inicio = n - maxRegistrosLogin
@@ -105,7 +131,7 @@ func lerUtmp(f *Facts, e *env.Env, caminho string, falhou, agora bool) bool {
 			" mais recentes: o que veio antes NÃO foi examinado")
 	}
 	for i := inicio; i < n; i++ {
-		r := b[i*tamRegistroUtmp : (i+1)*tamRegistroUtmp]
+		r := b[i*tam : (i+1)*tam]
 		l := Login{
 			Tipo:   int(int16(le16(r[0:]))),
 			PID:    int(int32(le32(r[4:]))),
@@ -115,8 +141,10 @@ func lerUtmp(f *Facts, e *env.Env, caminho string, falhou, agora bool) bool {
 			Falhou: falhou,
 			Agora:  agora,
 		}
-		if sec := le32(r[340:]); sec > 0 {
-			l.QuandoU = time.Unix(int64(sec), 0).UTC().Format("2006-01-02T15:04:05Z")
+		// O segundo do timestamp muda de lugar E de largura entre os dois
+		// layouts: 32 bits no offset 340, 64 bits no 344.
+		if sec := segundoDoRegistro(r, tam); sec > 0 {
+			l.QuandoU = time.Unix(sec, 0).UTC().Format("2006-01-02T15:04:05Z")
 		}
 		if l.User == "" && l.Tipo != TipoBoot {
 			continue
@@ -159,4 +187,49 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(d[i:])
+}
+
+// tamanhoDoRegistro descobre o layout pelo tamanho do arquivo.
+//
+// O utmp é uma sequência de registros de tamanho fixo, sem cabeçalho: o único
+// jeito de saber qual dos dois layouts está em uso é a divisibilidade. Quando os
+// dois dividem — arquivo vazio, ou um múltiplo comum como 2400 bytes — vence o
+// que casa com a arquitetura em que este binário roda, que é a resposta certa em
+// todo host que não teve o arquivo copiado de outra máquina.
+func tamanhoDoRegistro(b []byte) (int, bool) {
+	c32 := len(b)%tamUtmp32 == 0
+	c64 := len(b)%tamUtmp64 == 0
+	switch {
+	case c32 && c64:
+		return tamanhoNativoDeUtmp, true
+	case c64:
+		return tamUtmp64, true
+	case c32:
+		return tamUtmp32, true
+	}
+	return 0, false
+}
+
+// segundoDoRegistro lê o timestamp no lugar certo de cada layout.
+func segundoDoRegistro(r []byte, tam int) int64 {
+	if tam == tamUtmp64 {
+		if len(r) < 352 {
+			return 0
+		}
+		return int64(le64(r[344:]))
+	}
+	if len(r) < 344 {
+		return 0
+	}
+	return int64(le32(r[340:]))
+}
+
+// le64 lê um inteiro de 64 bits little-endian. Existe aqui porque só o layout
+// de 400 bytes usa essa largura no campo de tempo.
+func le64(b []byte) uint64 {
+	if len(b) < 8 {
+		return 0
+	}
+	return uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
+		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
 }

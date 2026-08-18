@@ -180,6 +180,12 @@ func collectSuid(f *Facts, e *env.Env) {
 			strconv.Itoa(maxSuidDepthHome)+" níveis dentro de /home e /root: "+
 			"SUID mais fundo que isso NÃO foi procurado")
 	}
+	if len(trab.negados) > 0 {
+		sort.Strings(trab.negados)
+		f.denyPersist("suid", "a varredura de SUID não conseguiu abrir "+
+			strconv.Itoa(len(trab.negados))+" diretórios: "+
+			resumoCaminhos(trab.negados)+" — SUID lá dentro NÃO foi procurado")
+	}
 	if len(trab.outroFS) > 0 {
 		lista := trab.outroFS
 		sort.Strings(lista)
@@ -221,6 +227,12 @@ type varredura struct {
 	truncado       bool
 	profundoDemais bool
 	outroFS        []string
+
+	// negados são os diretórios que a varredura não conseguiu ABRIR. Sem esta
+	// lista, um galho inteiro sumia com a mesma cara de galho sem SUID — e
+	// /home costuma ser 0700 por usuário, que é justamente onde um setuid
+	// plantado sobreviveria à faxina.
+	negados []string
 }
 
 func (v *varredura) rodar(n int) {
@@ -286,7 +298,15 @@ func (v *varredura) visitar(t tarefaDir) {
 
 	ents, err := v.e.ReadDir(t.dir)
 	if err != nil {
-		return // sem permissão neste galho: o resto da árvore continua
+		// O galho para aqui e o resto da árvore continua — mas o que ficou
+		// para trás precisa ser DITO. Diretório que sumiu no meio da varredura
+		// não conta: ausência é resposta, corrida de arquivo é ruído.
+		if env.EhLacuna(err) {
+			v.mu.Lock()
+			v.negados = append(v.negados, t.dir)
+			v.mu.Unlock()
+		}
+		return
 	}
 
 	var novos []tarefaDir

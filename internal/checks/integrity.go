@@ -103,7 +103,7 @@ var semDonoDePacote = check.Check{
 			fd.NextSteps = []string{
 				"pergunte QUEM instalou antes de tratar como achado: instalação " +
 					"manual legítima é comum",
-				"sudo cp " + o.Path + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
+				"sudo cp " + check.Arg(o.Path) + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
 				"com o binário em mãos, a §5.10 diz a FAMÍLIA — e o nome muda a " +
 					"prioridade do resto da resposta",
 			}

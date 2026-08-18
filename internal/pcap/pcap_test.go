@@ -97,7 +97,11 @@ func TestArquivoTemOFormatoDoLibpcap(t *testing.T) {
 
 	r := ler(t, buf.Bytes())
 	if r.magic != magicMicro {
-		t.Errorf("magic = %08x, queria %08x", r.magic, magicMicro)
+		// uint32 explícito: a constante não tipada vira `int` ao entrar num
+		// `any`, e 0xa1b2c3d4 estoura o int de 32 bits — o teste não compilava
+		// em i686, que é justamente a arquitetura onde o socketcall e este
+		// escritor nunca tinham sido exercitados.
+		t.Errorf("magic = %08x, queria %08x", r.magic, uint32(magicMicro))
 	}
 	if r.versao != [2]uint16{2, 4} {
 		t.Errorf("versão = %v, queria 2.4", r.versao)

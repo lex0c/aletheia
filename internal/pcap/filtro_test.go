@@ -87,9 +87,12 @@ func TestSemFiltroTudoEntra(t *testing.T) {
 // conseguir olhar dentro dos pacotes.
 func TestOQueNaoFoiEntendidoNaoViraNaoCasou(t *testing.T) {
 	f := fHost("51.91.190.241")
+	// Só entra aqui o que é TRUNCADO ou malformado — o que impede decidir.
+	// Quadro de outro protocolo (ARP, LLDP) NÃO entra: ele foi entendido, e
+	// simplesmente não é do tipo que um filtro de IP alcança. Ver
+	// TestQuadroNaoIPNaoEhLacuna.
 	casos := map[string][]byte{
 		"quadro curto demais":     {0x00, 0x01, 0x02},
-		"ethertype desconhecido":  append(make([]byte, 12), 0x88, 0xCC, 0x01),
 		"IPv4 com IHL impossível": quadroComIHL(3),
 		"IPv4 sem cabeçalho todo": quadro(alvo, local, protoTCP, 1, 2)[:20],
 	}
@@ -176,10 +179,13 @@ func TestEnlaceRawComecaNoIP(t *testing.T) {
 	if casa, entendi := fHost("51.91.190.241").Casa(LinkRaw, p); !casa || !entendi {
 		t.Errorf("DLT_RAW: casa=%v entendi=%v", casa, entendi)
 	}
-	// E o mesmo pacote lido como ethernet é lixo — é por isso que rotular o
-	// arquivo errado é pior que não escrever.
-	if _, entendi := fHost("51.91.190.241").Casa(LinkEthernet, p); entendi {
-		t.Error("um pacote RAW lido como ethernet não pode ser dado como entendido")
+	// E o mesmo pacote lido como ethernet não casa: os bytes 12-13 caem no meio
+	// do cabeçalho IP e não formam um EtherType de IP. Ele sai como "não casa",
+	// e não como lacuna — do lado de fora, um quadro de outro protocolo e um
+	// quadro mal rotulado são indistinguíveis. Quem impede o rótulo errado é o
+	// AbrirInterface, que RECUSA ARPHRD que não sabe traduzir.
+	if casa, _ := fHost("51.91.190.241").Casa(LinkEthernet, p); casa {
+		t.Error("um pacote RAW lido como ethernet não pode CASAR um filtro de host")
 	}
 }
 
@@ -204,5 +210,31 @@ func TestProtoValidoRecusaOQueNaoSabeDecidir(t *testing.T) {
 			t.Errorf("%q deveria ser recusado: aceitar e nunca casar produz "+
 				"captura vazia com cara de resposta", ruim)
 		}
+	}
+}
+
+// Quadro que não é IP — ARP, LLDP, STP — foi ENTENDIDO: ele só não é do tipo que
+// um filtro de host/porta alcança. Classificá-lo como "não consegui decodificar"
+// fazia toda captura filtrada num segmento Ethernet real terminar com lacuna
+// declarada e exit 1, e afogava o sinal do truncamento de verdade.
+func TestQuadroNaoIPNaoEhLacuna(t *testing.T) {
+	arp := make([]byte, 42)
+	arp[12], arp[13] = 0x08, 0x06 // ARP
+	lldp := make([]byte, 60)
+	lldp[12], lldp[13] = 0x88, 0xCC // LLDP
+
+	f := fHost("51.91.190.241")
+	for nome, pkt := range map[string][]byte{"ARP": arp, "LLDP": lldp} {
+		casa, entendi := f.Casa(LinkEthernet, pkt)
+		if casa {
+			t.Errorf("%s não casa um filtro de host IP", nome)
+		}
+		if !entendi {
+			t.Errorf("%s foi entendido — não é lacuna, é quadro de outro tipo", nome)
+		}
+	}
+	// E o truncado de verdade continua sendo lacuna.
+	if _, entendi := f.Casa(LinkEthernet, []byte{0x00, 0x01}); entendi {
+		t.Error("quadro menor que o cabeçalho de enlace é truncado: isso É lacuna")
 	}
 }

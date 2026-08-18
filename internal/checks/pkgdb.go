@@ -91,7 +91,7 @@ var baseDePacotesAdulterada = check.Check{
 				"`dpkg -V` e o md5sums do pacote citado dizem se o resto da base " +
 					"também foi mexido",
 				"o ctime de " + c.File + " data a edição (runbook §9)",
-				"sudo cp " + c.Path + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
+				"sudo cp " + check.Arg(c.Path) + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

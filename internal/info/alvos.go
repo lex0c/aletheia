@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/facts"
 )
 
@@ -152,7 +153,7 @@ func Processo(f *facts.Facts, pid int) *Dossie {
 	d.Sinais = append(d.Sinais, sinaisDoProcesso(p)...)
 	d.Proximo = []string{
 		"sudo aletheia preserve --out \"$IR\" --pid " + strconv.Itoa(pid) + " --mem",
-		"aletheia info file " + nz(p.Exe, "<exe>"),
+		"aletheia info file " + check.Arg(nz(p.Exe, "<exe>")),
 		"aletheia scan --only proc,net   # o veredito, com os falsos positivos junto",
 	}
 	return d
@@ -226,7 +227,7 @@ func IP(f *facts.Facts, addr string) *Dossie {
 		d.Sinais = append(d.Sinais, "endereço PÚBLICO: o que sai daqui sai do perímetro")
 	}
 	d.Proximo = []string{
-		"aletheia scan --ioc <(echo ips: [" + addr + "])   # o mesmo endereço no resto do que foi coletado",
+		"aletheia scan --ioc <(echo ips: [" + check.Arg(addr) + "])   # o mesmo endereço no resto do que foi coletado",
 		"e nos OUTROS hosts da frota: é assim que se acha a segunda máquina (§23)",
 		"o volume que passou não está no host: veja `aletheia checks | grep exfil` (§37.2)",
 	}
@@ -402,7 +403,7 @@ func Arquivo(f *facts.Facts, caminho string) *Dossie {
 			"varredura o referencia")
 	}
 	d.Proximo = []string{
-		"sudo aletheia preserve --out \"$IR\" --file " + caminho,
+		"sudo aletheia preserve --out \"$IR\" --file " + check.Arg(caminho),
 		"e as datas: o ctime não é falsificável com `touch`, o mtime é (§5.2)",
 	}
 	return d

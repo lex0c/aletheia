@@ -54,6 +54,9 @@ type Estatisticas struct {
 	SemRelogioDoKernel bool
 	// Motivo de a captura ter parado.
 	Parou string
+	// SemContadorDoKernel diz que o PACKET_STATISTICS não pôde ser lido: sem
+	// ele, "zero descartes" seria afirmação sem lastro.
+	SemContadorDoKernel bool
 }
 
 // Interface é o que o /sys diz sobre a placa antes de tentar capturar.
@@ -142,6 +145,12 @@ var ErrSemPrivilegio = errors.New("abrir socket de captura exige CAP_NET_RAW: " 
 // própria §2.6 trata interface promíscua como achado. Sem promíscuo se vê o
 // tráfego DESTE host, que é o que um incidente pergunta.
 func Capturar(w io.Writer, h hash.Hash, iface Interface, o Opcoes) (Estatisticas, error) {
+	// `erroFatal` guarda a falha que aconteceu DEPOIS de o arquivo já existir.
+	// Ela precisa ser devolvida: até esta correção, o disco encher no meio de
+	// uma captura terminava com `.pcap` truncado, manifesto dizendo
+	// "preservado", hash da origem batendo com o da cópia (porque os dois eram
+	// do que foi ESCRITO) e o comando saindo 0.
+	var erroFatal error
 	st := Estatisticas{Inicio: time.Now().UTC()}
 
 	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, int(htons(ethPAll)))
@@ -200,12 +209,19 @@ func Capturar(w io.Writer, h hash.Hash, iface Interface, o Opcoes) (Estatisticas
 			break
 		}
 
-		n, oobn, _, de, err := syscall.Recvmsg(fd, buf, oob, 0)
+		// MSG_TRUNC no recvmsg de um socket de PACOTE devolve o tamanho REAL do
+		// quadro, mesmo quando só `len(buf)` bytes foram copiados. Sem ele, o
+		// `orig_len` do pcap saía igual ao `incl_len` e um pacote cortado pelo
+		// snaplen se apresentava ao Wireshark como pacote completo — que é
+		// exatamente o "pacote truncado passa por pacote pequeno" que o
+		// escritor diz evitar.
+		n, oobn, _, de, err := syscall.Recvmsg(fd, buf, oob, syscall.MSG_TRUNC)
 		if err != nil {
 			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EINTR) {
 				continue // sem pacote na janela de espera: volta a conferir prazo
 			}
 			st.Parou = "erro de leitura: " + err.Error()
+			erroFatal = fmt.Errorf("leitura interrompida em %d pacote(s) gravado(s): %w", st.Gravados, err)
 			break
 		}
 		if n <= 0 {
@@ -244,15 +260,18 @@ func Capturar(w io.Writer, h hash.Hash, iface Interface, o Opcoes) (Estatisticas
 			continue
 		}
 
-		// `n` é o que foi COPIADO; o tamanho original vem do próprio recvmsg
-		// quando o snaplen corta — o AF_PACKET devolve o tamanho real do quadro
-		// só via MSG_TRUNC, então o que se sabe aqui é que o corte aconteceu.
+		// Com MSG_TRUNC, `n` é o tamanho do quadro NO FIO; o que coube em `buf`
+		// é o mínimo entre ele e o snaplen.
 		original := n
-		if n == snap {
+		copiado := n
+		if copiado > snap {
+			copiado = snap
 			st.Truncados++
 		}
-		if err := esc.Pacote(quando, buf[:n], original); err != nil {
+		if err := esc.Pacote(quando, buf[:copiado], original); err != nil {
 			st.Parou = "erro de escrita: " + err.Error()
+			erroFatal = fmt.Errorf("escrita interrompida em %d pacote(s): o arquivo "+
+				"está TRUNCADO no meio de um registro: %w", st.Gravados, err)
 			break
 		}
 		st.Gravados++
@@ -267,8 +286,12 @@ func Capturar(w io.Writer, h hash.Hash, iface Interface, o Opcoes) (Estatisticas
 	if p, d, err := estatisticasDoKernel(fd); err == nil {
 		st.VistosPeloKernel = p
 		st.Descartados = d
+	} else {
+		// Sem o contador do kernel não dá para afirmar que a captura foi
+		// completa — e afirmar isso é o oposto do que este pacote promete.
+		st.SemContadorDoKernel = true
 	}
-	return st, nil
+	return st, erroFatal
 }
 
 // horario devolve o instante do pacote. O do kernel é melhor: é quando o quadro

@@ -84,6 +84,11 @@ func collectLogs(f *Facts, e *env.Env) {
 // O `.gz` sai antes do número: sem isso `auth.log.2.gz` viraria base própria e
 // a sequência nunca teria buraco nenhum, porque cada geração seria um arquivo
 // diferente.
+// maxGeracoes é o teto de gerações que uma série de rotação pode ter. O
+// logrotate mais generoso guarda algumas dezenas; acima disso o número veio do
+// nome do arquivo, não da realidade.
+const maxGeracoes = 400
+
 func separaRotacao(nome string) (string, int) {
 	n := nome
 	for _, suf := range []string{".gz", ".xz", ".bz2", ".zst"} {
@@ -126,6 +131,13 @@ func (f *Facts) BuracosNaRotacao() map[string][]int {
 		// Do 1 até o maior presente: o que faltar no meio foi removido. A
 		// geração 0 não entra — um arquivo vivo ausente é outra história, e
 		// distribuição nenhuma garante que ele exista.
+		// TETO: `maior` sai de um Atoi do sufixo de um NOME DE ARQUIVO, e um
+		// `touch /var/log/x.500000000` derrubava o processo por falta de
+		// memória — exit 2, que a frota lê como comprometimento. Rotação de
+		// verdade não passa de algumas dezenas de gerações.
+		if maior > maxGeracoes {
+			continue
+		}
 		var faltam []int
 		for g := 1; g < maior; g++ {
 			if !tem[g] {

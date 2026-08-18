@@ -69,7 +69,7 @@ func collectSSHConfig(f *Facts, e *env.Env) {
 	arquivos := []string{"/etc/ssh/sshd_config"}
 	// Include é o padrão nas distribuições atuais, e ignorá-lo faria a
 	// ferramenta ler o arquivo principal e perder a configuração REAL.
-	for _, n := range e.ReadDirNames("/etc/ssh/sshd_config.d") {
+	for _, n := range f.listarNegando(e, "ssh", "/etc/ssh/sshd_config.d") {
 		if strings.HasSuffix(n, ".conf") {
 			arquivos = append(arquivos, "/etc/ssh/sshd_config.d/"+n)
 		}
@@ -77,8 +77,13 @@ func collectSSHConfig(f *Facts, e *env.Env) {
 
 	c := &f.SSH
 	for _, p := range arquivos {
-		b, err := e.ReadFile(p)
-		if err != nil {
+		// Ilegível é o oposto de ausente. O sshd_config é 0600 em host
+		// endurecido, e um `continue` mudo aqui esvaziava c.Files — que é
+		// exatamente o mesmo estado de "esta máquina não tem servidor SSH".
+		// O relatório calava sobre PermitRootLogin de um host que aceita
+		// login de root.
+		b, ok := f.lerNegando(e, "ssh", p)
+		if !ok {
 			continue
 		}
 		c.Files = append(c.Files, p)

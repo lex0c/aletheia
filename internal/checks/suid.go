@@ -156,7 +156,7 @@ var suidInesperado = check.Check{
 			fd.Quando, fd.QuandoFonte = s.ModUTC, "mtime do arquivo"
 			fd.Irreversible = true
 			fd.NextSteps = []string{
-				"sudo cp " + s.Path + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
+				"sudo cp " + check.Arg(s.Path) + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
 				"`chmod u-s,g-s " + s.Path + "` tira o poder sem apagar a prova",
 				"o mesmo caminho na frota diz se é padrão da casa ou incidente " +
 					"(runbook §23)",

@@ -1,6 +1,7 @@
 package env
 
 import (
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -22,8 +23,60 @@ import (
 // os.Root resolve isso no kernel (openat2/RESOLVE_BENEATH): qualquer caminho
 // que escape da raiz falha, incluindo por symlink.
 
+// MaxLeitura é o teto de UM arquivo lido do alvo.
+//
+// Ele existe porque o conteúdo é hostil por definição. Sem teto, um usuário sem
+// privilégio nenhum derruba a varredura com um comando:
+//
+//	truncate -s 8G ~/.ssh/authorized_keys   → arquivo esparso, 0 byte de disco
+//
+// O `os.ReadFile` aloca os 8 GB, o runtime morre em `fatal error: out of
+// memory`, e o processo sai com status 2 — que o contrato desta ferramenta
+// define como "CRITICAL: indicador de alta confiança". Um recover não alcança
+// isso: o runtime aborta sem passar por panic.
+//
+// 32 MB é folgado para tudo que esta ferramenta lê de propósito (config, chave,
+// crontab, unit, log de rotação) e barato de recusar.
+const MaxLeitura = 32 << 20
+
+// ErrGrandeDemais e ErrNaoEhArquivo são recusas, não falhas: quem chama precisa
+// declarar a lacuna em vez de tratar como "não havia nada".
+var (
+	ErrGrandeDemais = errors.New("arquivo maior que o teto de leitura: NÃO foi lido")
+	ErrNaoEhArquivo = errors.New("não é arquivo comum (fifo, socket ou dispositivo): " +
+		"NÃO foi lido, porque abrir isto bloqueia ou consome sem fim")
+)
+
 // ReadFile lê um arquivo, travado na raiz quando em modo image.
+//
+// Duas recusas antes de abrir, e as duas foram reproduzidas contra o binário
+// real por uma revisão:
+//
+//	fifo       `mkfifo /etc/ld.so.preload` — caminho que a ferramenta SEMPRE lê
+//	           e que o atacante já toca. O open bloqueia para sempre e a
+//	           varredura nunca termina
+//	tamanho    arquivo esparso de 8 GB derruba o processo por falta de memória
+//
+// O `Lstat` antes do open é o que impede as duas. Ele é uma chamada a mais por
+// arquivo lido, e é o preço de ler o disco de um host que não é seu.
 func (e *Env) ReadFile(p string) ([]byte, error) {
+	fi, err := e.Lstat(p)
+	if err != nil {
+		return nil, err
+	}
+	// Symlink é seguido de propósito (é assim que /etc/rc.local funciona em
+	// RHEL), mas o ALVO precisa passar pelas mesmas travas.
+	if fi.Mode()&fs.ModeSymlink != 0 {
+		if fi, err = e.Stat(p); err != nil {
+			return nil, err
+		}
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, ErrNaoEhArquivo
+	}
+	if fi.Size() > MaxLeitura {
+		return nil, ErrGrandeDemais
+	}
 	if e.root == nil {
 		return os.ReadFile(p)
 	}
@@ -116,4 +169,26 @@ func rel(p string) string {
 		return "."
 	}
 	return p
+}
+
+// EhLacuna separa "não existe" de "não consegui olhar".
+//
+// Ausência é RESPOSTA: metade dos caminhos de persistência não existe na
+// maioria dos hosts, e tratar isso como buraco encheria todo relatório de
+// ruído. Permissão negada, tamanho acima do teto e tipo que não se lê são
+// LACUNA — e é essa distinção que sustenta a tese inteira da ferramenta,
+// porque quem trata as duas igual afirma limpeza onde só houve cegueira.
+func EhLacuna(err error) bool {
+	return err != nil && !errors.Is(err, fs.ErrNotExist)
+}
+
+// MotivoDoErro reduz o erro do sistema à CAUSA, sem repetir o caminho. Quem
+// chama já tem o caminho e vai escrevê-lo na frase; sem isto a linha sai como
+// "/etc/shadow não pôde ser lido (open /etc/shadow: permission denied)".
+func MotivoDoErro(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err.Error()
+	}
+	return err.Error()
 }

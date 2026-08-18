@@ -92,7 +92,7 @@ var procLdPreload = check.Check{
 				fd.Irreversible = true
 				fd.NextSteps = []string{
 					"preserve a lib antes de matar o processo: ela é a amostra (runbook §6)",
-					"sudo cp " + v + " \"$IR/\"",
+					"sudo cp " + check.Arg(v) + " \"$IR/\"",
 					"ache quem DEFINIU: environ do pai, ~/.bashrc, /etc/environment, drop-in de unit",
 				}
 				r.Findings = append(r.Findings, fd)

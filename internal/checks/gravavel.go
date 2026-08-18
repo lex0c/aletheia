@@ -104,8 +104,8 @@ var rootExecutaGravavel = check.Check{
 			fd := self.F(sev, a.Caminho, "", ev...)
 			fd.Ator = a.Caminho
 			fd.NextSteps = []string{
-				"quem é o dono, e ele deveria ser: stat -c '%U %G %a' " + a.Caminho,
-				"sudo chown root:root " + a.Caminho + " && sudo chmod 755 " + a.Caminho,
+				"quem é o dono, e ele deveria ser: stat -c '%U %G %a' " + check.Arg(a.Caminho),
+				"sudo chown root:root " + check.Arg(a.Caminho) + " && sudo chmod 755 " + check.Arg(a.Caminho),
 				"o mesmo vale para o DIRETÓRIO e para tudo que o script chamar sem " +
 					"caminho absoluto (runbook §36.4)",
 			}

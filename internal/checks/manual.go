@@ -65,7 +65,7 @@ var consultaAoAudit = check.Check{
 		}
 
 		passos := []string{
-			"sudo ausearch -m EXECVE -ts " + desde + " -i | less   # o que executou na janela",
+			"sudo ausearch -m EXECVE -ts " + check.Arg(desde) + " -i | less   # o que executou na janela",
 		}
 		for _, pid := range pids {
 			passos = append(passos, "sudo ausearch -p "+strconv.Itoa(pid)+" -i   # tudo do processo "+strconv.Itoa(pid))
@@ -123,14 +123,14 @@ var logDaNuvem = check.Check{
 		switch provedor {
 		case "GCP":
 			fd.NextSteps = []string{
-				`gcloud logging read 'resource.labels.instance_id="` + host + `" AND timestamp>="` + desde + `"' --limit 200`,
-				`gcloud logging read 'protoPayload.authenticationInfo.principalEmail=~"` + host + `"' --freshness=7d`,
+				"gcloud logging read " + check.Arg(`resource.labels.instance_id="`+host+`" AND timestamp>="`+desde+`"`) + " --limit 200",
+				"gcloud logging read " + check.Arg(`protoPayload.authenticationInfo.principalEmail=~"`+host+`"`) + " --freshness=7d",
 				"e o uso da credencial DA INSTÂNCIA fora dela: procure a service " +
 					"account do host em chamadas que não partiram dele (§10.5)",
 			}
 		case "AWS":
 			fd.NextSteps = []string{
-				`aws cloudtrail lookup-events --start-time ` + desde + ` --max-results 200`,
+				"aws cloudtrail lookup-events --start-time " + check.Arg(desde) + " --max-results 200",
 				`aws cloudtrail lookup-events --lookup-attributes AttributeKey=Username,AttributeValue=<role-da-instância>`,
 				"a role da instância usada de um IP que não é o dela é roubo de " +
 					"credencial de metadata (§10.5)",
@@ -181,10 +181,10 @@ var integridadeDoCodigo = check.Check{
 		var passos []string
 		for _, repo := range repos {
 			passos = append(passos,
-				"git -C "+repo+" status --ignored --short   # o que o .gitignore ESCONDE do status",
-				"git -C "+repo+" diff origin/HEAD --stat    # a comparação autoritativa é o REMOTO",
-				"git -C "+repo+" reflog --date=iso | head -30  # quando o ref se moveu, na hora local",
-				"git -C "+repo+" fsck --lost-found 2>/dev/null | grep commit  # o que foi 'amend'-ado")
+				"git -C "+check.Arg(repo)+" status --ignored --short   # o que o .gitignore ESCONDE do status",
+				"git -C "+check.Arg(repo)+" diff origin/HEAD --stat    # a comparação autoritativa é o REMOTO",
+				"git -C "+check.Arg(repo)+" reflog --date=iso | head -30  # quando o ref se moveu, na hora local",
+				"git -C "+check.Arg(repo)+" fsck --lost-found 2>/dev/null | grep commit  # o que foi 'amend'-ado")
 		}
 		passos = append(passos,
 			"os três pontos cegos do status: commitou (as datas mentem — "+

@@ -118,7 +118,7 @@ var fronteiraDeContainer = check.Check{
 					"do host não tem caminho legítimo comum",
 			)
 			fd.NextSteps = []string{
-				"sudo cp " + p.Exe + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
+				"sudo cp " + check.Arg(p.Exe) + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
 				"`docker ps -a --no-trunc` e cruze o hash do caminho com a imagem de origem",
 				"quem tem acesso ao socket do docker tem root no host (runbook §7.9): " +
 					"confira o grupo `docker` antes de concluir que houve escape",

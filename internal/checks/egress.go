@@ -143,7 +143,7 @@ var escutaSemDono = check.Check{
 			fd := self.F(sev, "pid="+strconv.Itoa(s.PID), "", ev...)
 			fd.Irreversible = true
 			fd.NextSteps = []string{
-				"sudo cp " + p.Exe + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
+				"sudo cp " + check.Arg(p.Exe) + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
 				"pergunte QUEM instalou: aplicação manual legítima tem essa mesma forma",
 				"isole na camada de REDE antes de mexer no host (runbook §18)",
 			}
@@ -257,7 +257,7 @@ var saidaSemDono = check.Check{
 			fd := self.F(sev, sujeito, "", ev...)
 			fd.Irreversible = true
 			fd.NextSteps = []string{
-				"sudo cp " + p.Exe + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
+				"sudo cp " + check.Arg(p.Exe) + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
 				"pergunte ao time se este binário deveria falar com a internet",
 				"o destino vale como IOC de frota: procure a mesma conexão nos " +
 					"outros hosts (runbook §23)",

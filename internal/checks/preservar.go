@@ -3,6 +3,7 @@ package checks
 import (
 	"strconv"
 
+	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/env"
 )
 
@@ -28,7 +29,7 @@ import (
 // é o caminho REAL do processo que acabou de rodar (com symlink resolvido), e é
 // a única forma de a instrução funcionar colada no terminal.
 func preservarPID(e *env.Env, pid int, flags ...string) string {
-	s := "sudo " + ferramenta(e) + " preserve --out \"$IR\" --pid " + strconv.Itoa(pid)
+	s := "sudo " + check.Arg(ferramenta(e)) + " preserve --out \"$IR\" --pid " + strconv.Itoa(pid)
 	for _, f := range flags {
 		s += " " + f
 	}

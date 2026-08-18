@@ -324,7 +324,21 @@ func collectProcesses(f *Facts, e *env.Env) {
 		for i := range f.Processes {
 			p := &f.Processes[i]
 			if p.startTicks > 0 {
-				t := f.Host.bootTime.Add(time.Duration(p.startTicks) * time.Second / time.Duration(f.Host.hz))
+				// A DIVISÃO VEM ANTES da multiplicação, e a ordem não é
+				// estética: `ticks * 1e9` estoura o int64 acima de ~9,22e9
+				// ticks, que é uptime de 1068 dias a 100 Hz. Medido: com 1067
+				// dias a conta acerta; com 1068 todo processo recente passa a
+				// reportar uma data seis anos no passado — sem erro e sem
+				// lacuna, só datas erradas com cara de precisas, alimentando
+				// nove checks e a janela do --since.
+				//
+				// Servidor com três anos de uptime é exatamente o perfil do
+				// i686 legado que esta ferramenta existe para examinar.
+				seg := p.startTicks / int64(f.Host.hz)
+				resto := p.startTicks % int64(f.Host.hz)
+				t := f.Host.bootTime.
+					Add(time.Duration(seg) * time.Second).
+					Add(time.Duration(resto) * time.Second / time.Duration(f.Host.hz))
 				p.StartUTC = t.UTC().Format(time.RFC3339)
 				p.Age = e.Now.Sub(t)
 			}

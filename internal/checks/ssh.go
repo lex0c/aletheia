@@ -132,8 +132,11 @@ var sshdBackdoor = check.Check{
 		var r check.Result
 		c := f.SSH
 		if len(c.Files) == 0 {
-			// Sem sshd_config não há o que avaliar, e isso não é lacuna: host
-			// sem servidor SSH é normal.
+			// Sem sshd_config não há o que avaliar. Ausência não é lacuna —
+			// host sem servidor SSH é normal —, mas config ILEGÍVEL é o
+			// contrário exato: o arquivo está lá, decide quem entra na
+			// máquina, e não foi lido. Os dois casos chegavam aqui iguais.
+			r.Partial = append(r.Partial, f.PersistDenied["ssh"]...)
 			return r
 		}
 

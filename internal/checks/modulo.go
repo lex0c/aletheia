@@ -139,7 +139,7 @@ var moduloSemArquivo = check.Check{
 					"kernel, e o rmmod o destrói (runbook §19)",
 				"sudo cp /proc/kcore \"$IR/\"   # o kernel inteiro, se houver espaço; " +
 					"a região do módulo está em /sys/module/" + m.Nome + "/sections/",
-				"sudo cat /sys/module/" + m.Nome + "/sections/.text   # onde ele foi carregado",
+				"sudo cat " + check.Arg("/sys/module/"+m.Nome+"/sections/.text") + "   # onde ele foi carregado",
 				"a partir daqui, a análise honesta é DE FORA: um módulo hostil " +
 					"mente para todos os outros checks (runbook §35.6)",
 			}

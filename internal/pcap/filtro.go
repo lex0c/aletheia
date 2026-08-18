@@ -112,6 +112,8 @@ func semEnlace(tipoEnlace uint32, pkt []byte) (carga []byte, etherType uint16, o
 		return nil, 0, false
 
 	case LinkEthernet:
+		// Quadro menor que o cabeçalho de enlace é truncado de verdade: aí sim
+		// não dá para decidir nada sobre ele.
 		if len(pkt) < 14 {
 			return nil, 0, false
 		}
@@ -178,7 +180,12 @@ func (f Filtro) casaIP(etherType uint16, b []byte) (casa, entendi bool) {
 		}
 
 	default:
-		return false, false
+		// QUADRO QUE NÃO É IP: ARP, LLDP, STP, 802.1X. Ele foi entendido — só
+		// não é do tipo que um filtro de host/porta/protocolo alcança. Contar
+		// isso como "não consegui decodificar" fazia TODA captura filtrada num
+		// segmento Ethernet real terminar com lacuna declarada e exit 1, e
+		// afogava o sinal que existe para denunciar truncamento de verdade.
+		return false, true
 	}
 
 	if f.Host.IsValid() && f.Host != src && f.Host != dst {

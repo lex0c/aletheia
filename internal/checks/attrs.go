@@ -92,8 +92,8 @@ var arquivoImutavel = check.Check{
 			fd.NextSteps = []string{
 				// PRIMEIRO passo, e a ordem é o ponto do check: sem isto, o resto
 				// do roteiro devolve "operação não permitida" e parece defeito.
-				"sudo chattr -i -a " + a.Path + "   # ANTES de qualquer remoção: sem isto o resto falha",
-				"sudo cp " + a.Path + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
+				"sudo chattr -i -a " + check.Arg(a.Path) + "   # ANTES de qualquer remoção: sem isto o resto falha",
+				"sudo cp " + check.Arg(a.Path) + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
 				"`lsattr` no diretório inteiro: quem trava um arquivo costuma travar mais de um",
 			}
 			r.Findings = append(r.Findings, fd)

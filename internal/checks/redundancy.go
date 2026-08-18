@@ -174,7 +174,7 @@ var persistRedundant = check.Check{
 				"remova TODOS os mecanismos antes de matar o processo: sobrando um, " +
 					"ele volta (runbook §19)",
 				"a lista acima é o roteiro de limpeza — e depois dela, `atq` (runbook §7.4)",
-				"sudo cp " + alvo + " \"$IR/\"   # o binário é a amostra (runbook §6)",
+				"sudo cp " + check.Arg(alvo) + " \"$IR/\"   # o binário é a amostra (runbook §6)",
 			}
 			fd.Irreversible = true
 			r.Findings = append(r.Findings, fd)

@@ -91,7 +91,7 @@ var execEmDiretorioOculto = check.Check{
 			fd := self.F(check.SevWarn, d, "", ev...)
 			fd.Irreversible = true
 			fd.NextSteps = []string{
-				"sudo cp -a " + d + " \"$IR/\"   # o diretório inteiro, antes de qualquer coisa (runbook §6)",
+				"sudo cp -a " + check.Arg(d) + " \"$IR/\"   # o diretório inteiro, antes de qualquer coisa (runbook §6)",
 				"o ctime do diretório data a criação do esconderijo (runbook §9)",
 				"o conteúdo some no próximo boot se for tmpfs: preservar agora é a " +
 					"única chance",

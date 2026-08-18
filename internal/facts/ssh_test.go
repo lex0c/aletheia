@@ -1,8 +1,12 @@
 package facts
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/lex0c/aletheia/internal/env"
 )
 
 // NOTA DE MÉTODO: a primeira versão destes casos tinha blobs base64
@@ -130,5 +134,36 @@ func TestPareceTipoDeChave(t *testing.T) {
 		if pareceTipoDeChave(s) {
 			t.Errorf("%q é opção, não tipo de chave", s)
 		}
+	}
+}
+
+// sshd_config ilegível não pode virar "host sem SSH".
+//
+// O arquivo é 0600 root em host endurecido. Sem root, a leitura falha, c.Files
+// fica vazio — e vazio era o mesmo estado de uma máquina que não tem servidor
+// SSH nenhum. O check de PermitRootLogin voltava mudo sobre um host que aceita
+// login de root pela rede.
+func TestSshdConfigIlegivelNaoViraHostSemSSH(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root lê tudo")
+	}
+	raiz := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(raiz, "etc/ssh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(raiz, "etc/ssh/sshd_config")
+	if err := os.WriteFile(cfg, []byte("PermitRootLogin yes\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	e := env.Probe(env.Options{Root: raiz})
+	t.Cleanup(func() { e.Close() })
+	f := Collect(e)
+
+	if len(f.SSH.Files) != 0 {
+		t.Fatalf("o arquivo é ilegível: não podia ter sido lido — %v", f.SSH.Files)
+	}
+	if len(f.PersistDenied["ssh"]) == 0 {
+		t.Error("config ilegível saiu igual a config ausente: a diferença entre " +
+			"'esta máquina não tem sshd' e 'não consegui ler quem entra nela'")
 	}
 }

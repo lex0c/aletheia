@@ -104,8 +104,14 @@ var kernelBreakers = map[string]string{
 		"a interface que responde por eBPF omitiu um objeto que ela mesma entrega quando perguntada direto",
 	"cross.hidden_pid": "um PID responde a /proc/<pid> e não apareceu na listagem de /proc: " +
 		"a mesma interface deu duas respostas incompatíveis",
-	"cross.module_view": "um módulo aparece em /proc/modules e não em /sys/module: " +
-		"as duas visões do kernel sobre a própria lista de módulos discordam",
+	// Genérico DE PROPÓSITO: cross.module_view carrega DUAS evidências — a
+	// divergência /proc/modules × /sys/module, e a divergência ftrace × proc (o
+	// módulo escondido das duas primeiras que o ftrace ainda delata). A mensagem
+	// antiga só descrevia a primeira, e afirmava "aparece em /proc/modules" no
+	// caso em que ele NÃO aparece em /proc/modules nenhum — descrevia evidência
+	// que não ocorreu.
+	"cross.module_view": "interfaces independentes do kernel deram respostas " +
+		"incompatíveis sobre os módulos carregados (/proc/modules, /sys/module ou ftrace)",
 	// cross.thread_count NÃO entra: ele compara duas visões, mas emite SevWarn
 	// (a divergência de contagem de threads tem corrida real e não é
 	// reconfirmada), e invalidarAusencias só age sobre SevCritical. Deixá-lo no
@@ -311,11 +317,23 @@ func (r *Report) invalidarAusencias(fonte env.Source, completos []Check) {
 	for _, f := range r.Findings {
 		comAchado[f.ID] = true
 	}
-	razao := "o kernel demonstrou entregar visões inconsistentes de si mesmo nesta " +
-		"execução: a AUSÊNCIA de achado aqui foi respondida por ele, e não vale como resposta"
+	// TER achado NÃO devolve a completude. Um check que viu 1 processo suspeito
+	// provou que ele existe — o positivo continua valendo, e vale mais —, mas
+	// "não há OUTROS que o kernel escondeu" já não se sustenta: quem responderia
+	// isso é a fonte que acabou de mentir. Então a COBERTURA do check cai para
+	// parcial mesmo com achado; só o veredito positivo fica. Antes, quem tinha
+	// achado seguia Complete, e o relatório certificava uma enumeração completa
+	// que o kernel já não garantia.
+	semAchado := "o kernel demonstrou entregar visões inconsistentes de si mesmo " +
+		"nesta execução: a AUSÊNCIA de achado aqui foi respondida por ele, e não " +
+		"vale como resposta"
+	comAchadoRazao := "o kernel demonstrou mentir nesta execução: o ACHADO deste " +
+		"check continua valendo, mas a completude da enumeração não — pode haver " +
+		"mais que a fonte desqualificada escondeu"
 	for _, c := range completos {
+		razao := semAchado
 		if comAchado[c.ID] {
-			continue // achado positivo continua valendo, e vale mais
+			razao = comAchadoRazao
 		}
 		r.Coverage.Partial = append(r.Coverage.Partial, Partial{
 			ID: c.ID, Ref: c.Ref, Reasons: []string{razao},

@@ -169,3 +169,55 @@ func filepathDir(p string) string {
 	return "."
 }
 func hasSuffix(s, suf string) bool { return strings.HasSuffix(s, suf) }
+
+// Bug D: a forma MAIS comum do subprocess tem a entrada antes do shell=True.
+// Exigir shell=True primeiro deixava o caso típico só em tier 1.
+func TestSubprocessEntradaAntesDeShellTrue(t *testing.T) {
+	casos := []string{
+		`subprocess.run(request.args["cmd"], shell=True)`,
+		`subprocess.Popen(request.form["x"], shell=True)`,
+		`subprocess.call(shell=True, args=request.args["c"])`, // a outra ordem também
+	}
+	for _, linha := range casos {
+		if ms := analisarConteudo(linha, "python"); !tem(ms, 2, "subprocess") {
+			t.Errorf("%q: subprocess+shell=True sobre request é TIER 2 nas duas ordens: %+v", linha, ms)
+		}
+	}
+}
+
+// Bug C: diretório ou arquivo de código ILEGÍVEL não pode sumir do universo
+// avaliado em silêncio — é a regra central do projeto. ReadDirNames engolia o
+// erro e devolvia lista vazia; agora um diretório sem permissão vira lacuna
+// DECLARADA, e não-existe (raiz que o host não tem) continua sem ruído.
+func TestCodigoIlegivelViraLacunaNaoSilencio(t *testing.T) {
+	raiz := t.TempDir()
+	seg := raiz + "/var/www/segredo"
+	if err := os.MkdirAll(seg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(seg+"/x.php", []byte("<?php system($_GET[0]);"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// tira a permissão de LISTAR o diretório (só funciona como não-root).
+	if err := os.Chmod(seg, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(seg, 0o755) // para o t.TempDir conseguir limpar
+
+	if os.Geteuid() == 0 {
+		t.Skip("como root tudo é legível — este teste só vale sem privilégio")
+	}
+
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	defer e.Close()
+	f := &Facts{}
+	collectCodigo(f, e)
+
+	msgs := ""
+	for _, m := range f.PersistDenied["codigo"] {
+		msgs += m + " | "
+	}
+	if !strings.Contains(msgs, "não puderam ser LISTADOS") {
+		t.Errorf("diretório ilegível tinha de virar lacuna declarada, veio: %q", msgs)
+	}
+}

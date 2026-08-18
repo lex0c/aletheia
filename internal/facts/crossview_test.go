@@ -166,3 +166,20 @@ func TestModuloEscondidoSozinhoComProcVazio(t *testing.T) {
 		t.Fatalf("proc vazio e uma tag no ftrace é um módulo oculto: %v", got)
 	}
 }
+
+// A reconfirmação é uma INTERSEÇÃO: só a divergência presente NAS DUAS leituras
+// sobrevive. Uma que aparece só na primeira é corrida e é descartada. (O caso de
+// a segunda leitura FALHAR — vazio ≠ ilegível — é guardado pelas flags okProc/
+// okSys em quem chama, que declaram lacuna e zeram a divergência.)
+func TestReconfirmacaoEhIntersecao(t *testing.T) {
+	primeira := []string{"evil está em X", "ext4 está em X", "algo está em X"}
+	segunda := []string{"evil está em X"} // só evil persistiu
+	got := soPersistentes(primeira, segunda)
+	if len(got) != 1 || got[0] != "evil está em X" {
+		t.Fatalf("só o que persiste nas duas leituras sobrevive: %v", got)
+	}
+	// segunda leitura sem divergência nenhuma = tudo era corrida.
+	if got := soPersistentes(primeira, nil); len(got) != 0 {
+		t.Errorf("segunda leitura concordou (sem divergência): tudo descartado, veio %v", got)
+	}
+}

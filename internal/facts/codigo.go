@@ -82,8 +82,13 @@ var regrasJS = []regraDeCodigo{
 var regrasPy = []regraDeCodigo{
 	mustDup(2, "eval/exec sobre entrada de request", `\b(?:eval|exec)\s*\(\s*[^;\n]{0,120}`+pyInput),
 	mustDup(2, "os.system sobre entrada de request", `\bos\.system\s*\(\s*[^;\n]{0,120}`+pyInput),
+	// As DUAS ordens, porque a forma mais comum tem a entrada ANTES do
+	// shell=True: subprocess.run(request.args["cmd"], shell=True). Exigir
+	// shell=True primeiro deixava esse caso — o típico — cair só em tier 1.
 	mustDup(2, "subprocess com shell=True sobre entrada de request",
 		`\bsubprocess\.\w+\s*\([^;\n]{0,200}shell\s*=\s*True[^;\n]{0,200}`+pyInput),
+	mustDup(2, "subprocess com shell=True sobre entrada de request",
+		`\bsubprocess\.\w+\s*\([^;\n]{0,200}`+pyInput+`[^;\n]{0,200}shell\s*=\s*True`),
 	mustDup(2, "pickle.loads sobre entrada — desserialização executa código", `\bpickle\.loads\s*\(\s*[^;\n]{0,120}`+pyInput),
 	mustDup(1, "exec/eval presente", `\b(?:eval|exec)\s*\(`),
 	mustDup(1, "subprocess com shell=True", `\bsubprocess\.\w+\s*\([^;\n]{0,200}shell\s*=\s*True`),
@@ -212,11 +217,13 @@ type CodigoSuspeito struct {
 }
 
 type varreduraCodigo struct {
-	dirs           int
-	arquivos       int
-	truncado       bool
-	tempo          bool
-	grandesPulados int
+	dirs              int
+	arquivos          int
+	truncado          bool
+	tempo             bool
+	grandesPulados    int
+	dirsIlegiveis     int
+	arquivosIlegiveis int
 }
 
 func collectCodigo(f *Facts, e *env.Env) {
@@ -242,6 +249,8 @@ func collectCodigo(f *Facts, e *env.Env) {
 		st.truncado = st.truncado || porRaiz.truncado
 		st.tempo = st.tempo || porRaiz.tempo
 		st.grandesPulados += porRaiz.grandesPulados
+		st.dirsIlegiveis += porRaiz.dirsIlegiveis
+		st.arquivosIlegiveis += porRaiz.arquivosIlegiveis
 	}
 
 	if st.truncado {
@@ -259,6 +268,16 @@ func collectCodigo(f *Facts, e *env.Env) {
 			"acima de 2 MB NÃO foram analisados (minificado ou payload grande): "+
 			"um webshell cabe em bytes, mas um payload ofuscado pode não caber")
 	}
+	if st.dirsIlegiveis > 0 {
+		f.denyPersist("codigo", itoa(st.dirsIlegiveis)+" diretório(s) sob os web "+
+			"roots não puderam ser LISTADOS (permissão): o que havia neles NÃO "+
+			"foi analisado — sem root, boa parte do disco de aplicação é ilegível")
+	}
+	if st.arquivosIlegiveis > 0 {
+		f.denyPersist("codigo", itoa(st.arquivosIlegiveis)+" arquivo(s) de código "+
+			"foram listados e não puderam ser LIDOS (permissão): um backdoor num "+
+			"deles passa, e a ausência de achado ali é desconhecimento, não resposta")
+	}
 }
 
 func varrerCodigo(f *Facts, e *env.Env, dir string, prof int, st *varreduraCodigo, vistos map[string]bool) {
@@ -275,7 +294,20 @@ func varrerCodigo(f *Facts, e *env.Env, dir string, prof int, st *varreduraCodig
 	}
 	st.dirs++
 
-	for _, n := range e.ReadDirNames(dir) {
+	// ReadDir e NÃO ReadDirNames: o segundo engole o erro e devolve lista
+	// vazia, o que transformaria um diretório com permissão negada em "nenhum
+	// arquivo" — a confusão entre "não achei" e "não consegui ver", dentro do
+	// próprio scanner. Diretório ilegível vira lacuna DECLARADA. Não-existe
+	// (raiz que este host não tem) NÃO é lacuna, e EhLacuna separa os dois.
+	ents, err := e.ReadDir(dir)
+	if err != nil {
+		if env.EhLacuna(err) {
+			st.dirsIlegiveis++
+		}
+		return
+	}
+	for _, ent := range ents {
+		n := ent.Name()
 		p := dir + "/" + n
 		if e.IsDir(p) {
 			// As mesmas árvores que só geram profundidade e ruído. vendor e
@@ -312,6 +344,12 @@ func varrerCodigo(f *Facts, e *env.Env, dir string, prof int, st *varreduraCodig
 		}
 		b, err := e.ReadFile(p)
 		if err != nil {
+			// Um .php que o readdir listou e o ReadFile não abriu SOME do
+			// universo avaliado se calarmos. Ilegível é lacuna; não-existe
+			// (corrida: arquivo removido entre listar e ler) não é.
+			if env.EhLacuna(err) {
+				st.arquivosIlegiveis++
+			}
 			continue
 		}
 		ms := analisarConteudo(string(b), lang)

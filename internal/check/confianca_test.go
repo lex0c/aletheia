@@ -40,23 +40,35 @@ func TestKernelInconsistenteInvalidaAsAusencias(t *testing.T) {
 	if len(r.KernelTrustBroken) == 0 {
 		t.Fatal("cross.hidden_pid CRÍTICO precisa marcar o kernel como contraditório")
 	}
-	// Os dois calados saem de "completo" e entram em parcial.
-	if r.Coverage.Complete != 1 {
-		t.Errorf("completos = %d, queria 1 — só o que ACHOU continua completo",
-			r.Coverage.Complete)
+	// TODOS os três saem de "completo": os dois calados porque a ausência foi
+	// respondida por uma fonte desqualificada, e o que ACHOU porque a
+	// completude da enumeração dele também depende do kernel que mentiu. Nenhum
+	// check live continua certificando enumeração completa depois disso.
+	if r.Coverage.Complete != 0 {
+		t.Errorf("completos = %d, queria 0 — nenhum check live certifica enumeração "+
+			"completa quando o kernel prova que mente", r.Coverage.Complete)
 	}
-	var invalidados int
+	var invalidados, completudeVoid int
 	for _, p := range r.Coverage.Partial {
 		for _, m := range p.Reasons {
 			if strings.Contains(m, "não vale como resposta") {
 				invalidados++
+			}
+			if strings.Contains(m, "completude da enumeração não") {
+				completudeVoid++
 			}
 		}
 	}
 	if invalidados != 2 {
 		t.Errorf("ausências invalidadas = %d, queria 2: %+v", invalidados, r.Coverage.Partial)
 	}
-	// E o achado positivo continua valendo — vale mais, aliás.
+	// O check que achou entra em parcial com razão PRÓPRIA: achado vale,
+	// completude não.
+	if completudeVoid != 1 {
+		t.Errorf("o check com achado precisa virar parcial com a razão certa "+
+			"(achado vale, completude não), veio %d: %+v", completudeVoid, r.Coverage.Partial)
+	}
+	// E o achado positivo continua valendo — só a COBERTURA dele mudou.
 	if len(r.Findings) != 1 || r.Findings[0].Sev != SevCritical {
 		t.Errorf("o achado que provou a contradição não pode ser rebaixado: %+v", r.Findings)
 	}

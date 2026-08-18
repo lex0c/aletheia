@@ -285,16 +285,31 @@ func cruzarModulos(f *Facts) {
 	// divergência falsa. Relê e mantém só o que persiste nas DUAS leituras. É a
 	// mesma paranoia já aplicada a hidden PID, thread e BPF.
 	if len(f.Cross.ModDiff) > 0 {
-		proc2, sys2 := relerNomesDeModulos()
-		f.Cross.ModDiff = soPersistentes(f.Cross.ModDiff, DiferencaDeModulos(proc2, sys2))
+		proc2, sys2, okProc, okSys := relerNomesDeModulos()
+		if !okProc || !okSys {
+			// Sem a segunda testemunha, a divergência é INCONCLUSIVA, não
+			// confirmada: não vira CRÍTICO, e a lacuna é declarada.
+			f.partial("cross", "a divergência de módulos entre /proc/modules e "+
+				"/sys/module não pôde ser RECONFIRMADA (uma das interfaces ficou "+
+				"ilegível na segunda leitura): não é conclusiva")
+			f.Cross.ModDiff = nil
+		} else {
+			f.Cross.ModDiff = soPersistentes(f.Cross.ModDiff, DiferencaDeModulos(proc2, sys2))
+		}
 	}
 }
 
 // relerNomesDeModulos faz a segunda leitura das duas interfaces, para a
-// reconfirmação. Ilegível numa segunda tentativa devolve vazio, o que descarta
-// a divergência — o certo, porque sem a confirmação não há prova.
-func relerNomesDeModulos() (proc, sys []string) {
+// reconfirmação. Devolve okProc/okSys PORQUE vazio e ilegível NÃO são a mesma
+// coisa aqui — e a diferença é a que mais importa. Se a segunda leitura de
+// /sys/module falhasse e voltasse vazia, DiferencaDeModulos(proc, vazio)
+// marcaria TODO módulo como divergente, e a divergência inicial seria
+// "confirmada" por uma testemunha que não pôde falar — um CRÍTICO falso que
+// quebra a confiança do kernel inteiro. Quem chama descarta e declara lacuna
+// quando qualquer leitura falha: sem a segunda testemunha não há prova.
+func relerNomesDeModulos() (proc, sys []string, okProc, okSys bool) {
 	if s, ok := readTrim("/proc/modules"); ok {
+		okProc = true
 		for _, ln := range strings.Split(s, "\n") {
 			if fs := strings.Fields(ln); len(fs) > 0 {
 				proc = append(proc, fs[0])
@@ -302,11 +317,12 @@ func relerNomesDeModulos() (proc, sys []string) {
 		}
 	}
 	if ents, err := os.ReadDir("/sys/module"); err == nil {
+		okSys = true
 		for _, ent := range ents {
 			sys = append(sys, ent.Name())
 		}
 	}
-	return proc, sys
+	return proc, sys, okProc, okSys
 }
 
 // soPersistentes devolve os itens de `primeira` que também estão em `segunda`.

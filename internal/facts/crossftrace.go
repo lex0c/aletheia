@@ -93,25 +93,37 @@ func cruzarModulosFtrace(f *Facts, e *env.Env) {
 	// cobertura toda. Relê as duas e mantém só o que persiste. Mesma paranoia do
 	// hidden PID.
 	if len(f.Cross.ModFtraceDiff) > 0 {
-		proc2, _ := relerNomesDeModulos()
-		fresh := ModulosSoNoFtrace(tagsDeModuloDoFtrace(relerFtrace(e)), proc2)
-		f.Cross.ModFtraceDiff = soPersistentes(f.Cross.ModFtraceDiff, fresh)
+		proc2, _, okProc, _ := relerNomesDeModulos()
+		texto2, okFtrace := relerFtrace(e)
+		if !okProc || !okFtrace {
+			// Se /proc/modules ficar ilegível na reconfirmação, proc2 vazio
+			// faria TODA tag do ftrace parecer "ausente do /proc" — o candidato
+			// original "sobrevive" por uma testemunha que não falou. Sem os dois
+			// lados, a divergência é INCONCLUSIVA: não vira CRÍTICO.
+			f.partial("cross", "a divergência de módulos entre ftrace e "+
+				"/proc/modules não pôde ser RECONFIRMADA (uma das fontes ficou "+
+				"ilegível na segunda leitura): não é conclusiva")
+			f.Cross.ModFtraceDiff = nil
+		} else {
+			fresh := ModulosSoNoFtrace(tagsDeModuloDoFtrace(texto2), proc2)
+			f.Cross.ModFtraceDiff = soPersistentes(f.Cross.ModFtraceDiff, fresh)
+		}
 	}
 }
 
 // relerFtrace faz a segunda leitura de available_filter_functions. Devolve
 // vazio se não puder ler — o que descarta a divergência na reconfirmação, que é
 // o certo: sem a segunda testemunha não há prova.
-func relerFtrace(e *env.Env) string {
+func relerFtrace(e *env.Env) (string, bool) {
 	for _, p := range []string{
 		"/sys/kernel/tracing/available_filter_functions",
 		"/sys/kernel/debug/tracing/available_filter_functions",
 	} {
 		if b, err := e.ReadFile(p); err == nil {
-			return string(b)
+			return string(b), true
 		}
 	}
-	return ""
+	return "", false
 }
 
 // tagsDeModuloDoFtrace extrai o conjunto de módulos anotados, sem duplicar. A

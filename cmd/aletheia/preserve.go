@@ -70,6 +70,21 @@ func runPreserve(args []string) int {
 			"(--pid, --file, --bpf ou --pcap)")
 		return 3
 	}
+	// Os alvos são convertidos ANTES de qualquer escrita.
+	//
+	// Eles eram convertidos dentro do laço que já copiava, então
+	// `--pid 100 --pid abc` copiava o exe do 100, batia no "abc" e saía com 3 —
+	// deixando um diretório de incidente com peça dentro e SEM manifesto. Numa
+	// resposta a incidente, coleta pela metade sem registro é pior que coleta
+	// nenhuma: ela parece prova.
+	numPids, code := numeros(pids, "--pid")
+	if code != 0 {
+		return code
+	}
+	numBPFs, code := numeros(bpfs, "--bpf")
+	if code != 0 {
+		return code
+	}
 	opcoesPcap, code := montarCaptura(*capturar, *iface, *host, *porta, *proto,
 		*tudo, *duracao, *snaplen, *maxPcap)
 	if code != 0 {
@@ -93,23 +108,13 @@ func runPreserve(args []string) int {
 
 	// A ORDEM é a da §19: primeiro o que morre com o processo, depois o que
 	// morre com o boot, por último o que está em disco e não vai a lugar nenhum.
-	for _, p := range pids {
-		n, err := strconv.Atoi(p)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "preserve: --pid %q não é um número\n", p)
-			return 3
-		}
-		_ = c.Exe(n)
+	for _, n := range numPids {
+		_ = c.Exe(int(n))
 		if *mem {
-			_ = c.Memoria(n)
+			_ = c.Memoria(int(n))
 		}
 	}
-	for _, b := range bpfs {
-		n, err := strconv.ParseUint(b, 10, 32)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "preserve: --bpf %q não é um id\n", b)
-			return 3
-		}
+	for _, n := range numBPFs {
 		_ = c.BPF(uint32(n))
 	}
 	for _, p := range files {
@@ -215,9 +220,13 @@ func escreverManifesto(w io.Writer, c *preserve.Coletor, dir string) {
 func manifestoJSONL(path string, c *preserve.Coletor, e *env.Env) int {
 	w := io.Writer(os.Stdout)
 	if path != "-" {
-		fh, err := os.Create(path)
+		// openJSONOut e não os.Create: `Create` segue symlink e TRUNCA o alvo.
+		// O manifesto é a cadeia de custódia da coleta, e o resto do preserve
+		// escreve com O_EXCL e O_NOFOLLOW — não faz sentido que a peça que
+		// prova as outras seja a única com a porta aberta.
+		fh, err := openJSONOut(path)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "preserve: não foi possível escrever %s: %v\n", path, err)
+			fmt.Fprintf(os.Stderr, "preserve: %v\n", err)
 			return 3
 		}
 		defer fh.Close()
@@ -472,4 +481,20 @@ func resumoDaCaptura(w io.Writer, st pcap.Estatisticas) {
 		fmt.Fprintln(w, "  Isto NÃO é 'não houve tráfego': é 'nada casou o que você pediu'.")
 	}
 	fmt.Fprintln(w, "  O arquivo tem só o cabeçalho, e isso é resultado — não falha.")
+}
+
+// numeros converte os alvos numéricos de uma flag, ou falha antes de a coleta
+// escrever qualquer coisa. Ver a chamada: a validação tardia deixava diretório
+// de incidente pela metade.
+func numeros(vals []string, flag string) ([]uint64, int) {
+	out := make([]uint64, 0, len(vals))
+	for _, v := range vals {
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "preserve: %s %q não é um número\n", flag, v)
+			return nil, 3
+		}
+		out = append(out, n)
+	}
+	return out, 0
 }

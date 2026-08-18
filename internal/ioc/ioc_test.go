@@ -220,3 +220,42 @@ func TestTemEAlgoritmos(t *testing.T) {
 		t.Errorf("algoritmos = %d, queria 0", n)
 	}
 }
+
+// O "#" colado no valor é PARTE do valor.
+//
+// O corte era em qualquer cerquilha, e truncava o indicador em silêncio: um
+// caminho como /tmp/.cache#1 virava /tmp/.cache e deixava de casar. É um falso
+// negativo no único lugar do programa onde o operador disse, com todas as
+// letras, o que procurar — e ele não recebia aviso nenhum.
+func TestCerquilhaColadaNaoEhComentario(t *testing.T) {
+	p := escrever(t, "# lista do incidente\n"+
+		"path: /tmp/.cache#1\n"+
+		"path: /opt/app/x   # este É comentário\n"+
+		"string: sessao#4821\n")
+	l, err := Carregar(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quer := map[string]Tipo{
+		"/tmp/.cache#1": Caminho,
+		"/opt/app/x":    Caminho,
+		"sessao#4821":   Texto,
+	}
+	visto := map[string]bool{}
+	for _, it := range l.Itens {
+		tipo, ok := quer[it.Valor]
+		if !ok {
+			t.Errorf("indicador truncado ou inesperado: %q", it.Valor)
+			continue
+		}
+		if it.Tipo != tipo {
+			t.Errorf("%q veio como %q", it.Valor, it.Tipo)
+		}
+		visto[it.Valor] = true
+	}
+	for v := range quer {
+		if !visto[v] {
+			t.Errorf("indicador perdido: %q", v)
+		}
+	}
+}

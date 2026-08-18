@@ -102,7 +102,14 @@ func Carregar(caminho string) (*Lista, error) {
 		crua := linha
 		// Comentário e linha vazia não são erro: são o normal de um arquivo
 		// escrito à mão durante um incidente.
-		if i := strings.Index(linha, "#"); i >= 0 {
+		//
+		// Mas o corte é no "#" que ABRE comentário — começo de linha ou
+		// precedido de branco —, e não em qualquer "#". Cortar em todos
+		// truncava o indicador em silêncio: `/tmp/.cache#1`, uma URL com
+		// fragmento e um nome de arquivo com cerquilha viravam prefixos que não
+		// casam com nada. É um falso negativo no único lugar do programa onde o
+		// operador disse, com todas as letras, o que procurar.
+		if i := inicioDeComentario(linha); i >= 0 {
 			linha = linha[:i]
 		}
 		linha = strings.TrimSpace(linha)
@@ -480,4 +487,20 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// inicioDeComentario acha o "#" que abre comentário, ou -1.
+//
+// A convenção é a de quase todo formato de configuração: cerquilha no começo
+// da linha, ou depois de branco. Colada em texto, ela é parte do valor.
+func inicioDeComentario(linha string) int {
+	for i := 0; i < len(linha); i++ {
+		if linha[i] != '#' {
+			continue
+		}
+		if i == 0 || linha[i-1] == ' ' || linha[i-1] == '\t' {
+			return i
+		}
+	}
+	return -1
 }

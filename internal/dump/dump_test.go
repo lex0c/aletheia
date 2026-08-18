@@ -70,7 +70,7 @@ func TestIdaEVoltaPreservaOsFatosEOAmbiente(t *testing.T) {
 		t.Errorf("proveniência perdida: %+v", d.Ambiente)
 	}
 
-	e := d.Env(nil)
+	e, _ := d.Env(nil)
 	if !e.Has(env.CapProcfs) || !e.Has(env.CapFilesystem) {
 		t.Errorf("capacidades da coleta não voltaram: %v", e.Caps.Names())
 	}
@@ -91,7 +91,7 @@ func TestIdaEVoltaPreservaOsFatosEOAmbiente(t *testing.T) {
 // a coleta escreveu, não um genérico inventado na análise.
 func TestAnaliseNaoRecuperaCapacidadeQueAColetaNaoTinha(t *testing.T) {
 	d := idaEVolta(t, ambienteDeTeste(), fatosDeTeste())
-	e := d.Env(nil)
+	e, _ := d.Env(nil)
 
 	if e.Has(env.CapRoot) {
 		t.Fatal("a análise concedeu root a uma coleta que não tinha: é a cobertura " +
@@ -109,7 +109,7 @@ func TestCapacidadeQueAColetaNaoSondouSeDeclaraAssim(t *testing.T) {
 	d := &Dump{Schema: Schema, Facts: fatosDeTeste(), Ambiente: Ambiente{
 		Source: "live", Caps: []string{"procfs"},
 	}}
-	e := d.Env(nil)
+	e, _ := d.Env(nil)
 	r := e.Reason(env.CapDebugfs)
 	if !strings.Contains(r, "não sondou") {
 		t.Errorf("Reason(debugfs) = %q — precisa dizer que NINGUÉM olhou, e não "+
@@ -130,7 +130,7 @@ func TestCapacidadeDesconhecidaDoDumpEDeclarada(t *testing.T) {
 	if es := d.Estranhas(); len(es) != 1 || es[0] != "quantum" {
 		t.Fatalf("Estranhas = %v, queria [quantum]", es)
 	}
-	e := d.Env(nil)
+	e, _ := d.Env(nil)
 	if !e.Has(env.CapProcfs) {
 		t.Error("a capacidade conhecida ao lado da desconhecida se perdeu")
 	}
@@ -187,7 +187,30 @@ func TestDataIlegivelNaoViraAgora(t *testing.T) {
 	d := &Dump{Schema: Schema, Facts: fatosDeTeste(), Ambiente: Ambiente{
 		Source: "live", CollectedAt: "ontem de manhã",
 	}}
-	if !d.Env(nil).Now.IsZero() {
+	e, _ := d.Env(nil)
+	if !e.Now.IsZero() {
 		t.Error("data ilegível precisa ficar vazia, para o relatório poder dizer isso")
+	}
+}
+
+// A origem decide QUAIS CHECKS rodam. Um dump de uma versão mais nova, com um
+// terceiro modo, era tratado como host vivo em silêncio: os checks de processo
+// rodariam sobre fatos onde processo não existe e concluiriam ausência a
+// partir de um modo que nunca foi olhado.
+func TestOrigemDesconhecidaNaoViraHostVivo(t *testing.T) {
+	d := &Dump{Schema: Schema, Facts: fatosDeTeste(), Ambiente: Ambiente{
+		Source: "remote", CollectedAt: "2026-08-17T00:00:00Z",
+	}}
+	if _, err := d.Env(nil); err == nil {
+		t.Error("origem que este binário não conhece precisa RECUSAR a análise, " +
+			"e não virar 'live' por omissão")
+	}
+	// E as duas conhecidas continuam passando, inclusive a vazia dos dumps
+	// antigos, que não gravavam o campo e eram todos de coleta ao vivo.
+	for _, origem := range []string{"live", "image", ""} {
+		d.Ambiente.Source = origem
+		if _, err := d.Env(nil); err != nil {
+			t.Errorf("origem %q recusada: %v", origem, err)
+		}
 	}
 }

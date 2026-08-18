@@ -60,7 +60,14 @@ var execEmDiretorioOculto = check.Check{
 		// um esconderijo, não cinco achados.
 		porDir := map[string][]string{}
 		for _, p := range f.ExecOculto {
+			// LastIndex devolve -1 quando não há barra, e `p[:-1]` é pânico —
+			// que o motor converte em "o check falhou", perdendo o check
+			// INTEIRO. Sem barra, o diretório é o próprio ponto corrente.
 			i := strings.LastIndex(p, "/")
+			if i < 0 {
+				porDir["."] = append(porDir["."], p)
+				continue
+			}
 			porDir[p[:i]] = append(porDir[p[:i]], p[i+1:])
 		}
 

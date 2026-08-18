@@ -3,6 +3,7 @@
 package pcap
 
 import (
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -33,6 +34,14 @@ func getsockoptBytes(fd, nivel, opt int, b []byte) error {
 	}
 	_, _, errno := syscall.Syscall(sysSocketcall,
 		chamadaGet, uintptr(unsafe.Pointer(&args[0])), 0)
+	// Os ponteiros para `b` e `tam` viraram uint32 DENTRO de args, e a regra do
+	// unsafe só protege `uintptr(unsafe.Pointer(x))` escrito na própria
+	// chamada. Guardados num vetor, eles são números: nada impede o coletor de
+	// achar que `b` e `tam` morreram antes do kernel escrever neles. O GC de
+	// hoje não move objetos e o defeito não aparece — o que é a pior forma de
+	// um defeito existir, porque ele espera a versão de Go que mudar isso.
+	runtime.KeepAlive(b)
+	runtime.KeepAlive(&tam)
 	if errno != 0 {
 		return errno
 	}

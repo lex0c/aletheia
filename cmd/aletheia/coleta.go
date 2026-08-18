@@ -182,7 +182,11 @@ func runAnalyze(args []string) int {
 	// levar a lista de indicadores desta execução, e dizer quem está analisando.
 	local := env.Probe(env.Options{Version: version, IOC: lista})
 	defer local.Close()
-	e := d.Env(local)
+	e, err := d.Env(local)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 3
+	}
 	f := d.Facts
 
 	// A JANELA É ANCORADA NA COLETA, não no relógio de quem analisa.

@@ -130,7 +130,12 @@ func fatosParaInfo(de, root, assunto string) (*facts.Facts, *env.Env, int) {
 			fmt.Fprintf(os.Stderr, "info --from: %v\n", err)
 			return nil, nil, 3
 		}
-		return d.Facts, d.Env(nil), 0
+		e, err := d.Env(nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "info: %v\n", err)
+			return nil, nil, 3
+		}
+		return d.Facts, e, 0
 	}
 	if root != "" {
 		if fi, err := os.Stat(root); err != nil || !fi.IsDir() {

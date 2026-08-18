@@ -52,13 +52,24 @@ func TodasAsCaps() []string {
 	return out
 }
 
-// SourceDeNome devolve a origem gravada. Qualquer coisa que não seja "image" é
-// tratada como host vivo, que é o padrão da ferramenta.
-func SourceDeNome(s string) Source {
-	if s == "image" {
-		return SourceImage
+// SourceDeNome devolve a origem gravada, e diz quando NÃO a reconheceu.
+//
+// O "qualquer coisa que não seja image é host vivo" de antes era silencioso e
+// perigoso: a origem escolhe QUAIS CHECKS rodam, e um dump de uma versão mais
+// nova, com um terceiro modo, seria analisado como host vivo — os checks de
+// processo rodariam sobre fatos onde processo não existe, e concluiriam
+// ausência a partir de um modo que nunca foi olhado.
+//
+// Vazio continua sendo host vivo, e isso é compatibilidade e não chute: dumps
+// antigos não gravavam o campo, e todos eles são de coleta ao vivo.
+func SourceDeNome(s string) (Source, bool) {
+	switch s {
+	case "image":
+		return SourceImage, true
+	case "live", "":
+		return SourceLive, true
 	}
-	return SourceLive
+	return SourceLive, false
 }
 
 // ClockDeCodigo devolve o estado do relógio gravado. Código fora da faixa vira

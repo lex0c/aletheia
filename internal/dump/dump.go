@@ -192,7 +192,7 @@ func Carregar(caminho string) (*Dump, error) {
 //
 // Nenhuma capacidade é sondada aqui. Se fosse, uma análise rodando como root
 // declararia cobertura que a coleta sem root nunca teve.
-func (d *Dump) Env(local *env.Env) *env.Env {
+func (d *Dump) Env(local *env.Env) (*env.Env, error) {
 	a := d.Ambiente
 	caps, estranhas := env.CapsDeNomes(a.Caps)
 
@@ -215,9 +215,18 @@ func (d *Dump) Env(local *env.Env) *env.Env {
 			"versão da ferramenta): trate como NÃO verificada"
 	}
 
+	origem, conhecida := env.SourceDeNome(a.Source)
+	if !conhecida {
+		return nil, fmt.Errorf(
+			"o dump declara origem %q, que este binário não conhece.\n"+
+				"A origem decide quais checks rodam: tratá-la como host vivo faria a\n"+
+				"análise concluir ausência sobre um modo que nunca foi olhado.\n"+
+				"Use a versão da ferramenta que fez a coleta.", a.Source)
+	}
+
 	e := &env.Env{
 		Root:            a.Root,
-		Source:          env.SourceDeNome(a.Source),
+		Source:          origem,
 		Caps:            caps,
 		CapReason:       razoes,
 		Now:             quando(a.CollectedAt),
@@ -238,7 +247,7 @@ func (d *Dump) Env(local *env.Env) *env.Env {
 		e.CapReason["dump:"+n] = "a coleta declarou a capacidade " + n +
 			", que este binário não conhece: use a versão que coletou"
 	}
-	return e
+	return e, nil
 }
 
 // Estranhas devolve as capacidades declaradas pelo dump que este binário não

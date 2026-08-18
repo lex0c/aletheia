@@ -22,6 +22,20 @@ func init() {
 // porque quem faz força bruta tenta milhares.
 const minFalhasParaForcaBruta = 10
 
+// minOrigensPorConta é o segundo eixo, e ele existe porque o primeiro é
+// contado POR ORIGEM.
+//
+// Nove falhas de cada um de cem endereços somam novecentas tentativas e não
+// cruzam o limiar em origem nenhuma. Essa não é a forma exótica: é a comum,
+// justamente porque todo mundo limita por IP, e quem escreve a ferramenta de
+// ataque sabe disso.
+//
+// O eixo transposto não tem esse problema. Um usuário legítimo erra a senha do
+// celular, do laptop e da VPN — três origens, e olhe lá. Cinco endereços
+// DIFERENTES falhando contra a MESMA conta não é gente digitando errado, e o
+// limiar por origem nunca precisou ser cruzado para isso ser verdade.
+const minOrigensPorConta = 5
+
 // inventarioDeLogin — runbook §13.
 //
 // Esta ferramenta cita o wtmp em dezenas de evidências: "confira contra o
@@ -142,6 +156,11 @@ var forcaBrutaComSucesso = check.Check{
 		"automação com credencial expirada produz esta forma: dezenas de falhas " +
 			"seguidas de sucesso depois que alguém corrigiu a senha ou a chave. " +
 			"O que separa é a ORIGEM ser reconhecida pelo time",
+		"o limiar é de 10 falhas POR ORIGEM, e ele é dito aqui de propósito: " +
+			"quem lê esta ferramenta pode ficar abaixo dele. É por isso que existe " +
+			"o segundo eixo — 5 endereços diferentes falhando contra a MESMA conta, " +
+			"nenhum deles cruzando o limiar — que é a forma comum, porque todo " +
+			"mundo limita por IP",
 		"NAT e balanceador colapsam muitas origens num endereço só: num host " +
 			"atrás deles, as falhas do mundo inteiro e o login legítimo do time " +
 			"aparecem com o mesmo endereço",
@@ -171,8 +190,23 @@ var forcaBrutaComSucesso = check.Check{
 			return r
 		}
 
+		// origensPorConta é o eixo TRANSPOSTO de `alvos`: para cada conta, de
+		// quantos endereços diferentes vieram falhas contra ela.
+		origensPorConta := map[string]map[string]bool{}
+		for o, contas := range alvos {
+			for u := range contas {
+				if origensPorConta[u] == nil {
+					origensPorConta[u] = map[string]bool{}
+				}
+				origensPorConta[u][o] = true
+			}
+		}
+
 		// E agora o cruzamento: quem falhou muito e ENTROU.
 		entrou := map[string][]entrada{}
+		// espalhado é o mesmo cruzamento pelo outro eixo: conta atacada por
+		// muitas origens, e depois uma entrada bem-sucedida.
+		espalhado := map[string][]entrada{}
 		for i := range f.Logins {
 			l := &f.Logins[i]
 			if l.Falhou || l.Tipo != facts.TipoLoginUsuario || !origemDeRede(l.Origem) {
@@ -180,6 +214,12 @@ var forcaBrutaComSucesso = check.Check{
 			}
 			if falhas[l.Origem] >= minFalhasParaForcaBruta {
 				entrou[l.Origem] = append(entrou[l.Origem], entrada{l.User, l.QuandoU})
+				continue
+			}
+			// O SEGUNDO eixo: a origem sozinha ficou abaixo do limiar, mas a
+			// conta em que ela entrou foi atacada por muitas origens distintas.
+			if len(origensPorConta[l.User]) >= minOrigensPorConta {
+				espalhado[l.User] = append(espalhado[l.User], entrada{l.User, l.QuandoU})
 			}
 		}
 
@@ -216,6 +256,50 @@ var forcaBrutaComSucesso = check.Check{
 					"revisto: chave SSH, sudo, agendamento e histórico de shell",
 				"procure a MESMA origem nos outros hosts antes de concluir o " +
 					"alcance (runbook §23)",
+			}
+			r.Findings = append(r.Findings, fd)
+		}
+
+		// O segundo eixo, emitido por CONTA e não por origem: é a conta que
+		// identifica o alvo quando o ataque veio espalhado.
+		contas := make([]string, 0, len(espalhado))
+		for u := range espalhado {
+			contas = append(contas, u)
+		}
+		sort.Strings(contas)
+		for _, u := range contas {
+			ss := espalhado[u]
+			de := make([]string, 0, len(origensPorConta[u]))
+			for o := range origensPorConta[u] {
+				de = append(de, o)
+			}
+			sort.Strings(de)
+			total := 0
+			for _, o := range de {
+				total += falhas[o]
+			}
+			mostra := de
+			if len(mostra) > 8 {
+				mostra = append(mostra[:8:8], "… (+"+strconv.Itoa(len(de)-8)+")")
+			}
+
+			fd := self.F(check.SevCritical, u, "",
+				"a conta "+u+" recebeu falhas de "+strconv.Itoa(len(de))+
+					" endereços diferentes — "+strconv.Itoa(total)+" tentativas ao todo — "+
+					"e depois alguém ENTROU nela",
+				"origens: "+strings.Join(mostra, " "),
+				"entrou como: "+descreveSucessos(ss),
+				"NENHUMA das origens sozinha cruzou o limiar de "+
+					strconv.Itoa(minFalhasParaForcaBruta)+" falhas: é o ataque "+
+					"espalhado, que existe justamente porque se limita por IP",
+			)
+			fd.Quando, fd.QuandoFonte = quandoEntrou(ss), "registro de login bem-sucedido"
+			fd.Irreversible = true
+			fd.NextSteps = []string{
+				"a credencial de " + u + " deve ser tratada como conhecida: rotacione " +
+					"antes de reconectar qualquer coisa (runbook §16)",
+				"as origens acima valem como IOC de frota: procure as mesmas nos " +
+					"outros hosts (runbook §23)",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

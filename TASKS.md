@@ -62,9 +62,10 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
 
 ## Fase 8 — kernel (§35)
 
-- [~] **8.1** taint decodificado e ATRIBUÍDO (`kernel.taint_unexplained`: o achado é a marca que
-        nenhum módulo carregado assume) + `/sys/module` × `/proc/modules` (`cross.module_view`);
-        módulo carregado sem arquivo em disco continua de fora
+- [x] **8.1** taint decodificado e ATRIBUÍDO (`kernel.taint_unexplained`: o achado é a marca que
+        nenhum módulo carregado assume) + `/sys/module` × `/proc/modules` (`cross.module_view`)
+        + `kernel.module_no_file`: módulo carregado sem `.ko` que o explique
+        + `kernel.protection_context`: lockdown, assinatura de módulo, IMA, Secure Boot
 - [~] **8.2** ftrace feito (`kernel.ftrace_hook`); a LISTA de kprobes registrados não é lida —
         o que se vê hoje é o kprobe com programa eBPF pendurado, pela fase 8.3
 - [x] **8.3** eBPF nativo via `bpf()` — `PROG_GET_NEXT_ID`, `GET_FD_BY_ID`, `OBJ_GET_INFO_BY_FD`,
@@ -4477,3 +4478,152 @@ acompanhando a escrita, e snaplen zerado no cabeçalho global.
 
 79 checks, 142 cenários. A fase 12 fecha: `preserve` guarda exe, memória,
 bytecode de eBPF, arquivo e agora tráfego — as cinco coisas que somem.
+
+---
+
+## Registro — o módulo que não tem arquivo, e o que o kernel permite a si mesmo
+
+A ferramenta já decodificava a marca de taint e comparava as duas interfaces do
+kernel (`/proc/modules` × `/sys/module`). Faltava a pergunta mais direta — a
+mesma que ela faz sobre binário em execução desde a fase 7:
+
+```
+que ARQUIVO entregou isto?
+```
+
+Para módulo de kernel ela nunca tinha sido feita, e é onde a resposta importa
+mais: código de módulo roda DENTRO do kernel, e a partir dali todos os outros
+checks podem estar recebendo mentira.
+
+```
+insmod /tmp/x.ko && rm /tmp/x.ko
+```
+
+Depois disso o módulo continua carregado, o `/proc/modules` continua listando, e
+não existe arquivo nenhum em disco que o explique. É a versão em kernel do
+`proc.exe_deleted`, e nenhum check deste catálogo a alcançava.
+
+### A escada de severidade, e por que ela existe
+
+Há uma causa legítima e comum para "módulo sem arquivo": atualizar o pacote do
+kernel REMOVE os `.ko` da versão antiga, e a máquina segue rodando a antiga até
+reiniciar. Todo servidor que aplica atualização sem reboot passa semanas nesse
+estado. Um check que gritasse ali seria desligado no primeiro mês.
+
+O que separa os dois casos é o que o PRÓPRIO KERNEL diz do módulo:
+
+```
+sem arquivo                        AVISO      pode ser atualização sem reboot
+sem arquivo E marcado (O|E|F)      CRÍTICO    fora da árvore, sem assinatura
+                                              válida ou carregado à força — e a
+                                              atualização de kernel não produz isso
+```
+
+`P` (proprietário) e `C` (staging) NÃO entram: são driver de fábrica, e
+promovê-los a crítico transformaria todo desktop com nvidia num incidente.
+
+### As três travas de falso positivo
+
+```
+traço vira sublinhado   o kernel chama `snd_hda_intel` o que o arquivo chama
+                        `snd-hda-intel.ko`. Comparar cru acusaria metade dos
+                        módulos de qualquer máquina
+compressão              .ko, .ko.xz, .ko.gz, .ko.zst são o mesmo módulo, e a
+                        distribuição moderna comprime por padrão
+árvore não lida         sem /lib/modules, TODO módulo pareceria sem arquivo.
+                        Isso é lacuna de coleta, não achado — e só é declarada
+                        quando há módulo carregado, porque sem módulo não há
+                        pergunta a responder
+```
+
+E a quarta, que é a mesma que já derrubou a enumeração de eBPF: **em contêiner o
+check se cala**. Ali o `/proc/modules` é o do HOST — contêiner compartilha o
+kernel — e o `/lib/modules` é o da imagem, quase sempre vazio. Sem o guarda, um
+host de CI com 200 módulos produziria 200 achados de uma vez, todos falsos e
+todos convincentes.
+
+### Medido contra uma máquina real
+
+```
+249 módulos carregados · 12.412 arquivos .ko em disco · 0 achados
+```
+
+É a medição que decide se o check é usável, e ela foi feita com o `collect` que
+a unidade anterior criou: coletar o host, ler o JSON, contar. O acervo começou a
+pagar.
+
+### O contexto que pesa o achado
+
+`kernel.protection_context` inventaria o que este kernel permite a si mesmo:
+lockdown, assinatura de módulo obrigatória, `modules_disabled`, IMA, Secure
+Boot, `ptrace_scope`, `kptr_restrict`, `dmesg_restrict`,
+`unprivileged_bpf_disabled`.
+
+Não é achado — sai como INFO. Existe porque o MESMO módulo sem arquivo pesa
+coisas muito diferentes conforme o host: num kernel que exige assinatura, ele só
+entrou porque alguém desligou algo. Por isso o contexto viaja DENTRO do achado
+de módulo, e não num bloco separado que ninguém cruza.
+
+Duas decisões de honestidade aqui:
+
+- **A ferramenta não monta o securityfs** para ler o lockdown. Montar filesystem
+  para responder uma pergunta é alterar o host, que é exatamente o que ela
+  promete não fazer. A ausência é dita na linha do inventário.
+- **Nada lido não vira inventário de "não determinado"**: vira lacuna. Seis
+  linhas dizendo "não sei" gastam a mesma atenção de uma resposta e não entregam
+  nenhuma.
+
+### O cenário exigiu carregar um módulo de verdade
+
+Este fato não se planta: ele vem do `/proc/modules`, que é o kernel falando.
+Como o guest da microVM boota o kernel do HOST, um `.ko` do host serve — e o
+`make vm-image` agora prepara um `dummy.ko` (driver de rede inerte, presente em
+praticamente toda configuração) descomprimindo-o quando preciso. Sem ele, os
+cenários são PULADOS com o motivo, nunca passam em silêncio.
+
+```
+Z1  insmod + rm                    AVISO, e o guest tem uma árvore de módulos
+                                   legítima ao lado, senão o cenário provaria
+                                   apenas a lacuna de coleta
+Z2  o mesmo, com a assinatura       CRÍTICO. Quatro bytes acrescentados ao fim do
+    invalidada                      .ko invalidam a assinatura anexada — é onde
+                                    ela mora —, o módulo continua carregando e o
+                                    kernel passa a marcá-lo com (E)
+Z3  em contêiner                    o check se CALA, com a árvore plantada de
+                                    propósito para tirar a saída fácil
+```
+
+### E a suíte reensinou uma regra que o projeto já tinha pago para aprender
+
+A primeira versão do guarda de contêiner declarava LACUNA DE COBERTURA: "aqui
+não dá para responder". Parecia a coisa certa — é a tese da ferramenta — e
+derrubou **trinta e um cenários** de uma vez.
+
+O motivo estava escrito no código, no `proc.container_boundary`, desde uma
+regressão anterior: marcar parcial faz TODA varredura feita dentro de contêiner
+sair incompleta e com exit 1, inclusive a de um contêiner perfeitamente limpo.
+
+```
+não consegui olhar    lacuna: degrada a cobertura
+não encontrei         achado nenhum
+não há o que olhar    ESCOPO: nem um nem outro
+DENTRO DESTE ESCOPO
+```
+
+A pergunta sobre módulo é sobre o HOST; a varredura fala sobre o contêiner. Quem
+declara isso é o boundary, UMA vez, e ele ganhou a linha que faltava — módulo,
+taint e eBPF são perguntas do host. Trinta e um checks repetindo a mesma
+degradação não acrescentariam informação: gastariam o exit code.
+
+### Mutação
+
+Oito mutantes, oito mortos: nome não normalizado, só a extensão `.ko`, taint `P`
+contando como não assinado, guarda de contêiner removido, acusação sem árvore
+lida, tudo virando aviso, contexto de proteção fora do achado, e inventário
+vazio ainda imprimindo.
+
+### Estado
+
+81 checks, 145 cenários. A fase 8 fecha: taint atribuído, visão cruzada de
+módulos, eBPF nativo, e agora a pergunta de procedência sobre o que está DENTRO
+do kernel.

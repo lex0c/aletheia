@@ -96,6 +96,15 @@ type Scenario struct {
 	// que é o i686 de verdade.
 	Arch string
 
+	// RequerModulo diz que o cenário precisa carregar um MÓDULO DE KERNEL de
+	// verdade no guest.
+	//
+	// Não dá para plantar esse fato: ele vem de /proc/modules, que é o kernel
+	// falando. O `make vm-image` prepara um `dummy.ko` do host quando consegue
+	// — o guest boota o kernel do host, então serve —, e quando não consegue o
+	// cenário é PULADO com o motivo, nunca passa em silêncio.
+	RequerModulo bool
+
 	// Caps são capabilities extras do contêiner (--cap-add). Só os cenários que
 	// PRECISAM de privilégio para montar a situação as pedem: NET_ADMIN para
 	// criar apelido de endereço, SYS_ADMIN para o unshare.

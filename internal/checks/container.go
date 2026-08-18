@@ -79,6 +79,9 @@ var fronteiraDeContainer = check.Check{
 				"a varredura está DENTRO de um contêiner, e fala sobre ele",
 				"a fronteira contêiner/host não é visível daqui: todo processo que "+
 					"aparece está do mesmo lado dela",
+				"as perguntas sobre o KERNEL — módulo carregado sem arquivo, marca "+
+					"de taint, programa eBPF — são sobre o host: o contêiner "+
+					"compartilha o kernel dele, e daqui elas não têm resposta",
 				"para perguntar sobre o HOST, rode a ferramenta no host",
 			))
 			return r

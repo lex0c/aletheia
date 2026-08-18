@@ -56,6 +56,49 @@ docker rm -f "$cid" >/dev/null
 install -m 0755 "$root/dist/aletheia$sfx" "$rootfs/aletheia"
 install -m 0755 "$root/dist/helper$sfx"   "$rootfs/helper"
 
+# Um MÓDULO DE KERNEL de verdade para o guest, quando dá.
+#
+# O cenário de "módulo carregado sem arquivo em disco" não tem como ser montado
+# com plantio de arquivo: o fato vem de /proc/modules, que é o kernel falando. É
+# preciso carregar um módulo DE VERDADE — e o guest boota o kernel do HOST, então
+# um .ko do host serve.
+#
+# `dummy` é a escolha: driver de rede inerte, presente na configuração de
+# praticamente toda distribuição, e que não toca em nada. Nenhum outro módulo é
+# aceito como substituto — carregar um módulo qualquer num guest pode travá-lo, e
+# um cenário que trava é pior que um cenário que não roda.
+#
+# Sem ele, NADA falha aqui: o marcador não é escrito e o cenário correspondente é
+# PULADO com o motivo dito. Só no amd64, porque o guest 386 boota outro kernel.
+rm -f "$out/modulo$sfx.txt"
+if [[ "$arch" == "amd64" ]]; then
+	rel="$(uname -r)"
+	src=""
+	for dir in "/lib/modules/$rel/kernel/drivers/net" "/usr/lib/modules/$rel/kernel/drivers/net"; do
+		for ext in "" ".zst" ".xz" ".gz"; do
+			if [[ -f "$dir/dummy.ko$ext" ]]; then src="$dir/dummy.ko$ext"; break 2; fi
+		done
+	done
+	if [[ -n "$src" ]]; then
+		mkdir -p "$rootfs/modulos"
+		ko="$rootfs/modulos/dummy.ko"
+		case "$src" in
+			*.zst) zstd -d -q -o "$ko" "$src" 2>/dev/null || rm -f "$ko" ;;
+			*.xz)  xz  -dc "$src" > "$ko" 2>/dev/null || rm -f "$ko" ;;
+			*.gz)  gzip -dc "$src" > "$ko" 2>/dev/null || rm -f "$ko" ;;
+			*)     cp "$src" "$ko" ;;
+		esac
+		if [[ -s "$ko" ]]; then
+			echo "dummy" > "$out/modulo$sfx.txt"
+			echo "módulo para o guest: $src"
+		else
+			echo "não consegui descomprimir $src — o cenário de módulo será PULADO"
+		fi
+	else
+		echo "sem dummy.ko para o kernel $rel — o cenário de módulo será PULADO"
+	fi
+fi
+
 # /init: PID 1 do guest. Monta o mínimo, aplica o cenário, varre, desliga.
 cat > "$rootfs/init" <<'INIT'
 #!/bin/sh

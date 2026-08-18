@@ -365,6 +365,19 @@ func runVM(t *testing.T, sc scenario.Scenario) result {
 		t.Skipf("%s ausente: %v", qemu, err)
 	}
 
+	// O módulo de kernel do guest é preparado pelo `make vm-image` quando o host
+	// tem um `dummy.ko` compatível. Sem ele o cenário não tem como existir — o
+	// fato vem de /proc/modules, e plantar arquivo não carrega módulo nenhum.
+	if sc.RequerModulo {
+		marcador, _ := filepath.Abs("../dist/vm/modulo" + suffix + ".txt")
+		if _, err := os.Stat(marcador); err != nil {
+			t.Skipf("nenhum módulo de kernel foi preparado para o guest: o host " +
+				"precisa ter dummy.ko para o kernel em execução, e uma ferramenta " +
+				"para descomprimi-lo (zstd/xz/gzip). Rode `make vm-image` e veja a " +
+				"mensagem dele")
+		}
+	}
+
 	initramfs, err := filepath.Abs("../dist/vm/initramfs" + suffix + ".gz")
 	if err != nil {
 		t.Fatal(err)

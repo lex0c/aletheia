@@ -64,8 +64,17 @@ type Facts struct {
 	Modules       []ModuleConf   `json:"modules,omitempty"`
 	// Helpers são os programas que o KERNEL invoca sozinho: modprobe,
 	// core_pattern, uevent_helper e binfmt_misc.
-	Helpers        []HelperDoKernel        `json:"kernel_helpers,omitempty"`
-	ModuleFiles    []string                `json:"module_files,omitempty"`
+	Helpers     []HelperDoKernel `json:"kernel_helpers,omitempty"`
+	ModuleFiles []string         `json:"module_files,omitempty"`
+	// Carregados são os módulos que o kernel tem DENTRO dele agora, cada um
+	// confrontado com o arquivo que deveria explicá-lo.
+	Carregados []ModuloCarregado `json:"loaded_modules,omitempty"`
+	// ArvoreDeModulos diz que /lib/modules foi encontrada e lida. Sem ela,
+	// "módulo sem arquivo" não significa nada — significa que ninguém olhou.
+	ArvoreDeModulos bool `json:"module_tree_read,omitempty"`
+	// Protecao é o que o kernel deixa acontecer com ele mesmo: lockdown,
+	// assinatura de módulo, IMA. Não é achado, é o contexto que pesa os achados.
+	Protecao       ProtecaoKernel          `json:"kernel_protection"`
 	PkgEstranho    []ReivindicacaoEstranha `json:"pkg_odd_claims,omitempty"`
 	HashDiff       []HashDivergente        `json:"hash_mismatch,omitempty"`
 	Timestomps     []Timestomp             `json:"timestomps,omitempty"`
@@ -212,6 +221,9 @@ func Collect(e *env.Env) *Facts {
 		// Marca do próprio kernel sobre o que já foi carregado nele. Não
 		// depende de privilégio e não pode ser apagada sem reiniciar.
 		collectTaint(f, e)
+		// O que o kernel deixa acontecer com ele mesmo. Vem antes dos módulos
+		// carregados porque é o contexto que pesa o achado deles.
+		collectProtecaoKernel(f, e)
 		// Depois dos processos: o dono de um programa eBPF é um descritor
 		// aberto, e a lista de descritores já está lida.
 		collectBPF(f, e)
@@ -221,6 +233,13 @@ func Collect(e *env.Env) *Facts {
 
 	if e.Has(env.CapFilesystem) {
 		collectPersist(f, e)
+		// DEPOIS da persistência, que é quem varre /lib/modules: a pergunta
+		// "que arquivo entregou este módulo?" precisa da lista de arquivos, e
+		// respondê-la antes diria "nenhum" em todo host — a pior forma de falso
+		// positivo, porque é uniforme e convincente.
+		if e.Has(env.CapProcfs) {
+			collectModulosCarregados(f, e)
+		}
 		// Depois de tudo: o conjunto de candidatos a hash é o que os outros
 		// coletores acharem interessante. Só roda com hash na lista.
 		collectHashesIOC(f, e)

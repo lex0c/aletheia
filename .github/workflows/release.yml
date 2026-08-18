@@ -1,0 +1,160 @@
+# Publica os binários de uma versão.
+#
+# Dispara ao empurrar uma tag `v*`. O `workflow_dispatch` existe para ensaiar o
+# build inteiro sem publicar nada — útil antes de criar a tag de verdade.
+#
+# # O que este workflow garante
+#
+# O artefato publicado é o mesmo que `make dist` produz na máquina de quem
+# desenvolve: o workflow NÃO tem uma linha de build própria. Duplicar o comando
+# aqui deixaria as duas receitas divergirem em silêncio, e a divergência
+# apareceria como um binário que se comporta diferente do que foi testado.
+#
+# E ele não publica nada que não tenha passado pelas próprias invariantes do
+# projeto — `make dist` depende de `make verify`, que roda vet, os testes
+# unitários e a CONFIRMAÇÃO de que o binário é estático.
+#
+# # O que ele NÃO roda, e por quê
+#
+# A suíte de cenários (`make scenarios`) fica de fora do caminho de release. Ela
+# sobe contêineres de quatro distribuições e uma microVM, e o que ela testa é o
+# comportamento contra /proc de verdade — não o artefato. Colocá-la aqui
+# amarraria a publicação de uma versão à disponibilidade do Docker Hub e à
+# presença de qemu no runner: um release bloqueado por infraestrutura de
+# terceiro, sem nada de errado com o código.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # A versão vem do go.mod: uma cópia do número aqui envelheceria sem
+          # ninguém perceber, e a build de release usaria outro compilador.
+          go-version-file: go.mod
+          cache: true
+
+      - name: versão
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            # Ensaio: a versão diz o que é, para nunca ser confundida com um
+            # release. Ela é embutida no binário e sai no `aletheia version`.
+            v="0.0.0-ensaio-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "publicar=${GITHUB_REF_TYPE}" >> "$GITHUB_OUTPUT"
+
+      # make dist ⇒ make verify ⇒ lint + testes + build estático CONFIRMADO,
+      # depois amd64, 386 e arm64.
+      - name: build
+        run: make dist VERSION="${{ steps.ver.outputs.version }}"
+
+      # A propriedade que justificou escolher Go, conferida em CADA arquitetura
+      # e não só na do runner: um binário dinâmico linka contra a glibc do host
+      # e perde a imunidade a LD_PRELOAD e a binário de sistema trojanizado.
+      # Sem esta conferência, um `import` novo que puxe cgo passaria batido.
+      - name: confirmar que os três binários são estáticos
+        run: |
+          for b in dist/aletheia-linux-*; do
+            file "$b"
+            file "$b" | grep -q "statically linked" || {
+              echo "FALHA: $b não é estático — algum import puxou cgo" >&2
+              exit 1
+            }
+          done
+
+      # O binário precisa RODAR, não só compilar. É o mesmo argumento do teste
+      # que o executa numa imagem `scratch`: prova em runtime, não por inspeção.
+      - name: o binário roda e se identifica
+        run: |
+          chmod +x dist/aletheia-linux-amd64
+          ./dist/aletheia-linux-amd64 version
+          ./dist/aletheia-linux-amd64 version | grep -q "^aletheia ${{ steps.ver.outputs.version }}$" || {
+            echo "FALHA: o binário não reporta a versão que deveria" >&2
+            exit 1
+          }
+
+      # Os nomes no SHA256SUMS são os NOMES DOS ARQUIVOS, sem diretório: é assim
+      # que `sha256sum -c` funciona no diretório em que a pessoa baixou.
+      - name: somas
+        run: |
+          cd dist
+          sha256sum aletheia-linux-* > SHA256SUMS
+          cat SHA256SUMS
+
+      # A nota do release carrega a instrução de VERIFICAR. É a primeira coisa
+      # que quem baixa vê, e o runbook §16 é explícito: baixar e executar sem
+      # conferir é a prática que esta ferramenta existe para desaconselhar.
+      - name: nota do release
+        run: |
+          {
+            echo '## Baixar'
+            echo
+            echo '```sh'
+            echo "VER=${GITHUB_REF_NAME}"
+            echo 'ARCH=amd64            # amd64 | 386 | arm64'
+            echo 'BASE="https://github.com/${{ github.repository }}/releases/download/$VER"'
+            echo
+            echo 'curl -fsSLO "$BASE/aletheia-linux-$ARCH"'
+            echo 'curl -fsSLO "$BASE/SHA256SUMS"'
+            echo 'sha256sum --ignore-missing -c SHA256SUMS   # confira ANTES de executar'
+            echo
+            echo 'chmod +x "aletheia-linux-$ARCH"'
+            echo 'sudo ./aletheia-linux-$ARCH version'
+            echo '```'
+            echo
+            echo 'O sha256 impresso por `aletheia version` tem que ser o mesmo do'
+            echo '`SHA256SUMS`. Se não for, pare.'
+            echo
+            echo 'Binários estáticos, sem dependência: rodam em imagem mínima, sem libc.'
+            echo 'Baixe numa máquina limpa e copie para o alvo quando puder — este'
+            echo 'binário vira artefato na timeline do host que ele examina.'
+            echo
+            echo '### Somas'
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } > dist/NOTAS.md
+
+      - name: publicar
+        if: steps.ver.outputs.publicar == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "aletheia ${GITHUB_REF_NAME}" \
+            --notes-file dist/NOTAS.md \
+            --generate-notes \
+            --verify-tag \
+            dist/aletheia-linux-amd64 \
+            dist/aletheia-linux-386 \
+            dist/aletheia-linux-arm64 \
+            dist/SHA256SUMS
+
+      # No ensaio nada é publicado: os artefatos ficam disponíveis para download
+      # na própria execução, e é isso que se inspeciona antes de criar a tag.
+      - name: guardar artefatos do ensaio
+        if: steps.ver.outputs.publicar != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: aletheia-ensaio
+          path: |
+            dist/aletheia-linux-*
+            dist/SHA256SUMS
+            dist/NOTAS.md
+          retention-days: 7

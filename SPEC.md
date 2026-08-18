@@ -1,6 +1,8 @@
 # Aletheia — spec
 
-> **Status:** rascunho para revisão. Nada implementado ainda.
+> **Status:** implementada. Este documento é o DESENHO — onde a implementação
+> divergiu, o motivo está registrado em `TASKS.md`, e a divergência costuma ser
+> a parte interessante.
 > **Versão da spec:** 0.3 — incorpora as revisões da 0.1 e da 0.2 (ver 17).
 >
 > **Convenção:** `§N` refere-se **sempre** a uma seção do runbook `VM_SCAN.md`.

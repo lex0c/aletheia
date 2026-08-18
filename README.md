@@ -201,8 +201,16 @@ indicadores que só apareceu no terceiro dia.
 
 ```sh
 sudo aletheia collect --out retrato.json          # no host, curto
+#  → imprime o sha256 do dump: ANOTE fora do host, no war log
 aletheia analyze retrato.json --ioc incidente.yml # na sua máquina, quantas vezes quiser
+#  → confere o dump contra o `.sha256` escrito na coleta
 ```
+
+O `collect` escreve `retrato.json.sha256` ao lado e imprime a mesma soma na
+tela. O arquivo ao lado pega alteração acidental e corrupção de transporte — um
+dump atravessa scp, pendrive e três máquinas antes de virar conclusão. **Ele não
+autentica nada**: quem editar o dump edita a soma junto. A custódia de verdade é
+o número que você anotou, porque é a única cópia que o alvo não alcança.
 
 **A análise herda a cobertura da coleta e não pode melhorá-la.** Um retrato
 tirado sem root continua sem root quando analisado numa estação com root: o que

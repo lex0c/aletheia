@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -257,4 +260,67 @@ func jsonlCru(t *testing.T, p string) []map[string]any {
 		out = append(out, m)
 	}
 	return out
+}
+
+// A cadeia de custódia do `collect` era mais fraca que a do `preserve`: o dump
+// carregava `tool_sha256` DENTRO do próprio JSON, editável junto com o resto, e
+// não havia soma do artefato.
+//
+// O que estes testes fixam não é autenticação — quem edita o dump edita o
+// arquivo de soma ao lado, e nenhum dos dois carrega chave. É a detecção de
+// alteração e de corrupção de transporte, num arquivo que atravessa scp,
+// pendrive e três máquinas antes de virar conclusão.
+func TestSomaDoDumpDetectaAlteracao(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "d.json")
+	conteudo := []byte(`{"schema":1,"env":{"source":"live"}}` + "\n")
+	if err := os.WriteFile(p, conteudo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	soma := sha256.Sum256(conteudo)
+	if err := os.WriteFile(p+".sha256",
+		[]byte(hex.EncodeToString(soma[:])+"  d.json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var b bytes.Buffer
+	conferirSoma(&b, p)
+	if !strings.Contains(b.String(), "confere") {
+		t.Errorf("dump íntegro precisa dizer que confere: %q", b.String())
+	}
+
+	// Uma alteração de um byte.
+	if err := os.WriteFile(p, append(conteudo, ' '), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.Reset()
+	conferirSoma(&b, p)
+	got := b.String()
+	if !strings.Contains(got, "NÃO CONFERE") {
+		t.Errorf("um byte a mais precisa ser pego: %q", got)
+	}
+	// E a saída precisa mandar comparar com o número que saiu do host.
+	if !strings.Contains(got, "war log") {
+		t.Errorf("a custódia de verdade é o número anotado fora: %q", got)
+	}
+}
+
+// Sem arquivo de soma — dump de versão anterior, ou vindo de stdin — a análise
+// segue calada. Exigir a soma quebraria todo dump já coletado.
+func TestSemArquivoDeSomaAAnaliseSegue(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "d.json")
+	if err := os.WriteFile(p, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	conferirSoma(&b, p)
+	if b.Len() != 0 {
+		t.Errorf("sem soma não há o que dizer: %q", b.String())
+	}
+	b.Reset()
+	conferirSoma(&b, "-")
+	if b.Len() != 0 {
+		t.Errorf("stdin não tem arquivo ao lado: %q", b.String())
+	}
 }

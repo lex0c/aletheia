@@ -61,7 +61,22 @@ func (p ProtecaoKernel) TrancaModulo() bool {
 
 func collectProtecaoKernel(f *Facts, e *env.Env) {
 	p := &f.Protecao
-	p.SecurityFS = e.IsDir("/sys/kernel/security")
+	// MONTADO, e não "o diretório existe": /sys/kernel/security é criado pelo
+	// kernel esteja o securityfs montado ou não, e o `IsDir` dizia sim nos dois
+	// casos. Com o sim errado, o check de módulo calava sobre lockdown e IMA em
+	// vez de dizer que o filesystem que os expõe não está montado.
+	// MONTADO, e não "o diretório existe": /sys/kernel/security é criado pelo
+	// kernel esteja o securityfs montado ou não, e o `IsDir` dizia sim nos dois
+	// casos. Com o sim errado, o check de módulo calava sobre lockdown e IMA em
+	// vez de dizer que o filesystem que os expõe não está montado.
+	//
+	// Indeterminado conta como montado de propósito: daí a leitura de lockdown
+	// é TENTADA e a negativa vira lacuna declarada, em vez de virar a afirmação
+	// de que o securityfs não está lá.
+	switch e.EstadoDeMontagem("/sys/kernel/security") {
+	case env.MontagemAtiva, env.MontagemIndeterminada:
+		p.SecurityFS = true
+	}
 
 	// Lockdown e IMA moram no securityfs. Não montá-lo é decisão: a ferramenta
 	// é read-only, e montar filesystem para responder uma pergunta é alterar o

@@ -300,16 +300,31 @@ func (e *Env) probeCaps() {
 		e.grant(CapProcfs, err == nil, "/proc não montado ou ilegível")
 	}
 
-	// debugfs — o caminho mudou entre kernels; sondar os dois.
-	dbg := ""
+	// debugfs — o caminho mudou entre kernels; sondar os dois. E a sondagem é
+	// de MONTAGEM: /sys/kernel/tracing existe em todo kernel com o Kconfig
+	// ligado, e o `IsDir` de antes concedia a capacidade sobre um diretório
+	// vazio. O motivo acompanha o estado, porque "não está montado" manda
+	// montar e "não consigo listar" manda rodar como root.
+	dbg, indeterminado := false, false
+	motivoDbg := "debugfs/tracefs não montado: ftrace e kprobes não foram verificados"
 	for _, c := range []string{"/sys/kernel/tracing", "/sys/kernel/debug/tracing"} {
-		if e.IsDir(c) {
-			dbg = c
+		switch e.EstadoDeMontagem(c) {
+		case MontagemAtiva:
+			dbg = true
+		case MontagemIndeterminada:
+			// O PRIMEIRO candidato indeterminado, não o último: /sys/kernel/tracing
+			// é o caminho dos kernels atuais, e nomear o legado confundiria.
+			if !indeterminado {
+				indeterminado = true
+				motivoDbg = c + " está montado e não pôde ser listado (exige " +
+					"privilégio): ftrace e kprobes não foram verificados — rode como root"
+			}
+		}
+		if dbg {
 			break
 		}
 	}
-	e.grant(CapDebugfs, dbg != "",
-		"debugfs/tracefs não montado: ftrace e kprobes não foram verificados")
+	e.grant(CapDebugfs, dbg, motivoDbg)
 
 	// systemd — presença por diretório, não por binário: precisa funcionar
 	// sobre imagem montada.
@@ -324,7 +339,14 @@ func (e *Env) probeCaps() {
 
 	// base de pacotes
 	pkg := false
-	for _, c := range []string{"/var/lib/dpkg/status", "/var/lib/rpm", "/usr/lib/sysimage/rpm", "/lib/apk/db"} {
+	// O pacman FALTAVA nesta lista, e o coletor tem backend para ele desde
+	// sempre: em todo host Arch a coleta declarava "sem base de pacotes
+	// legível" enquanto lia a base normalmente. A capacidade dizia uma coisa e
+	// o coletor fazia outra — e quem lê o rodapé acredita na capacidade.
+	for _, c := range []string{
+		"/var/lib/dpkg/status", "/var/lib/rpm", "/usr/lib/sysimage/rpm",
+		"/lib/apk/db", "/var/lib/pacman/local",
+	} {
 		if e.Exists(c) {
 			pkg = true
 			break

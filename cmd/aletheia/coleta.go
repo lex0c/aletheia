@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -102,13 +103,32 @@ func resumoDaColeta(w io.Writer, e *env.Env, f *facts.Facts, arquivo string) {
 		return
 	}
 	fmt.Fprintf(w, "\nO QUE ESTA COLETA NÃO VIU — e nenhuma análise vai recuperar depois:\n")
+	// O mesmo motivo chega por dois caminhos: a capacidade que o probe negou e
+	// o coletor que desistiu por causa dela. Repeti-lo dá ao operador a
+	// impressão de dois buracos onde há um, e a lista existe para ele decidir
+	// se vale recoletar.
+	dito := map[string]bool{}
+	linha := func(quem, motivo string) {
+		if dito[motivo] {
+			return
+		}
+		dito[motivo] = true
+		fmt.Fprintf(w, "  %-11s %s\n", quem, report.Safe(motivo))
+	}
 	for _, n := range faltando.Names() {
 		c, _ := env.CapDeNome(n)
-		fmt.Fprintf(w, "  %-11s %s\n", n, report.Safe(e.Reason(c)))
+		linha(n, e.Reason(c))
 	}
-	for coletor, motivos := range f.Partial {
-		for _, m := range motivos {
-			fmt.Fprintf(w, "  %-11s %s\n", coletor, report.Safe(m))
+	// Ordem fixa: `f.Partial` é mapa, e sem ordenar as chaves duas execuções
+	// idênticas imprimem a mesma lista embaralhada.
+	coletores := make([]string, 0, len(f.Partial))
+	for c := range f.Partial {
+		coletores = append(coletores, c)
+	}
+	sort.Strings(coletores)
+	for _, coletor := range coletores {
+		for _, m := range f.Partial[coletor] {
+			linha(coletor, m)
 		}
 	}
 	fmt.Fprintln(w, "\nse der para recoletar com mais privilégio, recolete: o retrato é único")

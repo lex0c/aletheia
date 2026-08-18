@@ -147,6 +147,41 @@ func (e *Env) ReadDirNames(p string) []string {
 	return out
 }
 
+// Estado de um ponto de montagem de filesystem virtual.
+//
+// /sys/kernel/tracing e /sys/kernel/security são diretórios que o kernel cria
+// em todo host com o Kconfig ligado, montados ou não — `IsDir` responde sim nos
+// dois casos, e o sim errado vira capacidade CONCEDIDA sobre um diretório
+// vazio. São QUATRO estados e não dois, porque "não está montado", "não existe
+// neste kernel" e "não consigo listar" levam o operador a coisas diferentes.
+type Montagem int
+
+const (
+	MontagemAusente       Montagem = iota // o ponto não existe neste host
+	MontagemVazia                         // o ponto existe e nada está montado nele
+	MontagemAtiva                         // há filesystem montado ali
+	MontagemIndeterminada                 // existe e não pôde ser listado
+)
+
+// EstadoDeMontagem sonda pelo CONTEÚDO: montado, o diretório tem entradas;
+// ponto de montagem ocioso não tem. É a distinção que dá para fazer sem
+// depender do mountinfo, que não existe em modo image.
+func (e *Env) EstadoDeMontagem(p string) Montagem {
+	ents, err := e.ReadDir(p)
+	switch {
+	case err == nil && len(ents) > 0:
+		return MontagemAtiva
+	case err == nil:
+		return MontagemVazia
+	case errors.Is(err, fs.ErrNotExist):
+		return MontagemAusente
+	}
+	// O tracefs montado é 0700 de root, e o ponto ocioso é 0755. Chamar isto de
+	// "não montado" seria trocar lacuna por resposta — o erro que esta função
+	// existe para não cometer.
+	return MontagemIndeterminada
+}
+
 // IsDir é o predicado usado pelos probes de capacidade.
 func (e *Env) IsDir(p string) bool {
 	fi, err := e.Stat(p)

@@ -125,6 +125,32 @@ type SuidFile struct {
 
 	Size   int64  `json:"size"`
 	ModUTC string `json:"mod_utc,omitempty"`
+
+	// DirModo é o modo MEDIDO do diretório que contém o arquivo, e DirLido diz
+	// se ele chegou a ser lido.
+	//
+	// Existem porque a resposta era dada por PREFIXO: tudo abaixo de /tmp
+	// recebia a frase "está em diretório gravável por qualquer usuário". A
+	// frase é evidência num achado CRITICAL, e ela era falsa para todo
+	// subdiretório 0700 dentro de /tmp — que é o que systemd-private,
+	// /tmp/ssh-*, e qualquer mktemp -d criam.
+	DirModo uint32 `json:"dir_mode,omitempty"`
+	DirLido bool   `json:"dir_mode_read,omitempty"`
+}
+
+// DirGravavelPorTodos diz se o arquivo está num diretório em que QUALQUER
+// usuário escreve. Um SUID ali não é configuração incomum: é a forma do
+// backdoor.
+//
+// Quando o modo foi medido, ele é a resposta. Quando não foi — dump antigo, ou
+// imagem montada onde a permissão vem achatada —, vale o prefixo, que é a
+// aproximação de antes e continua certa para o caso comum de arquivo solto em
+// /tmp.
+func (s SuidFile) DirGravavelPorTodos() bool {
+	if s.DirLido {
+		return s.DirModo&0o002 != 0
+	}
+	return prefixoDeArvoreGravavel(s.Path)
 }
 
 func collectSuid(f *Facts, e *env.Env) {
@@ -313,6 +339,11 @@ func (v *varredura) visitar(t tarefaDir) {
 	var achados []SuidFile
 	var achadosOcultos []string
 	var fora []string
+	// O modo do diretório é lido no MÁXIMO uma vez por diretório, e só quando
+	// algum arquivo lá dentro pede — a varredura visita dezenas de milhares de
+	// diretórios e quase nenhum tem SUID.
+	var modoDir uint32
+	var lidoDir bool
 
 	for _, ent := range ents {
 		p := t.dir + "/" + ent.Name()
@@ -407,6 +438,7 @@ func (v *varredura) visitar(t tarefaDir) {
 			s.ModUTC = fi.ModTime().UTC().Format("2006-01-02T15:04:05Z")
 		}
 		s.UID, s.GID = donoDe(fi)
+		s.DirModo, s.DirLido = modoDoDiretorio(v.e, t.dir, &modoDir, &lidoDir)
 		achados = append(achados, s)
 	}
 
@@ -423,9 +455,9 @@ func (v *varredura) visitar(t tarefaDir) {
 	}
 }
 
-// DirGravavelPorTodos diz se o caminho está numa árvore em que qualquer usuário
-// escreve. Um SUID ali não é configuração incomum: é a forma do backdoor.
-func DirGravavelPorTodos(p string) bool {
+// prefixoDeArvoreGravavel é a aproximação LÉXICA, usada só quando o modo do
+// diretório não pôde ser medido.
+func prefixoDeArvoreGravavel(p string) bool {
 	for _, d := range []string{"/tmp/", "/var/tmp/", "/dev/shm/"} {
 		if strings.HasPrefix(p, d) {
 			return true
@@ -586,4 +618,19 @@ func idDeDiretorio(e *env.Env, dir string) ([2]uint64, bool) {
 		return [2]uint64{}, false
 	}
 	return [2]uint64{uint64(st.Dev), uint64(st.Ino)}, true
+}
+
+// modoDoDiretorio devolve o modo do diretório, medindo-o na primeira vez e
+// reaproveitando depois. O booleano diz se a medida existe: sem ele, "modo
+// zero" seria indistinguível de "diretório sem permissão nenhuma".
+func modoDoDiretorio(e *env.Env, dir string, cache *uint32, lido *bool) (uint32, bool) {
+	if !*lido {
+		fi, err := e.Lstat(dir)
+		if err != nil {
+			return 0, false
+		}
+		*cache = uint32(fi.Mode().Perm())
+		*lido = true
+	}
+	return *cache, true
 }

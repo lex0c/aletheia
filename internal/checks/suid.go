@@ -65,7 +65,7 @@ var suidInesperado = check.Check{
 
 		for i := range f.Suid {
 			s := &f.Suid[i]
-			gravavel := facts.DirGravavelPorTodos(s.Path)
+			gravavel := s.DirGravavelPorTodos()
 
 			// Num diretório gravável por qualquer um, o bit setuid é a forma do
 			// backdoor mesmo que a base de pacotes não tenha sido consultada:

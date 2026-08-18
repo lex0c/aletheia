@@ -1,6 +1,12 @@
 package facts
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/lex0c/aletheia/internal/env"
+)
 
 // O dado é REAL: saiu do /proc/net/packet de um desktop com wifi. Três sockets,
 // todos de root, todos de gestão de rede — é a população legítima que decide se
@@ -126,5 +132,61 @@ func TestSocketInerteDeContainer(t *testing.T) {
 		if v.Inerte() {
 			t.Errorf("socket ativo de gestão de rede virou inerte: %+v", v)
 		}
+	}
+}
+
+// O link relativo que sobe de diretório: `/usr/lib/systemd/systemd-udevd ->
+// ../../bin/udevadm`, que é como o systemd entrega o udevadm em toda
+// distribuição com usrmerge.
+//
+// O ".." nunca era resolvido, e o caminho seguia como
+// /usr/lib/systemd/../../bin/udevadm. O kernel abre isso sem reclamar, então
+// nada falhava — mas nenhuma base de pacotes contém aquela grafia, e o udevadm
+// de fábrica saía como CRITICAL "nenhum pacote reivindica". Um falso positivo
+// num binário que existe em toda instalação de systemd é pior que um achado
+// perdido: ensina o operador a ignorar a ferramenta.
+func TestLinkRelativoQueSobeDeDiretorioEhResolvido(t *testing.T) {
+	raiz := t.TempDir()
+	for _, d := range []string{"usr/bin", "usr/lib/systemd"} {
+		if err := os.MkdirAll(filepath.Join(raiz, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(raiz, "usr/bin/udevadm"), []byte("ELF"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A grafia exata do systemd: sobe dois níveis a partir de /usr/lib/systemd.
+	if err := os.Symlink("../../bin/udevadm",
+		filepath.Join(raiz, "usr/lib/systemd/systemd-udevd")); err != nil {
+		t.Fatal(err)
+	}
+	e := env.Probe(env.Options{Root: raiz})
+	t.Cleanup(func() { e.Close() })
+
+	got := alvoFinal(e, "/usr/lib/systemd/systemd-udevd")
+	if got != "/usr/bin/udevadm" {
+		t.Errorf("alvoFinal = %q, queria /usr/bin/udevadm — com o \"..\" cru, "+
+			"nenhuma base de pacotes reconhece o caminho e o binário sai como "+
+			"não reivindicado", got)
+	}
+}
+
+// E o limite declarado: caminho limpo que NÃO existe significa que a suposição
+// léxica falhou (um componente do meio era ele próprio um link). Aí vale o
+// original, que ao menos abre.
+func TestLimpezaQueNaoExisteMantemOOriginal(t *testing.T) {
+	raiz := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(raiz, "a/b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../../nao/existe", filepath.Join(raiz, "a/b/link")); err != nil {
+		t.Fatal(err)
+	}
+	e := env.Probe(env.Options{Root: raiz})
+	t.Cleanup(func() { e.Close() })
+
+	if got := alvoFinal(e, "/a/b/link"); got != "/a/b/../../nao/existe" {
+		t.Errorf("alvoFinal = %q: sem confirmação de que o caminho limpo existe, "+
+			"o original é o que se mantém", got)
 	}
 }

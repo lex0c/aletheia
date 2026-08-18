@@ -3,6 +3,7 @@ package facts
 import (
 	"bufio"
 	"io/fs"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -574,9 +575,39 @@ func alvoFinal(e *env.Env, p string) string {
 		if j := strings.LastIndex(atual, "/"); j > 0 {
 			dir = atual[:j] + "/"
 		}
-		atual = dir + strings.TrimPrefix(alvo, "./")
+		atual = juntarAlvo(e, dir, alvo)
 	}
 	return atual
+}
+
+// juntarAlvo junta o alvo relativo ao diretório do link e RESOLVE os ".." que
+// sobram.
+//
+// Sem isto, `/usr/lib/systemd/systemd-udevd -> ../../bin/udevadm` produzia o
+// caminho literal `/usr/lib/systemd/../../bin/udevadm`. O kernel abre esse
+// caminho sem reclamar, então nada falhava — mas nenhuma base de pacotes
+// contém aquela grafia, e o udevadm de fábrica saía como CRITICAL "nenhum
+// pacote reivindica". Um falso positivo assim, num binário que existe em toda
+// instalação de systemd, é pior que um achado perdido: ele ensina o operador a
+// ignorar a ferramenta.
+//
+// De quebra, o caminho sujo furava a deduplicação (mesmo inode, duas chaves) e
+// tirava o arquivo da verificação de hash, que também procura pela grafia.
+//
+// O LIMITE: a limpeza é léxica, e ".." depois de um componente que é ele
+// próprio um link não resolve como o kernel resolveria. Por isso o resultado é
+// confirmado com um Lstat — se o caminho limpo não existir, a suposição léxica
+// falhou e o original é mantido, que é o que ao menos abre.
+func juntarAlvo(e *env.Env, dir, alvo string) string {
+	bruto := dir + strings.TrimPrefix(alvo, "./")
+	if !strings.Contains(bruto, "/../") && !strings.HasSuffix(bruto, "/..") {
+		return bruto
+	}
+	limpo := path.Clean(bruto)
+	if _, err := e.Lstat(limpo); err != nil {
+		return bruto
+	}
+	return limpo
 }
 
 func formasResolvidas(e *env.Env, p string, cache map[string]string) []string {
@@ -602,7 +633,7 @@ func formasResolvidas(e *env.Env, p string, cache map[string]string) []string {
 				if i := strings.LastIndex(dir, "/"); i > 0 {
 					pai = dir[:i] + "/"
 				}
-				real = pai + strings.TrimPrefix(alvo, "./")
+				real = juntarAlvo(e, pai, alvo)
 			}
 		}
 		cache[dir] = real

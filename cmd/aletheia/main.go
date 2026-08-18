@@ -66,6 +66,11 @@ FLAGS DE scan E wtf
                 de severidade e CONTINUA no relatório, com a data
   --no-progress cala o batimento da coleta. Ele já só aparece em terminal —
                 pipe e 2>arquivo nunca o recebem —, esta flag desliga na mão
+  --ignore PATH exclui um caminho da varredura de filesystem (repetível): não
+                desce nele nem embaixo dele. Para tirar uma árvore grande e
+                irrelevante (--ignore /data/xmls) do custo. A exclusão é
+                DECLARADA — um backdoor ali dentro NÃO foi procurado. Vale em
+                scan, wtf e collect
 
 FLAGS DE scan
   --ioc FILE    casa os indicadores DESTE incidente contra o que foi coletado
@@ -79,6 +84,11 @@ FLAGS DE scan
   --fs-budget D teto de tempo da varredura de filesystem num FS grande (ex: 10s).
                 O que não couber vira lacuna DECLARADA — a cobertura cai, e o
                 relatório diz onde parou. 0 = sem teto (padrão)
+  --all-fs      varre CÓDIGO na FS montada inteira (a partir de /), não só os web
+                roots. Acha webshell em docroot fora da lista (Alias de Apache,
+                vhost em /home). Pseudo-FS e montagem de REDE são pulados e
+                declarados; contêiner rodando, >2 MB e ofuscado seguem de fora.
+                Mais caro — combine com --fs-budget e --ignore
   --mode M      auto | manual
   -v, -vv       evidência por achado / + INFO e detalhe de cobertura
 
@@ -124,7 +134,7 @@ INFO — a pergunta que vem ANTES do veredito
   a repetição quando ela tem forma conhecida (cron que se sobrepõe, pool).
 
 FLAGS DE collect E analyze
-  collect --out F [--root PATH]      escreve o dump ("-" = stdout)
+  collect --out F [--root PATH] [--ignore PATH]   escreve o dump ("-" = stdout)
   analyze DUMP [--ioc F] [--since S] [--only G,G] [--mode M] [--baseline F]
                [--json F] [-v|-vv]
 
@@ -326,6 +336,17 @@ func relatarTempoDeColeta(e *env.Env, f *facts.Facts, inicio, fim time.Time) {
 	}
 }
 
+// listaCaminhos é uma flag REPETÍVEL de caminhos: `--ignore /a --ignore /b`, e
+// também aceita vírgula. Existe para o --ignore, que exclui árvores da
+// varredura de filesystem.
+type listaCaminhos []string
+
+func (l *listaCaminhos) String() string { return strings.Join(*l, ",") }
+func (l *listaCaminhos) Set(v string) error {
+	*l = append(*l, v)
+	return nil
+}
+
 func runWtf(args []string) int {
 	fs := flag.NewFlagSet("wtf", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -337,6 +358,8 @@ func runWtf(args []string) int {
 		base    = fs.String("baseline", "", "comparar com a baseline em FILE")
 		noProg  = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
 	)
+	var ignore listaCaminhos
+	fs.Var(&ignore, "ignore", "excluir caminho da varredura de FS (repetível): --ignore /data/xmls")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
 		return 3
@@ -355,6 +378,7 @@ func runWtf(args []string) int {
 
 	e := env.Probe(env.Options{Root: *root, Version: version})
 	defer e.Close()
+	e.Ignorar(ignore)
 	// Mesma recusa do scan: --root que não abre é ERRO de invocação, não host
 	// suspeito. Sem isto o wtf saía 1 (WARNING) para um caminho digitado
 	// errado, e a triagem de frota ordena por exit code.
@@ -426,7 +450,10 @@ func runScan(args []string, wtf bool) int {
 		since    = fs.String("since", "", "janela de investigação: instante (2026-04-30T18:00Z) ou duração (72h, 7d)")
 		noProg   = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
 		fsBudget = fs.Duration("fs-budget", 0, "teto de tempo da varredura de filesystem (0 = sem teto)")
+		allFS    = fs.Bool("all-fs", false, "varrer código na FS montada INTEIRA (a partir de /), não só os web roots")
 	)
+	var ignore listaCaminhos
+	fs.Var(&ignore, "ignore", "excluir caminho da varredura de FS (repetível): --ignore /data/xmls")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
 		return 3
@@ -462,6 +489,8 @@ func runScan(args []string, wtf bool) int {
 		fmt.Fprintf(os.Stderr, "não foi possível abrir --root com raiz travada: %v\n", e.RootErr)
 		return 3
 	}
+	e.Ignorar(ignore)
+	e.CodigoTudo = *allFS
 	aoInterromper()
 	// Num FS grande, quem tem pressa limita a varredura no tempo; o que ela não
 	// terminar vira lacuna declarada, e a cobertura cai — nunca "nada achado".

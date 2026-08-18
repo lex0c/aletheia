@@ -462,6 +462,10 @@ func (v *varredura) visitar(t tarefaDir) {
 		if tipo&os.ModeSymlink != 0 {
 			continue
 		}
+		// --ignore do operador: nenhuma varredura de FS toca o que ele excluiu.
+		if v.e.Ignorado(p) {
+			continue
+		}
 		if tipo.IsDir() {
 			// A PODA não vale em árvore temporária.
 			//

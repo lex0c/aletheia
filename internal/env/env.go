@@ -119,6 +119,19 @@ type Env struct {
 	// da truncagem por contagem, disparada pelo relógio.
 	WalkDeadline time.Time
 
+	// CodigoTudo liga a varredura de código sobre a FS montada INTEIRA (a
+	// partir de /), no lugar da lista de web roots. Pseudo-FS e montagem de
+	// rede são pulados e DECLARADOS. É o --all-fs do scan: cobertura máxima da
+	// FS montada, ao custo de tempo, com os limites (contêiner, >2 MB) ditos.
+	CodigoTudo bool
+
+	// ignorados são prefixos de caminho absoluto que NENHUMA varredura de
+	// filesystem percorre — o --ignore. Excluir uma árvore gigante e
+	// irrelevante (/data/xmls) do custo é escolha do operador, e como o --root,
+	// atravessa todo coletor. A exclusão é DECLARADA: esquecer que se ignorou
+	// algo e ler "limpo" é a cegueira silenciosa que a ferramenta combate.
+	ignorados []string
+
 	// stageMarks registra QUANDO cada estágio de coleta começou, para o CLI
 	// poder dizer onde o tempo foi quando a coleta é lenta. Só a goroutine da
 	// coleta chama Stage (ela é sequencial), então não precisa de lock.
@@ -428,6 +441,56 @@ type ProgressSink interface {
 	Stage(name string)
 	Detalhe(s string)
 }
+
+// Ignorar registra os caminhos do --ignore, normalizados para caminho absoluto
+// e limpo. Ignorar "/" seria esvaziar a varredura inteira e é recusado — quem
+// quer isso não passa --ignore.
+func (e *Env) Ignorar(paths []string) {
+	for _, p := range paths {
+		for _, item := range strings.Split(p, ",") {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if !strings.HasPrefix(item, "/") {
+				item = "/" + item
+			}
+			item = filepath.Clean(item)
+			if item == "/" || e.jaIgnora(item) {
+				continue
+			}
+			e.ignorados = append(e.ignorados, item)
+		}
+	}
+}
+
+func (e *Env) jaIgnora(p string) bool {
+	for _, ig := range e.ignorados {
+		if ig == p {
+			return true
+		}
+	}
+	return false
+}
+
+// Ignorado diz se um caminho absoluto está sob um prefixo do --ignore. O
+// casamento respeita a fronteira de componente: --ignore /data/x não pega
+// /data/xmls, só /data/x e o que estiver embaixo dele.
+func (e *Env) Ignorado(p string) bool {
+	if e == nil {
+		return false
+	}
+	for _, ig := range e.ignorados {
+		if p == ig || strings.HasPrefix(p, ig+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// Ignorados devolve os prefixos do --ignore, para o relatório DECLARAR o que
+// foi excluído da varredura.
+func (e *Env) Ignorados() []string { return e.ignorados }
 
 // WalkExpired diz se a varredura de filesystem já passou do prazo. Falso quando
 // não há prazo (WalkDeadline zero), que é o caso do scan.

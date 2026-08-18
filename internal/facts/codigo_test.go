@@ -687,3 +687,92 @@ func TestVarreduraBFSAchaCodigoRasoAntesDeArvoreFundaIrma(t *testing.T) {
 			"funda esgotar o orçamento — achados: %+v", f.CodigoSuspeito)
 	}
 }
+
+// --ignore: o operador exclui uma árvore da varredura, e a exclusão é
+// DECLARADA. Ignorar /data/xmls tira o que está sob ela E não pega /data/xmlsX
+// (a fronteira é de componente, não de prefixo de string).
+func TestIgnoreExcluiArvoreEDeclara(t *testing.T) {
+	raiz := t.TempDir()
+	must := func(p string) {
+		t.Helper()
+		if err := os.MkdirAll(filepathDir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("<?php eval($_GET[0]);"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(raiz + "/data/app/a.php")       // fica
+	must(raiz + "/data/xmls/deep/b.php") // excluído por --ignore
+	must(raiz + "/data/xmlsX/c.php")     // NÃO casa /data/xmls (fronteira de componente)
+
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	defer e.Close()
+	e.Ignorar([]string{"/data/xmls"})
+	f := &Facts{}
+	collectCodigo(f, e)
+
+	achou := map[string]bool{}
+	for _, cs := range f.CodigoSuspeito {
+		achou[cs.Path] = true
+	}
+	if !achou["/data/app/a.php"] {
+		t.Errorf("o que NÃO foi ignorado tinha de ser achado: %+v", f.CodigoSuspeito)
+	}
+	if achou["/data/xmls/deep/b.php"] {
+		t.Errorf("--ignore /data/xmls tinha de excluir o que está embaixo: %+v", f.CodigoSuspeito)
+	}
+	if !achou["/data/xmlsX/c.php"] {
+		t.Errorf("/data/xmlsX NÃO é /data/xmls — a fronteira é de componente: %+v", f.CodigoSuspeito)
+	}
+	// e a exclusão é DECLARADA, nunca silenciosa:
+	msgs := strings.Join(f.PersistDenied["codigo"], " | ")
+	if !strings.Contains(msgs, "--ignore") || !strings.Contains(msgs, "/data/xmls") {
+		t.Errorf("o --ignore tinha de virar lacuna declarada: %q", msgs)
+	}
+}
+
+// --all-fs: a varredura anda a FS montada INTEIRA (a partir de /), não só os web
+// roots. É o que acha um webshell num docroot fora da lista estática — um Alias
+// de Apache, um vhost em /home/cliente, um caminho exótico.
+func TestAllFSAlcancaForaDosWebRoots(t *testing.T) {
+	raiz := t.TempDir()
+	must := func(p string) {
+		t.Helper()
+		if err := os.MkdirAll(filepathDir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("<?php eval($_GET[0]);"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// um docroot FORA de codigoRaizes (não é /var/www, /data, /opt, …):
+	must(raiz + "/clientes/site/public/shell.php")
+
+	// sem --all-fs: não está sob web root nenhum, não é achado
+	e1 := env.Probe(env.Options{Root: raiz, Version: "test"})
+	defer e1.Close()
+	f1 := &Facts{}
+	collectCodigo(f1, e1)
+	for _, cs := range f1.CodigoSuspeito {
+		if hasSuffix(cs.Path, "clientes/site/public/shell.php") {
+			t.Fatalf("sem --all-fs, um caminho fora dos web roots não deveria ser varrido: %+v", f1.CodigoSuspeito)
+		}
+	}
+
+	// com --all-fs: a FS inteira é varrida, o webshell aparece
+	e2 := env.Probe(env.Options{Root: raiz, Version: "test"})
+	defer e2.Close()
+	e2.CodigoTudo = true
+	f2 := &Facts{}
+	collectCodigo(f2, e2)
+	var achou bool
+	for _, cs := range f2.CodigoSuspeito {
+		if hasSuffix(cs.Path, "clientes/site/public/shell.php") {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Fatalf("--all-fs tinha de alcançar o docroot fora da lista: %+v", f2.CodigoSuspeito)
+	}
+}

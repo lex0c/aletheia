@@ -1285,8 +1285,55 @@ type varreduraCodigo struct {
 }
 
 func collectCodigo(f *Facts, e *env.Env) {
-	raizes := append([]string{}, codigoRaizes...)
-	raizes = append(raizes, homeDirs(e)...)
+	// pularAbs são caminhos ABSOLUTOS que a varredura não desce — distinto do
+	// pularNoCodigo, que casa por NOME em qualquer nível. Aqui entram o --ignore
+	// (escolha do operador) e, no modo --all-fs, os pseudo-FS e as montagens de
+	// rede. Casar por caminho absoluto é o que permite pular /proc sem pular um
+	// diretório chamado "proc" no meio de uma aplicação.
+	pularAbs := map[string]bool{}
+	for _, ig := range e.Ignorados() {
+		pularAbs[ig] = true
+	}
+
+	var raizes []string
+	if e.CodigoTudo {
+		// --all-fs: a FS montada INTEIRA, a partir de /. O discriminador tier-2
+		// (sink sobre entrada de request) quase não dispara em código de
+		// sistema, então varrer /usr sai limpo — o preço é tempo, não ruído.
+		raizes = []string{"/"}
+		// Pseudo-FS: não são arquivos de verdade, e /proc sozinho tem centenas
+		// de milhares de entradas. Pulados por caminho, e isto vale até em modo
+		// image (onde não há mountinfo).
+		for _, p := range []string{"/proc", "/sys", "/dev", "/run"} {
+			pularAbs[p] = true
+		}
+		// Montagem de REDE trava a varredura (NFS/CIFS/sshfs podem pendurar) e
+		// não é "a FS deste host": pulada e DECLARADA. Montagem local (ext4,
+		// xfs, btrfs, e o overlay de contêiner em disco) é atravessada — é onde
+		// código servido de verdade mora. f.Mounts já foi coletado (a ordem em
+		// facts.go garante).
+		var rede []string
+		for i := range f.Mounts {
+			m := &f.Mounts[i]
+			if fsDeRede[m.Tipo] {
+				pularAbs[m.Ponto] = true
+				rede = append(rede, m.Ponto+" ("+m.Tipo+")")
+			}
+		}
+		if len(rede) > 0 {
+			sort.Strings(rede)
+			if len(rede) > 6 {
+				rede = append(rede[:6:6], "…")
+			}
+			f.denyPersist("codigo", "--all-fs: "+itoa(len(rede))+" montagem(ns) de "+
+				"REDE NÃO foram varridas (podem pendurar a varredura, e não são a FS "+
+				"deste host): "+strings.Join(rede, ", ")+". Aponte `scan --root` nelas "+
+				"se precisar")
+		}
+	} else {
+		raizes = append([]string{}, codigoRaizes...)
+		raizes = append(raizes, homeDirs(e)...)
+	}
 
 	// Orçamento POR RAIZ, não global. Com um contador único, uma raiz enorme —
 	// um /var/www com árvore `generated/` de dezenas de milhares de arquivos —
@@ -1298,12 +1345,12 @@ func collectCodigo(f *Facts, e *env.Env) {
 	var st varreduraCodigo
 	vistos := map[string]bool{}
 	for _, r := range raizes {
-		if r == "" || vistos[r] {
+		if r == "" || vistos[r] || pularAbs[r] || e.Ignorado(r) {
 			continue
 		}
 		vistos[r] = true
 		porRaiz := varreduraCodigo{tempo: st.tempo}
-		varrerCodigo(f, e, r, 0, &porRaiz, vistos)
+		varrerCodigo(f, e, r, 0, &porRaiz, vistos, pularAbs)
 		st.truncado = st.truncado || porRaiz.truncado
 		st.tempo = st.tempo || porRaiz.tempo
 		st.grandesPulados += porRaiz.grandesPulados
@@ -1339,9 +1386,18 @@ func collectCodigo(f *Facts, e *env.Env) {
 			"foram listados e não puderam ser LIDOS (permissão): um backdoor num "+
 			"deles passa, e a ausência de achado ali é desconhecimento, não resposta")
 	}
+	if ig := e.Ignorados(); len(ig) > 0 {
+		mostra := append([]string{}, ig...)
+		if len(mostra) > 8 {
+			mostra = append(mostra[:8:8], "…")
+		}
+		f.denyPersist("codigo", "--ignore: "+itoa(len(ig))+" caminho(s) foram "+
+			"EXCLUÍDOS da varredura por sua escolha ("+strings.Join(mostra, ", ")+
+			"): um backdoor lá dentro NÃO foi procurado")
+	}
 }
 
-func varrerCodigo(f *Facts, e *env.Env, raiz string, prof int, st *varreduraCodigo, vistos map[string]bool) {
+func varrerCodigo(f *Facts, e *env.Env, raiz string, prof int, st *varreduraCodigo, vistos, pularAbs map[string]bool) {
 	// BFS por PROFUNDIDADE, não DFS. O código SERVIDO — o index.php, o
 	// bootstrap.php, o painel — mora raso, na raiz de cada aplicação; o que é
 	// fundo é dado, upload, cache, build. A recursão em profundidade mergulhava
@@ -1392,7 +1448,16 @@ func varrerCodigo(f *Facts, e *env.Env, raiz string, prof int, st *varreduraCodi
 		for _, ent := range ents {
 			n := ent.Name()
 			p := at.dir + "/" + n
+			if at.dir == "/" { // raiz do --all-fs: evita a barra dupla "//data"
+				p = "/" + n
+			}
 			if e.IsDir(p) {
+				// Caminho absoluto excluído: --ignore do operador, ou pseudo-FS e
+				// montagem de rede no modo --all-fs. Distinto do pularNoCodigo, que
+				// casa por NOME. e.Ignorado cobre o --ignore mesmo no modo de lista.
+				if pularAbs[p] || e.Ignorado(p) {
+					continue
+				}
 				// As mesmas árvores que só geram profundidade e ruído. vendor e
 				// node_modules TAMBÉM podem esconder shell — mas varrê-los inteiros
 				// é o custo que acabamos de medir, então ficam de fora e isso é dito.
@@ -1453,6 +1518,16 @@ func varrerCodigo(f *Facts, e *env.Env, raiz string, prof int, st *varreduraCodi
 
 // pularNoCodigo são as árvores de dependência que não se percorre: varrê-las
 // inteiras é o custo de I/O que já mordeu a varredura de SUID.
+// fsDeRede são os tipos de filesystem que o modo --all-fs NÃO atravessa: podem
+// PENDURAR a varredura (o servidor remoto não responde) e não são a FS deste
+// host. Pulados e declarados; o operador aponta `--root` neles se precisar.
+var fsDeRede = map[string]bool{
+	"nfs": true, "nfs4": true, "cifs": true, "smb3": true, "smbfs": true,
+	"ceph": true, "glusterfs": true, "afs": true, "9p": true, "ncpfs": true,
+	"fuse.sshfs": true, "fuse.s3fs": true, "fuse.rclone": true,
+	"fuse.glusterfs": true, "fuse.cephfs": true, "davfs": true,
+}
+
 var pularNoCodigo = map[string]bool{
 	"node_modules": true, "vendor": true, ".git": true, ".cache": true,
 	".svn": true, "bower_components": true, ".npm": true,

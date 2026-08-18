@@ -87,7 +87,7 @@ Alguns exemplos de sinais implementados:
 | Rede | provável reverse shell pela estrutura de FDs, processo fazendo conexões públicas e privadas compatíveis com pivot, correlação socket-processo |
 | Persistência | `/etc/ld.so.preload`, cron suspeito ou excessivamente frequente, units/drop-ins/timers systemd, SSH `authorized_keys`, `modprobe install`, processos observando arquivos de persistência |
 | Integridade | arquivo de pacote modificado, sinais de timestomp, executável usado por root mas gravável por usuário menos privilegiado, arquivo cujo dono (uid/gid) não existe em `passwd`/`group` |
-| Código servido | padrão de backdoor/webshell em PHP, JS e Python: sink de execução sobre entrada de request (`eval($_POST)`, `` `$_GET` ``, `system`, `subprocess shell=True`), com micro-taint de fluxo de duas linhas que respeita escopo de função e allowlist (`switch` de literais, `in_array` de lista fixa), e distinção entre entrada remota e local |
+| Código servido | padrão de backdoor/webshell em PHP, JS e Python: sink de execução sobre entrada de request (`eval($_POST)`, `` `$_GET` ``, `system`, `subprocess shell=True`), com micro-taint de fluxo de duas linhas que respeita escopo de função e allowlist (`switch` de literais, `in_array` de lista fixa), e distinção entre entrada remota e local. Varre os web roots por padrão, a FS montada inteira com `--all-fs`, e `--ignore PATH` exclui uma árvore (a exclusão é declarada) |
 | Kernel | divergência entre três visões independentes de módulos (`/proc/modules`, `/sys/module`, ftrace), módulos sem arquivo correspondente, taint inexplicado, hooks ftrace em funções sensíveis, programas BPF sem owner identificado, inconsistências na enumeração BPF e cross-views de processos |
 | IOC | IPs, hashes, paths e strings fornecidos pelo investigador |
 
@@ -436,6 +436,33 @@ snapshot ou imagem de disco em uma máquina confiável:
 
 Nesse modo, a leitura do filesystem é feita pelo kernel da estação de análise,
 não pelo kernel do host investigado.
+
+### Cobertura da varredura de código
+
+A peneira de webshell (`app.code_backdoor`) varre, por padrão, as árvores onde
+código servido mora (`/var/www`, `/srv`, `/data`, `/usr/local/www`, os homes de
+`/etc/passwd`, entre outras) — e não o `/` inteiro, porque arrastar `/usr` e as
+camadas de contêiner custa caro sem acrescentar sinal.
+
+Três flags ajustam o alcance, e cada uma vale em `scan`, `wtf` e `collect`:
+
+```sh
+# a FS montada INTEIRA, a partir de /: acha webshell num docroot fora da lista
+# (Alias de Apache, vhost em /home/cliente). Pseudo-FS e montagem de rede são
+# pulados e DECLARADOS; contêiner rodando, arquivo > 2 MB e ofuscação seguem fora.
+sudo ./aletheia scan --all-fs
+
+# excluir uma árvore grande e irrelevante do custo (repetível). A exclusão é
+# DECLARADA no relatório — um backdoor ali dentro não foi procurado.
+sudo ./aletheia scan --all-fs --ignore /data/xmls --ignore /var/backups
+
+# mirar direto numa árvore suspeita, sem varrer o resto:
+./aletheia scan --root /data/local/www/data/consultoria
+```
+
+Quando a varredura estoura um teto (árvore gigante) ou você exclui um caminho, o
+relatório **declara a lacuna** em vez de dizer "limpo" — a ausência de achado
+onde não se olhou é desconhecimento, não resposta.
 
 Isso é especialmente útil para procurar:
 

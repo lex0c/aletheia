@@ -110,3 +110,48 @@ func init() {
 		Exit: 2,
 	})
 }
+
+// B4 — --all-fs alcança um docroot FORA da lista estática de web roots. O caso
+// que o motivou: um host (FreeBSD) servindo de /usr/local/www, e árvores de
+// aplicação em caminhos que a lista não previa. Sem --all-fs, um webshell ali
+// passa; com ele, a FS montada inteira é varrida e o webshell aparece.
+func init() {
+	Register(Scenario{
+		ID:     "B4-all-fs-alcanca-fora-dos-roots",
+		Desc:   "--all-fs varre a FS inteira e acha o webshell num docroot que não está na lista de web roots",
+		Images: matriz,
+		Args:   []string{"--all-fs", "--only", "app"},
+		Plant: "mkdir -p /custom/webapp /var/www/app\n" +
+			// FORA de qualquer web root: só o --all-fs alcança
+			"printf '<?php eval($_GET[0]);' > /custom/webapp/shell.php\n" +
+			// e um dentro de /var/www, para provar que a lista continua coberta
+			"printf '<?php eval($_GET[0]);' > /var/www/app/normal.php",
+		Expect: []Expect{
+			{ID: "app.code_backdoor", Sev: "CRITICAL", Subject: "/custom/webapp/shell.php"},
+			{ID: "app.code_backdoor", Sev: "CRITICAL", Subject: "/var/www/app/normal.php"},
+		},
+		Exit: 2,
+	})
+}
+
+// B5 — --ignore exclui uma árvore da varredura, e a exclusão é DECLARADA. O
+// webshell irmão continua sendo achado; o que caiu sob o --ignore NÃO aparece
+// como achado, mas o relatório diz que aquele caminho foi excluído.
+func init() {
+	Register(Scenario{
+		ID:     "B5-ignore-exclui-e-declara",
+		Desc:   "--ignore tira uma árvore da varredura (declarado), sem cegar o resto",
+		Images: matriz,
+		Args:   []string{"--ignore", "/var/www/ignoreme", "--only", "app"},
+		Plant: "mkdir -p /var/www/ignoreme/deep /var/www/keep\n" +
+			"printf '<?php eval($_GET[0]);' > /var/www/ignoreme/deep/shell.php\n" +
+			"printf '<?php eval($_GET[0]);' > /var/www/keep/shell.php",
+		Expect: []Expect{
+			{ID: "app.code_backdoor", Sev: "CRITICAL", Subject: "/var/www/keep/shell.php"},
+		},
+		// o webshell sob --ignore NÃO pode aparecer como achado (a exclusão em si
+		// sai DECLARADA na cobertura — travado em TestIgnoreExcluiArvoreEDeclara)
+		ForbidOutput: []string{"ignoreme/deep/shell.php"},
+		Exit:         2,
+	})
+}

@@ -38,6 +38,8 @@ func runCollect(args []string) int {
 		out    = fs.String("out", "", "arquivo do dump ('-' = stdout) — obrigatório")
 		noProg = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
 	)
+	var ignore listaCaminhos
+	fs.Var(&ignore, "ignore", "excluir caminho da varredura de FS (repetível): --ignore /data/xmls")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
 		return 3
@@ -60,6 +62,7 @@ func runCollect(args []string) int {
 		fmt.Fprintf(os.Stderr, "não foi possível abrir --root com raiz travada: %v\n", e.RootErr)
 		return 3
 	}
+	e.Ignorar(ignore)
 
 	aoInterromper()
 	prog := progress.New(os.Stderr, time.Now(), *noProg)

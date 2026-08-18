@@ -55,10 +55,15 @@ func TestLequeDeSaidaEhReconhecidoENomeado(t *testing.T) {
 	}
 }
 
-// O outro lado, e ele importa mais: um navegador abre conexão para dezenas de
-// endereços em 443 o tempo todo. Chamar isso de leque afogaria o leque que
-// importa, e ensinaria o operador a ignorar a seção.
-func TestLequeEmPortaDeWebNaoEhPadrao(t *testing.T) {
+// O leque em 443 CONTINUA sendo reportado, e a primeira versão deste arquivo o
+// descartava.
+//
+// Descartar estava errado por construção: a porta é exatamente o campo que o
+// atacante escolhe. C2 moderno usa 443 de propósito, e filtrar por porta é
+// filtrar pelo que o adversário controla — a ferramenta ficaria cega
+// justamente onde ele decidiu se esconder. O que a porta muda é a RESSALVA,
+// não a existência da linha.
+func TestLequeEmPortaDeWebEhReportadoComRessalva(t *testing.T) {
 	var socks []facts.Socket
 	for i := 0; i < 40; i++ {
 		socks = append(socks, sockOut(700, "93.184.216."+itoaT(i), 443, facts.ScopePublic))
@@ -66,10 +71,46 @@ func TestLequeEmPortaDeWebNaoEhPadrao(t *testing.T) {
 	f := hostComRede(socks, []facts.Process{
 		{PID: 700, Exe: "/usr/lib/firefox/firefox", Comm: "firefox"},
 	})
-	for _, p := range CensoDaRede(f).Padroes {
-		if p.Tipo == "leque de saída" {
-			t.Errorf("443 é a forma normal de navegador e de cliente de API: %+v", p)
+	c := CensoDaRede(f)
+	var achou *Padrao
+	for i := range c.Padroes {
+		if c.Padroes[i].Tipo == "leque de saída" {
+			achou = &c.Padroes[i]
 		}
+	}
+	if achou == nil {
+		t.Fatal("o leque em 443 não pode sumir: é a porta que C2 escolhe")
+	}
+	if !achou.Comum {
+		t.Error("mas precisa vir marcado: em 443 esta forma também é a de " +
+			"navegador e de atualizador")
+	}
+	if !strings.Contains(achou.Detalhe, "NÃO separa") {
+		t.Errorf("e a ressalva precisa dizer o que separa os dois: %q", achou.Detalhe)
+	}
+}
+
+// E a ordem: leque em porta de SERVIÇO vem antes do leque em porta de web. Num
+// desktop o de web aparece toda vez, e pô-lo no topo enterraria o que muda o
+// que o operador faz em seguida. Ordenar não é esconder.
+func TestLequeDeServicoVemAntesDoDeWeb(t *testing.T) {
+	var socks []facts.Socket
+	for i := 0; i < 40; i++ {
+		socks = append(socks, sockOut(700, "93.184.216."+itoaT(i), 443, facts.ScopePublic))
+	}
+	for i := 0; i < 10; i++ {
+		socks = append(socks, sockOut(900, "10.0.9."+itoaT(i), 22, facts.ScopePrivate))
+	}
+	f := hostComRede(socks, []facts.Process{
+		{PID: 700, Exe: "/usr/lib/firefox/firefox"},
+		{PID: 900, Exe: "/usr/bin/python3"},
+	})
+	ps := CensoDaRede(f).Padroes
+	if len(ps) != 2 {
+		t.Fatalf("padrões = %+v", ps)
+	}
+	if ps[0].Comum || !ps[1].Comum {
+		t.Errorf("o de porta 22 vem primeiro mesmo tendo N MENOR: %+v", ps)
 	}
 }
 

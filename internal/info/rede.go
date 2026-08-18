@@ -84,10 +84,18 @@ type TetoDeRede struct {
 	Perto bool
 }
 
-// portasDeWeb são as portas em que o leque é a NORMA, e não sinal. Um
-// navegador, um atualizador e um cliente de API abrem conexão para dezenas de
-// endereços distintos em 443 o tempo todo; deixá-las entrar no reconhecimento
-// de padrão afogaria o leque que importa.
+// portasDeWeb são as portas em que o leque também é a forma NORMAL. Elas NÃO
+// são excluídas do reconhecimento — são ordenadas por último e recebem a
+// ressalva junto.
+//
+// A primeira versão deste arquivo as descartava, e isso estava errado por
+// construção: a porta é exatamente o campo que o atacante escolhe. C2 moderno
+// usa 443 de propósito, e um filtro por porta é um filtro pelo que o adversário
+// controla — a ferramenta estaria cega justamente onde ele decidiu se esconder.
+//
+// O que separa navegador de C2 em 443 não é a porta: é QUEM. Essa é a pergunta
+// de propriedade do binário, e o censo não a responde — ele diz onde ela é
+// respondida.
 var portasDeWeb = map[int]bool{80: true, 443: true, 8080: true, 8443: true}
 
 // minLeque é quantos destinos distintos, na MESMA porta, antes de chamar de
@@ -250,12 +258,8 @@ func padroesDeRede(
 
 	for _, exe := range exes {
 		// LEQUE: muitos destinos DISTINTOS na mesma porta.
-		//
-		// A porta é o que dá o sentido, e por isso 80 e 443 ficam de fora: ali
-		// o leque é a norma — navegador, atualizador e cliente de API têm essa
-		// forma o tempo todo, e deixá-los entrar afogaria o leque que importa.
 		for porta, n := range portasDe[exe] {
-			if portasDeWeb[porta] || n < minLeque {
+			if n < minLeque {
 				continue
 			}
 			distintos := destinosDistintosNaPorta(f, exe, porta)
@@ -266,10 +270,10 @@ func padroesDeRede(
 				Tipo: "leque de saída",
 				Alvo: exe + " → " + strconv.Itoa(distintos) + " endereços na porta " +
 					strconv.Itoa(porta),
-				N: distintos,
+				N:     distintos,
+				Comum: portasDeWeb[porta],
 				Detalhe: "um destino por host e sempre a MESMA porta é a forma de " +
-					"varredura ou de movimento lateral — o que muda o peso é a porta: " +
-					nomeDaPorta(porta),
+					"varredura ou de movimento lateral — " + nomeDaPorta(porta),
 			})
 		}
 
@@ -283,7 +287,16 @@ func padroesDeRede(
 			})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].N > out[j].N })
+	// Web por ÚLTIMO. É a forma normal de navegador e de atualizador, e num
+	// desktop ela aparece toda vez; pô-la no topo enterraria o leque em porta
+	// de serviço, que é o que muda o que o operador faz em seguida. Ordenar
+	// não é o mesmo que esconder — a linha continua lá, com a ressalva.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Comum != out[j].Comum {
+			return !out[i].Comum
+		}
+		return out[i].N > out[j].N
+	})
 	return out
 }
 
@@ -323,6 +336,13 @@ func nomeDaPorta(p int) string {
 		return "porta de BANCO — leque aqui é procura por instância exposta"
 	case 25, 465, 587:
 		return "porta de SMTP — leque aqui costuma ser envio de spam"
+	case 80, 443, 8080, 8443:
+		// A ressalva tem os DOIS lados. Dizer só que é comum ensinaria a pular
+		// a linha, e é nela que o C2 moderno mora de propósito.
+		return "porta de WEB, onde esta forma é a NORMA (navegador, atualizador, " +
+			"cliente de API) — e é também a porta que C2 escolhe justamente por " +
+			"isso. A porta NÃO separa os dois: quem separa é 'que pacote entregou " +
+			"este binário', e é `aletheia scan` que faz essa pergunta"
 	}
 	return "porta " + strconv.Itoa(p)
 }

@@ -76,10 +76,14 @@ type Contagem struct {
 
 // Padrao é uma repetição que tem NOME.
 type Padrao struct {
-	Tipo    string // "cron sobreposto" | "pool" | "respawn"
+	Tipo    string // "cron sobreposto" | "pool" | "respawn" | "leque de saída"
 	Alvo    string
 	N       int
 	Detalhe string
+	// Comum marca o padrão cuja forma também é a do uso legítimo frequente.
+	// Ele NÃO é suprimido — vai para o fim da lista, com a ressalva junto:
+	// suprimir seria filtrar pelo campo que o atacante escolhe.
+	Comum bool `json:",omitempty"`
 }
 
 // Perto diz se o usuário está a menos de 10% do teto — a faixa em que o próximo

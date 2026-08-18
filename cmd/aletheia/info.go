@@ -417,7 +417,14 @@ func escreverCensoDeRede(w io.Writer, c *info.CensoDeRede) {
 	}
 
 	for _, p := range c.Padroes {
-		fmt.Fprintf(w, "PADRÃO RECONHECIDO — %s · %d\n", strings.ToUpper(p.Tipo), p.N)
+		cab := "PADRÃO RECONHECIDO"
+		if p.Comum {
+			// A marca é da FORMA, não do veredito: ela diz que esta mesma forma
+			// aparece em uso legítimo frequente. Não diz que este caso é
+			// legítimo — a porta não decide isso.
+			cab = "PADRÃO RECONHECIDO (forma também comum em uso legítimo)"
+		}
+		fmt.Fprintf(w, "%s — %s · %d\n", cab, strings.ToUpper(p.Tipo), p.N)
 		fmt.Fprintf(w, "  %s\n", report.Safe(p.Alvo))
 		fmt.Fprintf(w, "  %s\n\n", report.Safe(p.Detalhe))
 	}

@@ -119,3 +119,22 @@ func TestAsDuasViasDeModuloConvivem(t *testing.T) {
 		t.Fatalf("as duas vias são achados separados: %v", r.Findings)
 	}
 }
+
+// Regressão do loop duplicado: um módulo escondido (ModFtraceDiff) é achado de
+// cross.module_view e SÓ dele. pidOculto tinha um loop copiado que o fazia
+// virar cross.hidden_pid também — errado, e pior: cross.hidden_pid é
+// kernelBreaker, então o relatório passava a acusar "um PID responde a /proc"
+// sem PID oculto nenhum. O teste antigo exercitava moduloDivergente direto e
+// não via a duplicação.
+func TestModuloEscondidoNaoViraPidOculto(t *testing.T) {
+	f := &facts.Facts{Cross: facts.CrossView{
+		ModFtraceDiff: []string{"evil tem função rastreável no ftrace e NÃO está em /proc/modules"},
+	}}
+	if r := pidOculto.Run(pidOculto, f, testEnv()); len(r.Findings) != 0 {
+		t.Errorf("pidOculto tem de IGNORAR ModFtraceDiff — módulo não é PID oculto: %v", r.Findings)
+	}
+	r := moduloDivergente.Run(moduloDivergente, f, testEnv())
+	if len(r.Findings) != 1 || r.Findings[0].ID != "cross.module_view" {
+		t.Errorf("moduloDivergente é o ÚNICO que reporta o módulo escondido: %v", r.Findings)
+	}
+}

@@ -362,6 +362,14 @@ func runWtf(args []string) int {
 		fmt.Fprintf(os.Stderr, "não foi possível abrir --root com raiz travada: %v\n", e.RootErr)
 		return 3
 	}
+	// O prazo da varredura de filesystem cabe DENTRO do orçamento do wtf: sem
+	// ele a coleta — a parte cara — estourava os ~2s num FS grande, e o
+	// "overview em ~1s" virava minutos. Reserva um quarto do orçamento para os
+	// outros coletores e os checks, que são baratos sobre fatos já coletados. O
+	// que a varredura não terminar no prazo vira lacuna declarada, nunca "nada
+	// encontrado". (Faltava: o comentário de Env prometia isto e o código não
+	// cumpria — só o scan ligava o WalkDeadline.)
+	e.WalkDeadline = start.Add(*budget * 3 / 4)
 	prog := progress.New(os.Stderr, start, *noProg)
 	e.Progress = prog
 	defer prog.Stop()

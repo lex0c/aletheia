@@ -110,6 +110,10 @@ echo "ftrace_tem_evil=$(grep -c 'evil_marcador \[evil\]' $T/available_filter_fun
 # --- PARTE 2b: a aletheia com o módulo ESCONDIDO. tem de disparar. ---
 /aletheia scan --json /tmp/oculto.jsonl >/dev/null 2>&1
 echo "aletheia_oculto_cross_module=$(dump /tmp/oculto.jsonl)"
+# BUG 1: módulo escondido NÃO pode virar cross.hidden_pid (loop duplicado, corrigido)
+# só ACHADO conta: a linha de um achado tem "subject"; a menção de cobertura
+# (cross.hidden_pid virou parcial porque module_view quebrou a confiança) não.
+echo "aletheia_oculto_hidden_pid=$(grep '\"cross.hidden_pid\"' /tmp/oculto.jsonl 2>/dev/null | grep -c '\"subject\"')"
 # a linha inteira do achado, para conferir que nomeia 'evil' e é CRITICAL
 grep '"cross.module_view"' /tmp/oculto.jsonl 2>/dev/null | head -1 > /tmp/linha
 echo "aletheia_oculto_nomeia_evil=$(grep -c 'evil' /tmp/linha)"
@@ -146,6 +150,7 @@ falhou=0
 [ "$(get aletheia_oculto_cross_module)" -ge 1 ] 2>/dev/null || { echo "FALHOU: a aletheia NÃO reportou o módulo escondido"; falhou=1; }
 [ "$(get aletheia_oculto_nomeia_evil)" -ge 1 ] 2>/dev/null || { echo "FALHOU: o achado não nomeia 'evil'"; falhou=1; }
 [ "$(get aletheia_oculto_critical)" -ge 1 ] 2>/dev/null || { echo "FALHOU: o achado não é CRITICAL"; falhou=1; }
+[ "$(get aletheia_oculto_hidden_pid)" = "0" ] || { echo "FALHOU: módulo escondido virou cross.hidden_pid (loop duplicado)"; falhou=1; }
 
 if [ "$falhou" = 0 ]; then
 	echo "OK — módulo escondido de /proc/modules E /sys/module; host limpo cala; e"

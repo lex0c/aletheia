@@ -135,7 +135,14 @@ func resumoDaColeta(w io.Writer, e *env.Env, f *facts.Facts, arquivo, hash strin
 			faltando |= c
 		}
 	}
-	if faltando == 0 {
+	// Capacidade ausente e lacuna de COLETOR são dois buracos diferentes: o
+	// primeiro é "não me deixaram olhar", o segundo é "olhei e parei antes"
+	// (varredura de SUID truncada, prazo, teto de código). Só declarar
+	// "ambiente completo" quando NENHUM dos dois existe — senão o resumo diz
+	// "completo" com a varredura truncada por baixo, que é a confusão entre
+	// "não achei" e "não terminei de olhar" cometida no próprio resumo.
+	temGapDeColetor := len(f.Partial) > 0 || len(f.PersistDenied) > 0
+	if faltando == 0 && !temGapDeColetor {
 		fmt.Fprintln(w, "ambiente completo: a análise deste dump não terá lacuna de capacidade")
 		return
 	}
@@ -156,18 +163,28 @@ func resumoDaColeta(w io.Writer, e *env.Env, f *facts.Facts, arquivo, hash strin
 		c, _ := env.CapDeNome(n)
 		linha(n, e.Reason(c))
 	}
-	// Ordem fixa: `f.Partial` é mapa, e sem ordenar as chaves duas execuções
-	// idênticas imprimem a mesma lista embaralhada.
-	coletores := make([]string, 0, len(f.Partial))
-	for c := range f.Partial {
-		coletores = append(coletores, c)
-	}
-	sort.Strings(coletores)
-	for _, coletor := range coletores {
-		for _, m := range f.Partial[coletor] {
-			linha(coletor, m)
+	// OS DOIS mapas de lacuna, e o resumo precisa dos dois. `f.Partial` guarda
+	// "não pude olhar" (proc, cross); `f.PersistDenied` guarda "olhei e parei
+	// antes" (varredura de SUID truncada, código, teto de log). No scan os
+	// checks repassam o PersistDenied para a cobertura; o `collect` NÃO roda
+	// check, então se o resumo lê só o primeiro, a truncagem some — a mesma
+	// confusão entre "não achei" e "não terminei", desta vez no resumo.
+	// Ordem fixa: mapa embaralha, e duas execuções idênticas têm de imprimir
+	// igual.
+	imprimirGaps := func(m map[string][]string) {
+		coletores := make([]string, 0, len(m))
+		for c := range m {
+			coletores = append(coletores, c)
+		}
+		sort.Strings(coletores)
+		for _, coletor := range coletores {
+			for _, msg := range m[coletor] {
+				linha(coletor, msg)
+			}
 		}
 	}
+	imprimirGaps(f.Partial)
+	imprimirGaps(f.PersistDenied)
 	fmt.Fprintln(w, "\nse der para recoletar com mais privilégio, recolete: o retrato é único")
 }
 

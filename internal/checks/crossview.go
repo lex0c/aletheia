@@ -84,25 +84,13 @@ var pidOculto = check.Check{
 			}
 			r.Findings = append(r.Findings, fd)
 		}
-		for _, d := range f.Cross.ModFtraceDiff {
-			fd := self.F(check.SevCritical, d, "", []string{
-				d,
-				"o ftrace registra a função rastreável de um módulo no " +
-					"CARREGAMENTO e só a libera no descarregamento real: um módulo " +
-					"que se desencadeia da lista para sumir do /proc/modules não " +
-					"limpa esse registro",
-				"e é a interface que o crossview de sysfs não alcança — ali o " +
-					"módulo escondido é indistinguível de um embutido no kernel " +
-					"(runbook §35.3)",
-			}...)
-			fd.NextSteps = []string{
-				"`grep \"[<nome>]\" /sys/kernel/tracing/available_filter_functions` " +
-					"lista as funções que o módulo escondido ainda expõe",
-				"a partir daqui, resultado vindo deste host não vale como prova: " +
-					"analise a imagem DE FORA (runbook §35.6)",
-			}
-			r.Findings = append(r.Findings, fd)
-		}
+		// ModFtraceDiff NÃO é processado aqui: módulo escondido é achado de
+		// `moduloDivergente` (cross.module_view), não de PID oculto. Havia um
+		// loop duplicado nesta função que fazia um módulo virar cross.hidden_pid
+		// — semanticamente errado, e com efeito colateral grave: cross.hidden_pid
+		// é kernelBreaker, e o relatório passava a acusar "um PID responde a
+		// /proc" sem PID oculto nenhum ter existido. O teste exercitava
+		// moduloDivergente direto e não via a duplicação global.
 		r.Partial = append(r.Partial, f.Partial["cross"]...)
 		return r
 	},

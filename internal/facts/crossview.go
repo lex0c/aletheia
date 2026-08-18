@@ -279,6 +279,52 @@ func cruzarModulos(f *Facts) {
 	}
 
 	f.Cross.ModDiff = DiferencaDeModulos(f.Cross.ModProc, f.Cross.ModSys)
+	// RECONFIRMA antes de deixar isto virar CRÍTICO — cross.module_view é
+	// quebra-confiança, e invalida a cobertura inteira. As duas leituras são
+	// sequenciais: um módulo legítimo carregado ou removido entre elas produz
+	// divergência falsa. Relê e mantém só o que persiste nas DUAS leituras. É a
+	// mesma paranoia já aplicada a hidden PID, thread e BPF.
+	if len(f.Cross.ModDiff) > 0 {
+		proc2, sys2 := relerNomesDeModulos()
+		f.Cross.ModDiff = soPersistentes(f.Cross.ModDiff, DiferencaDeModulos(proc2, sys2))
+	}
+}
+
+// relerNomesDeModulos faz a segunda leitura das duas interfaces, para a
+// reconfirmação. Ilegível numa segunda tentativa devolve vazio, o que descarta
+// a divergência — o certo, porque sem a confirmação não há prova.
+func relerNomesDeModulos() (proc, sys []string) {
+	if s, ok := readTrim("/proc/modules"); ok {
+		for _, ln := range strings.Split(s, "\n") {
+			if fs := strings.Fields(ln); len(fs) > 0 {
+				proc = append(proc, fs[0])
+			}
+		}
+	}
+	if ents, err := os.ReadDir("/sys/module"); err == nil {
+		for _, ent := range ents {
+			sys = append(sys, ent.Name())
+		}
+	}
+	return proc, sys
+}
+
+// soPersistentes devolve os itens de `primeira` que também estão em `segunda`.
+// Como a formatação da divergência é determinística — mesmo módulo, mesma
+// string —, intersectar os conjuntos de mensagens descarta a corrida sem
+// precisar reparsear o nome.
+func soPersistentes(primeira, segunda []string) []string {
+	na2 := make(map[string]bool, len(segunda))
+	for _, d := range segunda {
+		na2[d] = true
+	}
+	var out []string
+	for _, d := range primeira {
+		if na2[d] {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // DiferencaDeModulos compara as duas listas e devolve as divergências.

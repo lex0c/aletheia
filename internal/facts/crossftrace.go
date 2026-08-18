@@ -86,6 +86,32 @@ func cruzarModulosFtrace(f *Facts, e *env.Env) {
 
 	f.Cross.ModFtrace = tagsDeModuloDoFtrace(texto)
 	f.Cross.ModFtraceDiff = ModulosSoNoFtrace(f.Cross.ModFtrace, f.Cross.ModProc)
+
+	// RECONFIRMA antes de virar CRÍTICO. As leituras de /proc/modules e do
+	// ftrace são sequenciais, e um módulo LEGÍTIMO carregado entre elas apareceria
+	// só no ftrace — falso positivo que, por ser quebra-confiança, invalidaria a
+	// cobertura toda. Relê as duas e mantém só o que persiste. Mesma paranoia do
+	// hidden PID.
+	if len(f.Cross.ModFtraceDiff) > 0 {
+		proc2, _ := relerNomesDeModulos()
+		fresh := ModulosSoNoFtrace(tagsDeModuloDoFtrace(relerFtrace(e)), proc2)
+		f.Cross.ModFtraceDiff = soPersistentes(f.Cross.ModFtraceDiff, fresh)
+	}
+}
+
+// relerFtrace faz a segunda leitura de available_filter_functions. Devolve
+// vazio se não puder ler — o que descarta a divergência na reconfirmação, que é
+// o certo: sem a segunda testemunha não há prova.
+func relerFtrace(e *env.Env) string {
+	for _, p := range []string{
+		"/sys/kernel/tracing/available_filter_functions",
+		"/sys/kernel/debug/tracing/available_filter_functions",
+	} {
+		if b, err := e.ReadFile(p); err == nil {
+			return string(b)
+		}
+	}
+	return ""
 }
 
 // tagsDeModuloDoFtrace extrai o conjunto de módulos anotados, sem duplicar. A

@@ -421,3 +421,20 @@ func TestGroupedSeparaPorSeveridade(t *testing.T) {
 		t.Errorf("tamanhos = %d e %d", gs[0].N(), gs[1].N())
 	}
 }
+
+// cross.thread_count emite SevWarn (corrida real, não reconfirmada), e
+// invalidarAusencias só age sobre SevCritical. Se estivesse em kernelBreakers,
+// seria contrato quebrado: listado como quebra-confiança sem como quebrar. Só
+// PROVA de que o kernel mente invalida tudo; um aviso com corrida não prova.
+func TestThreadCountNaoEstaEmKernelBreakers(t *testing.T) {
+	if _, ok := kernelBreakers["cross.thread_count"]; ok {
+		t.Error("cross.thread_count é SevWarn e não pode estar em kernelBreakers — " +
+			"nunca chegaria a >= SevCritical para disparar a invalidação")
+	}
+	// e os três que FICAM têm de continuar lá: são a espinha da invalidação.
+	for _, id := range []string{"cross.bpf_hidden", "cross.hidden_pid", "cross.module_view"} {
+		if _, ok := kernelBreakers[id]; !ok {
+			t.Errorf("%s emite SevCritical e é quebra-confiança: não pode sair do mapa", id)
+		}
+	}
+}

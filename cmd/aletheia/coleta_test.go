@@ -324,3 +324,27 @@ func TestSemArquivoDeSomaAAnaliseSegue(t *testing.T) {
 		t.Errorf("stdin não tem arquivo ao lado: %q", b.String())
 	}
 }
+
+// Bug 4: o resumo do collect escondia lacuna de coletor quando as caps estavam
+// todas presentes. E pior, só lia f.Partial — a truncagem de SUID vai para
+// f.PersistDenied e não aparecia NUNCA. Os dois têm de sair, mesmo com ambiente
+// completo, senão o resumo diz "completo" com a varredura truncada por baixo.
+func TestResumoMostraGapMesmoComCapsCompletas(t *testing.T) {
+	var buf bytes.Buffer
+	e := &env.Env{Now: time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC), Source: env.SourceLive}
+	for _, n := range env.TodasAsCaps() {
+		c, _ := env.CapDeNome(n)
+		e.Caps |= c
+	}
+	f := &facts.Facts{PersistDenied: map[string][]string{
+		"suid": {"a varredura de SUID parou em 40000 diretórios: o excedente NÃO foi examinado"},
+	}}
+	resumoDaColeta(&buf, e, f, "host.json", "abc123")
+	out := buf.String()
+	if strings.Contains(out, "ambiente completo") {
+		t.Error("com truncagem de SUID não se pode dizer 'ambiente completo'")
+	}
+	if !strings.Contains(out, "O QUE ESTA COLETA NÃO VIU") || !strings.Contains(out, "40000 diretórios") {
+		t.Errorf("a truncagem de SUID (PersistDenied) precisa sair no resumo: %q", out)
+	}
+}

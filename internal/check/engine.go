@@ -106,7 +106,12 @@ var kernelBreakers = map[string]string{
 		"a mesma interface deu duas respostas incompatíveis",
 	"cross.module_view": "um módulo aparece em /proc/modules e não em /sys/module: " +
 		"as duas visões do kernel sobre a própria lista de módulos discordam",
-	"cross.thread_count": "o número de threads declarado no status não bate com o diretório de tasks",
+	// cross.thread_count NÃO entra: ele compara duas visões, mas emite SevWarn
+	// (a divergência de contagem de threads tem corrida real e não é
+	// reconfirmada), e invalidarAusencias só age sobre SevCritical. Deixá-lo no
+	// mapa era um contrato quebrado — estava listado como quebra-confiança e não
+	// tinha como quebrar. Só invalida tudo quem PROVA que o kernel mente; um
+	// aviso com corrida não prova. Os três acima emitem SevCritical.
 }
 
 // runGuarded isola a falha de um check. Um defeito em um não pode calar os

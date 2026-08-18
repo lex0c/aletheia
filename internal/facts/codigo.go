@@ -71,73 +71,68 @@ func mustDup(tier int, rotulo, pat string) regraDeCodigo {
 	return regraDeCodigo{re: regexp.MustCompile(pat), tier: tier, rotulo: rotulo}
 }
 
-// defsCodigo reúne os padrões de uma linguagem em camadas: sink DIRETO sobre
-// entrada (uma expressão, agora casada no arquivo inteiro para pegar multilinha),
-// micro-taint (var recebe entrada, e depois um sink recebe a var) e tier-1 solto.
+// defsCodigo reúne os padrões de uma linguagem. O casamento de sink+entrada usa
+// BALANCEAMENTO de parênteses (não `[^;]`), o que corrige duas coisas: em JS sem
+// ponto-e-vírgula, `exec("x")` deixa de casar com um req do statement seguinte; e
+// em Python multilinha, `subprocess.run(\n request.args,\n shell=True)` passa a
+// casar. O taint é ORDENADO por offset e respeita reatribuição.
 type defsCodigo struct {
-	direto   []regraDeCodigo
-	taintRem *regexp.Regexp // `var = <entrada remota>`, grupo 1 = nome da var
-	taintLoc *regexp.Regexp // `var = <entrada local>`,  grupo 1 = nome da var
-	sinkVar  *regexp.Regexp // sink aplicado a uma VARIÁVEL; algum grupo = nome
-	suspeito []regraDeCodigo
+	// sinkAbre casa `nome(` de um sink cujo ARGUMENTO executa; o argumento
+	// balanceado é testado por entrada. cbAbre é o callback cujo PRIMEIRO arg é
+	// a função executada.
+	sinkAbre *regexp.Regexp
+	cbAbre   *regexp.Regexp
+	inputRem *regexp.Regexp
+	inputLoc *regexp.Regexp
+	// atribui casa `var = rhs` (grupo 1 = var, grupo 2 = rhs), e varTok acha as
+	// variáveis usadas dentro dos argumentos de um sink.
+	atribui *regexp.Regexp
+	varTok  *regexp.Regexp
+	// dynAbre casa uma CHAMADA por variável, `$var(` ou `var(`, capturando o
+	// nome no grupo 1 — para pegar `$fn = $_GET['f']; $fn(...)`. `new $var()` é
+	// instanciação (vulnerabilidade de object injection, não backdoor) e é
+	// excluída no motor.
+	dynAbre *regexp.Regexp
+	// especiais são construções fechadas casadas direto (crase, /e, include…);
+	// suspeito é tier 1.
+	especiais []regraDeCodigo
+	suspeito  []regraDeCodigo
 }
 
+var reShellTrue = regexp.MustCompile(`shell\s*=\s*True`)
+
 var defsPHP = defsCodigo{
-	direto: []regraDeCodigo{
-		// Crase: exclui caractere de CONTROLE do meio. Sem isso, `[^`]*`
-		// atravessava um blob binário (lzw_decompress("…")) até topar com um
-		// $_GET por acaso — quatro falsos positivos num ad.php de Adminer.
+	sinkAbre: regexp.MustCompile(`\b(?:` + phpSinks + `|unserialize|` + phpInclui + `)\s*\(`),
+	cbAbre:   regexp.MustCompile(`\b(?:` + phpCallbacks + `)\s*\(`),
+	inputRem: regexp.MustCompile(phpRemota),
+	inputLoc: regexp.MustCompile(phpLocal),
+	atribui:  regexp.MustCompile(`(\$\w+)\s*=\s*([^;]{0,400})`),
+	varTok:   regexp.MustCompile(`\$\w+`),
+	dynAbre:  regexp.MustCompile(`(\$\w+)\s*\(`),
+	especiais: []regraDeCodigo{
 		mustDup(2, "shell via crase sobre entrada de request", "`[^`\\x00-\\x1f]{0,120}"+phpRemota),
-		mustDup(2, "sink de execução sobre entrada de request", `\b(?:`+phpSinks+`)\s*\(\s*[^;]{0,160}`+phpRemota),
-		// Callback nomeado pelo REQUEST: o 1º arg é o que executa.
-		// `call_user_func($_GET['f'], …)` é RCE; `call_user_func('trim', $_POST)`
-		// não é (função fixa), e por isso o request tem de ser o PRIMEIRO arg.
-		mustDup(2, "callback nomeado pelo request — executa função escolhida pelo atacante",
-			`\b(?:`+phpCallbacks+`)\s*\(\s*@?\s*`+phpRemota),
+		mustDup(2, "função nomeada pelo request (chamada dinâmica)", `\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\b(?:\s*\[[^\]]{0,40}\])?\s*\(`),
 		mustDup(2, "include/require sobre entrada de request — LFI/RFI", `\b(?:`+phpInclui+`)\b\s*\(?\s*[^;]{0,160}`+phpRemota),
-		mustDup(2, "unserialize sobre entrada de request — injeção de objeto", `\bunserialize\s*\(\s*[^;]{0,160}`+phpRemota),
-		mustDup(2, "função nomeada pelo request (chamada dinâmica)", phpRemota+`\s*\(`),
-		mustDup(2, "eval de conteúdo decodificado — assinatura de webshell",
-			`\b(?:eval|assert)\s*\(\s*@?\s*(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|hex2bin|convert_uudecode)\b`),
-		// preg_replace /e é CRÍTICO em DUAS formas: com entrada de request na
-		// chamada, OU com um SINK no replacement (o /e executa o replacement,
-		// então `system("\1")` roda comando no que casou). O que NÃO é crítico é
-		// o /e com replacement FIXO de encoding — `'='.sprintf('%02X',ord('\1'))`
-		// do quoted-printable do PHPMailer antigo —, que cai em tier 1 abaixo.
-		// Isso matou quatro falsos positivos de PHPMailer sem perder o RCE.
-		mustDup(2, "preg_replace /e sobre entrada de request — executa o replacement",
-			`\bpreg_replace\s*\(\s*['"][^'"]{1,200}/[a-zA-DF-Z]*e[a-zA-DF-Z]*['"][^;]{0,200}`+phpRemota),
-		mustDup(2, "preg_replace /e com sink no replacement — RCE",
-			"\\bpreg_replace\\s*\\(\\s*['\"][^'\"]{1,200}/[a-zA-DF-Z]*e[a-zA-DF-Z]*['\"]\\s*,\\s*[^;]{0,80}(?:\\b(?:system|exec|shell_exec|passthru|eval|assert|popen|proc_open|passthru)\\b|`)"),
-		// LOCAL — mesmo sink, entrada de argv/env: não é atacante remoto. TIER 1.
-		mustDup(1, "sink de execução sobre entrada LOCAL (argv/env)", `\b(?:`+phpSinks+`)\s*\(\s*[^;]{0,160}`+phpLocal),
+		mustDup(2, "eval de conteúdo decodificado — assinatura de webshell", `\b(?:eval|assert)\s*\(\s*@?\s*(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|hex2bin|convert_uudecode)\b`),
+		mustDup(2, "preg_replace /e sobre entrada de request — executa o replacement", `\bpreg_replace\s*\(\s*['"][^'"]{1,200}/[a-zA-DF-Z]*e[a-zA-DF-Z]*['"][^;]{0,200}`+phpRemota),
+		mustDup(2, "preg_replace /e com sink no replacement — RCE", "\\bpreg_replace\\s*\\(\\s*['\"][^'\"]{1,200}/[a-zA-DF-Z]*e[a-zA-DF-Z]*['\"]\\s*,\\s*[^;]{0,80}(?:\\b(?:system|exec|shell_exec|passthru|eval|assert|popen|proc_open)\\b|`)"),
 	},
-	taintRem: regexp.MustCompile(`\$(\w+)\s*=\s*[^;]{0,200}` + phpRemota),
-	taintLoc: regexp.MustCompile(`\$(\w+)\s*=\s*[^;]{0,200}` + phpLocal),
-	sinkVar:  regexp.MustCompile("`[^`]*\\$(\\w+)|" + `\b(?:` + phpSinks + `)\s*\(\s*\$(\w+)\b|\$(\w+)\s*\(`),
 	suspeito: []regraDeCodigo{
 		mustDup(1, "create_function — equivale a eval, obsoleto e favorito de shell", `\bcreate_function\s*\(`),
 		mustDup(1, "decodificação empilhada", `\b(?:base64_decode|gzinflate|gzuncompress)\s*\(\s*(?:base64_decode|gzinflate|gzuncompress|str_rot13)\b`),
 		mustDup(1, "eval presente", `\beval\s*\(`),
-		// preg_replace /e sem entrada de request: deprecado e perigoso se o
-		// subject vier a ser controlado, mas o idioma de encoding (PHPMailer) é
-		// legítimo. Vale ler, não é crítico.
 		mustDup(1, "preg_replace com modificador /e (deprecado)", `\bpreg_replace\s*\(\s*['"][^'"]{1,200}/[a-zA-DF-Z]*e[a-zA-DF-Z]*['"]`),
 		mustDup(1, "blob base64 longo embutido no código", `['"][A-Za-z0-9+/]{200,}={0,2}['"]`),
 	},
 }
 
 var defsJS = defsCodigo{
-	direto: []regraDeCodigo{
-		mustDup(2, "child_process sobre entrada de request", `\b(?:`+jsSinks+`)\s*\(\s*[^;]{0,160}`+jsRemota),
-		mustDup(2, "eval sobre entrada de request", `\beval\s*\(\s*[^;]{0,160}`+jsRemota),
-		mustDup(2, "new Function sobre entrada de request", `new\s+Function\s*\(\s*[^;]{0,160}`+jsRemota),
-		mustDup(2, "vm.run sobre entrada de request", `\bvm\.run(?:InThisContext|InNewContext|InContext)\s*\(\s*[^;]{0,160}`+jsRemota),
-		mustDup(1, "child_process sobre entrada LOCAL (argv/env)", `\b(?:`+jsSinks+`)\s*\(\s*[^;]{0,160}`+jsLocal),
-	},
-	taintRem: regexp.MustCompile(`\b(\w+)\s*=\s*[^;]{0,200}` + jsRemota),
-	taintLoc: regexp.MustCompile(`\b(\w+)\s*=\s*[^;]{0,200}` + jsLocal),
-	sinkVar:  regexp.MustCompile(`\b(?:eval|` + jsSinks + `)\s*\(\s*(\w+)\s*[),]`),
+	sinkAbre: regexp.MustCompile(`\b(?:eval|` + jsSinks + `)\s*\(|new\s+Function\s*\(|\bvm\.run\w+\s*\(`),
+	inputRem: regexp.MustCompile(jsRemota),
+	inputLoc: regexp.MustCompile(jsLocal),
+	atribui:  regexp.MustCompile(`\b(\w+)\s*=\s*([^;\n]{0,400})`),
+	varTok:   regexp.MustCompile(`\b\w+\b`),
+	dynAbre:  regexp.MustCompile(`\b(\w+)\s*\(`),
 	suspeito: []regraDeCodigo{
 		mustDup(1, "eval presente", `\beval\s*\(`),
 		mustDup(1, "new Function — eval por outro nome", `new\s+Function\s*\(`),
@@ -146,20 +141,11 @@ var defsJS = defsCodigo{
 }
 
 var defsPy = defsCodigo{
-	direto: []regraDeCodigo{
-		mustDup(2, "eval/exec sobre entrada de request", `\b(?:eval|exec)\s*\(\s*[^;\n]{0,160}`+pyRemota),
-		mustDup(2, "os.system/os.popen sobre entrada de request", `\bos\.(?:system|popen)\s*\(\s*[^;\n]{0,160}`+pyRemota),
-		// As duas ordens: a entrada pode vir antes OU depois do shell=True.
-		mustDup(2, "subprocess com shell=True sobre entrada de request",
-			`\bsubprocess\.\w+\s*\([^;\n]{0,200}shell\s*=\s*True[^;\n]{0,200}`+pyRemota),
-		mustDup(2, "subprocess com shell=True sobre entrada de request",
-			`\bsubprocess\.\w+\s*\([^;\n]{0,200}`+pyRemota+`[^;\n]{0,200}shell\s*=\s*True`),
-		mustDup(2, "pickle.loads sobre entrada — desserialização executa código", `\bpickle\.loads\s*\(\s*[^;\n]{0,160}`+pyRemota),
-		mustDup(1, "exec/eval/os.system sobre entrada LOCAL (argv/env/stdin)", `\b(?:eval|exec|os\.system|os\.popen)\s*\(\s*[^;\n]{0,160}`+pyLocal),
-	},
-	taintRem: regexp.MustCompile(`\b(\w+)\s*=\s*[^;\n]{0,200}` + pyRemota),
-	taintLoc: regexp.MustCompile(`\b(\w+)\s*=\s*[^;\n]{0,200}` + pyLocal),
-	sinkVar:  regexp.MustCompile(`\b(?:eval|exec|os\.system|os\.popen)\s*\(\s*(\w+)\s*[),]`),
+	sinkAbre: regexp.MustCompile(`\b(?:eval|exec|os\.system|os\.popen|subprocess\.\w+|pickle\.loads)\s*\(`),
+	inputRem: regexp.MustCompile(pyRemota),
+	inputLoc: regexp.MustCompile(pyLocal),
+	atribui:  regexp.MustCompile(`\b(\w+)\s*=\s*([^;\n]{0,400})`),
+	varTok:   regexp.MustCompile(`\b\w+\b`),
 	suspeito: []regraDeCodigo{
 		mustDup(1, "exec/eval presente", `\b(?:eval|exec)\s*\(`),
 		mustDup(1, "subprocess com shell=True", `\bsubprocess\.\w+\s*\([^;\n]{0,200}shell\s*=\s*True`),
@@ -235,37 +221,105 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 		porLinha[ln] = MatchDeCodigo{Linha: ln, Tier: tier, Regra: rotulo, Trecho: trecho(texto)}
 	}
 
-	// Camada A — sink DIRETO sobre entrada.
-	for _, r := range def.direto {
-		for _, loc := range r.re.FindAllStringIndex(masc, -1) {
-			registrar(loc[0], r.tier, r.rotulo)
+	// Um evento é uma atribuição (marca/limpa taint de uma var) ou um sink (que
+	// pode receber entrada DIRETA nos argumentos, ou uma variável tainted).
+	type evento struct {
+		off            int
+		atrib          bool
+		nome           string // atribuição: a var
+		classe         int    // atribuição: 2 remota | 1 local | 0 limpa
+		remDir, locDir bool   // sink: entrada direta no argumento balanceado
+		vars           []string
+		rotulo         string
+	}
+	var evs []evento
+
+	for _, m := range def.atribui.FindAllStringSubmatchIndex(masc, -1) {
+		rhs := masc[m[4]:m[5]]
+		classe := 0
+		if def.inputRem.MatchString(rhs) {
+			classe = 2
+		} else if def.inputLoc.MatchString(rhs) {
+			classe = 1
+		}
+		evs = append(evs, evento{off: m[0], atrib: true, nome: masc[m[2]:m[3]], classe: classe})
+	}
+	adicionarSink := func(loc []int, primeiroArgSo bool, rotulo string) {
+		nome := masc[loc[0]:loc[1]]
+		args := argBalanceado(masc, loc[1]-1)
+		// subprocess só é sink com shell=True; sem isso a lista é execução segura.
+		if strings.Contains(nome, "subprocess") && !reShellTrue.MatchString(args) {
+			return
+		}
+		if primeiroArgSo {
+			args = primeiroArgTop(args)
+		}
+		e := evento{off: loc[0], vars: def.varTok.FindAllString(args, -1), rotulo: rotulo}
+		if def.inputRem.MatchString(args) {
+			e.remDir = true
+		} else if def.inputLoc.MatchString(args) {
+			e.locDir = true
+		}
+		evs = append(evs, e)
+	}
+	for _, loc := range def.sinkAbre.FindAllStringIndex(masc, -1) {
+		adicionarSink(loc, false, "sink de execução sobre entrada de request")
+	}
+	if def.cbAbre != nil {
+		for _, loc := range def.cbAbre.FindAllStringIndex(masc, -1) {
+			adicionarSink(loc, true, "callback nomeado pelo request — executa função escolhida pelo atacante")
+		}
+	}
+	// Chamada dinâmica `$fn(...)` onde $fn é tainted: o atacante escolhe a
+	// função. EXCLUI `new $fn()` (instanciação = object injection, uma
+	// vulnerabilidade, não backdoor — e o padrão de um exemplo inseguro de
+	// biblioteca como o jpGraph) e método/estático (`.m()`, `->m()`, `::m()`).
+	if def.dynAbre != nil {
+		for _, m := range def.dynAbre.FindAllStringSubmatchIndex(masc, -1) {
+			if !chamadaDinamicaValida(masc, m[0]) {
+				continue
+			}
+			evs = append(evs, evento{off: m[0], vars: []string{masc[m[2]:m[3]]},
+				rotulo: "função nomeada por variável de entrada de request (chamada dinâmica)"})
 		}
 	}
 
-	// Camada B — micro-taint: var recebe entrada, depois um sink recebe a var.
-	taint := map[string]int{} // nome -> 2 (remota) | 1 (local)
-	for _, m := range def.taintRem.FindAllStringSubmatch(masc, -1) {
-		taint[m[1]] = 2
-	}
-	for _, m := range def.taintLoc.FindAllStringSubmatch(masc, -1) {
-		if taint[m[1]] == 0 {
-			taint[m[1]] = 1
+	// ORDENADO por offset: um sink antes da contaminação não é achado, e a
+	// reatribuição a valor seguro limpa o taint. É o que separa fluxo real de
+	// coincidência de nome entre funções.
+	sort.Slice(evs, func(i, j int) bool { return evs[i].off < evs[j].off })
+	taint := map[string]int{}
+	for _, e := range evs {
+		if e.atrib {
+			taint[e.nome] = e.classe
+			continue
 		}
-	}
-	if len(taint) > 0 {
-		for _, loc := range def.sinkVar.FindAllStringSubmatchIndex(masc, -1) {
-			nome := grupoNaoVazio(masc, loc)
-			if t := taint[nome]; t > 0 {
-				rot := "sink de execução sobre variável de entrada de request (fluxo de duas linhas)"
-				if t == 1 {
-					rot = "sink de execução sobre variável de entrada LOCAL (argv/env)"
+		switch {
+		case e.remDir:
+			registrar(e.off, 2, e.rotulo)
+		case e.locDir:
+			registrar(e.off, 1, e.rotulo+" — entrada LOCAL (argv/env)")
+		default:
+			maior := 0
+			for _, v := range e.vars {
+				if taint[v] > maior {
+					maior = taint[v]
 				}
-				registrar(loc[0], t, rot)
+			}
+			if maior == 2 {
+				registrar(e.off, 2, "sink sobre variável de entrada de request (fluxo)")
+			} else if maior == 1 {
+				registrar(e.off, 1, "sink sobre variável de entrada LOCAL (argv/env)")
 			}
 		}
 	}
 
-	// Camada C — tier 1 solto (eval sem entrada, ofuscação).
+	// Construções fechadas (crase, /e, include, ofuscação) — ordem-independentes.
+	for _, r := range def.especiais {
+		for _, loc := range r.re.FindAllStringIndex(masc, -1) {
+			registrar(loc[0], r.tier, r.rotulo)
+		}
+	}
 	for _, r := range def.suspeito {
 		for _, loc := range r.re.FindAllStringIndex(masc, -1) {
 			registrar(loc[0], 1, r.rotulo)
@@ -297,53 +351,167 @@ func numeroDaLinha(s string, off int) (int, string) {
 	return linha, s[ini:fim]
 }
 
-// grupoNaoVazio devolve o primeiro grupo de captura que participou do match —
-// o sinkVar tem alternativas (crase, sink(), chamada dinâmica), cada uma com o
-// nome da variável no seu próprio grupo.
-func grupoNaoVazio(s string, loc []int) string {
-	for i := 2; i+1 < len(loc); i += 2 {
-		if loc[i] >= 0 {
-			return s[loc[i]:loc[i+1]]
+// argBalanceado devolve o texto entre o '(' em `abre` e o ')' que o fecha,
+// respeitando aninhamento e PULANDO strings — assim um ')' dentro de "a)b" não
+// fecha cedo, e um sink em JS/Python não estende o argumento até o statement
+// seguinte (que não tem ';' para barrar). Limita o alcance para não varrer o
+// arquivo inteiro num parêntese que nunca fecha.
+func argBalanceado(s string, abre int) string {
+	if abre < 0 || abre >= len(s) || s[abre] != '(' {
+		return ""
+	}
+	limite := abre + 4000
+	if limite > len(s) {
+		limite = len(s)
+	}
+	prof := 0
+	var str byte // 0 = código; senão a aspa que abriu
+	for i := abre; i < limite; i++ {
+		c := s[i]
+		if str != 0 {
+			if c == '\\' {
+				i++
+			} else if c == str {
+				str = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			str = c
+		case '(':
+			prof++
+		case ')':
+			prof--
+			if prof == 0 {
+				return s[abre+1 : i]
+			}
 		}
 	}
-	return ""
+	return s[abre+1 : limite]
 }
 
-// mascararComentarios troca os comentários por espaço, PRESERVANDO o tamanho em
-// bytes e as quebras de linha — assim os offsets do match continuam apontando
-// para a linha certa. Não é lexer: ignora strings, e um `//` dentro de uma
-// string vira espaço. Para uma peneira, o custo disso é baixo e o ganho de não
-// casar dentro de comentário é alto.
+// primeiroArgTop devolve o primeiro argumento (até a primeira vírgula de topo),
+// para os callbacks: só o 1º arg é a função executada.
+func primeiroArgTop(args string) string {
+	prof := 0
+	var str byte
+	for i := 0; i < len(args); i++ {
+		c := args[i]
+		if str != 0 {
+			if c == '\\' {
+				i++
+			} else if c == str {
+				str = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			str = c
+		case '(', '[', '{':
+			prof++
+		case ')', ']', '}':
+			prof--
+		case ',':
+			if prof == 0 {
+				return args[:i]
+			}
+		}
+	}
+	return args
+}
+
+// mascararComentarios troca comentário e INTERIOR de string por espaço,
+// preservando tamanho em bytes e quebras de linha — os offsets continuam
+// apontando para a linha certa no original.
+//
+// É uma máquina de estados, não um lexer completo, mas entende string: comentário
+// só começa em NORMAL, então `//` dentro de "http://x" NÃO apaga o resto da linha
+// — o bypass que a versão anterior tinha, e que apagava um webshell depois de uma
+// string com `//`. E branquear o interior das aspas deixa o casamento balanceado
+// de parênteses correto (parêntese dentro de string não conta) e evita casar um
+// $_GET escrito DENTRO de uma string.
+//
+// A crase do PHP é EXCEÇÃO: ela é shell_exec, um sink, não uma string — o
+// conteúdo dela precisa ficar visível para o padrão de webshell.
 func mascararComentarios(s, lang string) string {
 	b := []byte(s)
 	n := len(b)
 	branco := func(i int) {
-		if b[i] != '\n' {
+		if i < n && b[i] != '\n' {
 			b[i] = ' '
 		}
 	}
+	const (
+		norm = iota
+		aspaS
+		aspaD
+		crase
+		comLinha
+		comBloco
+	)
+	st := norm
 	for i := 0; i < n; i++ {
-		switch {
-		case i+1 < n && b[i] == '/' && b[i+1] == '/':
-			for ; i < n && b[i] != '\n'; i++ {
+		c := b[i]
+		switch st {
+		case norm:
+			switch {
+			case c == '/' && i+1 < n && b[i+1] == '/':
+				branco(i)
+				branco(i + 1)
+				i++
+				st = comLinha
+			case c == '#' && lang != "js":
+				branco(i)
+				st = comLinha
+			case c == '/' && i+1 < n && b[i+1] == '*':
+				branco(i)
+				branco(i + 1)
+				i++
+				st = comBloco
+			case c == '\'':
+				st = aspaS
+			case c == '"':
+				st = aspaD
+			case c == '`' && lang != "php":
+				st = crase // template literal do JS é string; a crase do PHP não
+			}
+		case comLinha:
+			if c == '\n' {
+				st = norm
+			} else {
 				branco(i)
 			}
-		case b[i] == '#' && lang != "js":
-			for ; i < n && b[i] != '\n'; i++ {
+		case comBloco:
+			if c == '*' && i+1 < n && b[i+1] == '/' {
+				branco(i)
+				branco(i + 1)
+				i++
+				st = norm
+			} else {
 				branco(i)
 			}
-		case i+1 < n && b[i] == '/' && b[i+1] == '*':
-			branco(i)
-			branco(i + 1)
-			i += 2
-			for ; i < n; i++ {
-				if i+1 < n && b[i] == '*' && b[i+1] == '/' {
-					branco(i)
-					branco(i + 1)
-					i++
-					break
-				}
-				branco(i)
+		case aspaS:
+			// Dentro de string NÃO se branqueia (o blob base64 embutido e o
+			// conteúdo precisam ficar visíveis); só se rastreia o estado para o
+			// comentário não começar aqui. O escape pula o próximo char.
+			if c == '\\' {
+				i++
+			} else if c == '\'' {
+				st = norm
+			}
+		case aspaD:
+			if c == '\\' {
+				i++
+			} else if c == '"' {
+				st = norm
+			}
+		case crase:
+			if c == '\\' {
+				i++
+			} else if c == '`' {
+				st = norm
 			}
 		}
 	}
@@ -548,4 +716,33 @@ func varrerCodigo(f *Facts, e *env.Env, dir string, prof int, st *varreduraCodig
 var pularNoCodigo = map[string]bool{
 	"node_modules": true, "vendor": true, ".git": true, ".cache": true,
 	".svn": true, "bower_components": true, ".npm": true,
+}
+
+// isWordByte responde se o byte faz parte de um identificador.
+func isWordByte(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// chamadaDinamicaValida diz se `nome(` em `pos` é mesmo uma chamada por
+// variável — não `new nome()` (instanciação), nem `.m()`/`->m()`/`::m()`
+// (método), nem `function nome()` (definição).
+func chamadaDinamicaValida(s string, pos int) bool {
+	i := pos - 1
+	for i >= 0 && (s[i] == ' ' || s[i] == '\t') {
+		i--
+	}
+	if i >= 0 {
+		if c := s[i]; c == '.' || c == '>' || c == ':' {
+			return false // método de objeto ou estático
+		}
+	}
+	fim := i + 1
+	for i >= 0 && isWordByte(s[i]) {
+		i--
+	}
+	switch s[i+1 : fim] {
+	case "new", "function":
+		return false
+	}
+	return true
 }

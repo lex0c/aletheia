@@ -87,17 +87,17 @@ func TestComentarioNaoDispara(t *testing.T) {
 
 // Node e Python: o mesmo formato de co-ocorrência.
 func TestNodeEPython(t *testing.T) {
-	if ms := analisarConteudo(`const r = require('child_process').execSync(req.query.cmd);`, "js"); !tem(ms, 2, "child_process") {
-		t.Errorf("node: exec sobre req.query tinha de ser TIER 2: %+v", ms)
-	}
-	if ms := analisarConteudo(`eval(req.body.payload)`, "js"); !tem(ms, 2, "eval sobre entrada") {
-		t.Errorf("node: eval sobre req.body: %+v", ms)
-	}
-	if ms := analisarConteudo(`os.system(request.args['c'])`, "python"); !tem(ms, 2, "os.system") {
-		t.Errorf("python: os.system sobre request: %+v", ms)
-	}
-	if ms := analisarConteudo(`data = pickle.loads(request.data)`, "python"); !tem(ms, 2, "pickle") {
-		t.Errorf("python: pickle.loads sobre request: %+v", ms)
+	// Rótulo unificado agora ("sink de execução sobre entrada de request"): o
+	// que importa é o TIER, não a etiqueta exata do sink.
+	for _, c := range []struct{ lang, src string }{
+		{"js", `const r = require('child_process').execSync(req.query.cmd);`},
+		{"js", `eval(req.body.payload)`},
+		{"python", `os.system(request.args['c'])`},
+		{"python", `data = pickle.loads(request.data)`},
+	} {
+		if ms := analisarConteudo(c.src, c.lang); !tem(ms, 2, "") {
+			t.Errorf("%s: %q tinha de ser TIER 2: %+v", c.lang, c.src, ms)
+		}
 	}
 }
 
@@ -180,7 +180,7 @@ func TestSubprocessEntradaAntesDeShellTrue(t *testing.T) {
 		`subprocess.call(shell=True, args=request.args["c"])`, // a outra ordem também
 	}
 	for _, linha := range casos {
-		if ms := analisarConteudo(linha, "python"); !tem(ms, 2, "subprocess") {
+		if ms := analisarConteudo(linha, "python"); !tem(ms, 2, "") {
 			t.Errorf("%q: subprocess+shell=True sobre request é TIER 2 nas duas ordens: %+v", linha, ms)
 		}
 	}
@@ -314,6 +314,38 @@ func TestFalsosPositivosDeHostReal(t *testing.T) {
 	for nome, src := range crit {
 		if ms := analisarConteudo(src, "php"); !tem(ms, 2, "") {
 			t.Errorf("VERDADEIRO POSITIVO perdido: %q deixou de ser tier 2: %+v", nome, ms)
+		}
+	}
+}
+
+// Os itens da terceira review: bypass por string, taint ordenado, boundary de
+// parênteses, cobertura de sinks no taint, e Python multilinha. Cada linha é um
+// falso negativo ou falso positivo que a versão anterior tinha.
+func TestReviewTerceiraRodada(t *testing.T) {
+	type c struct {
+		lang, src string
+		tier2     bool
+	}
+	casos := map[string]c{
+		// item 1: // dentro de string não podia apagar o webshell seguinte
+		"bypass por string":   {"php", "<?php\n$x=\"http://foo\"; system($_GET['cmd']);", true},
+		"bypass /* em string": {"js", "const x=\"/*\";\neval(req.body.cmd)", true},
+		// item 2: ordem e reatribuição
+		"sink antes do source": {"php", "system($cmd);\n$cmd=$_GET['x'];", false},
+		"reatribuído a seguro": {"php", "$cmd=$_GET['x'];\n$cmd='date';\nsystem($cmd);", false},
+		// item 3: JS sem ; não pode juntar dois statements
+		"js sem ponto-vírgula": {"js", "exec(\"uptime\")\nconst cmd=req.query.cmd", false},
+		// item 4: taint cobre subprocess/include/unserialize/new Function
+		"taint subprocess":   {"python", "cmd=request.args['cmd']\nsubprocess.run(cmd, shell=True)", true},
+		"taint include":      {"php", "$p=$_GET['page'];\ninclude($p);", true},
+		"taint unserialize":  {"php", "$x=$_POST['o'];\nunserialize($x);", true},
+		"taint new Function": {"js", "const c=req.body.code;\nnew Function(c)", true},
+		// item 5: Python multilinha
+		"python multilinha": {"python", "subprocess.run(\n  request.args['cmd'],\n  shell=True,\n)", true},
+	}
+	for nome, k := range casos {
+		if tem(analisarConteudo(k.src, k.lang), 2, "") != k.tier2 {
+			t.Errorf("%s: esperava tier2=%v -> %+v", nome, k.tier2, analisarConteudo(k.src, k.lang))
 		}
 	}
 }

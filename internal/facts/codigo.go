@@ -2,6 +2,7 @@ package facts
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/lex0c/aletheia/internal/env"
@@ -36,74 +37,119 @@ type regraDeCodigo struct {
 	rotulo string
 }
 
-// As entradas de request de cada linguagem, embutidas nos padrões de sink para
-// exigir a co-ocorrência.
+// Entrada controlada, em DOIS domínios de confiança distintos. Misturá-los era
+// impreciso: exec(process.env.X) é código ruim, mas NÃO significa "atacante
+// remoto controla o comando". Só a REMOTA — request HTTP, incluindo os
+// frameworks — sustenta CRÍTICO; a LOCAL (argv, env, stdin) sai como aviso.
 const (
-	phpInput = `\$_(?:GET|POST|REQUEST|COOKIE|SERVER|FILES)\b`
-	jsInput  = `(?:req\.(?:query|body|params|headers|cookies)|process\.argv|process\.env)`
-	pyInput  = `(?:request\.(?:args|form|values|data|json|cookies|files)|sys\.argv|\binput\s*\()`
+	phpRemota = `(?:\$_(?:GET|POST|REQUEST|COOKIE|SERVER|FILES)\b|php://input|\$\w*[Rr]equest->(?:input|get|query|post|all|json|cookie)\b|\$\w*[Rr]equest->(?:request|query|json)->get\b)`
+	phpLocal  = `(?:\bgetenv\s*\(|\$argv\b|\$_ENV\b)`
+
+	// Express, Koa (ctx), Hapi (request.payload/query/params).
+	jsRemota = `(?:req\.(?:query|body|params|headers|cookies)|request\.(?:query|payload|params)|ctx\.(?:query|params|headers|request))`
+	jsLocal  = `(?:process\.argv|process\.env)`
+
+	// Django (request.GET/POST/...) e Flask (request.args/form/...).
+	pyRemota = `(?:request\.(?:GET|POST|COOKIES|FILES|META|args|form|values|data|json|cookies|files|body))`
+	pyLocal  = `(?:sys\.argv|\binput\s*\(|\bos\.environ)`
 )
 
-// mustDup compila e entra em pânico no init se o padrão for inválido — erro de
-// programador, não de runtime.
+const (
+	phpSinks  = `eval|assert|system|exec|shell_exec|passthru|popen|proc_open|pcntl_exec|call_user_func|call_user_func_array|array_map`
+	phpInclui = `include|include_once|require|require_once`
+	jsSinks   = `exec|execSync|spawn|spawnSync|execFile`
+)
+
+// mustDup compila e entra em pânico no init se o padrão for inválido.
 func mustDup(tier int, rotulo, pat string) regraDeCodigo {
 	return regraDeCodigo{re: regexp.MustCompile(pat), tier: tier, rotulo: rotulo}
 }
 
-// Os sinks de execução do PHP, para os padrões de "sink sobre entrada".
-const phpSinks = `eval|assert|system|exec|shell_exec|passthru|popen|proc_open|pcntl_exec|call_user_func|call_user_func_array|array_map`
-
-var regrasPHP = []regraDeCodigo{
-	// TIER 2 — sink DIRETO sobre entrada de request. O caso do bootstrap.php.
-	mustDup(2, "shell via crase sobre entrada de request", "`[^`]*"+phpInput),
-	mustDup(2, "sink de execução sobre entrada de request", `\b(?:`+phpSinks+`)\s*\(\s*[^;]{0,120}`+phpInput),
-	mustDup(2, "eval de conteúdo decodificado — assinatura de webshell",
-		`\b(?:eval|assert)\s*\(\s*@?\s*(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|hex2bin|convert_uudecode)\b`),
-	mustDup(2, "preg_replace com modificador /e — executa o replacement",
-		`\bpreg_replace\s*\(\s*['"][^'"]{1,200}/[a-zA-DF-Z]*e[a-zA-DF-Z]*['"]`),
-	// TIER 1 — suspeito, precisa de leitura (e o mtime decide o peso).
-	mustDup(1, "create_function — equivale a eval, obsoleto e favorito de shell", `\bcreate_function\s*\(`),
-	mustDup(1, "decodificação empilhada", `\b(?:base64_decode|gzinflate|gzuncompress)\s*\(\s*(?:base64_decode|gzinflate|gzuncompress|str_rot13)\b`),
-	mustDup(1, "chamada de função por variável de variável", `\$\{?\$[a-zA-Z_]\w*\}?\s*\(`),
-	mustDup(1, "eval presente", `\beval\s*\(`),
-	mustDup(1, "blob base64 longo embutido no código", `['"][A-Za-z0-9+/]{200,}={0,2}['"]`),
+// defsCodigo reúne os padrões de uma linguagem em camadas: sink DIRETO sobre
+// entrada (uma expressão, agora casada no arquivo inteiro para pegar multilinha),
+// micro-taint (var recebe entrada, e depois um sink recebe a var) e tier-1 solto.
+type defsCodigo struct {
+	direto   []regraDeCodigo
+	taintRem *regexp.Regexp // `var = <entrada remota>`, grupo 1 = nome da var
+	taintLoc *regexp.Regexp // `var = <entrada local>`,  grupo 1 = nome da var
+	sinkVar  *regexp.Regexp // sink aplicado a uma VARIÁVEL; algum grupo = nome
+	suspeito []regraDeCodigo
 }
 
-var regrasJS = []regraDeCodigo{
-	mustDup(2, "child_process sobre entrada de request",
-		`\b(?:exec|execSync|spawn|spawnSync|execFile)\s*\(\s*[^;]{0,120}`+jsInput),
-	mustDup(2, "eval sobre entrada de request", `\beval\s*\(\s*[^;]{0,120}`+jsInput),
-	mustDup(2, "new Function sobre entrada de request", `new\s+Function\s*\(\s*[^;]{0,120}`+jsInput),
-	mustDup(1, "eval presente", `\beval\s*\(`),
-	mustDup(1, "new Function — eval por outro nome", `new\s+Function\s*\(`),
-	mustDup(1, "child_process carregado", `require\s*\(\s*['"]child_process['"]`),
+var defsPHP = defsCodigo{
+	direto: []regraDeCodigo{
+		mustDup(2, "shell via crase sobre entrada de request", "`[^`]*"+phpRemota),
+		mustDup(2, "sink de execução sobre entrada de request", `\b(?:`+phpSinks+`)\s*\(\s*[^;]{0,160}`+phpRemota),
+		mustDup(2, "include/require sobre entrada de request — LFI/RFI", `\b(?:`+phpInclui+`)\b\s*\(?\s*[^;]{0,160}`+phpRemota),
+		mustDup(2, "unserialize sobre entrada de request — injeção de objeto", `\bunserialize\s*\(\s*[^;]{0,160}`+phpRemota),
+		mustDup(2, "função nomeada pelo request (chamada dinâmica)", phpRemota+`\s*\(`),
+		mustDup(2, "eval de conteúdo decodificado — assinatura de webshell",
+			`\b(?:eval|assert)\s*\(\s*@?\s*(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|hex2bin|convert_uudecode)\b`),
+		mustDup(2, "preg_replace com modificador /e — executa o replacement",
+			`\bpreg_replace\s*\(\s*['"][^'"]{1,200}/[a-zA-DF-Z]*e[a-zA-DF-Z]*['"]`),
+		// LOCAL — mesmo sink, entrada de argv/env: não é atacante remoto. TIER 1.
+		mustDup(1, "sink de execução sobre entrada LOCAL (argv/env)", `\b(?:`+phpSinks+`)\s*\(\s*[^;]{0,160}`+phpLocal),
+	},
+	taintRem: regexp.MustCompile(`\$(\w+)\s*=\s*[^;]{0,200}` + phpRemota),
+	taintLoc: regexp.MustCompile(`\$(\w+)\s*=\s*[^;]{0,200}` + phpLocal),
+	sinkVar:  regexp.MustCompile("`[^`]*\\$(\\w+)|" + `\b(?:` + phpSinks + `)\s*\(\s*\$(\w+)\b|\$(\w+)\s*\(`),
+	suspeito: []regraDeCodigo{
+		mustDup(1, "create_function — equivale a eval, obsoleto e favorito de shell", `\bcreate_function\s*\(`),
+		mustDup(1, "decodificação empilhada", `\b(?:base64_decode|gzinflate|gzuncompress)\s*\(\s*(?:base64_decode|gzinflate|gzuncompress|str_rot13)\b`),
+		mustDup(1, "eval presente", `\beval\s*\(`),
+		mustDup(1, "blob base64 longo embutido no código", `['"][A-Za-z0-9+/]{200,}={0,2}['"]`),
+	},
 }
 
-var regrasPy = []regraDeCodigo{
-	mustDup(2, "eval/exec sobre entrada de request", `\b(?:eval|exec)\s*\(\s*[^;\n]{0,120}`+pyInput),
-	mustDup(2, "os.system sobre entrada de request", `\bos\.system\s*\(\s*[^;\n]{0,120}`+pyInput),
-	// As DUAS ordens, porque a forma mais comum tem a entrada ANTES do
-	// shell=True: subprocess.run(request.args["cmd"], shell=True). Exigir
-	// shell=True primeiro deixava esse caso — o típico — cair só em tier 1.
-	mustDup(2, "subprocess com shell=True sobre entrada de request",
-		`\bsubprocess\.\w+\s*\([^;\n]{0,200}shell\s*=\s*True[^;\n]{0,200}`+pyInput),
-	mustDup(2, "subprocess com shell=True sobre entrada de request",
-		`\bsubprocess\.\w+\s*\([^;\n]{0,200}`+pyInput+`[^;\n]{0,200}shell\s*=\s*True`),
-	mustDup(2, "pickle.loads sobre entrada — desserialização executa código", `\bpickle\.loads\s*\(\s*[^;\n]{0,120}`+pyInput),
-	mustDup(1, "exec/eval presente", `\b(?:eval|exec)\s*\(`),
-	mustDup(1, "subprocess com shell=True", `\bsubprocess\.\w+\s*\([^;\n]{0,200}shell\s*=\s*True`),
-	mustDup(1, "pickle.loads — desserialização é superfície de RCE", `\bpickle\.loads\s*\(`),
+var defsJS = defsCodigo{
+	direto: []regraDeCodigo{
+		mustDup(2, "child_process sobre entrada de request", `\b(?:`+jsSinks+`)\s*\(\s*[^;]{0,160}`+jsRemota),
+		mustDup(2, "eval sobre entrada de request", `\beval\s*\(\s*[^;]{0,160}`+jsRemota),
+		mustDup(2, "new Function sobre entrada de request", `new\s+Function\s*\(\s*[^;]{0,160}`+jsRemota),
+		mustDup(2, "vm.run sobre entrada de request", `\bvm\.run(?:InThisContext|InNewContext|InContext)\s*\(\s*[^;]{0,160}`+jsRemota),
+		mustDup(1, "child_process sobre entrada LOCAL (argv/env)", `\b(?:`+jsSinks+`)\s*\(\s*[^;]{0,160}`+jsLocal),
+	},
+	taintRem: regexp.MustCompile(`\b(\w+)\s*=\s*[^;]{0,200}` + jsRemota),
+	taintLoc: regexp.MustCompile(`\b(\w+)\s*=\s*[^;]{0,200}` + jsLocal),
+	sinkVar:  regexp.MustCompile(`\b(?:eval|` + jsSinks + `)\s*\(\s*(\w+)\s*[),]`),
+	suspeito: []regraDeCodigo{
+		mustDup(1, "eval presente", `\beval\s*\(`),
+		mustDup(1, "new Function — eval por outro nome", `new\s+Function\s*\(`),
+		mustDup(1, "child_process carregado", `require\s*\(\s*['"]child_process['"]`),
+	},
 }
 
-// regrasPorLinguagem mapeia a extensão para o conjunto de padrões.
-func regrasPorLinguagem(lang string) []regraDeCodigo {
+var defsPy = defsCodigo{
+	direto: []regraDeCodigo{
+		mustDup(2, "eval/exec sobre entrada de request", `\b(?:eval|exec)\s*\(\s*[^;\n]{0,160}`+pyRemota),
+		mustDup(2, "os.system/os.popen sobre entrada de request", `\bos\.(?:system|popen)\s*\(\s*[^;\n]{0,160}`+pyRemota),
+		// As duas ordens: a entrada pode vir antes OU depois do shell=True.
+		mustDup(2, "subprocess com shell=True sobre entrada de request",
+			`\bsubprocess\.\w+\s*\([^;\n]{0,200}shell\s*=\s*True[^;\n]{0,200}`+pyRemota),
+		mustDup(2, "subprocess com shell=True sobre entrada de request",
+			`\bsubprocess\.\w+\s*\([^;\n]{0,200}`+pyRemota+`[^;\n]{0,200}shell\s*=\s*True`),
+		mustDup(2, "pickle.loads sobre entrada — desserialização executa código", `\bpickle\.loads\s*\(\s*[^;\n]{0,160}`+pyRemota),
+		mustDup(1, "exec/eval/os.system sobre entrada LOCAL (argv/env/stdin)", `\b(?:eval|exec|os\.system|os\.popen)\s*\(\s*[^;\n]{0,160}`+pyLocal),
+	},
+	taintRem: regexp.MustCompile(`\b(\w+)\s*=\s*[^;\n]{0,200}` + pyRemota),
+	taintLoc: regexp.MustCompile(`\b(\w+)\s*=\s*[^;\n]{0,200}` + pyLocal),
+	sinkVar:  regexp.MustCompile(`\b(?:eval|exec|os\.system|os\.popen)\s*\(\s*(\w+)\s*[),]`),
+	suspeito: []regraDeCodigo{
+		mustDup(1, "exec/eval presente", `\b(?:eval|exec)\s*\(`),
+		mustDup(1, "subprocess com shell=True", `\bsubprocess\.\w+\s*\([^;\n]{0,200}shell\s*=\s*True`),
+		mustDup(1, "pickle.loads — desserialização é superfície de RCE", `\bpickle\.loads\s*\(`),
+	},
+}
+
+// defsPorLinguagem mapeia a extensão para os padrões da linguagem.
+func defsPorLinguagem(lang string) *defsCodigo {
 	switch lang {
 	case "php":
-		return regrasPHP
+		return &defsPHP
 	case "js":
-		return regrasJS
+		return &defsJS
 	case "python":
-		return regrasPy
+		return &defsPy
 	}
 	return nil
 }
@@ -126,49 +172,156 @@ func linguagemPorExtensao(path string) string {
 	return ""
 }
 
-// ehComentario responde se a linha é claramente um comentário — reduz o falso
-// positivo de casar um padrão dentro de `// exemplo: eval($_GET)`. Não é lexer:
-// código de verdade não esconde webshell em comentário, e o operador vê o
-// trecho de qualquer forma.
-func ehComentario(linha string) bool {
-	t := strings.TrimSpace(linha)
-	return strings.HasPrefix(t, "//") || strings.HasPrefix(t, "#") ||
-		strings.HasPrefix(t, "*") || strings.HasPrefix(t, "/*")
-}
-
 // maxTrecho é o teto do trecho guardado: o suficiente para o operador
 // reconhecer, sem despejar uma linha minificada de 40 KB no relatório.
 const maxTrecho = 160
 
-// analisarConteudo roda os padrões da linguagem sobre o conteúdo e devolve os
-// matches. Puro: a mesma entrada dá a mesma saída, e é isto que o teste exercita
-// com o exemplo real.
+// analisarConteudo é o motor de peneira, em três camadas. Puro: a mesma entrada
+// dá a mesma saída, e é isto que o teste exercita com os exemplos reais.
+//
+// A varredura roda no ARQUIVO inteiro, não linha a linha — é o que pega a forma
+// multilinha `system(\n  $_GET['x']\n)`, porque `[^;]` casa a quebra de linha. E
+// há um MICRO-TAINT de um salto: `$cmd = $_GET[...]` marca $cmd, e um sink que
+// recebe $cmd depois vira achado. Não é um analisador de fluxo; é o suficiente
+// para o implante minimamente organizado que separa a entrada do sink em duas
+// linhas — a forma que o casamento por linha perdia inteira.
 func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
-	regras := regrasPorLinguagem(lang)
-	if regras == nil {
+	def := defsPorLinguagem(lang)
+	if def == nil {
 		return nil
 	}
-	var out []MatchDeCodigo
-	linhas := strings.Split(conteudo, "\n")
-	for i, linha := range linhas {
-		if ehComentario(linha) {
-			continue
+	// Comentário vira espaço (mesmo tamanho em bytes, quebras preservadas): os
+	// offsets continuam apontando para a linha certa no ORIGINAL, e um padrão
+	// dentro de `// exemplo: eval($_GET)` deixa de casar.
+	masc := mascararComentarios(conteudo, lang)
+
+	// Um achado por linha, o de maior tier: sink+entrada crítico ganha do eval
+	// solto na mesma linha.
+	porLinha := map[int]MatchDeCodigo{}
+	registrar := func(off, tier int, rotulo string) {
+		if off < 0 || off > len(conteudo) {
+			return
 		}
-		melhor := -1 // um match por linha: o de maior tier
-		var achado MatchDeCodigo
-		for _, r := range regras {
-			if r.re.MatchString(linha) {
-				if r.tier > melhor {
-					melhor = r.tier
-					achado = MatchDeCodigo{Linha: i + 1, Tier: r.tier, Regra: r.rotulo, Trecho: trecho(linha)}
-				}
-			}
+		ln, texto := numeroDaLinha(conteudo, off)
+		if ex, ok := porLinha[ln]; ok && ex.Tier >= tier {
+			return
 		}
-		if melhor >= 0 {
-			out = append(out, achado)
+		porLinha[ln] = MatchDeCodigo{Linha: ln, Tier: tier, Regra: rotulo, Trecho: trecho(texto)}
+	}
+
+	// Camada A — sink DIRETO sobre entrada.
+	for _, r := range def.direto {
+		for _, loc := range r.re.FindAllStringIndex(masc, -1) {
+			registrar(loc[0], r.tier, r.rotulo)
 		}
 	}
+
+	// Camada B — micro-taint: var recebe entrada, depois um sink recebe a var.
+	taint := map[string]int{} // nome -> 2 (remota) | 1 (local)
+	for _, m := range def.taintRem.FindAllStringSubmatch(masc, -1) {
+		taint[m[1]] = 2
+	}
+	for _, m := range def.taintLoc.FindAllStringSubmatch(masc, -1) {
+		if taint[m[1]] == 0 {
+			taint[m[1]] = 1
+		}
+	}
+	if len(taint) > 0 {
+		for _, loc := range def.sinkVar.FindAllStringSubmatchIndex(masc, -1) {
+			nome := grupoNaoVazio(masc, loc)
+			if t := taint[nome]; t > 0 {
+				rot := "sink de execução sobre variável de entrada de request (fluxo de duas linhas)"
+				if t == 1 {
+					rot = "sink de execução sobre variável de entrada LOCAL (argv/env)"
+				}
+				registrar(loc[0], t, rot)
+			}
+		}
+	}
+
+	// Camada C — tier 1 solto (eval sem entrada, ofuscação).
+	for _, r := range def.suspeito {
+		for _, loc := range r.re.FindAllStringIndex(masc, -1) {
+			registrar(loc[0], 1, r.rotulo)
+		}
+	}
+
+	out := make([]MatchDeCodigo, 0, len(porLinha))
+	for _, m := range porLinha {
+		out = append(out, m)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Linha < out[j].Linha })
 	return out
+}
+
+// numeroDaLinha devolve a linha (1-based) do offset e o texto dela, do conteúdo
+// ORIGINAL — para o operador ler o código de verdade, não a versão mascarada.
+func numeroDaLinha(s string, off int) (int, string) {
+	if off > len(s) {
+		off = len(s)
+	}
+	linha := 1 + strings.Count(s[:off], "\n")
+	ini := strings.LastIndexByte(s[:off], '\n') + 1
+	fim := strings.IndexByte(s[off:], '\n')
+	if fim < 0 {
+		fim = len(s)
+	} else {
+		fim += off
+	}
+	return linha, s[ini:fim]
+}
+
+// grupoNaoVazio devolve o primeiro grupo de captura que participou do match —
+// o sinkVar tem alternativas (crase, sink(), chamada dinâmica), cada uma com o
+// nome da variável no seu próprio grupo.
+func grupoNaoVazio(s string, loc []int) string {
+	for i := 2; i+1 < len(loc); i += 2 {
+		if loc[i] >= 0 {
+			return s[loc[i]:loc[i+1]]
+		}
+	}
+	return ""
+}
+
+// mascararComentarios troca os comentários por espaço, PRESERVANDO o tamanho em
+// bytes e as quebras de linha — assim os offsets do match continuam apontando
+// para a linha certa. Não é lexer: ignora strings, e um `//` dentro de uma
+// string vira espaço. Para uma peneira, o custo disso é baixo e o ganho de não
+// casar dentro de comentário é alto.
+func mascararComentarios(s, lang string) string {
+	b := []byte(s)
+	n := len(b)
+	branco := func(i int) {
+		if b[i] != '\n' {
+			b[i] = ' '
+		}
+	}
+	for i := 0; i < n; i++ {
+		switch {
+		case i+1 < n && b[i] == '/' && b[i+1] == '/':
+			for ; i < n && b[i] != '\n'; i++ {
+				branco(i)
+			}
+		case b[i] == '#' && lang != "js":
+			for ; i < n && b[i] != '\n'; i++ {
+				branco(i)
+			}
+		case i+1 < n && b[i] == '/' && b[i+1] == '*':
+			branco(i)
+			branco(i + 1)
+			i += 2
+			for ; i < n; i++ {
+				if i+1 < n && b[i] == '*' && b[i+1] == '/' {
+					branco(i)
+					branco(i + 1)
+					i++
+					break
+				}
+				branco(i)
+			}
+		}
+	}
+	return string(b)
 }
 
 func trecho(linha string) string {

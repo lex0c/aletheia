@@ -73,13 +73,14 @@ func TestEvalPuroEhTier1NaoTier2(t *testing.T) {
 // Comentário não dispara: casar dentro de `// exemplo: eval($_GET)` encheria de
 // falso positivo doc e código de exemplo.
 func TestComentarioNaoDispara(t *testing.T) {
-	for _, linha := range []string{
+	for _, trecho := range []string{
 		"// perigo: eval($_POST['x'])",
 		"# system($_GET['cmd'])",
-		" * assert($_REQUEST['y'])",
+		"/* nota: assert($_REQUEST['y']) */",
+		"/**\n * exemplo: system($_GET['cmd'])\n * não roda\n */\n$x = 1;",
 	} {
-		if ms := analisarConteudo(linha, "php"); len(ms) != 0 {
-			t.Errorf("comentário não pode disparar: %q -> %+v", linha, ms)
+		if ms := analisarConteudo(trecho, "php"); len(ms) != 0 {
+			t.Errorf("comentário não pode disparar: %q -> %+v", trecho, ms)
 		}
 	}
 }
@@ -219,5 +220,63 @@ func TestCodigoIlegivelViraLacunaNaoSilencio(t *testing.T) {
 	}
 	if !strings.Contains(msgs, "não puderam ser LISTADOS") {
 		t.Errorf("diretório ilegível tinha de virar lacuna declarada, veio: %q", msgs)
+	}
+}
+
+// Os saltos da review: multiline, micro-taint, remote vs local, frameworks.
+func TestMultilineEMicroTaint(t *testing.T) {
+	tier2 := map[string]string{
+		// multiline: o sink e a entrada em linhas diferentes, um statement só
+		"php-multiline": "<?php\nsystem(\n  $_GET['cmd']\n);",
+		// micro-taint de duas linhas, nas três linguagens
+		"php-taint": "<?php\n$cmd = $_GET['cmd'];\nsystem($cmd);",
+		"js-taint":  "const cmd = req.query.cmd;\nexec(cmd);",
+		"py-taint":  "cmd = request.args['cmd']\nos.system(cmd)",
+		// frameworks
+		"django":  "cmd = request.POST['c']\nos.system(cmd)",
+		"koa":     "const c = ctx.query.cmd;\nexecSync(c);",
+		"laravel": "<?php $c = $request->input('cmd'); system($c);",
+		// include/require e unserialize sobre request
+		"php-lfi":         "<?php include($_GET['page']);",
+		"php-unserialize": "<?php unserialize($_POST['o']);",
+		// subprocess na ordem comum
+		"py-subprocess": `subprocess.run(request.args["cmd"], shell=True)`,
+	}
+	for nome, src := range tier2 {
+		lang := "php"
+		if strings.HasPrefix(nome, "js") || nome == "koa" {
+			lang = "js"
+		} else if strings.HasPrefix(nome, "py") || nome == "django" {
+			lang = "python"
+		}
+		if ms := analisarConteudo(src, lang); !tem(ms, 2, "") {
+			t.Errorf("%s: esperava TIER 2, veio %+v\n(src: %q)", nome, ms, src)
+		}
+	}
+}
+
+// Remote ≠ local: entrada de argv/env/stdin com sink é AVISO (tier 1), não
+// crítico. exec(process.env.X) é código ruim, não "atacante remoto controla".
+func TestEntradaLocalNaoEhCritica(t *testing.T) {
+	locais := map[string]string{
+		"js-env":       `exec(process.env.BACKUP_COMMAND)`,
+		"py-argv":      `subprocess.run(sys.argv[1], shell=True)`,
+		"py-argv-sink": `os.system(sys.argv[1])`,
+		"php-getenv":   `<?php system(getenv('CMD'));`,
+	}
+	for nome, src := range locais {
+		lang := "php"
+		if strings.HasPrefix(nome, "js") {
+			lang = "js"
+		} else if strings.HasPrefix(nome, "py") {
+			lang = "python"
+		}
+		ms := analisarConteudo(src, lang)
+		if tem(ms, 2, "") {
+			t.Errorf("%s: entrada LOCAL não pode ser crítica: %+v", nome, ms)
+		}
+		if !tem(ms, 1, "") {
+			t.Errorf("%s: mas continua sendo tier 1 (leia): %+v", nome, ms)
+		}
 	}
 }

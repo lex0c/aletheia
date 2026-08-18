@@ -111,6 +111,12 @@ type Env struct {
 	Caps      Cap
 	CapReason map[string]string // capacidade ausente -> motivo
 
+	// Progress recebe o nome do estágio de coleta atual, para o CLI mostrar que
+	// a varredura longa não travou. nil = silêncio, e é o padrão: nada em
+	// `facts` ou nos testes precisa de um. Vive aqui porque `e` já atravessa
+	// todo coletor.
+	Progress ProgressSink
+
 	Now   time.Time // sempre UTC
 	Clock ClockState
 
@@ -400,4 +406,18 @@ func errStr(err error) string {
 		return "motivo desconhecido"
 	}
 	return err.Error()
+}
+
+// ProgressSink recebe o rótulo do estágio corrente da coleta. O CLI passa um
+// escritor de terminal; um dump ou teste passa nil e tudo cala.
+type ProgressSink interface {
+	Stage(name string)
+}
+
+// Stage anuncia o estágio atual da coleta, se houver quem escute. No-op quando
+// Progress é nil, que é o caso de todo caminho que não seja o CLI interativo.
+func (e *Env) Stage(name string) {
+	if e != nil && e.Progress != nil {
+		e.Progress.Stage(name)
+	}
 }

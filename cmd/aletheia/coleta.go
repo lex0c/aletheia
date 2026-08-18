@@ -17,6 +17,7 @@ import (
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
 	"github.com/lex0c/aletheia/internal/ioc"
+	"github.com/lex0c/aletheia/internal/progress"
 	"github.com/lex0c/aletheia/internal/report"
 )
 
@@ -33,8 +34,9 @@ func runCollect(args []string) int {
 	fs := flag.NewFlagSet("collect", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var (
-		root = fs.String("root", "", "coletar de imagem montada em PATH")
-		out  = fs.String("out", "", "arquivo do dump ('-' = stdout) — obrigatório")
+		root   = fs.String("root", "", "coletar de imagem montada em PATH")
+		out    = fs.String("out", "", "arquivo do dump ('-' = stdout) — obrigatório")
+		noProg = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
 	)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
@@ -59,7 +61,11 @@ func runCollect(args []string) int {
 		return 3
 	}
 
+	prog := progress.New(os.Stderr, time.Now(), *noProg)
+	e.Progress = prog
+	defer prog.Stop()
 	f := facts.Collect(e)
+	prog.Stop() // a linha some antes de o dump começar a sair
 	d := dump.De(e, f)
 
 	// O hash é calculado DURANTE a escrita, e não relendo o arquivo depois.

@@ -24,6 +24,7 @@ import (
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
 	"github.com/lex0c/aletheia/internal/ioc"
+	"github.com/lex0c/aletheia/internal/progress"
 	"github.com/lex0c/aletheia/internal/report"
 )
 
@@ -61,6 +62,8 @@ FLAGS DE scan E wtf
   --json FILE   JSONL; "-" = stdout. NUNCA afetado pela verbosidade
   --baseline F  compara com a baseline em F: o que já estava lá desce um nível
                 de severidade e CONTINUA no relatório, com a data
+  --no-progress cala o batimento da coleta. Ele já só aparece em terminal —
+                pipe e 2>arquivo nunca o recebem —, esta flag desliga na mão
 
 FLAGS DE scan
   --ioc FILE    casa os indicadores DESTE incidente contra o que foi coletado
@@ -283,6 +286,7 @@ func runWtf(args []string) int {
 		budget  = fs.Duration("budget", wtfBudget, "teto de tempo")
 		jsonOut = fs.String("json", "", "escrever JSONL em FILE ('-' = stdout)")
 		base    = fs.String("baseline", "", "comparar com a baseline em FILE")
+		noProg  = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
 	)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
@@ -308,6 +312,9 @@ func runWtf(args []string) int {
 		fmt.Fprintf(os.Stderr, "não foi possível abrir --root com raiz travada: %v\n", e.RootErr)
 		return 3
 	}
+	prog := progress.New(os.Stderr, start, *noProg)
+	e.Progress = prog
+	defer prog.Stop()
 	f := facts.Collect(e)
 
 	selected := check.Select(check.Selection{Wtf: true})
@@ -327,6 +334,7 @@ func runWtf(args []string) int {
 	}
 	elapsed := time.Since(start)
 
+	prog.Stop() // a linha some antes do relatório nascer
 	out := io.Writer(os.Stdout)
 	if *jsonOut == "-" {
 		out = os.Stderr
@@ -358,6 +366,7 @@ func runScan(args []string, wtf bool) int {
 		base     = fs.String("baseline", "", "comparar com a baseline em FILE")
 		iocFile  = fs.String("ioc", "", "casar os indicadores DESTE incidente, do arquivo FILE")
 		since    = fs.String("since", "", "janela de investigação: instante (2026-04-30T18:00Z) ou duração (72h, 7d)")
+		noProg   = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
 	)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
@@ -394,6 +403,9 @@ func runScan(args []string, wtf bool) int {
 		fmt.Fprintf(os.Stderr, "não foi possível abrir --root com raiz travada: %v\n", e.RootErr)
 		return 3
 	}
+	prog := progress.New(os.Stderr, time.Now(), *noProg)
+	e.Progress = prog
+	defer prog.Stop()
 	f := facts.Collect(e)
 
 	sel := check.Selection{Mode: *mode, Wtf: wtf}
@@ -423,6 +435,7 @@ func runScan(args []string, wtf bool) int {
 	// produto do stdout, com o relatório humano indo para stderr: misturar os
 	// dois tornava `scan --json - > out.jsonl` um arquivo inválido, que é como a
 	// agregação de frota consome a saída.
+	prog.Stop() // a linha some antes do relatório nascer
 	return emitir(r, f, e, saida{
 		baseline: *base,
 		janela:   janela,
@@ -541,8 +554,9 @@ func runBaseline(args []string) int {
 	fs := flag.NewFlagSet("baseline", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var (
-		root = fs.String("root", "", "capturar de imagem montada em PATH")
-		out  = fs.String("o", "-", "arquivo de saída ('-' = stdout)")
+		root   = fs.String("root", "", "capturar de imagem montada em PATH")
+		out    = fs.String("o", "-", "arquivo de saída ('-' = stdout)")
+		noProg = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
 	)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
@@ -557,11 +571,15 @@ func runBaseline(args []string) int {
 
 	e := env.Probe(env.Options{Root: *root, Version: version})
 	defer e.Close()
+	prog := progress.New(os.Stderr, time.Now(), *noProg)
+	e.Progress = prog
+	defer prog.Stop()
 	f := facts.Collect(e)
 
 	selected := check.Select(check.Selection{})
 	r := check.Run(selected, f, e)
 	collectorGaps(r, f)
+	prog.Stop() // a linha some antes de escrever a baseline
 
 	bl := baseline.Capturar(r, f, f.Host.Hostname, version, e.Now)
 

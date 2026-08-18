@@ -221,15 +221,18 @@ func Collect(e *env.Env) *Facts {
 	collectHost(f, e)
 	// Antes de tudo que interpreta caminho: a tabela de montagem diz se o bit
 	// setuid de um arquivo é inerte e se algo executa de um diretório.
+	e.Stage("montagens")
 	collectMounts(f, e)
 
 	if e.Has(env.CapProcfs) {
+		e.Stage("processos")
 		collectProcesses(f, e)
 		// Depois dos processos: o dono de cada socket sai do join com os fds
 		// que o coletor de processo já leu.
 		// Os limites vêm ANTES dos sockets: além de serem os tetos que
 		// transformam "há 400 conexões" em "e o próximo connect vai falhar",
 		// a faixa de porta efêmera é INSUMO da inferência de direção.
+		e.Stage("rede")
 		collectLimitesDeRede(f, e)
 		collectSockets(f, e)
 		// E os que leem PACOTE, que não aparecem em tabela de conexão nenhuma:
@@ -241,6 +244,7 @@ func Collect(e *env.Env) *Facts {
 		classificaContainers(f)
 		// Depois dos processos: a comparação precisa da lista para saber o que
 		// está VISÍVEL.
+		e.Stage("kernel e módulos")
 		collectCrossView(f, e)
 		// Junto do cross-view: aqueles dizem que o kernel pode estar mentindo,
 		// e este diz COMO.
@@ -259,6 +263,10 @@ func Collect(e *env.Env) *Facts {
 	}
 
 	if e.Has(env.CapFilesystem) {
+		// A parte cara: varre dezenas de milhares de diretórios. É o estágio em
+		// que a coleta "parece travada" num disco lento, e por isso o que mais
+		// justifica o batimento.
+		e.Stage("varredura de filesystem")
 		collectPersist(f, e)
 		// DEPOIS da persistência: a pergunta "quem pode reescrever o que root
 		// executa" precisa da lista do que root executa, e ela sai dali.
@@ -281,9 +289,11 @@ func Collect(e *env.Env) *Facts {
 	// de caminhos que os outros coletores montaram — é contra ele que os
 	// inodes observados ganham nome.
 	if e.Has(env.CapProcfs) {
+		e.Stage("vigias de arquivo")
 		collectVigias(f, e)
 	}
 
+	e.Stage("finalizando")
 	f.Index()
 	return f
 }

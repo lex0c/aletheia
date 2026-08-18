@@ -397,6 +397,7 @@ func (v *varredura) terminou() {
 }
 
 func (v *varredura) visitar(t tarefaDir) {
+	v.e.Detalhe(t.dir)
 	var donosLocais resumoDeDonos
 	if suidPularCusto[t.dir] {
 		return

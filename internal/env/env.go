@@ -421,10 +421,12 @@ func errStr(err error) string {
 	return err.Error()
 }
 
-// ProgressSink recebe o rótulo do estágio corrente da coleta. O CLI passa um
+// ProgressSink recebe o rótulo do estágio corrente da coleta e, opcionalmente, o
+// DETALHE do que está sendo feito agora (o caminho sendo lido). O CLI passa um
 // escritor de terminal; um dump ou teste passa nil e tudo cala.
 type ProgressSink interface {
 	Stage(name string)
+	Detalhe(s string)
 }
 
 // WalkExpired diz se a varredura de filesystem já passou do prazo. Falso quando
@@ -454,6 +456,15 @@ func (e *Env) Stage(name string) {
 	e.stageMarks = append(e.stageMarks, stageMark{name, time.Now()})
 	if e.Progress != nil {
 		e.Progress.Stage(name)
+	}
+}
+
+// Detalhe informa ao progresso o que está sendo lido AGORA (um caminho). É
+// chamado no laço quente das varreduras, então precisa ser barato: o reporter só
+// guarda a string, e o tique decide quando desenhar. No-op sem terminal.
+func (e *Env) Detalhe(s string) {
+	if e != nil && e.Progress != nil {
+		e.Progress.Detalhe(s)
 	}
 }
 

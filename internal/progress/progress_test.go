@@ -66,3 +66,43 @@ func TestStopIdempotente(t *testing.T) {
 	r.Stop()
 	r.Stop() // não pode dar panic
 }
+
+// A segunda linha mostra o DETALHE (o caminho sendo lido), truncado pela cauda
+// (o nome do arquivo importa mais que a raiz), e some no Stop.
+func TestSegundaLinhaMostraODetalhe(t *testing.T) {
+	var buf bytes.Buffer
+	r := &Reporter{w: &buf, tty: true, largura: 80, start: time.Now(), done: make(chan struct{})}
+	r.Detalhe("/var/www/site/app/controller/Administrador.class.php")
+	r.draw()
+	saida := buf.String()
+	if !strings.Contains(saida, "Administrador.class.php") {
+		t.Errorf("a cauda do caminho precisa aparecer na 2ª linha: %q", saida)
+	}
+	// duas linhas: tem a quebra e o sobe-cursor no redesenho.
+	buf.Reset()
+	r.draw() // segundo desenho: sobe para a 1ª linha
+	if !strings.Contains(buf.String(), "\x1b[A") {
+		t.Error("o redesenho precisa subir o cursor para reescrever as duas linhas")
+	}
+	// Stop apaga as DUAS linhas.
+	buf.Reset()
+	r.Stop()
+	if strings.Count(buf.String(), "\x1b[K") < 2 {
+		t.Errorf("Stop tem de apagar as duas linhas: %q", buf.String())
+	}
+}
+
+// Caminho longo é truncado pela cauda para não passar da largura e quebrar (o
+// que faria o \033[A subir para o lugar errado).
+func TestCaminhoLongoTruncaPelaCauda(t *testing.T) {
+	got := encurtarCauda("/muito/longo/"+strings.Repeat("x", 200)+"/fim.php", 30)
+	if len([]rune(got)) > 30 {
+		t.Errorf("passou da largura: %d runas", len([]rune(got)))
+	}
+	if !strings.HasSuffix(got, "fim.php") {
+		t.Errorf("a cauda (o arquivo) tem de sobreviver: %q", got)
+	}
+	if !strings.HasPrefix(got, "…") {
+		t.Errorf("truncou sem marcar: %q", got)
+	}
+}

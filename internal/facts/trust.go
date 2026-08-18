@@ -199,6 +199,7 @@ func collectGitHooks(f *Facts, e *env.Env) {
 }
 
 func procurarHooks(f *Facts, e *env.Env, dir string, prof int, vistos *int, truncado *bool) {
+	e.Detalhe(dir)
 	if prof > maxGitDepth || *truncado {
 		return
 	}

@@ -628,6 +628,7 @@ func collectCodigo(f *Facts, e *env.Env) {
 }
 
 func varrerCodigo(f *Facts, e *env.Env, dir string, prof int, st *varreduraCodigo, vistos map[string]bool) {
+	e.Detalhe(dir)
 	if prof > maxCodigoDepth || st.truncado || st.tempo {
 		return
 	}

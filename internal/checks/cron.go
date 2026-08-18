@@ -211,17 +211,16 @@ var atJob = check.Check{
 // periódicos da distribuição. A isenção é do MECANISMO no lugar certo: um
 // run-parts apontando para /tmp não é plumbing de distribuição.
 func agendadorDaDistro(cmd string) bool {
-	campos := strings.Fields(cmd)
-	if len(campos) < 2 || baseDe(campos[0]) != "run-parts" {
-		return false
-	}
-	for _, a := range campos[1:] {
-		if strings.HasPrefix(a, "-") {
-			continue // --report e afins
-		}
-		return strings.HasPrefix(a, "/etc/periodic/") || strings.HasPrefix(a, "/etc/cron.")
-	}
-	return false
+	// O diretório precisa ser um dos que a distribuição usa, pela lista EXATA
+	// que o coletor percorre — e não por prefixo.
+	//
+	// Por prefixo, `/etc/cron.` casava `/etc/cron.backup`, que nenhuma
+	// distribuição cria e que o coletor não inventariava. Quem escolhia o nome
+	// do diretório escolhia se a linha era olhada: um `curl | sh` a cada minuto
+	// saía com RESULT OK. Isentar o que não se inventaria é dar a escolha ao
+	// adversário.
+	dir, ok := facts.DiretorioDoRunParts(cmd)
+	return ok && facts.RunPartsDaDistro(dir)
 }
 
 // cronContexto acrescenta o que decide se a linha importa.

@@ -423,6 +423,13 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 			addDoDisco(ko, "módulo de kernel")
 		}
 	}
+	// O programa que o sshd consulta para saber QUAIS CHAVES VALEM. Ele roda a
+	// cada tentativa de login, como root ou como o usuário declarado, e decide
+	// quem entra na máquina — "que pacote entregou isto?" é exatamente a
+	// pergunta certa a fazer sobre ele.
+	if cmd := primeiroToken(f.SSH.AuthorizedKeysCommand); cmd != "" {
+		add(cmd, "AuthorizedKeysCommand do sshd")
+	}
 	// SUID é o caso em que a pergunta de propriedade vale MAIS: o conjunto
 	// legítimo de binários com setuid é pequeno, conhecido e vem todo de
 	// pacote. Um que não vem é a resposta inteira.

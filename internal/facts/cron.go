@@ -106,7 +106,77 @@ func collectCron(f *Facts, e *env.Env) {
 		}
 	}
 
+	// E os diretórios que uma LINHA DE CRON manda o run-parts executar.
+	//
+	// A lista fixa acima cobre os da distribuição. Ela não cobre
+	// `run-parts /etc/cron.backup`, e essa linha agenda tudo que estiver lá
+	// dentro com a mesma força — medido: um script de `curl | sh` a cada minuto
+	// saía com RESULT OK, porque a linha era isentada por parecer plumbing e o
+	// diretório nunca era lido.
+	seguirRunParts(f, e)
+
 	collectAt(f, e)
+}
+
+// seguirRunParts coleta os diretórios que as próprias linhas de cron mandam
+// executar. Sem isto, quem escolhe o nome do diretório escolhe se ele é olhado.
+func seguirRunParts(f *Facts, e *env.Env) {
+	visto := map[string]bool{}
+	for _, d := range cronRunParts {
+		visto[d] = true
+	}
+	// Cópia: o laço acrescenta a f.Cron, e iterar sobre o que se modifica é
+	// como um diretório vira dois.
+	linhas := append([]CronEntry(nil), f.Cron...)
+	for _, c := range linhas {
+		dir, ok := DiretorioDoRunParts(c.Cmd)
+		if !ok || visto[dir] {
+			continue
+		}
+		visto[dir] = true
+		for _, n := range f.listarNegando(e, "cron", dir) {
+			p := dir + "/" + n
+			if e.IsDir(p) {
+				continue
+			}
+			f.Cron = append(f.Cron, CronEntry{
+				File: p, Kind: "dir", Cmd: p, User: c.User,
+				Schedule:    c.Schedule,
+				IntervalSec: c.IntervalSec,
+				ModUTC:      modUTC(e, p),
+			})
+		}
+	}
+}
+
+// DiretorioDoRunParts extrai o diretório que um `run-parts` executa, se a linha
+// for isso. Exportado porque o check de frequência precisa da MESMA leitura
+// para decidir se a linha é plumbing da distribuição — e a resposta não pode
+// divergir entre os dois.
+func DiretorioDoRunParts(cmd string) (string, bool) {
+	campos := strings.Fields(cmd)
+	if len(campos) < 2 || baseNome(campos[0]) != "run-parts" {
+		return "", false
+	}
+	for _, a := range campos[1:] {
+		if strings.HasPrefix(a, "-") {
+			continue // --report e afins
+		}
+		return strings.TrimRight(a, "/"), true
+	}
+	return "", false
+}
+
+// RunPartsDaDistro diz se o diretório é um dos que a distribuição usa. A lista
+// é a MESMA que o coletor percorre: isentar um diretório que não se inventaria
+// é dar a escolha ao adversário.
+func RunPartsDaDistro(dir string) bool {
+	for _, d := range cronRunParts {
+		if d == dir {
+			return true
+		}
+	}
+	return false
 }
 
 // collectAt lê o spool do at. O arquivo do job é um script de shell que carrega

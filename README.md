@@ -1,336 +1,1432 @@
-# aletheia
+# Aletheia
 
-Triagem de resposta a incidente em Linux, num binário estático sem dependência
-nenhuma.
+**Triagem de comprometimento e resposta a incidente em Linux, em um único binário estático.**
 
-`alḗtheia` (ἀλήθεια) é grego para *des-ocultamento*, e o nome não é decorativo: a
-propriedade central desta ferramenta é distinguir **"nada estava escondido"** de
-**"eu não consegui ver"**. Cobertura incompleta não é detalhe de rodapé — ela
-chega ao exit code.
+Aletheia coleta e correlaciona sinais de comprometimento em processos, memória,
+rede, persistência, integridade de arquivos e kernel. O objetivo não é procurar
+uma assinatura específica de malware, mas responder três perguntas durante um
+incidente:
 
-```
-$ sudo aletheia scan
-web-01 · 6.1.0-18-amd64 · Debian 12 · up 34d · load 0.42 (4 cpu)
-relógio sincronizado · 2026-08-17T21:03:11Z · modo live · aletheia 0.1.0
+1. **O que é anormal neste host?**
+2. **Quais evidências sustentam essa conclusão?**
+3. **O que a ferramenta não conseguiu verificar?**
 
-⛔ 2   ⚠ 6   ◆ 4 manuais   ·   cobertura 79/81
+A distinção entre "não encontrei" e "não consegui observar" faz parte do modelo
+da ferramenta. Cobertura incompleta é reportada explicitamente e afeta o exit
+code.
 
-⛔ /tmp/.x                 3 sinais no mesmo alvo
-     · execução fileless: exe aponta para memória anônima (pid=812)     §3.16
-     · binário em execução que nenhum pacote reivindica                 §24
-     · saída para endereço público a partir de binário sem dono (pid=812) §4.3
-
-AGORA, nesta ordem (runbook §19 — não inverta):
-  1. sudo /opt/ir/aletheia preserve --out "$IR" --pid 812   ← irreversível se pulado
-  2. isolar na camada de REDE, não no host (runbook §18)
-  3. remover persistência ANTES de matar (runbook §19)
-
-RESULT: CRITICAL        2 críticos · 6 avisos · 4 manuais · cobertura 79/81
-```
-
-O primeiro passo é o irreversível, e ele vem com o PID preenchido: matar o
-processo destrói a única cópia de um binário que nunca esteve em disco.
+> **Aletheia é uma ferramenta de triagem, não uma prova de que o host está
+> limpo.** Em um sistema cujo kernel já foi comprometido, interfaces como
+> `/proc`, `/sys`, tracefs e até syscalls podem fornecer uma visão falsa. Para
+> investigações de alta confiança, combine a coleta live com análise de
+> filesystem montado externamente e, quando necessário, forense de memória.
 
 ---
 
-## Baixar
+## Por que o nome Aletheia?
 
-Os binários de cada release são estáticos e cobrem `amd64`, `386` e `arm64`.
+**Alḗtheia** (`ἀλήθεια`) é uma palavra do grego antigo normalmente traduzida
+como **verdade**, mas sua formação também carrega a ideia de
+**des-ocultamento**: aquilo que deixa de estar escondido.
 
-```sh
-VER=v1.1.1            # ou: use a URL de /releases/latest/download/…
-ARCH=amd64            # amd64 | 386 | arm64
-BASE="https://github.com/lex0c/aletheia/releases/download/$VER"
+Essa ideia descreve melhor o propósito da ferramenta do que simplesmente
+"detectar malware".
 
-curl -fsSLO "$BASE/aletheia-linux-$ARCH"
-curl -fsSLO "$BASE/SHA256SUMS"
+Durante uma investigação Linux, quase tudo o que o analista observa é uma visão
+fornecida pelo próprio sistema investigado:
 
-# CONFIRA ANTES DE EXECUTAR. Baixar e rodar sem verificar é exatamente a
-# prática que o runbook §16 condena — e você está prestes a rodar isto como
-# root, num host que talvez já esteja comprometido.
-sha256sum --ignore-missing -c SHA256SUMS
-
-chmod +x "aletheia-linux-$ARCH"
-sudo ./aletheia-linux-$ARCH version
+```text
+ps          -> /proc
+ss          -> kernel
+ls          -> VFS
+systemctl   -> systemd + filesystem
+bpftool     -> kernel BPF API
 ```
 
-Sempre a última versão, sem descobrir a tag:
+Se alguma dessas camadas foi manipulada, "não apareceu nada" pode significar
+duas coisas completamente diferentes:
 
-```sh
-curl -fsSL -o aletheia \
-  https://github.com/lex0c/aletheia/releases/latest/download/aletheia-linux-amd64
+```text
+não existe
 ```
 
-Se o `sha256sum` do seu ambiente não tiver `--ignore-missing`:
+ou:
 
-```sh
-grep "aletheia-linux-$ARCH\$" SHA256SUMS | sha256sum -c -
+```text
+existe, mas a fonte usada para observar não mostrou
 ```
 
-**Não existe `curl | sh` aqui, e isso é decisão.** Executar um script vindo da
-rede sem olhar é o oposto do que esta ferramenta faz.
+Aletheia foi desenhado em torno dessa diferença.
 
-### Onde baixar importa
+Por isso a ferramenta tenta:
 
-Este binário **vira artefato na sua timeline**: é um ELF estático, fora de
-pacote, com `ctime` de agora — e a própria ferramenta vai reportá-lo assim para
-quem varrer o host depois.
+- consultar fontes primitivas em vez de depender de comandos do host;
+- cruzar visões diferentes do mesmo objeto quando possível;
+- correlacionar sinais independentes em vez de confiar em uma única heurística;
+- declarar explicitamente quando uma fonte não pôde ser observada;
+- impedir que cobertura incompleta seja apresentada como resultado limpo.
 
-O certo é baixar numa máquina limpa, conferir o hash **lá**, e só então copiar
-para o alvo. Baixar direto no host suspeito acrescenta uma conexão de rede e um
-arquivo novo à cena que você está tentando ler.
+O nome, portanto, não significa que Aletheia "descobre a verdade" sobre um host.
+Significa algo mais específico e mais defensável:
 
-```sh
-# na máquina LIMPA, depois do sha256sum -c da seção acima
-BIN=aletheia-linux-amd64
-
-# 1. scp — a rota comum. O destino NÃO é /tmp: ele é gravável por todos, e
-#    num host suspeito isso é uma janela para trocarem o binário entre a
-#    cópia e a execução
-scp "$BIN" ir@web01:~/aletheia
-ssh ir@web01 'chmod +x ~/aletheia'
-
-# 2. cat por SSH — quando não há scp nem sftp do outro lado
-ssh ir@web01 'cat > ~/aletheia && chmod +x ~/aletheia' < "$BIN"
-
-# 3. disco — quando o host não deve receber conexão NENHUMA, e o mesmo
-#    volume vai levar o --out do preserve de volta
-cp "$BIN" /mnt/externo/ir/
-```
-
-O disco tem uma vantagem que as outras duas rotas não têm: rodando o binário de
-lá, nenhum arquivo novo entra no filesystem do alvo — o artefato fica no seu
-volume, e não na timeline que você veio ler.
-
-```sh
-sudo /mnt/externo/ir/aletheia-linux-amd64 version
-```
-
-Em qualquer uma das três, confira o hash **de novo no alvo** e registre caminho
-e hash no war log (§39.3). A cópia é mais um lugar onde o arquivo pode mudar, e
-conferir só na origem não cobre isso:
-
-```sh
-aletheia version     # imprime versão, caminho real e sha256 do próprio binário
-```
-
-O hash impresso ali tem que ser o mesmo do `SHA256SUMS`. Se não for, pare.
+> **tornar explícito o que pôde ser observado, o que parece estar oculto e onde
+> a própria observação deixa de ser confiável.**
 
 ---
 
-## Uso
+## O que ela procura
 
-```
-aletheia <comando> [flags]
-```
+Aletheia trabalha com **comportamento, inconsistências e correlação de
+evidências**, em vez de depender de uma base de assinaturas.
 
-| comando | o que responde |
+Alguns exemplos de sinais implementados:
+
+| Área | Exemplos |
 | --- | --- |
-| `scan` | este host está comprometido? Coleta e analisa (modo normal) |
-| `wtf` | overview em ~1s: este host está pegando fogo? |
-| `watch` | varre em ciclo e reporta só o que MUDAR — o eixo que um retrato não tem |
-| `collect` | só coleta: tira o retrato e sai. Não conclui nada |
-| `analyze` | só analisa: roda os checks sobre um retrato, do lado limpo |
-| `info` | responde sobre UM alvo — process, net, git, ip, port, file — sem concluir nada |
-| `preserve` | guarda a evidência antes que ela suma. O **único** que escreve |
-| `baseline` | captura o estado atual como referência para comparar depois |
-| `checks` | catálogo: id, §ref, modo, grupo, requires, falsos positivos |
-| `version` | versão, caminho e sha256 deste binário |
+| Processos e memória | execução via `memfd`, executável apagado ainda em execução, processo userspace disfarçado de kernel thread, mapas anônimos RWX, namespaces divergentes, `LD_PRELOAD`/`LD_AUDIT` em processos |
+| Rede | provável reverse shell pela estrutura de FDs, processo fazendo conexões públicas e privadas compatíveis com pivot, correlação socket-processo |
+| Persistência | `/etc/ld.so.preload`, cron suspeito ou excessivamente frequente, units/drop-ins/timers systemd, SSH `authorized_keys`, `modprobe install`, processos observando arquivos de persistência |
+| Integridade | arquivo de pacote modificado, sinais de timestomp, executável usado por root mas gravável por usuário menos privilegiado |
+| Kernel | divergência entre visões de módulos, módulos sem arquivo correspondente, taint inexplicado, hooks ftrace em funções sensíveis, programas BPF sem owner identificado, inconsistências na enumeração BPF e cross-views de processos |
+| IOC | IPs, hashes, paths e strings fornecidos pelo investigador |
 
-`aletheia --help` traz as flags de cada um, e o texto de ajuda é documentação da
-ferramenta — não saída gerada.
+Um finding isolado nem sempre significa comprometimento. JITs legítimos,
+agentes de observabilidade, ferramentas de administração, automação de sistema e
+atualizações de pacotes podem produzir sinais semelhantes. Por isso os checks
+registram falsos positivos conhecidos e o relatório mostra a evidência usada na
+decisão.
 
-### Os primeiros cinco minutos
-
-```sh
-export IR=/mnt/externo/ir-web01        # fora do host suspeito, se possível
-mkdir -p "$IR"
-
-sudo aletheia wtf                      # está pegando fogo AGORA?
-sudo aletheia scan --json "$IR/scan.jsonl" -v
-
-# o relatório imprime o comando de preservação com o PID já preenchido:
-sudo aletheia preserve --out "$IR" --pid 812 --mem
-```
-
-### A pergunta que vem antes do veredito
+Para ver o catálogo implementado na versão do binário que você está executando:
 
 ```sh
-aletheia info process              # censo: quem roda o quê, e contra que TETO
-aletheia info process 812          # o dossiê de um processo
-aletheia info net                  # censo de rede: o que expõe, e contra que TETO
-aletheia info git                  # censo de um repositório: config que executa, histórico reescrito
-aletheia info ip 51.91.190.241
-aletheia info port 4100
-aletheia info file /usr/sbin/nginx
+aletheia checks
 ```
 
-Junta o que hoje custa `ps`, `ss`, `lsof`, `stat`, `getcap`, `lsattr` e `dpkg -S`
-encadeados, e diz o que cada número **significa**. O censo compara as tarefas de
-cada uid com o `RLIMIT_NPROC` dele — é o número que explica `Resource
-temporarily unavailable` em `su`, `fork` e `execve` — e dá **nome** à repetição
-quando ela tem forma conhecida:
+---
 
-```
-CENSO · 904 processos · 4904 tarefas (processos + threads)
+## Por que um binário estático
 
-  usuário         proc  tarefas    teto
-  node             904     4904    4096  ⛔ NO TETO — fork e execve falham com EAGAIN
+Durante um incidente, o próprio userland pode estar adulterado.
 
-O QUE NODE ESTÁ RODANDO
-  por executável REAL
-     400  /usr/bin/dash
-     400  /usr/bin/node
-  por processo pai
-     503  pid=2 (crond)
+Aletheia é compilado com `CGO_ENABLED=0` e não possui dependências Go externas.
+A distribuição oficial produz binários estáticos para Linux em `amd64`, `arm64`
+e `386`.
 
-PADRÃO RECONHECIDO — CRON SOBREPOSTO · 400 cópias
-  /bin/sh -c /home/node/check-pm2.sh
-  as cópias começaram em intervalos REGULARES de ~1m0s, e nenhuma terminou
+Isso reduz a dependência de componentes do host como:
+
+```text
+ps
+ss
+lsof
+rpm
+dpkg
+libc dinâmica
+shell scripts auxiliares
 ```
 
-Não conclui nada: quem conclui é o `scan`, que traz os falsos positivos junto.
-Perguntar sobre processo, ip ou porta custa dezenas de milissegundos — não varre
-disco. Também responde sobre um retrato: `info --from retrato.json process`.
+Sempre que possível, a ferramenta coleta os fatos diretamente de interfaces do
+kernel e de arquivos de sistema.
 
-### Coletar aqui, analisar do lado limpo
+Isso **não torna o binário imune a um kernel comprometido**. Apenas reduz a
+quantidade de userland do alvo em que a análise precisa confiar.
 
-Menos tempo no host comprometido, e o retrato vira acervo: os mesmos fatos podem
-ser reanalisados semanas depois, com checks mais novos e com a lista de
-indicadores que só apareceu no terceiro dia.
+---
+
+## Instalação
+
+Prefira baixar e validar o binário em uma máquina limpa e só depois copiá-lo para
+o host investigado.
 
 ```sh
-sudo aletheia collect --out retrato.json          # no host, curto
-#  → imprime o sha256 do dump: ANOTE fora do host, no war log
-aletheia analyze retrato.json --ioc incidente.yml # na sua máquina, quantas vezes quiser
-#  → confere o dump contra o `.sha256` escrito na coleta
+ARCH=amd64   # amd64 | arm64 | 386
+
+curl -fLO \
+  "https://github.com/lex0c/aletheia/releases/latest/download/aletheia-linux-${ARCH}"
+
+curl -fLO \
+  "https://github.com/lex0c/aletheia/releases/latest/download/SHA256SUMS"
+
+grep "aletheia-linux-${ARCH}$" SHA256SUMS | sha256sum -c -
+
+chmod +x "aletheia-linux-${ARCH}"
+mv "aletheia-linux-${ARCH}" aletheia
 ```
 
-O `collect` escreve `retrato.json.sha256` ao lado e imprime a mesma soma na
-tela. O arquivo ao lado pega alteração acidental e corrupção de transporte — um
-dump atravessa scp, pendrive e três máquinas antes de virar conclusão. **Ele não
-autentica nada**: quem editar o dump edita a soma junto. A custódia de verdade é
-o número que você anotou, porque é a única cópia que o alvo não alcança.
-
-**A análise herda a cobertura da coleta e não pode melhorá-la.** Um retrato
-tirado sem root continua sem root quando analisado numa estação com root: o que
-ninguém olhou continua não olhado, e o relatório diz isso.
-
-### Os indicadores DESTE incidente
+Confira novamente a identidade do binário no destino:
 
 ```sh
-sudo aletheia scan --ioc incidente.yml --since 72h
+./aletheia version
 ```
+
+O comando imprime a versão, o caminho real e o SHA-256 do próprio executável.
+
+Evite baixar ferramentas diretamente no host suspeito quando isso não for
+necessário. Cada arquivo criado e cada conexão nova passam a fazer parte da
+timeline do incidente.
+
+---
+
+## Começando uma investigação
+
+### 1. Visão rápida
+
+```sh
+sudo ./aletheia wtf
+```
+
+`wtf` executa uma triagem rápida com orçamento de tempo limitado. Checks que não
+couberem no orçamento são reportados como não verificados, em vez de serem
+tratados como negativos.
+
+### 2. Scan completo
+
+```sh
+sudo ./aletheia scan -v
+```
+
+Para salvar saída estruturada:
+
+```sh
+sudo ./aletheia scan -v --json scan.jsonl
+```
+
+Para restringir a investigação a uma janela:
+
+```sh
+sudo ./aletheia scan --since 72h
+```
+
+Para investigar somente determinados subsistemas:
+
+```sh
+sudo ./aletheia scan --only proc,net,kernel
+```
+
+### 3. Preserve antes de destruir evidência
+
+Se um processo suspeito estiver executando um binário apagado, código via
+`memfd` ou regiões anônimas relevantes, preservar primeiro costuma ser mais
+valioso do que matar primeiro.
+
+```sh
+mkdir -p /mnt/ir/case-001
+
+sudo ./aletheia preserve \
+  --out /mnt/ir/case-001 \
+  --pid 812 \
+  --mem
+```
+
+Também é possível preservar arquivos, bytecode BPF e tráfego de rede:
+
+```sh
+sudo ./aletheia preserve --out /mnt/ir/case-001 --file /path/suspeito
+sudo ./aletheia preserve --out /mnt/ir/case-001 --bpf 42
+
+sudo ./aletheia preserve \
+  --out /mnt/ir/case-001 \
+  --pcap \
+  --iface eth0 \
+  --host 203.0.113.10 \
+  --duration 60s
+```
+
+Aletheia não mata processos, remove persistência ou altera regras de firewall.
+
+---
+
+## Coletar no alvo, analisar do lado limpo
+
+Para reduzir o tempo gasto no host investigado, coleta e análise podem ser
+separadas:
+
+```sh
+sudo ./aletheia collect --out host.json
+```
+
+Depois, em uma máquina de análise:
+
+```sh
+./aletheia analyze host.json
+```
+
+O mesmo dump pode ser reanalisado com novos IOCs:
+
+```sh
+./aletheia analyze host.json --ioc incident.yml
+```
+
+Exemplo:
 
 ```yaml
-# incidente.yml
-ips:     [51.91.190.241]
-hashes:  ["9f2c1e4b…"]
-paths:   ["*/htop/defunct", "*.dat"]
-strings: [GS_ARGS, gs-netcat]
+ips:
+  - 203.0.113.10
+
+hashes:
+  - "0123456789abcdef..."
+
+paths:
+  - "*/.config/htop/defunct"
+  - "*.dat"
+
+strings:
+  - "GS_ARGS"
+  - "gs-netcat"
 ```
 
-Achado por indicador é CRÍTICO — e vale o que a lista valer. `--since` recorta a
-janela da investigação: o que tem data e cai fora sai do relatório e é
-**contado**; o que não tem data **fica**.
+A análise **não melhora retroativamente a coleta**. Se determinada fonte não
+estava acessível quando o dump foi criado, essa lacuna continua existindo na
+análise offline.
 
-### Imagem montada
+### O que o `collect` coleta
 
-Quando o userland do alvo não é confiável, monte o disco e varra de fora — ali o
-kernel é o seu, e ocultamento de arquivo por rootkit não acontece (§35.6):
+`collect` captura os fatos estruturados que serão usados posteriormente pelos
+checks do `analyze`.
+
+Ele não salva simplesmente a saída de `ps`, `ss`, `lsof` ou outros comandos.
+Aletheia coleta diretamente as fontes que conhece e normaliza os resultados em
+um snapshot próprio.
+
+Dependendo do kernel, modo de execução, permissões e interfaces disponíveis, o
+dump pode conter:
+
+| Área | Exemplos de fatos coletados |
+| --- | --- |
+| Host | hostname, kernel, arquitetura, distribuição, uptime, relógio e contexto da aquisição |
+| Processos | PID, PPID, UID/GID, argv, executável real, estado, relações pai/filho, cgroups, namespaces e FDs |
+| Memória de processos | mappings de `/proc/<pid>/maps` e informações necessárias para identificar `memfd`, executável apagado e mappings executáveis/anônimos |
+| Ambiente | variáveis relevantes como `LD_PRELOAD`, `LD_AUDIT` e marcadores conhecidos de ferramentas |
+| Rede | sockets TCP/UDP, endereços locais/remotos, estados, inode, associação socket-processo e direção inferida |
+| Cron e `at` | crontabs, jobs periódicos, frequência e jobs `at` observáveis |
+| systemd | units, drop-ins, timers e comandos configurados para execução |
+| SSH | `authorized_keys`, opções de chave e configurações relevantes do `sshd` |
+| Loader | `/etc/ld.so.preload`, configuração do dynamic loader e variáveis de preload persistentes |
+| modprobe | regras `install`, `alias` e outras configurações relevantes de carregamento de módulos |
+| Filesystem | paths relevantes, ownership, permissões, timestamps, symlinks e metadata usada pelos checks |
+| Pacotes | ownership de arquivos e hashes declarados pelo gerenciador de pacotes quando o formato é suportado |
+| Integridade | hashes e metadata dos arquivos selecionados pela coleta para verificação |
+| Kernel modules | módulos visíveis em `/proc/modules`, visão de `/sys/module`, arquivos `.ko` relacionados e taints |
+| BPF | programas, maps, links, referências e owners que as APIs disponíveis permitem observar |
+| ftrace | funções instrumentadas e callbacks visíveis em tracefs/debugfs |
+| Kernel security | lockdown, assinatura obrigatória de módulos, Secure Boot, IMA, `modules_disabled`, `kptr_restrict`, `dmesg_restrict`, unprivileged BPF e Yama |
+| Cross-view | fatos usados para comparar visões independentes de processos, threads, módulos e BPF |
+| Cobertura | quais fontes foram observadas, quais estavam parciais, quais não puderam ser verificadas e por quê |
+| Aquisição | instante da coleta, versão/hash da ferramenta, capabilities disponíveis e lacunas encontradas |
+
+O conjunto exato depende do host.
+
+Por exemplo:
+
+```text
+tracefs não montado
+        ->
+ftrace não observável
+        ->
+lacuna registrada no dump
+
+BPF_GET_NEXT_ID retorna EPERM
+        ->
+enumeração BPF indisponível
+        ->
+lacuna registrada no dump
+
+/proc/<pid>/exe inacessível
+        ->
+facts daquele processo ficam parciais
+        ->
+analyze não transforma isso em "executável normal"
+```
+
+O fluxo é:
+
+```text
+               HOST
+                |
+                v
+             collect
+                |
+                v
+        Facts + Coverage
+                |
+                v
+           host.json
+                |
+          copia para fora
+                |
+                v
+             analyze
+                |
+                v
+      checks + correlation
+                |
+                v
+             findings
+```
+
+Isso permite analisar o mesmo retrato várias vezes:
 
 ```sh
-aletheia scan --root /mnt/imagem
+./aletheia analyze host.json
+./aletheia analyze host.json --ioc incident.yml
+./aletheia analyze host.json --since 72h
+./aletheia analyze host.json --only kernel -vv
 ```
+
+inclusive com uma versão futura da ferramenta, desde que o formato do dump seja
+compatível.
+
+#### O que `collect` não é
+
+O dump do `collect` **não é uma aquisição forense completa do host**.
+
+Ele não equivale a:
+
+```text
+imagem bit-a-bit do disco
++
+dump integral da RAM
++
+captura contínua de rede
+```
+
+A diferença prática é:
+
+```text
+collect
+  snapshot estruturado dos fatos que Aletheia sabe interpretar
+
+preserve
+  cópia explícita de evidência que pode desaparecer
+  executável, arquivo, bytecode BPF, memória anônima, PCAP
+
+scan --root
+  análise de um filesystem montado externamente
+
+aquisição forense externa
+  imagem de disco / memória obtida fora do kernel suspeito
+```
+
+Se um processo possui um executável apagado ou código somente em memória,
+`collect` registra os fatos observáveis sobre ele, mas para guardar os bytes
+antes que desapareçam use `preserve`:
+
+```sh
+sudo ./aletheia preserve \
+  --out /mnt/ir/case \
+  --pid 812 \
+  --mem
+```
+
+Se a hipótese inclui comprometimento do kernel, um dump produzido dentro do
+próprio guest continua limitado pela visão fornecida por esse kernel. Nesse
+caso, complemente a investigação com snapshot externo de disco e, quando
+necessário, aquisição de memória pela camada de virtualização/hypervisor.
+
+---
+
+## Analisar um filesystem fora do host
+
+Quando existe suspeita de rootkit ou adulteração do userland, prefira montar um
+snapshot ou imagem de disco em uma máquina confiável:
+
+```sh
+./aletheia scan --root /mnt/rootfs
+```
+
+Nesse modo, a leitura do filesystem é feita pelo kernel da estação de análise,
+não pelo kernel do host investigado.
+
+Isso é especialmente útil para procurar:
+
+- persistência escondida;
+- binários ou bibliotecas adulterados;
+- arquivos que não eram visíveis durante a coleta live;
+- alterações em units, cron, SSH, loader e configuração do sistema.
+
+O modo `--root` não substitui análise de memória. Um implante exclusivamente em
+RAM pode não existir no filesystem.
+
+---
+
+## Monitoramento de curta duração
+
+```sh
+sudo ./aletheia watch
+```
+
+`watch` repete amostras de processos e sockets e executa scans completos
+periodicamente, reportando mudanças ao longo do tempo.
+
+Exemplo:
+
+```sh
+sudo ./aletheia watch \
+  --interval 2s \
+  --full 30s \
+  --for 10m
+```
+
+Esse mecanismo usa polling. Um processo ou conexão que exista por menos tempo
+que o intervalo pode escapar.
+
+Se o objetivo é detecção contínua de eventos efêmeros, use uma solução instalada
+antes do incidente baseada em audit/eBPF e trate Aletheia como ferramenta de
+triagem e investigação.
+
+---
+
+## Inspeção sem veredito
+
+`info` expõe os fatos coletados sem tentar classificá-los como comprometimento:
+
+```sh
+./aletheia info process
+./aletheia info process 812
+
+./aletheia info net
+./aletheia info ip 203.0.113.10
+./aletheia info port 443
+
+./aletheia info file /usr/sbin/sshd
+./aletheia info git /srv/app
+```
+
+Também funciona sobre um dump:
+
+```sh
+./aletheia info --from host.json process 812
+```
+
+Use `info` quando a pergunta for "o que está acontecendo?" e `scan` quando a
+pergunta for "quais sinais de comprometimento existem?".
+
+---
+
+## Quando usar cada comando
+
+A forma mais simples de pensar na CLI é:
+
+```text
+preciso de uma visão rápida?             -> wtf
+quero uma triagem completa agora?        -> scan
+quero entender um processo/arquivo/IP?   -> info
+a evidência pode desaparecer?            -> preserve
+quero sair rápido do host?               -> collect
+quero analisar depois/offline?           -> analyze
+suspeito que o host esteja escondendo?   -> scan --root
+o comportamento aparece e some?          -> watch
+tenho um estado conhecido anterior?       -> baseline
+quero saber exatamente quais regras há?  -> checks
+```
+
+Abaixo estão fluxos concretos de investigação.
+
+### Cenário 1: "Entrei no servidor e alguma coisa parece errada"
+
+Você ainda não tem um IOC específico. Quer saber rapidamente se existem sinais
+óbvios de comprometimento sem começar examinando centenas de processos à mão.
+
+Comece por:
+
+```sh
+sudo ./aletheia wtf
+```
+
+Se aparecer algo relevante ou se você quiser uma triagem mais completa:
+
+```sh
+sudo ./aletheia scan -v
+```
+
+Se quiser guardar a análise:
+
+```sh
+mkdir -p /mnt/ir/host-01
+
+sudo ./aletheia scan \
+  -v \
+  --json /mnt/ir/host-01/scan.jsonl
+```
+
+Use este fluxo para perguntas como:
+
+```text
+"esse servidor parece comprometido?"
+"há persistência estranha?"
+"há processo fileless?"
+"há reverse shell?"
+"há sinais de rootkit ou BPF suspeito?"
+```
+
+`wtf` é para orientação rápida. `scan` é o diagnóstico de triagem.
+
+---
+
+### Cenário 2: "Achei um processo suspeito"
+
+Suponha que você encontrou o PID `812`.
+
+Antes de matar o processo:
+
+```sh
+sudo ./aletheia info process 812
+```
+
+Isso ajuda a responder:
+
+```text
+qual é o executável real?
+quem é o pai?
+quais sockets pertencem a ele?
+há namespaces diferentes?
+o executável foi apagado?
+há mapas de memória suspeitos?
+```
+
+Depois rode a triagem completa para buscar contexto ao redor do processo:
+
+```sh
+sudo ./aletheia scan -v
+```
+
+Se houver evidência volátil, preserve:
+
+```sh
+mkdir -p /mnt/ir/case-812
+
+sudo ./aletheia preserve \
+  --out /mnt/ir/case-812 \
+  --pid 812 \
+  --mem
+```
+
+Só depois disso considere matar o processo ou remover persistência.
+
+A ordem é importante porque casos como estes podem desaparecer ao encerrar o
+PID:
+
+```text
+/proc/812/exe -> /tmp/.x (deleted)
+memfd:payload
+código injetado em mapping anônimo
+socket ativo de C2
+```
+
+---
+
+### Cenário 3: "O processo está disfarçado de kernel thread"
+
+Você encontra algo como:
+
+```text
+[kswapd0]
+[kworker/0:1]
+[card0-crtc8]
+```
+
+mas suspeita que seja userspace.
+
+Primeiro:
+
+```sh
+sudo ./aletheia info process <PID>
+```
+
+Depois:
+
+```sh
+sudo ./aletheia scan --only proc,net,persist -v
+```
+
+Aletheia pode correlacionar situações em que:
+
+```text
+argv aparenta kernel thread
++
+existe /proc/<pid>/exe apontando para ELF userspace
++
+há socket outbound
++
+há persistência relacionada
+```
+
+Se o executável estiver apagado ou for fileless:
+
+```sh
+sudo ./aletheia preserve \
+  --out /mnt/ir/case \
+  --pid <PID> \
+  --mem
+```
+
+Esse é um caso onde `kill -9` como primeiro comando pode destruir a melhor
+evidência disponível.
+
+---
+
+### Cenário 4: "Tenho um IP de C2 ou outro IOC"
+
+Você recebeu um endereço suspeito:
+
+```text
+203.0.113.10
+```
+
+Para olhar somente esse alvo:
+
+```sh
+sudo ./aletheia info ip 203.0.113.10
+```
+
+Para correlacioná-lo com toda a triagem, crie:
+
+```yaml
+# incident.yml
+ips:
+  - 203.0.113.10
+```
+
+e execute:
+
+```sh
+sudo ./aletheia scan \
+  --ioc incident.yml \
+  -v
+```
+
+Uma lista pode combinar vários tipos de indicador:
+
+```yaml
+ips:
+  - 203.0.113.10
+
+paths:
+  - "*/.config/htop/defunct"
+  - "/tmp/.x"
+
+strings:
+  - "gs-netcat"
+  - "GS_ARGS"
+
+hashes:
+  - "0123456789abcdef..."
+```
+
+Se o host já foi coletado anteriormente:
+
+```sh
+./aletheia analyze host.json --ioc incident.yml
+```
+
+Isso permite aplicar IOCs que só ficaram conhecidos depois da aquisição.
+
+---
+
+### Cenário 5: "Tenho pouco tempo no host comprometido"
+
+Você quer minimizar permanência e comandos executados no alvo.
+
+Faça somente a aquisição:
+
+```sh
+sudo ./aletheia collect \
+  --out /mnt/ir/host-01.json
+```
+
+Depois copie o dump para uma estação confiável e saia do host.
+
+Na estação de análise:
+
+```sh
+./aletheia analyze host-01.json -v
+```
+
+Mais tarde, você pode repetir a análise:
+
+```sh
+./aletheia analyze host-01.json \
+  --ioc incident.yml \
+  --since 7d \
+  -v
+```
+
+Use esse fluxo quando:
+
+```text
+o servidor é crítico;
+você quer reduzir interferência;
+há várias máquinas para coletar;
+o analista que fará a investigação não está no host;
+novos IOCs podem surgir depois.
+```
+
+O dump guarda o que foi observado no momento da coleta, inclusive lacunas de
+cobertura.
+
+---
+
+### Cenário 6: "Suspeito que ls, ps ou o próprio kernel estejam escondendo coisas"
+
+Se existe suspeita de rootkit, não fique repetindo comandos dentro do mesmo
+ambiente esperando que a próxima consulta seja magicamente mais honesta.
+
+Obtenha um snapshot do disco e monte-o read-only em uma máquina confiável:
+
+```sh
+sudo mount -o ro /dev/mapper/snapshot /mnt/suspect
+```
+
+Então:
+
+```sh
+./aletheia scan \
+  --root /mnt/suspect \
+  -v
+```
+
+Você também pode inspecionar algo específico:
+
+```sh
+./aletheia info \
+  --root /mnt/suspect \
+  file /etc/ld.so.preload
+```
+
+Esse fluxo é indicado para procurar:
+
+```text
+arquivo escondido no host live
+biblioteca adulterada
+systemd unit maliciosa
+cron persistence
+authorized_keys
+módulo em disco
+alterações de loader
+```
+
+Importante: `--root` troca a autoridade usada para observar o **filesystem**.
+Ele não recupera processos ou código exclusivamente em RAM.
+
+Se a hipótese for comprometimento real do kernel, combine isso com aquisição de
+memória externa ao guest.
+
+---
+
+### Cenário 7: "A conexão ou processo aparece por poucos segundos"
+
+Um `scan` é uma fotografia. Alguns comportamentos são temporários:
+
+```text
+beacon a cada 30 segundos
+processo que nasce, executa e morre
+reverse shell reconectando
+worker criado periodicamente por cron
+```
+
+Use:
+
+```sh
+sudo ./aletheia watch \
+  --interval 2s \
+  --full 30s \
+  --for 15m
+```
+
+Se você estiver principalmente interessado em processo e rede:
+
+```sh
+sudo ./aletheia watch \
+  --only proc,net \
+  --interval 1s \
+  --full 60s \
+  --for 10m
+```
+
+O intervalo é um compromisso:
+
+```text
+intervalo menor -> maior chance de pegar eventos curtos
+intervalo maior -> menos custo de coleta
+```
+
+Polling ainda pode perder algo que exista por menos tempo que o intervalo.
+
+Para monitoramento permanente, Aletheia não substitui sensores event-driven
+instalados previamente.
+
+---
+
+### Cenário 8: "Quero capturar o tráfego do processo suspeito"
+
+Depois de identificar um peer:
+
+```sh
+sudo ./aletheia info process 812
+```
+
+preserve uma janela de tráfego:
+
+```sh
+sudo ./aletheia preserve \
+  --out /mnt/ir/case-812 \
+  --pcap \
+  --iface eth0 \
+  --host 203.0.113.10 \
+  --port 443 \
+  --proto tcp \
+  --duration 120s
+```
+
+Se quiser capturar tudo na interface, isso precisa ser explícito:
+
+```sh
+sudo ./aletheia preserve \
+  --out /mnt/ir/case-812 \
+  --pcap \
+  --iface eth0 \
+  --all \
+  --duration 60s
+```
+
+Captura sem filtro pode conter credenciais e tráfego de terceiros. Trate o PCAP
+como evidência sensível.
+
+---
+
+### Cenário 9: "Há um programa BPF suspeito"
+
+Comece pelo scan focado em kernel:
+
+```sh
+sudo ./aletheia scan --only kernel -vv
+```
+
+Se um finding apontar um programa BPF específico, preserve o bytecode antes que
+ele desapareça:
+
+```sh
+sudo ./aletheia preserve \
+  --out /mnt/ir/kernel-case \
+  --bpf 42
+```
+
+Isso é especialmente importante porque um programa BPF pode existir apenas em
+memória e desaparecer quando suas referências forem removidas ou quando a
+máquina reiniciar.
+
+Um finding BPF forte deve aumentar a suspeita sobre a confiabilidade das demais
+visões fornecidas pelo kernel, mas ainda não substitui aquisição externa de
+memória.
+
+---
+
+### Cenário 10: "Quero investigar só persistência"
+
+Em vez de executar o conjunto inteiro:
+
+```sh
+sudo ./aletheia scan \
+  --only persist \
+  -vv
+```
+
+Isso direciona a triagem para mecanismos como:
+
+```text
+cron
+systemd
+SSH
+ld.so.preload
+environment preload
+modprobe install
+file watchers relacionados a persistência
+```
+
+Se quiser olhar o filesystem fora da máquina suspeita:
+
+```sh
+./aletheia scan \
+  --root /mnt/snapshot \
+  --only persist \
+  -vv
+```
+
+O segundo formato é preferível quando você suspeita que a visão live esteja
+sendo manipulada.
+
+---
+
+### Cenário 11: "Quero investigar especificamente sinais de kernel compromise"
+
+Comece reunindo as evidências live disponíveis:
+
+```sh
+sudo ./aletheia scan \
+  --only kernel \
+  -vv
+```
+
+Procure principalmente por combinações, não apenas por uma linha isolada:
+
+```text
+divergência entre /proc/modules e /sys/module
++
+taint de módulo sem explicação
++
+hook ftrace em função sensível
++
+BPF sem owner ou inconsistente entre visões
++
+processos ou threads divergindo entre censos
+```
+
+Se houver uma inconsistência forte, trate o kernel como suspeito.
+
+A próxima etapa não deve ser simplesmente executar o mesmo scan novamente.
+Prefira mudar a fonte de evidência:
+
+```text
+1. preservar evidência volátil;
+2. snapshot de disco;
+3. scan --root em máquina confiável;
+4. aquisição de RAM pelo hypervisor, quando possível;
+5. análise forense de memória.
+```
+
+Aletheia pode levantar e correlacionar sinais de comprometimento de kernel, mas
+uma coleta executada dentro do próprio kernel suspeito não consegue certificar
+sua integridade.
+
+---
+
+### Cenário 12: "Tenho dezenas ou centenas de servidores para triar"
+
+Para uma primeira passagem rápida por SSH:
+
+```sh
+ssh web01 'sudo ./aletheia wtf --oneline'
+ssh web02 'sudo ./aletheia wtf --oneline'
+ssh web03 'sudo ./aletheia wtf --oneline'
+```
+
+O exit code pode ser usado pela automação:
+
+```sh
+sudo ./aletheia wtf --oneline
+rc=$?
+
+case "$rc" in
+  0) echo "sem findings e cobertura completa" ;;
+  1) echo "warning ou cobertura incompleta" ;;
+  2) echo "critical" ;;
+  3) echo "erro da ferramenta" ;;
+esac
+```
+
+Para hosts que merecem aprofundamento:
+
+```sh
+sudo ./aletheia collect --out /mnt/ir/"$(hostname)".json
+```
+
+e centralize a análise em uma estação limpa:
+
+```sh
+./aletheia analyze web01.json
+./aletheia analyze web02.json
+```
+
+---
+
+### Cenário 13: "Quero comparar com um estado conhecido anterior"
+
+Crie baseline apenas quando você tem motivos para considerar o estado atual uma
+boa referência:
+
+```sh
+sudo ./aletheia baseline -o baseline.json
+```
+
+Depois:
+
+```sh
+sudo ./aletheia scan \
+  --baseline baseline.json \
+  -v
+```
+
+Isso é útil para distinguir:
+
+```text
+"essa unit apareceu hoje"
+```
+
+de:
+
+```text
+"essa unit já existia na referência"
+```
+
+Mas baseline não é allowlist de legitimidade.
+
+Se você criar a baseline depois que o invasor já entrou, o comprometimento
+também vira "estado conhecido".
+
+---
+
+### Cenário 14: "Quero saber exatamente por que um finding existe"
+
+Liste o catálogo:
+
+```sh
+./aletheia checks
+```
+
+Depois rode com mais detalhe:
+
+```sh
+sudo ./aletheia scan -vv
+```
+
+Se quiser reduzir o ruído para um domínio:
+
+```sh
+sudo ./aletheia scan --only net -vv
+```
+
+ou:
+
+```sh
+sudo ./aletheia scan --only kernel -vv
+```
+
+O objetivo de `-vv` não é produzir um relatório "mais assustador". É mostrar
+evidência e cobertura suficientes para você decidir se o finding é explicável,
+falso positivo ou parte de uma correlação maior.
+
+---
+
+## Comandos
+
+| Comando | Uso |
+| --- | --- |
+| `scan` | coleta e executa os checks de triagem |
+| `wtf` | triagem rápida com orçamento de tempo |
+| `watch` | amostragem temporal de processos, rede e scans periódicos |
+| `collect` | coleta fatos sem emitir veredito |
+| `analyze` | analisa um dump previamente coletado |
+| `info` | inspeciona processos, rede, arquivos, Git, IPs e portas |
+| `preserve` | preserva artefatos voláteis ou arquivos selecionados |
+| `baseline` | captura um estado de referência |
+| `checks` | lista checks, requisitos e falsos positivos conhecidos |
+| `version` | mostra versão, caminho e hash do binário |
+
+A referência completa de flags está no próprio binário:
+
+```sh
+./aletheia --help
+./aletheia <comando> --help
+```
+
+---
+
+## Cobertura
+
+Aletheia trata cobertura como parte do resultado.
+
+Um check pode estar:
+
+```text
+complete
+partial
+not checked
+```
+
+Além disso, a própria coleta pode registrar lacunas quando uma fonte necessária
+não estava disponível.
+
+Exemplos comuns:
+
+- execução sem privilégios suficientes;
+- `/proc` montado com restrições;
+- tracefs/debugfs indisponível;
+- kernel sem determinada API;
+- dados que só podem ser observados no host live;
+- limites internos atingidos durante uma coleta hostil ou muito grande.
+
+Um resultado sem findings, mas com cobertura incompleta, não é equivalente a um
+resultado totalmente observado.
 
 ---
 
 ## Exit codes
 
-```
-0  OK          zero achados E cobertura completa
-1  WARNING     achado que precisa de olhar humano, OU cobertura incompleta
-2  CRITICAL    indicador de alta confiança
-3  ERROR       argumento ou ambiente inválido
-```
+| Código | Resultado | Significado |
+| ---: | --- | --- |
+| `0` | `OK` | nenhum finding e cobertura completa |
+| `1` | `WARNING` | existe warning ou a cobertura ficou incompleta |
+| `2` | `CRITICAL` | pelo menos um indicador de alta confiança |
+| `3` | `ERROR` | erro da ferramenta, argumentos ou ambiente inválido |
 
-Exit 0 exige as **duas** condições. Uma execução sem root e sem debugfs não sai
-zero — seria a ferramenta contradizendo o próprio nome. Vale igual para o
-`watch`: uma vigília que passou a noite sem enxergar não termina dizendo que a
-noite foi tranquila.
+Isso permite usar o scanner em automação sem transformar uma falha de coleta em
+"host limpo".
 
 ---
 
-## O que ela não faz
+## Como pensar nos findings
 
+Aletheia não usa uma regra simples de "arquivo estranho = malware".
+
+Os checks tentam combinar sinais que ganham força quando aparecem juntos.
+
+Exemplo conceitual:
+
+```text
+processo executando de memfd
+        +
+executável sem owner de pacote
+        +
+conexão outbound pública
+        +
+persistência relacionada
+        =
+investigação prioritária
 ```
-não mata processo, não apaga arquivo, não altera regra ou serviço
-não executa nada do host: o binário do alvo pode ser o implante
-não fala com a rede e não resolve DNS: consulta avisa o atacante (§2.1)
-não tem base de assinatura de malware, e não deveria ter
-não move o atime do que lê: apagar a data de acesso é apagar prova (§9)
-só escreve com `preserve`, e apenas dentro de --out
+
+Outro exemplo:
+
+```text
+processo com argv parecido com "[kworker/...]"
+        +
+/proc/<pid>/exe aponta para executável userspace
+        =
+userspace disfarçado de kernel thread
 ```
 
-O atime é recente e vale explicar: ler um arquivo move a data de acesso dele, e
-em `relatime` — o padrão de toda distribuição — isso apaga quando aquele arquivo
-foi lido pela última vez. Numa ferramenta que usa data como evidência, é o
-investigador destruindo a resposta de "quem leu o `authorized_keys`, e quando".
-As leituras passam por `O_NOATIME`; sem root, em arquivo de outro dono, ele
-falha e a leitura acontece do jeito normal — não ler seria pior.
+Para sinais de kernel, a estratégia inclui cross-view:
 
-**"RESULT: OK" não prova que o host está limpo.** Significa que nenhum indicador
-COBERTO disparou. Um rootkit em kernel mente para todos os checks (§35.8) — é
-por isso que a cobertura é impressa junto do veredito, sempre.
+```text
+/proc/modules
+      vs
+/sys/module
+      vs
+funções rastreáveis do ftrace
+```
+
+A terceira via pega o caso que as duas primeiras não separam: um módulo que se
+desencadeia da lista para sumir do `/proc/modules` continua no `/sys/module`, o
+que o torna indistinguível de um módulo embutido no kernel. O ftrace desfaz o
+empate, porque o registro da função rastreável do módulo sobrevive a essa
+ocultação e só é liberado no descarregamento real.
+
+e:
+
+```text
+enumeração BPF
+      vs
+referências e abertura direta por ID
+```
+
+Cross-view aumenta o custo de ocultação, mas todas essas fontes ainda pertencem
+ao mesmo kernel. Um rootkit suficientemente sofisticado pode falsificá-las de
+forma coerente.
 
 ---
 
-## Compilar
+## Modelo de confiança
 
-Sem dependência externa: o `go.mod` não tem um único `require`.
+### O que Aletheia tenta não confiar
+
+- comandos administrativos instalados no host;
+- bibliotecas dinâmicas do userland;
+- resolução DNS;
+- reputação online durante o scan;
+- uma única visão quando outra fonte local pode ser correlacionada.
+
+### O que continua sendo uma autoridade no modo live
+
+O kernel.
+
+Isso é uma limitação fundamental.
+
+Se o atacante tiver execução arbitrária no kernel, ele pode interferir com:
+
+```text
+procfs
+sysfs
+tracefs
+BPF
+netlink
+VFS
+syscalls
+```
+
+Por isso:
+
+> **`RESULT: OK` significa "nenhum indicador coberto disparou". Não significa
+> "este host foi provado íntegro".**
+
+Quando a hipótese inclui comprometimento de kernel, aumente a independência da
+evidência:
+
+1. preserve o que for volátil;
+2. obtenha snapshot do disco fora do guest;
+3. execute `scan --root` em sistema confiável;
+4. se necessário, adquira memória pela camada de virtualização/hypervisor;
+5. faça análise forense de memória com ferramentas apropriadas.
+
+---
+
+## Baseline
 
 ```sh
-make verify      # lint + testes + build, com o binário CONFIRMADO estático
-make dist        # amd64, 386 e arm64 + sha256
-make scenarios   # a suíte de cenários (exige docker; alguns exigem qemu)
+sudo ./aletheia baseline -o baseline.json
+sudo ./aletheia scan --baseline baseline.json
 ```
 
-`CGO_ENABLED=0` não é otimização: sem ele o binário linka contra a glibc do host
-e perde a imunidade a `LD_PRELOAD` e a binário de sistema trojanizado.
+Uma baseline não transforma comportamento conhecido em comportamento legítimo.
+Quando um finding já existia na baseline, ele continua no relatório e sua
+severidade pode ser reduzida.
+
+**Não crie uma baseline de confiança durante um incidente e assuma que o estado
+capturado é benigno.** Se o comprometimento já existia, a baseline também o
+capturou.
 
 ---
 
-## Como isto é testado
+## Preservação e impacto no host
 
-```
-90 checks       cada um declara os próprios falsos positivos — é invariante de
-                registro, não disciplina: sem eles o programa nem inicia
-163 cenários    a CLI de verdade, contra /proc de verdade: debian 12 e alpine
-                como matriz, centos 7 e debian 9 para userland de época (rpm,
-                systemd de outra geração), e microVM com kernel PRÓPRIO — 3.18,
-                4.14 e i686 — para o que contêiner nenhum alcança, porque
-                contêiner compartilha o kernel de quem o roda
-mutação         mutantes plantados à mão em cada unidade nova, para provar que
-                os testes têm dentes
-```
+Os scanners não fazem remediação automática.
 
-O contrato dos cenários não é "passou": é **o que a ferramenta precisa dizer**,
-incluindo o silêncio. Um check que nunca foi visto CALAR não foi demonstrado.
+Comandos que recebem explicitamente um caminho de saída podem gravar os
+artefatos solicitados, por exemplo:
+
+- `collect --out`;
+- `baseline -o`;
+- `scan --json`;
+- `preserve --out`.
+
+As leituras de arquivos tentam usar `O_NOATIME` para reduzir alteração da
+timeline. Quando o kernel ou as permissões não permitem esse modo, a ferramenta
+pode precisar fazer uma leitura normal.
+
+`preserve` é o comando destinado a copiar evidência do alvo. Nada dentro de
+`--out` é sobrescrito silenciosamente.
 
 ---
 
-## Documentação
+## Arquitetura
 
-O registro das decisões é o **histórico do git**. Cada commit diz o que mudou,
-o que aquilo quebrava antes e por que a correção é essa — inclusive os defeitos
-que a suíte achou e os que só apareceram rodando a ferramenta no host de quem a
-escreveu.
+A implementação separa aquisição de fatos de interpretação:
+
+```text
+              +----------------+
+              | env / filesystem|
+              +--------+-------+
+                       |
+                       v
+                 +-----------+
+                 | collectors |
+                 +-----+-----+
+                       |
+                       v
+                 +-----------+
+                 |   Facts   |
+                 +-----+-----+
+                       |
+            +----------+----------+
+            |                     |
+            v                     v
+       +---------+           +----------+
+       | checks  |           |   info   |
+       +----+----+           +----------+
+            |
+            v
+     +-------------+
+     | correlation |
+     | + coverage  |
+     +------+------+
+            |
+            v
+        +--------+
+        | report |
+        +--------+
+```
+
+`collect` serializa os fatos e a cobertura observada.
+
+`analyze` reconstrói esse contexto e executa os checks depois, sem fingir que
+fontes ausentes durante a aquisição ficaram disponíveis retroativamente.
+
+Essa separação também permite que os checks sejam testados sobre fatos
+controlados, enquanto cenários de integração exercitam a CLI contra sistemas
+reais.
+
+---
+
+## Desenvolvimento
+
+O projeto usa apenas a biblioteca padrão do Go.
+
+Build local:
 
 ```sh
-git log                       # a história, com o porquê de cada unidade
-aletheia checks               # o catálogo: id, §ref, requires, falsos positivos
-aletheia <comando> --help     # as flags, que são documentação e não saída gerada
+make build
 ```
 
-O `--help` e o `checks` são a referência de uso: eles vivem no binário, então
-não têm como divergir dele.
+Verificação padrão:
+
+```sh
+make verify
+```
+
+`verify` executa formatação, `go vet`, testes, build e confirma que o binário
+resultante é realmente estático.
+
+Testes adicionais:
+
+```sh
+make scenarios
+make race
+make mutacao
+```
+
+- `scenarios` executa a CLI contra ambientes Linux reais/isolados;
+- `race` roda o detector de data races, incluindo a suíte de cenários;
+- `mutacao` injeta mutações em decisões dos checks para verificar se os testes
+  detectam regressões semânticas.
+
+Distribuição:
+
+```sh
+make dist
+```
+
+Gera binários Linux para as arquiteturas suportadas e hashes SHA-256.
+
+---
+
+## Limitações
+
+Aletheia **não**:
+
+- prova que um host está limpo;
+- substitui aquisição e análise forense de memória;
+- impede um kernel comprometido de mentir para uma coleta live;
+- faz EDR contínuo;
+- captura todos os processos ou conexões mais curtos que o intervalo de polling;
+- decide automaticamente se uma chave SSH, ferramenta administrativa ou agente
+  legítimo pertence à organização;
+- usa reputação online ou consulta serviços externos durante o scan;
+- remove malware ou corrige o sistema;
+- deve ser usado como única fonte para encerrar uma investigação de
+  comprometimento de kernel.
+
+O objetivo é reduzir rapidamente o espaço de investigação, preservar evidência
+importante e tornar explícito onde a observação foi forte, parcial ou impossível.
+
+---
+
+## Licença
+
+MIT.

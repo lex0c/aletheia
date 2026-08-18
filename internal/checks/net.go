@@ -126,6 +126,17 @@ var pivot = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+
+		// Um pool de aplicação tem a MESMA forma que um pivô, multiplicada pelo
+		// número de workers. Ver pool.go: o agrupamento é o que impede que um
+		// servidor php-fpm produza um aviso por processo.
+		grupo := novoPool()
+		type dados struct {
+			p                  *facts.Process
+			ext, intn, inbound []facts.Socket
+		}
+		por := map[string]*dados{}
+
 		for i := range f.Processes {
 			p := &f.Processes[i]
 			if p.Self || p.Vanished {
@@ -152,21 +163,40 @@ var pivot = check.Check{
 				continue
 			}
 
-			ev := []string{
-				"saída externa: " + joinPeers(ext, 3),
-				"saída interna: " + joinPeers(intn, 4),
-				"exe=" + nz(p.Exe, "?"),
-				"comm=" + p.Comm + " uid=" + strconv.Itoa(p.UID),
+			// A forma é o executável mais o conjunto dos DOIS lados. Dois
+			// workers que falam com destinos diferentes continuam sendo duas
+			// histórias, e continuam saindo separados.
+			chave := grupo.junta(nz(p.Exe, "?"), append(peersDe(ext), peersDe(intn)...), p.PID)
+			if _, visto := por[chave]; !visto {
+				por[chave] = &dados{p: p, ext: ext, intn: intn, inbound: inbound}
 			}
-			if len(inbound) > 0 {
+		}
+
+		for _, chave := range grupo.Grupos() {
+			d := por[chave]
+			pids := grupo.PIDs(chave)
+
+			ev := []string{
+				"saída externa: " + joinPeers(d.ext, 3),
+				"saída interna: " + joinPeers(d.intn, 4),
+				"exe=" + nz(d.p.Exe, "?"),
+				"comm=" + d.p.Comm + " uid=" + strconv.Itoa(d.p.UID),
+			}
+			if len(d.inbound) > 0 {
 				// Recebe de fora E sai para fora: pode ser proxy que também
 				// fala com o operador. Vale registrar, não descartar.
 				ev = append(ev, "atenção: também recebe conexão externa ("+
-					joinPeers(inbound, 2)+") — confira se é proxy legítimo")
+					joinPeers(d.inbound, 2)+") — confira se é proxy legítimo")
 			}
 
-			fd := self.F(check.SevWarn, "pid="+strconv.Itoa(p.PID), "", ev...)
-			fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
+			sujeito := "pid=" + strconv.Itoa(d.p.PID)
+			if len(pids) > 1 {
+				sujeito = nz(d.p.Exe, d.p.Comm)
+				ev = append(ev, notaDoPool(len(pids), nz(d.p.Exe, "?")), listaDePIDs(pids))
+			}
+
+			fd := self.F(check.SevWarn, sujeito, "", ev...)
+			fd.Quando, fd.QuandoFonte = d.p.StartUTC, "início do processo"
 			fd.NextSteps = []string{
 				"este host é CAMINHO, não só alvo: os alvos internos passam a ser suspeitos (runbook §23)",
 				"o alcance interno está na §12.4; a mitigação é egress default-deny (runbook §34.3)",
@@ -236,4 +266,13 @@ func nz(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// peersDe extrai os endereços remotos, para compor a forma do grupo.
+func peersDe(ss []facts.Socket) []string {
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		out = append(out, s.Peer())
+	}
+	return out
 }

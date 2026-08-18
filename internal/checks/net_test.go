@@ -200,8 +200,73 @@ func TestSocketHerdadoPorForkApareceNosDoisProcessos(t *testing.T) {
 		Sockets: []facts.Socket{ext, int1},
 	}
 	r := pivot.Run(pivot, f, testEnv())
-	if len(r.Findings) != 2 {
-		t.Fatalf("achados = %d, quer 2: os dois processos detêm as duas pernas", len(r.Findings))
+	// UM achado, com os DOIS pids dentro: pai e filho são o mesmo executável
+	// falando com os mesmos destinos, e o agrupamento por forma junta os dois
+	// (ver pool.go). A propriedade que este teste protege continua sendo a do
+	// join — se o filho não fosse atribuído ao socket herdado, ele não estaria
+	// na lista.
+	if len(r.Findings) != 1 {
+		t.Fatalf("achados = %d, quer 1 agrupado", len(r.Findings))
+	}
+	ev := strings.Join(r.Findings[0].Evidence, " ")
+	if !strings.Contains(ev, "pids: 100 101") {
+		t.Errorf("os dois processos detêm as duas pernas, e os dois precisam "+
+			"aparecer: %v", r.Findings[0].Evidence)
+	}
+}
+
+// Dois processos com o MESMO executável e destinos DIFERENTES continuam sendo
+// duas histórias. O agrupamento junta repetição, não conteúdo diferente.
+func TestPivosComDestinosDiferentesNaoSeJuntam(t *testing.T) {
+	f := &facts.Facts{
+		Processes: []facts.Process{
+			{PID: 100, Comm: "app", Exe: "/srv/app", FDs: sockFDs(1, 2)},
+			{PID: 200, Comm: "app", Exe: "/srv/app", FDs: sockFDs(3, 4)},
+		},
+		Sockets: []facts.Socket{
+			sock(1, 100, facts.DirOut, facts.ScopePublic, "51.91.190.241"),
+			sock(2, 100, facts.DirOut, facts.ScopePrivate, "10.0.0.9"),
+			sock(3, 200, facts.DirOut, facts.ScopePublic, "8.8.8.8"),
+			sock(4, 200, facts.DirOut, facts.ScopePrivate, "10.0.0.9"),
+		},
+	}
+	if r := pivot.Run(pivot, f, testEnv()); len(r.Findings) != 2 {
+		t.Errorf("achados = %d, quer 2: destinos diferentes são histórias diferentes", len(r.Findings))
+	}
+}
+
+// O caso que originou tudo isto: um pool de aplicação. Trinta workers do mesmo
+// executável falando com a mesma API externa e o mesmo banco interno viravam
+// trinta avisos — contra um retrato de produção de verdade, 497.
+func TestPoolDeWorkersNaoViraParede(t *testing.T) {
+	f := &facts.Facts{}
+	for i := 0; i < 30; i++ {
+		pid := 1000 + i
+		ext, intn := uint64(2*i+1), uint64(2*i+2)
+		f.Processes = append(f.Processes, facts.Process{
+			PID: pid, Comm: "php-fpm", Exe: "/usr/sbin/php-fpm8.1",
+			FDs: sockFDs(ext, intn),
+		})
+		f.Sockets = append(f.Sockets,
+			sock(ext, pid, facts.DirOut, facts.ScopePublic, "35.231.119.5"),
+			sock(intn, pid, facts.DirOut, facts.ScopePrivate, "10.142.0.55"))
+	}
+	r := pivot.Run(pivot, f, testEnv())
+	if len(r.Findings) != 1 {
+		t.Fatalf("achados = %d, quer 1: trinta workers idênticos são UM fato "+
+			"sobre o serviço, não trinta", len(r.Findings))
+	}
+	fd := r.Findings[0]
+	if fd.Subject != "/usr/sbin/php-fpm8.1" {
+		t.Errorf("subject = %q — num grupo o sujeito é o EXECUTÁVEL, porque o "+
+			"pid deixou de identificar o achado", fd.Subject)
+	}
+	ev := strings.Join(fd.Evidence, " ")
+	if !strings.Contains(ev, "30 processos") {
+		t.Errorf("a contagem não pode se perder: %v", fd.Evidence)
+	}
+	if !strings.Contains(ev, "pids: 1000 1001") || !strings.Contains(ev, "(+22)") {
+		t.Errorf("os pids saem com teto, e o que foi cortado é dito: %v", fd.Evidence)
 	}
 }
 

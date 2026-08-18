@@ -197,7 +197,15 @@ var saidaSemDono = check.Check{
 
 		// Um processo pode ter muitas conexões para o mesmo destino; o achado é
 		// sobre o PROCESSO, e repetir por socket inflaria a triagem.
+		//
+		// E um POOL pode ter muitos processos com o mesmo destino: aí o achado é
+		// sobre o executável, e repetir por processo inflaria a triagem do mesmo
+		// jeito — só que multiplicado pelo tamanho do pool (ver pool.go).
 		visto := map[int]bool{}
+		grupo := novoPool()
+		primeiro := map[string]*facts.Process{}
+		destinosDo := map[string][]string{}
+
 		for i := range f.Sockets {
 			s := &f.Sockets[i]
 			if s.Dir != facts.DirOut || s.PeerScope != facts.ScopePublic || s.PID == 0 {
@@ -215,10 +223,21 @@ var saidaSemDono = check.Check{
 			}
 			visto[s.PID] = true
 
-			sev, nota := pesoDoCaminho(p.Exe)
 			destinos := destinosPublicos(f, s.PID)
+			chave := grupo.junta(p.Exe, destinos, p.PID)
+			if _, ok := primeiro[chave]; !ok {
+				primeiro[chave], destinosDo[chave] = p, destinos
+			}
+		}
+
+		for _, chave := range grupo.Grupos() {
+			p := primeiro[chave]
+			pids := grupo.PIDs(chave)
+			destinos := destinosDo[chave]
+
+			sev, nota := pesoDoCaminho(p.Exe)
 			ev := []string{
-				p.Comm + " (pid=" + strconv.Itoa(s.PID) + ") mantém conexão para " +
+				p.Comm + " (pid=" + strconv.Itoa(p.PID) + ") mantém conexão para " +
 					strings.Join(destinos, ", "),
 				"exe=" + p.Exe + " — nenhum pacote reivindica este binário (base: " +
 					f.Pkg.Kind + ")",
@@ -229,8 +248,13 @@ var saidaSemDono = check.Check{
 			if p.StartUTC != "" {
 				ev = append(ev, "processo iniciado em "+p.StartUTC)
 			}
+			sujeito := "pid=" + strconv.Itoa(p.PID)
+			if len(pids) > 1 {
+				sujeito = p.Exe
+				ev = append(ev, notaDoPool(len(pids), p.Exe), listaDePIDs(pids))
+			}
 
-			fd := self.F(sev, "pid="+strconv.Itoa(s.PID), "", ev...)
+			fd := self.F(sev, sujeito, "", ev...)
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"sudo cp " + p.Exe + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",

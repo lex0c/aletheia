@@ -1,6 +1,7 @@
 package checks
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 
@@ -46,6 +47,10 @@ var mapsRWXAnon = check.Check{
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
 		var denied int
+		// isentos são os processos que a regra de runtime com JIT tirou da
+		// pergunta. Eles NÃO foram avaliados, e o número precisa chegar à
+		// cobertura.
+		var isentos []string
 		for i := range f.Processes {
 			p := &f.Processes[i]
 			if p.Self || p.Vanished {
@@ -62,7 +67,20 @@ var mapsRWXAnon = check.Check{
 					anon = append(anon, m)
 				}
 			}
-			if len(anon) == 0 || isJITRuntime(p) {
+			if len(anon) == 0 {
+				continue
+			}
+			if isJITRuntime(p) {
+				// A isenção existe e é necessária — sem ela, todo host com
+				// navegador ou JVM vira uma parede de achados. Mas ela é uma
+				// decisão de NÃO OLHAR, e decisão de não olhar se DECLARA.
+				//
+				// A ressalva morava só em FalsePositives, que é impresso junto
+				// de um achado — e supressão significa achado nenhum, então ela
+				// nunca era impressa para os processos a que se aplicava. Medido
+				// num contêiner: implante com rwx anônimo dentro de
+				// /usr/lib/node/node saía com "cobertura 89/89 completa".
+				isentos = append(isentos, nz(p.Exe, p.Comm))
 				continue
 			}
 
@@ -97,11 +115,36 @@ var mapsRWXAnon = check.Check{
 			r.Findings = append(r.Findings, fd)
 		}
 		if denied > 0 {
-			r.Partial = []string{strconv.Itoa(denied) +
-				" processos com /proc/<pid>/maps ilegível não foram avaliados"}
+			r.Partial = append(r.Partial, strconv.Itoa(denied)+
+				" processos com /proc/<pid>/maps ilegível não foram avaliados")
+		}
+		if n := len(isentos); n > 0 {
+			// UMA linha, e não uma por processo: um desktop tem dezenas de
+			// processos de navegador, e N degradações pela mesma decisão
+			// afogariam a seção que existe para ser lida.
+			r.Partial = append(r.Partial, strconv.Itoa(n)+
+				" processo(s) com região rwx anônima NÃO foram avaliados por serem "+
+				"runtime com JIT em diretório de sistema ("+firstN(dedupOrdenado(isentos), 3)+
+				"): código injetado DENTRO de um deles não é distinguível daqui do "+
+				"código que o próprio runtime gera")
 		}
 		return r
 	},
+}
+
+// dedupOrdenado tira as repetições e ordena. Um navegador tem trinta processos
+// com o mesmo exe, e listar o mesmo caminho trinta vezes não informa nada.
+func dedupOrdenado(ss []string) []string {
+	visto := map[string]bool{}
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if !visto[s] {
+			visto[s] = true
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // nsDivergent — runbook §3.15.
@@ -149,6 +192,8 @@ var nsDivergent = check.Check{
 		}
 
 		var denied int
+		// sobUnit conta os processos que a isenção de unit tirou da pergunta.
+		var sobUnit int
 		for i := range f.Processes {
 			p := &f.Processes[i]
 			if p.Self || p.Vanished || p.PID == 1 {
@@ -169,7 +214,17 @@ var nsDivergent = check.Check{
 			// configuração, não anomalia. Sobra o caso da §3.15 — namespace
 			// criado por quem não tinha por que criar, tipicamente `unshare`
 			// a partir de uma sessão.
-			if isContainerCgroup(p.Cgroup) || isUnitCgroup(p.Cgroup) {
+			if isContainerCgroup(p.Cgroup) {
+				continue
+			}
+			if isUnitCgroup(p.Cgroup) {
+				// Mesmo caso do runtime com JIT: a isenção é necessária —
+				// PrivateTmp=, PrivateNetwork= e PrivateUsers= criam namespace
+				// legitimamente, e num desktop udevd, polkit e upower já somam
+				// dezenas —, mas ela é uma decisão de NÃO OLHAR, e essas se
+				// declaram. Quem comprometeu uma unit some daqui, e o operador
+				// precisa saber que sumiu.
+				sobUnit++
 				continue
 			}
 
@@ -206,6 +261,12 @@ var nsDivergent = check.Check{
 		if denied > 0 {
 			r.Partial = append(r.Partial, strconv.Itoa(denied)+
 				" processos com /proc/<pid>/ns/* ilegível não foram avaliados")
+		}
+		if sobUnit > 0 {
+			r.Partial = append(r.Partial, strconv.Itoa(sobUnit)+
+				" processo(s) sob unit de systemd NÃO foram avaliados: "+
+				"PrivateTmp e PrivateUsers criam namespace legitimamente, e "+
+				"quem comprometeu uma unit não aparece por este caminho")
 		}
 		return r
 	},

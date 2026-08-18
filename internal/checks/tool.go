@@ -98,7 +98,9 @@ var toolArtifact = check.Check{
 			}
 			r.Findings = append(r.Findings, fd)
 		}
-		r.Partial = f.PersistDenied["artifact"]
+		// append e não atribuição: a atribuição aliasa o slice do Facts, e o
+		// Facts é compartilhado por todos os checks.
+		r.Partial = append(r.Partial, f.PersistDenied["artifact"]...)
 		return r
 	},
 }

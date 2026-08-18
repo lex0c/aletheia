@@ -82,7 +82,11 @@ var unitExecSuspect = check.Check{
 				r.Findings = append(r.Findings, fd)
 			}
 		}
-		r.Partial = f.PersistDenied["unit"]
+		// append sobre o nil, e uma vez só. A atribuição direta ALIASA o slice
+		// do Facts — um append posterior escreveria na capacidade sobressalente
+		// de um fato compartilhado por todos os checks — e a linha repetida
+		// duplicava cada razão na seção de cobertura, que é justamente a seção
+		// em que a ferramenta se audita.
 		r.Partial = append(r.Partial, f.PersistDenied["unit"]...)
 		return r
 	},

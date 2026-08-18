@@ -20,6 +20,8 @@ package scenario
 //	A3  ativação adiada             nada roda no instante da varredura
 //	A4  data forjada                o relógio do arquivo mente
 //	A5  ativação por socket         o backdoor só nasce quando alguém conecta
+//	A6  dentro de um runtime JIT    a isenção que existe para calar o ruído
+//	A7  sob uma unit de systemd     o ponto cego declarado do §3.15
 
 func init() {
 	Register(Scenario{
@@ -205,6 +207,43 @@ func init() {
 		},
 		Exit: -1,
 	})
+
+	Register(Scenario{
+		ID:   "A6-dentro-de-runtime-com-jit",
+		Desc: "o implante roda DENTRO de um runtime com JIT: a isenção some com o achado, e precisa aparecer como LACUNA",
+		// ATAQUE À SUPRESSÃO, e não ao detector.
+		//
+		// `proc.maps_rwx_anon` isenta runtime com JIT rodando de diretório de
+		// sistema, e a isenção é NECESSÁRIA: sem ela, todo host com navegador
+		// ou JVM vira parede de achado. Mas ela é uma decisão de não olhar, e
+		// quem leu esta ferramenta sabe disso — basta pôr o implante lá dentro.
+		//
+		// O desfecho certo aqui NÃO é "detecta". É DECLARA: não há como
+		// distinguir daqui código injetado numa JVM do código que a JVM gera, e
+		// dizer isso é a única resposta honesta. O que a ferramenta não pode
+		// fazer é sair com cobertura completa — que era o comportamento antes
+		// deste cenário existir. Medido: 89/89, zero menção à isenção.
+		Images: matriz,
+		Plant: `mkdir -p /usr/lib/node
+			cp /helper /usr/lib/node/node
+			/usr/lib/node/node rwx &
+			sleep 0.5`,
+		// O achado de injeção NÃO sai: a isenção agiu, e ela é para agir.
+		Forbid: []string{"proc.maps_rwx_anon"},
+		// Mas a cobertura tem que dizer o que ficou de fora.
+		MustBeIncomplete: true,
+		Args:             []string{"-v"},
+		ExpectOutput: []string{
+			"NÃO foram avaliados por serem runtime com JIT",
+			"não é distinguível daqui do código que o próprio runtime gera",
+		},
+		Exit: -1,
+		// Orçamento de ruído MEDIDO: o binário sem dono em /usr/lib continua
+		// sendo achado de propriedade (§24), e isso é correto — o que este
+		// cenário afirma é o silêncio do §3.10 acompanhado da lacuna.
+		MaxWarn: 2,
+	})
+
 }
 
 // ---------------------------------------------------------------------------

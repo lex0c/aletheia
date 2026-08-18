@@ -38,7 +38,7 @@ processo destrói a única cópia de um binário que nunca esteve em disco.
 Os binários de cada release são estáticos e cobrem `amd64`, `386` e `arm64`.
 
 ```sh
-VER=v0.1.0            # ou: use a URL de /releases/latest/download/…
+VER=v1.1.1            # ou: use a URL de /releases/latest/download/…
 ARCH=amd64            # amd64 | 386 | arm64
 BASE="https://github.com/lex0c/aletheia/releases/download/$VER"
 
@@ -131,7 +131,7 @@ aletheia <comando> [flags]
 | `watch` | varre em ciclo e reporta só o que MUDAR — o eixo que um retrato não tem |
 | `collect` | só coleta: tira o retrato e sai. Não conclui nada |
 | `analyze` | só analisa: roda os checks sobre um retrato, do lado limpo |
-| `info` | responde sobre UM alvo — process, ip, port, file — sem concluir nada |
+| `info` | responde sobre UM alvo — process, net, git, ip, port, file — sem concluir nada |
 | `preserve` | guarda a evidência antes que ela suma. O **único** que escreve |
 | `baseline` | captura o estado atual como referência para comparar depois |
 | `checks` | catálogo: id, §ref, modo, grupo, requires, falsos positivos |
@@ -260,8 +260,16 @@ não mata processo, não apaga arquivo, não altera regra ou serviço
 não executa nada do host: o binário do alvo pode ser o implante
 não fala com a rede e não resolve DNS: consulta avisa o atacante (§2.1)
 não tem base de assinatura de malware, e não deveria ter
+não move o atime do que lê: apagar a data de acesso é apagar prova (§9)
 só escreve com `preserve`, e apenas dentro de --out
 ```
+
+O atime é recente e vale explicar: ler um arquivo move a data de acesso dele, e
+em `relatime` — o padrão de toda distribuição — isso apaga quando aquele arquivo
+foi lido pela última vez. Numa ferramenta que usa data como evidência, é o
+investigador destruindo a resposta de "quem leu o `authorized_keys`, e quando".
+As leituras passam por `O_NOATIME`; sem root, em arquivo de outro dono, ele
+falha e a leitura acontece do jeito normal — não ler seria pior.
 
 **"RESULT: OK" não prova que o host está limpo.** Significa que nenhum indicador
 COBERTO disparou. Um rootkit em kernel mente para todos os checks (§35.8) — é

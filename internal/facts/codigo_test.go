@@ -349,3 +349,33 @@ func TestReviewTerceiraRodada(t *testing.T) {
 		}
 	}
 }
+
+// FPs de host real que NÃO são backdoor — vulnerabilidade ou anti-padrão, mas
+// não implante. Cada um distingue uma coisa que o motor precisa saber separar.
+func TestNaoBackdoorDeHostReal(t *testing.T) {
+	naoCrit := map[string]string{
+		// jpGraph: `new $theme()` com $theme do request é object injection
+		// (vulnerabilidade), e é código de EXEMPLO de biblioteca. Instanciação,
+		// não chamada de função.
+		"jpgraph new-classe": "$theme=$_GET['theme'];\nif($theme){ $g->SetTheme(new $theme()); }",
+		// dispatch dinâmico de MÉTODO num objeto: $obj->$metodo() só alcança os
+		// métodos daquele objeto — anti-padrão de MVC legado, não RCE. O `->`
+		// separa do `$fn()` livre.
+		"dispatch metodo":   "$metodo=$_GET['metodo'];\n$dados=$obj->$metodo($filtro,$qtd);",
+		"dispatch estatico": "$m=$_GET['m'];\nFoo::$m($x);",
+	}
+	for nome, src := range naoCrit {
+		if ms := analisarConteudo(src, "php"); tem(ms, 2, "") {
+			t.Errorf("%s: NÃO é backdoor (vuln/anti-padrão, não RCE): %+v", nome, ms)
+		}
+	}
+	// Mas a chamada de FUNÇÃO nomeada pelo request continua RCE:
+	for _, src := range []string{
+		`$fn=$_GET['f'];` + "\n" + `$fn($_GET['a']);`,
+		`$_GET['a']($_GET['b']);`,
+	} {
+		if ms := analisarConteudo(src, "php"); !tem(ms, 2, "") {
+			t.Errorf("função dinâmica pelo request É RCE: %q -> %+v", src, ms)
+		}
+	}
+}

@@ -81,6 +81,14 @@ type Process struct {
 	TracerPID int    `json:"tracer_pid,omitempty"`
 	Threads   int    `json:"threads,omitempty"`
 
+	// NProcMax é o RLIMIT_NPROC efetivo deste processo — o teto de processos E
+	// THREADS do uid REAL, que é o que produz EAGAIN quando estoura.
+	//
+	// Ele é por processo e não por usuário: um processo pode baixar o próprio
+	// limite, e o do systemd não é o do login. Vale -1 para "sem teto" e 0 para
+	// "não lido".
+	NProcMax int `json:"nproc_max,omitempty"`
+
 	StartUTC string        `json:"start_utc,omitempty"`
 	Age      time.Duration `json:"-"`
 
@@ -434,6 +442,7 @@ func readProcess(pid int) (*Process, readOutcome) {
 		}
 		return nil, readDenied
 	}
+	readLimites(p)
 	readExe(p)
 	readCwd(p)
 	readCmdline(p)
@@ -628,6 +637,37 @@ func readEnviron(p *Process) {
 		}
 	}
 	sort.Strings(p.EnvKeys)
+}
+
+// readLimites lê o teto de processos do /proc/<pid>/limits.
+//
+// É o número que transforma "há muitos processos" em "por isso o `su` falha":
+// o RLIMIT_NPROC conta processos E threads do uid real, e quando ele estoura o
+// kernel recusa fork e execve com EAGAIN — inclusive o execve que o `su` faz
+// DEPOIS de já ter trocado de identidade, que é o que produz a mensagem
+// "failed to execute /bin/bash: Resource temporarily unavailable".
+func readLimites(p *Process) {
+	b, err := os.ReadFile(procPath(p.PID, "limits"))
+	if err != nil {
+		return
+	}
+	for _, ln := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(ln, "Max processes") {
+			continue
+		}
+		campos := strings.Fields(strings.TrimPrefix(ln, "Max processes"))
+		if len(campos) == 0 {
+			return
+		}
+		if campos[0] == "unlimited" {
+			p.NProcMax = -1
+			return
+		}
+		if n, err := strconv.Atoi(campos[0]); err == nil {
+			p.NProcMax = n
+		}
+		return
+	}
 }
 
 func readCgroup(p *Process) {

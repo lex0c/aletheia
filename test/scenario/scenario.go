@@ -237,13 +237,14 @@ func Register(s Scenario) {
 // muda, e a contagem depende do ritmo da amostragem; o `preserve` não conta
 // nada, porque não produz achado.
 func orcamentoDeRuidoFazSentido(cmd string) bool {
-	return cmd != "watch" && cmd != "preserve"
+	return cmd != "watch" && cmd != "preserve" && cmd != "info"
 }
 
 // Varredura diz se o cenário ANALISA o host. Só quem analisa tem cobertura a
-// declarar: o `preserve` copia bytes e vai embora, e uma linha de cobertura ali
+// declarar: o `preserve` copia bytes e vai embora, e o `info` responde sobre UM
+// alvo sem concluir nada. Uma linha de cobertura em qualquer um dos dois
 // afirmaria uma conclusão que ninguém tirou.
-func (s Scenario) Varredura() bool { return s.Cmd != "preserve" }
+func (s Scenario) Varredura() bool { return s.Cmd != "preserve" && s.Cmd != "info" }
 
 // Orcamento devolve o teto de avisos e se ele foi DECLARADO. É a função que
 // separa "este cenário aceita até N avisos" de "ninguém disse nada sobre ruído

@@ -50,6 +50,7 @@ COMANDOS
   analyze       só analisa: roda os checks sobre um retrato, do lado limpo
   preserve      guarda a evidência antes que ela suma — inclusive tráfego
                 (--pcap). O ÚNICO que escreve
+  info          responde sobre UM alvo: process, ip, port, file
   checks        catálogo: id, §ref, modo, grupo, requires, falsos positivos
   version       versão e hash deste binário
 
@@ -93,6 +94,23 @@ FLAGS DE baseline
 FLAGS DE wtf
   --oneline     UMA linha: veredito + alvos. Para triagem de FROTA por ssh
   --budget D    teto de tempo (padrão 2s). O que estourar vira NÃO VERIFICADO
+
+INFO — a pergunta que vem ANTES do veredito
+  aletheia info process         censo: quem roda o quê, e contra que TETO
+  aletheia info process 812     o dossiê de um processo
+  aletheia info ip 51.91.190.241
+  aletheia info port 4100
+  aletheia info file /usr/sbin/nginx
+  --from DUMP   responder sobre um retrato do collect, do lado limpo
+  --root PATH   responder sobre uma imagem montada
+
+  Junta o que hoje custa ps, ss, lsof, stat, getcap, lsattr e dpkg -S
+  encadeados, e diz o que cada número SIGNIFICA. Não conclui nada: quem conclui
+  é o scan, que traz os falsos positivos junto.
+
+  O censo compara as tarefas de cada uid com o RLIMIT_NPROC dele — é o número
+  que explica Resource temporarily unavailable em su, fork e execve — e NOMEIA
+  a repetição quando ela tem forma conhecida (cron que se sobrepõe, pool).
 
 FLAGS DE collect E analyze
   collect --out F [--root PATH]      escreve o dump ("-" = stdout)
@@ -218,6 +236,8 @@ func main() {
 		os.Exit(runCollect(os.Args[2:]))
 	case "analyze":
 		os.Exit(runAnalyze(os.Args[2:]))
+	case "info":
+		os.Exit(runInfo(os.Args[2:]))
 	case "checks":
 		os.Exit(runChecks(os.Args[2:]))
 	case "version":

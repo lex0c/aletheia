@@ -102,6 +102,7 @@ aletheia <comando> [flags]
 | `watch` | varre em ciclo e reporta só o que MUDAR — o eixo que um retrato não tem |
 | `collect` | só coleta: tira o retrato e sai. Não conclui nada |
 | `analyze` | só analisa: roda os checks sobre um retrato, do lado limpo |
+| `info` | responde sobre UM alvo — process, ip, port, file — sem concluir nada |
 | `preserve` | guarda a evidência antes que ela suma. O **único** que escreve |
 | `baseline` | captura o estado atual como referência para comparar depois |
 | `checks` | catálogo: id, §ref, modo, grupo, requires, falsos positivos |
@@ -122,6 +123,44 @@ sudo aletheia scan --json "$IR/scan.jsonl" -v
 # o relatório imprime o comando de preservação com o PID já preenchido:
 sudo aletheia preserve --out "$IR" --pid 812 --mem
 ```
+
+### A pergunta que vem antes do veredito
+
+```sh
+aletheia info process              # censo: quem roda o quê, e contra que TETO
+aletheia info process 812          # o dossiê de um processo
+aletheia info ip 51.91.190.241
+aletheia info port 4100
+aletheia info file /usr/sbin/nginx
+```
+
+Junta o que hoje custa `ps`, `ss`, `lsof`, `stat`, `getcap`, `lsattr` e `dpkg -S`
+encadeados, e diz o que cada número **significa**. O censo compara as tarefas de
+cada uid com o `RLIMIT_NPROC` dele — é o número que explica `Resource
+temporarily unavailable` em `su`, `fork` e `execve` — e dá **nome** à repetição
+quando ela tem forma conhecida:
+
+```
+CENSO · 904 processos · 4904 tarefas (processos + threads)
+
+  usuário         proc  tarefas    teto
+  node             904     4904    4096  ⛔ NO TETO — fork e execve falham com EAGAIN
+
+O QUE NODE ESTÁ RODANDO
+  por executável REAL
+     400  /usr/bin/dash
+     400  /usr/bin/node
+  por processo pai
+     503  pid=2 (crond)
+
+PADRÃO RECONHECIDO — CRON SOBREPOSTO · 400 cópias
+  /bin/sh -c /home/node/check-pm2.sh
+  as cópias começaram em intervalos REGULARES de ~1m0s, e nenhuma terminou
+```
+
+Não conclui nada: quem conclui é o `scan`, que traz os falsos positivos junto.
+Perguntar sobre processo, ip ou porta custa dezenas de milissegundos — não varre
+disco. Também responde sobre um retrato: `info --from retrato.json process`.
 
 ### Coletar aqui, analisar do lado limpo
 

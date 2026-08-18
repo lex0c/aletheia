@@ -161,3 +161,33 @@ func collectSudoers(f *Facts, e *env.Env) {
 		}
 	}
 }
+
+// NomesDeUsuario lê APENAS o /etc/passwd, para traduzir uid em nome.
+//
+// Existe para a coleta barata: o `info` responde sobre processo em dezenas de
+// milissegundos porque não varre filesystem, e sem isto ele imprimiria "uid
+// 1000" onde o operador espera "node" — que é justamente o nome que ele digitou
+// no comando que falhou.
+//
+// É só o passwd: shadow, grupos e sudoers são a coleta completa, e nenhum deles
+// é preciso para dar nome a um número.
+func NomesDeUsuario(e *env.Env) []Account {
+	b, err := e.ReadFile("/etc/passwd")
+	if err != nil {
+		return nil
+	}
+	var out []Account
+	for _, ln := range strings.Split(string(b), "\n") {
+		fs := strings.Split(ln, ":")
+		if len(fs) < 4 || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		uid, err1 := strconv.Atoi(fs[2])
+		gid, err2 := strconv.Atoi(fs[3])
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		out = append(out, Account{Name: fs[0], UID: uid, GID: gid})
+	}
+	return out
+}

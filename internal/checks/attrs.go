@@ -47,7 +47,6 @@ var arquivoImutavel = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
-		semDono := caminhosSemDono(f)
 
 		for i := range f.Atributos {
 			a := &f.Atributos[i]
@@ -72,16 +71,30 @@ var arquivoImutavel = check.Check{
 			// O peso vem de o arquivo ser algo que ninguém empacotou. Config de
 			// sistema travada é endurecimento; binário sem dono travado é
 			// implante que se defende.
+			//
+			// São TRÊS respostas e não duas. A ausência do caminho no
+			// inventário de propriedade era lida como "tem dono", e num host
+			// RPM — onde a base é binária e o inventário sai vazio inteiro —
+			// isso fazia a ferramenta AFIRMAR que cada arquivo imutável veio de
+			// pacote, e ainda baixar a severidade do caso que importa.
 			sev := check.SevWarn
-			if semDono[a.Path] {
+			temDono, sabido := propriedadeSabida(f, a.Path)
+			switch {
+			case sabido && !temDono:
 				sev = check.SevCritical
 				ev = append(ev, "e nenhum pacote reivindica este arquivo: travar o "+
 					"que a distribuição não entregou é defesa de implante, não "+
 					"endurecimento de sistema")
-			} else {
+			case sabido:
 				ev = append(ev, "o arquivo tem dono de pacote — guia de endurecimento "+
 					"manda travar /etc/passwd e /etc/shadow assim, e ali o atributo "+
 					"é defesa")
+			default:
+				ev = append(ev, "NÃO foi possível perguntar quem entregou este "+
+					"arquivo: a diferença entre endurecimento e implante que se "+
+					"defende fica em aberto, e ela é a única coisa que separa os dois")
+				r.Partial = append(r.Partial, "a propriedade de pacote de "+a.Path+
+					" não pôde ser consultada: o peso deste achado ficou no piso")
 			}
 			if motivo := arquivoComPoder(f, a.Path); motivo != "" {
 				sev = check.SevCritical

@@ -274,6 +274,22 @@ var saidaSemDono = check.Check{
 // Devolve vazio quando a base de pacotes não pôde ser consultada, e é por isso
 // que os dois checks propagam a lacuna: sem a resposta, "nenhuma conexão de
 // binário sem dono" significaria apenas que ninguém perguntou.
+// propriedadeSabida responde a pergunta de dono com TRÊS respostas em vez de
+// duas: tem dono, não tem dono, e NÃO FOI PERGUNTADO.
+//
+// `caminhosSemDono` só sabe dizer as duas primeiras, e quem lê a ausência do
+// caminho no mapa como "tem dono" AFIRMA o que não foi verificado. Num host
+// RPM, onde a base é binária e o inventário de propriedade sai vazio inteiro,
+// essa leitura fazia a ferramenta dizer que cada arquivo veio de pacote.
+func propriedadeSabida(f *facts.Facts, p string) (temDono, sabido bool) {
+	for i := range f.Ownership {
+		if f.Ownership[i].Path == p {
+			return f.Ownership[i].Owned, true
+		}
+	}
+	return false, false
+}
+
 func caminhosSemDono(f *facts.Facts) map[string]bool {
 	out := map[string]bool{}
 	for i := range f.Ownership {

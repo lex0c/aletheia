@@ -113,6 +113,15 @@ type Ownership struct {
 func collectPkg(f *Facts, e *env.Env) {
 	f.Pkg = detectarPkgDB(e)
 
+	// Os atributos de inode NÃO dependem de base de pacote: são lidos sobre o
+	// que executa e sobre o que carrega SUID. Ficam num defer justamente por
+	// isso — eles moravam depois dos dois `return` abaixo, e num host RPM,
+	// onde a base é binária e não se consulta, `chattr +i` nunca era
+	// procurado. Arquivo imutável saía da varredura com a mesma cara de
+	// arquivo comum, e tornar imutável é o passo seguinte clássico de quem
+	// acabou de plantar alguma coisa.
+	defer coletarAtributos(f, e)
+
 	candidatos := candidatosDePropriedade(f, e)
 	if len(candidatos) == 0 {
 		return
@@ -121,6 +130,14 @@ func collectPkg(f *Facts, e *env.Env) {
 		f.denyPersist("pkg", "propriedade de pacote não pôde ser consultada ("+
 			f.Pkg.Motivo+"): "+strconv.Itoa(len(candidatos))+
 			" binários em execução ou agendados NÃO foram verificados")
+		// O timestomp, esse, depende mesmo da propriedade — e a lacuna precisa
+		// ser dita em vez de deduzida. A comparação de datas só separa sinal de
+		// ruído nos arquivos SEM dono: o rpm preserva o mtime do build do
+		// pacote e o ctime é o da instalação, então rodá-la sem saber quem tem
+		// dono acusaria cada binário do sistema com meses de diferença.
+		f.denyPersist("pkg", "a comparação de datas (timestomp) NÃO foi feita: "+
+			"ela só distingue adulteração de instalação nos arquivos sem dono "+
+			"de pacote, e a propriedade não pôde ser consultada")
 		return
 	}
 
@@ -171,7 +188,6 @@ func collectPkg(f *Facts, e *env.Env) {
 	// arquivos SEM dono de pacote, e os atributos de inode são lidos sobre o
 	// conjunto de que a ferramenta FALA.
 	coletarTimestomp(f, e)
-	coletarAtributos(f, e)
 }
 
 func detectarPkgDB(e *env.Env) PkgDB {
@@ -193,54 +209,77 @@ func detectarPkgDB(e *env.Env) PkgDB {
 		Motivo: "nenhuma base de pacotes encontrada"}
 }
 
+// registrar aplica as três provas que um candidato precisa passar. Era o corpo
+// do closure `add`; virou função para que os caminhos vindos do disco possam
+// usá-lo sem passar pelo filtro de metacaractere, que não vale para eles.
+func registrar(e *env.Env, out map[string][]string, p, onde string) {
+	// O arquivo precisa EXISTIR.
+	//
+	// Uma unit instalada cujo binário opcional não está no host aponta para
+	// um caminho que não existe — `netctl-ifplugd@.service` referenciando
+	// /usr/bin/ifplugd é o exemplo que apareceu num host real, e rendeu
+	// vinte e uma acusações de "nenhum pacote reivindica". Nenhum pacote
+	// reivindica mesmo: não há arquivo. Unit apontando para binário ausente
+	// é unit QUEBRADA, que é outra conversa e outra severidade.
+	fi, err := e.Lstat(p)
+	if err != nil {
+		return
+	}
+	// Link vira DOIS candidatos: ele e o alvo final. Sem perguntar pelo
+	// alvo, a cadeia do update-alternatives não tem como ser respondida.
+	if fi.Mode()&fs.ModeSymlink != 0 {
+		if alvo := alvoFinal(e, p); alvo != "" && alvo != p {
+			if _, ja := out[alvo]; !ja {
+				if afi, err := e.Lstat(alvo); err == nil && !afi.IsDir() {
+					out[alvo] = append(out[alvo], "alvo de "+p)
+				}
+			}
+		}
+	}
+	// E não pode ser DIRETÓRIO. Linha de agendamento e de unit cita caminho
+	// que não é executável o tempo todo — `cd /srv/app`, `--report
+	// /etc/cron.hourly`, `WorkingDirectory=` —, e perguntar quem empacotou
+	// um diretório não tem resposta útil: nenhum pacote reivindica `/`.
+	//
+	// O ramo dos gatilhos, mais abaixo, já descartava diretório e explicava
+	// por quê. Era a mesma decisão, tomada uma vez e aplicada num lugar só.
+	//
+	// O corte é em DIRETÓRIO e não em "não-regular" de propósito: /bin/sh é
+	// link simbólico em quase toda distribuição, e exigir arquivo regular
+	// aqui jogaria fora binário de verdade.
+	if fi.IsDir() {
+		return
+	}
+	out[p] = append(out[p], onde)
+}
+
 // candidatosDePropriedade é a pergunta estreita: quem é dono do que está
 // RODANDO e do que algum gatilho EXECUTA.
 func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 	out := map[string][]string{}
+
+	// addDoDisco é para caminho que veio do FILESYSTEM ou do kernel: o exe de
+	// /proc, uma biblioteca do maps, um .ko, um binário SUID achado por
+	// readdir. Ele não passa pelo filtro de metacaractere, e a distinção é do
+	// atacante: um implante em `/usr/local/bin/app(1)` ou `/tmp/.x$` sumia da
+	// pergunta de propriedade em silêncio, porque o filtro que existe para
+	// descartar FRAGMENTO DE SHELL descartava também o nome esquisito de um
+	// arquivo que existe de verdade.
+	addDoDisco := func(p, onde string) {
+		if !strings.HasPrefix(p, "/") {
+			return
+		}
+		registrar(e, out, p, onde)
+	}
+	// add é para caminho extraído de uma LINHA DE COMANDO — ExecStart, linha de
+	// cron, valor de variável. Ali o metacaractere significa que o token não é
+	// um caminho, e perguntar quem empacotou `$HOME/x` não tem resposta.
 	add := func(p, onde string) {
 		if !strings.HasPrefix(p, "/") || strings.ContainsAny(p, "*?[]()|;&$\"'`<>") {
 			return
 		}
-		// O arquivo precisa EXISTIR.
-		//
-		// Uma unit instalada cujo binário opcional não está no host aponta para
-		// um caminho que não existe — `netctl-ifplugd@.service` referenciando
-		// /usr/bin/ifplugd é o exemplo que apareceu num host real, e rendeu
-		// vinte e uma acusações de "nenhum pacote reivindica". Nenhum pacote
-		// reivindica mesmo: não há arquivo. Unit apontando para binário ausente
-		// é unit QUEBRADA, que é outra conversa e outra severidade.
-		fi, err := e.Lstat(p)
-		if err != nil {
-			return
-		}
-		// Link vira DOIS candidatos: ele e o alvo final. Sem perguntar pelo
-		// alvo, a cadeia do update-alternatives não tem como ser respondida.
-		if fi.Mode()&fs.ModeSymlink != 0 {
-			if alvo := alvoFinal(e, p); alvo != "" && alvo != p {
-				if _, ja := out[alvo]; !ja {
-					if afi, err := e.Lstat(alvo); err == nil && !afi.IsDir() {
-						out[alvo] = append(out[alvo], "alvo de "+p)
-					}
-				}
-			}
-		}
-		// E não pode ser DIRETÓRIO. Linha de agendamento e de unit cita caminho
-		// que não é executável o tempo todo — `cd /srv/app`, `--report
-		// /etc/cron.hourly`, `WorkingDirectory=` —, e perguntar quem empacotou
-		// um diretório não tem resposta útil: nenhum pacote reivindica `/`.
-		//
-		// O ramo dos gatilhos, mais abaixo, já descartava diretório e explicava
-		// por quê. Era a mesma decisão, tomada uma vez e aplicada num lugar só.
-		//
-		// O corte é em DIRETÓRIO e não em "não-regular" de propósito: /bin/sh é
-		// link simbólico em quase toda distribuição, e exigir arquivo regular
-		// aqui jogaria fora binário de verdade.
-		if fi.IsDir() {
-			return
-		}
-		out[p] = append(out[p], onde)
+		registrar(e, out, p, onde)
 	}
-
 	// Quantos processos de CONTÊINER saíram da pergunta. Não é zero calado: o
 	// número vai para o relatório, porque "não perguntei sobre trinta binários"
 	// é informação e não pode virar silêncio.
@@ -264,12 +303,12 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 			deContainer++
 			continue
 		}
-		add(p.Exe, "processo pid="+strconv.Itoa(p.PID))
+		addDoDisco(p.Exe, "processo pid="+strconv.Itoa(p.PID))
 		// As bibliotecas que ele carregou. É o que faz o Ebury aparecer: a
 		// biblioteca trocada NO LUGAR dela não executa nada, e nenhuma outra
 		// fonte a traria para a pergunta.
 		for _, lib := range p.MapsLibs {
-			add(lib, "biblioteca carregada")
+			addDoDisco(lib, "biblioteca carregada")
 		}
 	}
 	for i := range f.Units {
@@ -288,7 +327,7 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 	// /usr/lib/python3.11/sitecustomize.py pelo libpython3.11-minimal. Quem
 	// responde é o gerenciador de pacotes, e por isso eles entram AQUI.
 	for _, p := range hooksDePython(e) {
-		add(p, "hook de inicialização do python")
+		addDoDisco(p, "hook de inicialização do python")
 	}
 	// E o ALVO de cada hook de interpretador. Sem isto o check de hook não tem
 	// como pesar o que encontrou: `NODE_OPTIONS=--require /opt/app/x.js` numa
@@ -346,7 +385,7 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 		// pela distribuição não é achado; um acrescentado ali é — e a diferença
 		// é exatamente a pergunta de propriedade.
 		if fi, err := e.Lstat(t.File); err == nil && fi.Mode().IsRegular() {
-			add(t.File, "arquivo de gatilho")
+			addDoDisco(t.File, "arquivo de gatilho")
 		}
 	}
 	// O arquivo de configuração de módulo, e o MÓDULO em si.
@@ -359,7 +398,7 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 	// altos que existem — é a camada em que o invasor passa a mentir para tudo
 	// que estiver acima, inclusive para esta ferramenta.
 	for i := range f.Modules {
-		add(f.Modules[i].File, "config de módulo")
+		addDoDisco(f.Modules[i].File, "config de módulo")
 	}
 	// O programa que o KERNEL invoca sozinho é o candidato mais forte desta
 	// lista: ele executa como root, sem processo pai suspeito e sem unit.
@@ -380,14 +419,14 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 	relevantes := modulosRelevantes(f)
 	for _, ko := range f.ModuleFiles {
 		if relevantes[ko] {
-			add(ko, "módulo de kernel")
+			addDoDisco(ko, "módulo de kernel")
 		}
 	}
 	// SUID é o caso em que a pergunta de propriedade vale MAIS: o conjunto
 	// legítimo de binários com setuid é pequeno, conhecido e vem todo de
 	// pacote. Um que não vem é a resposta inteira.
 	for i := range f.Suid {
-		add(f.Suid[i].Path, "setuid/setgid")
+		addDoDisco(f.Suid[i].Path, "setuid/setgid")
 	}
 	return out
 }

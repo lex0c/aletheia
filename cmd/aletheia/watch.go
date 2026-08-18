@@ -145,9 +145,22 @@ func runWatch(args []string) int {
 
 	// Ctrl-C não pode matar o processo direto: o resumo é metade do valor, e
 	// quem roda isto por uma hora vai encerrar com Ctrl-C.
-	parar := make(chan os.Signal, 1)
-	signal.Notify(parar, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(parar)
+	//
+	// Mas o PRIMEIRO Ctrl-C, e não mais que um: se o ciclo em curso estiver
+	// preso numa coleta lenta, quem quer sair não pode ficar refém dela. O
+	// segundo sinal força a saída na hora. Sem isto o segundo Ctrl-C caía num
+	// buffer cheio e sumia — e o operador ficava sem conseguir encerrar.
+	sinais := make(chan os.Signal, 2)
+	signal.Notify(sinais, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sinais)
+	parar := make(chan struct{})
+	go func() {
+		<-sinais // primeiro: para com resumo, no fim do ciclo
+		close(parar)
+		<-sinais // segundo: força a saída, mesmo no meio de uma coleta
+		fmt.Fprint(os.Stderr, "\r\033[K\ninterrompido à força\n")
+		os.Exit(130)
+	}()
 
 	w := &vigia{
 		selected: selected,

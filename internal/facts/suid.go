@@ -245,6 +245,11 @@ func collectSuid(f *Facts, e *env.Env) {
 		f.denyPersist("suid", "a varredura de SUID parou em "+
 			strconv.Itoa(maxSuidDirs)+" diretórios: o excedente NÃO foi examinado")
 	}
+	if trab.truncadoTempo {
+		f.denyPersist("suid", "a varredura de SUID parou pelo orçamento de tempo "+
+			"(o wtf a limita para caber nos ~2s): o que faltou NÃO foi examinado — "+
+			"rode `scan`, que não tem esse teto")
+	}
 	if trab.profundoDemais {
 		f.denyPersist("suid", "a varredura de SUID desceu no máximo "+
 			strconv.Itoa(maxSuidDepthHome)+" níveis dentro de /home e /root: "+
@@ -315,6 +320,12 @@ type varredura struct {
 	// struct.
 	donos *acumuladorDeDonos
 
+	// truncadoTempo diz que a varredura parou pelo RELÓGIO, não pela contagem.
+	// O wtf define um prazo para caber no orçamento; scan não define nenhum.
+	// A lacuna que isto gera é diferente da truncagem por contagem, e por isso
+	// tem mensagem própria.
+	truncadoTempo bool
+
 	// negados são os diretórios que a varredura não conseguiu ABRIR. Sem esta
 	// lista, um galho inteiro sumia com a mesma cara de galho sem SUID — e
 	// /home costuma ser 0700 por usuário, que é justamente onde um setuid
@@ -344,6 +355,15 @@ func (v *varredura) rodar(n int) {
 // proxima entrega o próximo diretório, ou diz que acabou.
 func (v *varredura) proxima() (tarefaDir, bool) {
 	for {
+		// O prazo é checado ANTES de pegar mais trabalho: passou do orçamento,
+		// a fila para de ser servida e os trabalhadores drenam. O que sobra na
+		// fila NÃO foi examinado, e vira lacuna declarada.
+		if v.e.WalkExpired() {
+			v.mu.Lock()
+			v.truncadoTempo = true
+			v.mu.Unlock()
+			return tarefaDir{}, false
+		}
 		v.mu.Lock()
 		if len(v.fila) > 0 {
 			t := v.fila[len(v.fila)-1]

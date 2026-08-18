@@ -61,6 +61,7 @@ func runCollect(args []string) int {
 		return 3
 	}
 
+	aoInterromper()
 	prog := progress.New(os.Stderr, time.Now(), *noProg)
 	e.Progress = prog
 	defer prog.Stop()

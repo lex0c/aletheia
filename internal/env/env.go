@@ -111,6 +111,13 @@ type Env struct {
 	Caps      Cap
 	CapReason map[string]string // capacidade ausente -> motivo
 
+	// WalkDeadline limita as varreduras de filesystem (SUID e git-hooks) no
+	// tempo. Zero = sem limite, o padrão do scan. O wtf a define para a
+	// varredura caber no orçamento: ela para no prazo e DECLARA o que não
+	// examinou, em vez de estourar o "~2s" que o wtf promete. É a mesma lacuna
+	// da truncagem por contagem, disparada pelo relógio.
+	WalkDeadline time.Time
+
 	// Progress recebe o nome do estágio de coleta atual, para o CLI mostrar que
 	// a varredura longa não travou. nil = silêncio, e é o padrão: nada em
 	// `facts` ou nos testes precisa de um. Vive aqui porque `e` já atravessa
@@ -412,6 +419,12 @@ func errStr(err error) string {
 // escritor de terminal; um dump ou teste passa nil e tudo cala.
 type ProgressSink interface {
 	Stage(name string)
+}
+
+// WalkExpired diz se a varredura de filesystem já passou do prazo. Falso quando
+// não há prazo (WalkDeadline zero), que é o caso do scan.
+func (e *Env) WalkExpired() bool {
+	return e != nil && !e.WalkDeadline.IsZero() && time.Now().After(e.WalkDeadline)
 }
 
 // Stage anuncia o estágio atual da coleta, se houver quem escute. No-op quando

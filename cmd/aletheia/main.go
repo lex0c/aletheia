@@ -13,9 +13,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/lex0c/aletheia/internal/baseline"
@@ -74,6 +76,9 @@ FLAGS DE scan
                 2026-04-30) ou duração (72h, 7d). O que tem data e cai FORA sai
                 do relatório e é CONTADO; o que não tem data FICA
   --only G,G    escopo por subsistema: proc net persist priv integrity kernel app cloud ioc
+  --fs-budget D teto de tempo da varredura de filesystem num FS grande (ex: 10s).
+                O que não couber vira lacuna DECLARADA — a cobertura cai, e o
+                relatório diz onde parou. 0 = sem teto (padrão)
   --mode M      auto | manual
   -v, -vv       evidência por achado / + INFO e detalhe de cobertura
 
@@ -277,6 +282,25 @@ const wtfBudget = 2 * time.Second
 
 // runWtf responde uma pergunta diferente do scan — este host está pegando
 // fogo? Mesma coleta, seleção menor, renderização e orçamento próprios.
+// aoInterromper deixa o Ctrl-C dos comandos de UMA tacada — scan, wtf, collect,
+// baseline — apagar a linha de progresso e sair na hora com 130 (128+SIGINT).
+//
+// Sem handler o default do runtime já mata, mas mata no meio do desenho do
+// spinner, deixando a linha pendurada. E quando um estágio trava num syscall
+// ININTERRUPTÍVEL — o stat de um mount morto —, o processo não morre nem assim:
+// o que este handler acrescenta ali é o AVISO impresso de OUTRA thread, dizendo
+// que o sinal chegou e que quem prende é o kernel, não a ferramenta. É a
+// diferença entre "travou e me ignora" e "travou no mount, e ela sabe".
+func aoInterromper() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		fmt.Fprint(os.Stderr, "\r\033[K\ninterrompido\n")
+		os.Exit(130)
+	}()
+}
+
 func runWtf(args []string) int {
 	fs := flag.NewFlagSet("wtf", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -302,6 +326,7 @@ func runWtf(args []string) int {
 	// O relógio começa a contar ANTES da coleta: a coleta é a parte cara, e um
 	// orçamento que só cobre os checks mediria a parte errada.
 	start := time.Now()
+	aoInterromper()
 
 	e := env.Probe(env.Options{Root: *root, Version: version})
 	defer e.Close()
@@ -367,6 +392,7 @@ func runScan(args []string, wtf bool) int {
 		iocFile  = fs.String("ioc", "", "casar os indicadores DESTE incidente, do arquivo FILE")
 		since    = fs.String("since", "", "janela de investigação: instante (2026-04-30T18:00Z) ou duração (72h, 7d)")
 		noProg   = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
+		fsBudget = fs.Duration("fs-budget", 0, "teto de tempo da varredura de filesystem (0 = sem teto)")
 	)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
@@ -402,6 +428,12 @@ func runScan(args []string, wtf bool) int {
 	if e.Source == env.SourceImage && !e.Has(env.CapFilesystem) {
 		fmt.Fprintf(os.Stderr, "não foi possível abrir --root com raiz travada: %v\n", e.RootErr)
 		return 3
+	}
+	aoInterromper()
+	// Num FS grande, quem tem pressa limita a varredura no tempo; o que ela não
+	// terminar vira lacuna declarada, e a cobertura cai — nunca "nada achado".
+	if *fsBudget > 0 {
+		e.WalkDeadline = time.Now().Add(*fsBudget)
 	}
 	prog := progress.New(os.Stderr, time.Now(), *noProg)
 	e.Progress = prog
@@ -571,6 +603,7 @@ func runBaseline(args []string) int {
 
 	e := env.Probe(env.Options{Root: *root, Version: version})
 	defer e.Close()
+	aoInterromper()
 	prog := progress.New(os.Stderr, time.Now(), *noProg)
 	e.Progress = prog
 	defer prog.Stop()

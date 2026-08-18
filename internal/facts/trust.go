@@ -192,13 +192,20 @@ func collectGitHooks(f *Facts, e *env.Env) {
 		procurarHooks(f, e, raiz, 0, &vistos, &truncado)
 	}
 	if truncado {
-		f.denyPersist("githook", "a busca por hooks de git parou em "+
-			strconv.Itoa(maxGitDirs)+" diretórios: o excedente NÃO foi avaliado")
+		f.denyPersist("githook", "a busca por hooks de git parou (limite de "+
+			strconv.Itoa(maxGitDirs)+" diretórios ou orçamento de tempo do wtf): "+
+			"o excedente NÃO foi avaliado")
 	}
 }
 
 func procurarHooks(f *Facts, e *env.Env, dir string, prof int, vistos *int, truncado *bool) {
 	if prof > maxGitDepth || *truncado {
+		return
+	}
+	// Mesmo prazo da varredura de SUID: no wtf a busca para quando o orçamento
+	// acaba, e o que faltou vira lacuna em vez de "nenhum hook".
+	if e.WalkExpired() {
+		*truncado = true
 		return
 	}
 	if *vistos >= maxGitDirs {

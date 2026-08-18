@@ -316,6 +316,12 @@ func writeCompact(w io.Writer, r *check.Report) {
 // checks no mesmo alvo.
 func writeVerbose(w io.Writer, r *check.Report, o Options) {
 	var lastSev check.Severity = -1
+	// O bloco FP é IDÊNTICO para todo achado do mesmo check — repeti-lo por
+	// achado enche o relatório de prosa. Em -v sai UMA vez por check (o
+	// primeiro achado dele); em -vv sai completo, por achado, para a auditoria
+	// a fundo. A caveat continua visível, sem a parede.
+	fpMostrado := map[string]bool{}
+	nsMostrado := map[string]bool{}
 	for _, fd := range r.Findings {
 		if fd.Sev == check.SevInfo && o.Verbose < 2 {
 			continue
@@ -336,11 +342,18 @@ func writeVerbose(w io.Writer, r *check.Report, o Options) {
 		for _, ev := range fd.Evidence {
 			fmt.Fprintln(w, "   · "+Safe(ev))
 		}
-		for _, ns := range fd.NextSteps {
-			fmt.Fprintln(w, "   → "+Safe(ns))
+		// Os → são guia por CHECK, quase iguais entre achados do mesmo tipo. Em
+		// -v saem uma vez por check; em -vv, por achado. O caminho de cada
+		// achado continua na linha de subject.
+		if len(fd.NextSteps) > 0 && (o.Verbose >= 2 || !nsMostrado[fd.ID]) {
+			for _, ns := range fd.NextSteps {
+				fmt.Fprintln(w, "   → "+Safe(ns))
+			}
+			nsMostrado[fd.ID] = true
 		}
-		if len(fd.FalsePositives) > 0 {
+		if len(fd.FalsePositives) > 0 && (o.Verbose >= 2 || !fpMostrado[fd.ID]) {
 			fmt.Fprintln(w, "   FP: "+Safe(strings.Join(fd.FalsePositives, " · ")))
+			fpMostrado[fd.ID] = true
 		}
 		fmt.Fprintln(w)
 	}

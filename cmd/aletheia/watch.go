@@ -222,6 +222,10 @@ type vigia struct {
 	cobertura string
 	// semChave conta o que não pôde ser diferenciado entre ciclos.
 	semChave int
+	// coberturaFalhou fica ligado no PRIMEIRO ciclo que não cobriu tudo, e não
+	// desliga: se a vigília ficou cega às 03:00, o exit não pode dizer que a
+	// noite foi tranquila só porque o último ciclo enxergou.
+	coberturaFalhou bool
 }
 
 func (w *vigia) carregarBaseline(caminho string) int {
@@ -261,6 +265,17 @@ func (w *vigia) ciclo(primeiro bool) {
 		if fd.Sev == check.SevInfo {
 			continue
 		}
+		// A severidade conta ANTES da chave.
+		//
+		// Um achado sem chave estável não pode ser comparado entre ciclos, mas
+		// ele existe — e o `continue` abaixo o tirava do laço antes de ele
+		// tocar em w.pior. Um CRITICAL indiferenciável saía da vigília com exit
+		// 0: o achado aparecia na tela e não chegava ao código de saída, que é
+		// por onde o resto do mundo lê esta ferramenta.
+		if fd.Sev > w.pior {
+			w.pior = fd.Sev
+		}
+
 		k := chaveDeVigia(f, fd)
 		if k == "" {
 			// Sem chave estável não dá para dizer se é novo. Contar e declarar
@@ -276,13 +291,6 @@ func (w *vigia) ciclo(primeiro bool) {
 			continue
 		}
 		atual[k] = true
-
-		// A severidade conta a partir do ciclo 0: um host que já estava
-		// comprometido quando a vigília começou não sai com exit 0 porque nada
-		// mudou depois.
-		if fd.Sev > w.pior {
-			w.pior = fd.Sev
-		}
 
 		// O ciclo 0 é a REFERÊNCIA, e nada nele é mudança. Registrá-lo como
 		// evento fazia o resumo dizer "APARECEU — não estava aqui quando a
@@ -319,6 +327,9 @@ func (w *vigia) ciclo(primeiro bool) {
 	}
 	w.semChave = semChave
 
+	if r.Coverage.Incomplete() {
+		w.coberturaFalhou = true
+	}
 	cob := fmt.Sprintf("%d/%d", r.Coverage.Complete, r.Coverage.Total)
 	if len(r.Coverage.CollectorGaps) > 0 {
 		cob += fmt.Sprintf(" (+%d lacunas de coleta)", len(r.Coverage.CollectorGaps))
@@ -452,6 +463,13 @@ func (w *vigia) exit() int {
 	case w.pior >= check.SevCritical:
 		return 2
 	case w.pior >= check.SevWarn:
+		return 1
+	case w.coberturaFalhou:
+		// A mesma regra do `scan` (SPEC 7.9): zero exige achado nenhum E
+		// cobertura completa. Faltava aqui — uma vigília de oito horas que
+		// nunca conseguiu ler /proc de ninguém terminava com exit 0, que é a
+		// ferramenta dizendo "olhei a noite toda e não vi nada" sobre uma noite
+		// em que ela não olhou.
 		return 1
 	}
 	return 0

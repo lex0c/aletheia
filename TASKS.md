@@ -85,11 +85,11 @@ Marcar `[x]` só quando compila, roda e tem teste onde faz sentido.
         coletor); o varrimento do relatório, do JSONL e do checklist continua aberto
 - [ ] **11.3** fixtures por distro + suíte rodando contra todas
 
-## Fase 12 — `preserve`
+## Fase 12 — `preserve`  ▸ COMPLETA
 
 - [x] **12.1** `cp /proc/<pid>/exe` + `stat` + sha256 do original e da cópia
 - [x] **12.2** dump de memória nativo (`/proc/<pid>/maps` + `/proc/<pid>/mem`), sem ptrace
-- [ ] **12.3** `--pcap` — AF_PACKET + `x/net/bpf`, com `PACKET_STATISTICS` reportado
+- [x] **12.3** `--pcap` — AF_PACKET nativo, com `PACKET_STATISTICS` reportado (sem `x/net/bpf`: o filtro é de espaço de usuário, ver registro)
 - [x] **12.4** run log em `$IR/aletheia-runs.jsonl`
 - [x] **12.5** bytecode de eBPF como tipo de evidência: não há arquivo a copiar
 
@@ -4357,3 +4357,123 @@ pureza — um `import "os"` num check derruba o teste com o motivo escrito.
 (`emitir`), de propósito: um passo acrescentado a um e esquecido no outro
 produziria dois relatórios diferentes para os mesmos fatos, e a diferença
 apareceria como conclusão, não como bug.
+
+---
+
+## Registro — `--pcap`: capturar sem tcpdump, e dizer o que a captura não prova
+
+O runbook manda capturar em vários pontos, e num host suspeito isso esbarra em
+duas paredes: em imagem mínima o `tcpdump` não está instalado, e instalá-lo mexe
+na base de pacotes — que é a evidência da §24. Compilar com libpcap exigiria
+cgo, e cgo mata o binário estático que faz esta ferramenta rodar em userland
+comprometido.
+
+O que sobra é o que o kernel oferece direto: `AF_PACKET`, e um formato de arquivo
+que cabe em 24 bytes de cabeçalho global mais 16 por pacote.
+
+```
+aletheia preserve --out $IR --pcap --iface eth0 --host 51.91.190.241 --duration 60s
+```
+
+### Sem a dependência que a SPEC autorizava
+
+A SPEC abria exceção para `golang.org/x/net/bpf` — montar o filtro em BPF
+clássico e deixar o kernel descartar antes de copiar. A exceção não foi usada, e
+o motivo não é purismo:
+
+**Um filtro de kernel sutilmente errado descarta o que você pediu, e a captura
+sai LEGITIMAMENTE vazia.** Ninguém revisa um arquivo vazio — ele parece
+resposta. Filtrando em espaço de usuário, um erro meu só pode gravar pacote
+demais; nunca perder em silêncio o que foi pedido.
+
+O preço é o kernel entregar tudo, e o preço é MEDIDO: `PACKET_STATISTICS` entra
+no manifesto, e captura que perdeu pacote é declarada incompleta — o descarte do
+kernel é o único número desta coleta que não dá para recuperar depois. Para
+reduzi-lo, `SO_RCVBUF` de 8 MB e `--snaplen`.
+
+Resultado: zero dependências continua sendo zero dependências, e o `go.mod` segue
+sem `require`.
+
+### O defeito que só apareceu medindo contra o tcpdump
+
+O primeiro handshake capturado tinha SEIS pacotes onde o `tcpdump` grava três.
+
+Na loopback o mesmo quadro é entregue DUAS vezes ao `AF_PACKET`: uma na
+transmissão (`PACKET_OUTGOING`) e outra na recepção, porque ali as duas pontas
+são esta máquina. Gravar as duas dobra a contagem de pacotes e de bytes, e
+qualquer análise de volume ou de ritmo sai errada — sem nada na saída que
+denuncie.
+
+A cópia descartada é a de transmissão, e **só na loopback**: numa placa de
+verdade o que este host ENVIA aparece exclusivamente como `PACKET_OUTGOING`, e
+descartá-lo perderia metade da conversa. O descarte é contado e sai no manifesto.
+
+Depois da correção, `tcpdump -r` sobre o nosso arquivo:
+
+```
+link-type EN10MB (Ethernet), snapshot length 262144
+00:17:15.996949 IP 127.0.0.1.53038 > 127.0.0.1.9999: Flags [S] …
+00:17:15.996960 IP 127.0.0.1.9999 > 127.0.0.1.53038: Flags [S.] …
+00:17:15.996969 IP 127.0.0.1.53038 > 127.0.0.1.9999: Flags [.] …
+```
+
+Os mesmos três quadros, com o carimbo de tempo do KERNEL (`SO_TIMESTAMP`), não o
+da leitura — e quando o carimbo não vem, a nota diz que o horário é o da leitura.
+
+### Quatro recusas
+
+```
+--iface obrigatória        capturar em "qualquer interface" mistura enlaces no
+                           mesmo arquivo. Um pcap com rótulo errado é decodificado
+                           com confiança total a partir do byte errado
+ARPHRD desconhecido        recusa em vez de chutar o rótulo, pelo mesmo motivo
+--host só aceita IP        nome exigiria DNS, e consulta avisa o atacante (§2.1)
+--all é obrigatório para   tráfego bruto carrega sessão e credencial em claro de
+capturar sem filtro        terceiros que não são parte do incidente, num arquivo
+                           que não tem como ser redigido depois
+```
+
+E o modo promíscuo **não é ligado**: seria alterar o estado da interface — numa
+ferramenta read-only —, é visível para quem estiver olhando, e a §2.6 trata
+interface promíscua como achado. Sem promíscuo se vê o tráfego DESTE host, que é
+o que um incidente pergunta.
+
+### Zero pacotes é resultado, não falha
+
+Uma captura que não gravou nada produz um arquivo de 24 bytes, e o manifesto
+listaria "1 peça preservada". Lido com pressa, isso vira "capturei e não houve
+tráfego". São três coisas diferentes, e o operador decide diferente em cada uma:
+
+```
+nada passou na interface      a conversa não é por aqui, ou a placa é a errada
+passou e não casou o filtro   o filtro está errado, ou o alvo mudou de porta
+casou e o kernel descartou    a captura está incompleta, e não passa de novo
+```
+
+As três saem escritas. E "não entendi o pacote" é contado à parte de "não
+casou" — um quadro que o parser não decodificou até onde o filtro precisava fica
+de fora e é DECLARADO, em vez de virar silêncio.
+
+### O aviso obrigatório
+
+Impresso antes de capturar, toda vez: se houver eBPF hostil em `xdp`/`tc`, **esta
+captura mente** — o pacote é escondido antes de chegar ao socket (§35.4).
+Captura confiável é espelhamento fora da máquina. E mais uma linha que a
+ferramenta deve a si mesma: enquanto a captura roda, um `scan` neste host vê um
+socket `AF_PACKET` e o sinaliza pela §2.6 — é este processo, não um sniffer.
+
+### Cenários e mutação
+
+O par Y1/Y2 é o teste: o mesmo tráfego, com o filtro casando e com o filtro
+excluindo. Sozinho, cada um deixa passar uma das duas direções de erro. O Y1
+afirma **3 gravados** — o número exato, que é o que trava a desduplicação.
+
+Oito mutantes no pacote, oito mortos: host casado só na origem, VLAN não
+pulada, porta lida em fragmento intermediário, DLT_RAW lido como ethernet, IHL
+não conferido, `incl_len`/`orig_len` trocados no cabeçalho, hash não
+acompanhando a escrita, e snaplen zerado no cabeçalho global.
+
+### Estado
+
+79 checks, 142 cenários. A fase 12 fecha: `preserve` guarda exe, memória,
+bytecode de eBPF, arquivo e agora tráfego — as cinco coisas que somem.

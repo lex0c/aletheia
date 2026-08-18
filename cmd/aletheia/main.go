@@ -48,7 +48,8 @@ COMANDOS
   baseline      captura o estado atual como referência para comparar depois
   collect       só coleta: tira o retrato do host e sai. Não conclui nada
   analyze       só analisa: roda os checks sobre um retrato, do lado limpo
-  preserve      guarda a evidência antes que ela suma. O ÚNICO que escreve
+  preserve      guarda a evidência antes que ela suma — inclusive tráfego
+                (--pcap). O ÚNICO que escreve
   checks        catálogo: id, §ref, modo, grupo, requires, falsos positivos
   version       versão e hash deste binário
 
@@ -126,6 +127,33 @@ FLAGS DE preserve
                 do gcore. Só as anônimas; o que tem arquivo por trás use --file
   --mem-max S   teto do dump (padrão 512M). O que não couber é DECLARADO
   --json FILE   manifesto em JSONL ("-" = stdout)
+
+  --pcap        captura tráfego para .pcap, sem tcpdump e sem libpcap. Em imagem
+                mínima o tcpdump não existe, e instalá-lo mexe na base de
+                pacotes — que é a evidência da §24
+  --iface NAME  interface da captura. OBRIGATÓRIA: capturar em "qualquer
+                interface" mistura enlaces no mesmo arquivo, e um pcap rotulado
+                errado é decodificado com confiança total a partir do byte errado
+  --host IP     filtro: só este endereço, como origem OU destino. IP, não nome:
+                resolver DNS avisa o atacante (§2.1)
+  --port N      filtro: só esta porta, em TCP e em UDP
+  --proto P     filtro: tcp | udp | icmp
+  --all         capturar SEM filtro. Precisa ser pedido: tráfego bruto carrega
+                credencial em claro de terceiros, e o arquivo não tem como ser
+                redigido depois
+  --duration D  duração da captura (padrão 60s)
+  --snaplen N   bytes por pacote (0 = pacote inteiro)
+  --pcap-max S  teto do arquivo (padrão 256M)
+
+  O filtro roda em ESPAÇO DE USUÁRIO. Um filtro de kernel errado descarta o que
+  você pediu e a captura sai legitimamente vazia — ninguém revisa arquivo vazio.
+  Aqui o preço é o kernel entregar tudo, e ele é MEDIDO: o contador de descartes
+  do próprio kernel entra no manifesto, e captura que perdeu pacote é declarada
+  incompleta.
+
+  Se houver eBPF hostil em xdp/tc, a captura MENTE: o pacote é escondido antes
+  do socket (§35.4). O modo promíscuo não é ligado — seria alterar o estado da
+  interface, e a §2.6 trata interface promíscua como achado.
 
   O manifesto traz o hash da ORIGEM e o da CÓPIA. Divergência não é erro de
   cópia: é o artefato tendo mudado durante a leitura — e sai com exit 2.

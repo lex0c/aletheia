@@ -5,13 +5,17 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/lex0c/aletheia/internal/env"
+	"github.com/lex0c/aletheia/internal/pcap"
 	"github.com/lex0c/aletheia/internal/preserve"
 	"github.com/lex0c/aletheia/internal/report"
 )
@@ -37,6 +41,17 @@ func runPreserve(args []string) int {
 		files   listaFlag
 		bpfs    listaFlag
 	)
+	var (
+		capturar = fs.Bool("pcap", false, "capturar tráfego para um arquivo .pcap")
+		iface    = fs.String("iface", "", "interface da captura (obrigatória com --pcap)")
+		host     = fs.String("host", "", "filtro: só o tráfego DESTE endereço")
+		porta    = fs.Int("port", 0, "filtro: só esta porta, TCP ou UDP")
+		proto    = fs.String("proto", "", "filtro: tcp | udp | icmp")
+		tudo     = fs.Bool("all", false, "capturar SEM filtro (pedido explícito)")
+		duracao  = fs.Duration("duration", 60*time.Second, "duração da captura")
+		snaplen  = fs.Int("snaplen", 0, "bytes por pacote (0 = pacote inteiro)")
+		maxPcap  = fs.String("pcap-max", "256M", "teto do arquivo de captura")
+	)
 	fs.Var(&pids, "pid", "processo cujo exe preservar (pode repetir)")
 	fs.Var(&files, "file", "arquivo a preservar (pode repetir)")
 	fs.Var(&bpfs, "bpf", "id de programa eBPF cujo bytecode preservar (pode repetir)")
@@ -50,10 +65,15 @@ func runPreserve(args []string) int {
 			"parte da ferramenta que escreve, e ela não escolhe onde")
 		return 3
 	}
-	if len(pids)+len(files)+len(bpfs) == 0 {
+	if len(pids)+len(files)+len(bpfs) == 0 && !*capturar {
 		fmt.Fprintln(os.Stderr, "preserve: informe ao menos um alvo "+
-			"(--pid, --file ou --bpf)")
+			"(--pid, --file, --bpf ou --pcap)")
 		return 3
+	}
+	opcoesPcap, code := montarCaptura(*capturar, *iface, *host, *porta, *proto,
+		*tudo, *duracao, *snaplen, *maxPcap)
+	if code != 0 {
+		return code
 	}
 
 	e := env.Probe(env.Options{Version: version})
@@ -94,6 +114,19 @@ func runPreserve(args []string) int {
 	}
 	for _, p := range files {
 		_ = c.Arquivo(p)
+	}
+	// A captura por último, e não por acomodação: ela ESPERA — de segundos a
+	// minutos —, e as outras peças morrem se o processo morrer nesse meio tempo.
+	if opcoesPcap != nil {
+		avisoDaCaptura(os.Stderr, *opcoesPcap)
+		parar := make(chan struct{})
+		sinais := make(chan os.Signal, 1)
+		signal.Notify(sinais, os.Interrupt, syscall.SIGTERM)
+		go func() { <-sinais; close(parar) }()
+		opcoesPcap.Parar = parar
+		st, _ := c.PCAP(*opcoesPcap)
+		signal.Stop(sinais)
+		resumoDaCaptura(os.Stderr, st)
 	}
 
 	humano := io.Writer(os.Stdout)
@@ -310,4 +343,133 @@ func humanoBytes(n int64) string {
 		return strconv.FormatFloat(float64(n)/(1<<10), 'f', 1, 64) + " KB"
 	}
 	return strconv.FormatInt(n, 10) + " B"
+}
+
+// montarCaptura valida o pedido de captura ANTES de qualquer leitura, e recusa
+// as três formas de pedir uma captura que ninguém saberia interpretar depois.
+func montarCaptura(ligada bool, iface, host string, porta int, proto string,
+	tudo bool, duracao time.Duration, snaplen int, maxBytes string) (*pcap.Opcoes, int) {
+	if !ligada {
+		if iface != "" || host != "" || porta != 0 || proto != "" || tudo {
+			fmt.Fprintln(os.Stderr, "preserve: --iface/--host/--port/--proto/--all "+
+				"só fazem sentido com --pcap")
+			return nil, 3
+		}
+		return nil, 0
+	}
+	if iface == "" {
+		fmt.Fprintf(os.Stderr, "preserve --pcap: --iface é obrigatório.\n"+
+			"Não há escolha padrão honesta: capturar em \"qualquer interface\" "+
+			"mistura enlaces diferentes no mesmo arquivo, e um pcap com o rótulo "+
+			"errado é decodificado com confiança total a partir do byte errado.\n"+
+			"Interfaces deste host: %s\n", interfacesDoHost())
+		return nil, 3
+	}
+	if err := pcap.ProtoValido(proto); err != nil {
+		fmt.Fprintf(os.Stderr, "preserve --pcap: %v\n", err)
+		return nil, 3
+	}
+	if porta < 0 || porta > 65535 {
+		fmt.Fprintln(os.Stderr, "preserve --pcap: --port fora da faixa")
+		return nil, 3
+	}
+	if duracao <= 0 {
+		fmt.Fprintln(os.Stderr, "preserve --pcap: --duration precisa ser positiva. "+
+			"Uma captura sem prazo num incidente é um arquivo que ninguém fecha")
+		return nil, 3
+	}
+
+	o := &pcap.Opcoes{Iface: iface, Duracao: duracao, Snaplen: snaplen}
+	if host != "" {
+		a, err := netip.ParseAddr(host)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "preserve --pcap: --host %q não é um endereço IP. "+
+				"Nome não é aceito de propósito: resolver DNS avisa o atacante (§2.1)\n", host)
+			return nil, 3
+		}
+		o.Filtro.Host = a
+	}
+	o.Filtro.Porta = porta
+	o.Filtro.Proto = proto
+
+	// CAPTURAR TUDO PRECISA SER PEDIDO. Tráfego bruto de um host de produção
+	// carrega sessão, cookie e credencial em claro de gente que não é parte do
+	// incidente — e o arquivo não tem como ser redigido depois.
+	if o.Filtro.Vazio() && !tudo {
+		fmt.Fprintln(os.Stderr, "preserve --pcap: sem filtro, esta captura grava "+
+			"TODO o tráfego da interface — inclusive credencial em claro de "+
+			"terceiros que não são parte do incidente, num arquivo que não tem "+
+			"como ser redigido depois.\n"+
+			"Diga o que procurar (--host, --port, --proto) ou peça --all explicitamente.")
+		return nil, 3
+	}
+	if !o.Filtro.Vazio() && tudo {
+		fmt.Fprintln(os.Stderr, "preserve --pcap: --all com filtro é ambíguo")
+		return nil, 3
+	}
+	n, ok := tamanho(maxBytes)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "preserve --pcap: --pcap-max não entendido: %q\n", maxBytes)
+		return nil, 3
+	}
+	o.MaxBytes = n
+	return o, 0
+}
+
+// avisoDaCaptura é impresso ANTES de capturar, e é obrigatório (SPEC 6.3).
+//
+// As duas frases dizem coisas diferentes e as duas são necessárias: uma sobre o
+// que a captura NÃO prova, outra sobre o que ela produz.
+func avisoDaCaptura(w io.Writer, o pcap.Opcoes) {
+	fmt.Fprintf(w, "CAPTURANDO em %s por %s · %s\n",
+		report.Safe(o.Iface), o.Duracao, report.Safe(o.Filtro.Descricao()))
+	fmt.Fprintln(w, "  Se houver eBPF hostil em xdp/tc, ESTA CAPTURA MENTE: o pacote é")
+	fmt.Fprintln(w, "  escondido antes de chegar ao socket (§35.4). Captura confiável é")
+	fmt.Fprintln(w, "  espelhamento FORA desta máquina (§2.6).")
+	fmt.Fprintln(w, "  O .pcap sai BRUTO: em tráfego sem TLS ele contém credencial em claro.")
+	fmt.Fprintln(w, "  Enquanto isto roda, um scan neste host vê um socket AF_PACKET — é este")
+	fmt.Fprintln(w, "  processo, e não um sniffer (§2.6). O modo promíscuo NÃO foi ligado.")
+	fmt.Fprintln(w)
+}
+
+// interfacesDoHost lista os nomes para a mensagem de erro. Uma recusa que não
+// diz quais são as opções manda o operador procurar num host que ele não conhece.
+func interfacesDoHost() string {
+	ents, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		return "(não foi possível listar /sys/class/net)"
+	}
+	var ns []string
+	for _, e := range ents {
+		ns = append(ns, e.Name())
+	}
+	return strings.Join(ns, " ")
+}
+
+// resumoDaCaptura diz o que uma contagem sozinha não diz.
+//
+// Uma captura que gravou zero pacote produz um arquivo de 24 bytes — cabeçalho e
+// nada — e o manifesto listaria "1 peça preservada". Lido rápido, isso vira
+// "capturei e não houve tráfego". São três coisas diferentes, e o operador
+// decide diferente em cada uma:
+//
+//	nada passou na interface       a conversa não é por aqui, ou a placa é a errada
+//	passou e não casou o filtro    o filtro está errado, ou o alvo mudou de porta
+//	casou e o kernel descartou     a captura está incompleta, e não passa de novo
+func resumoDaCaptura(w io.Writer, st pcap.Estatisticas) {
+	if st.Gravados > 0 {
+		return
+	}
+	switch {
+	case st.VistosPeloKernel == 0:
+		fmt.Fprintln(w, "\nNENHUM pacote passou por esta interface na janela da captura.")
+		fmt.Fprintln(w, "  Não é 'nada casou o filtro': não houve tráfego NENHUM aqui.")
+		fmt.Fprintln(w, "  Confira a interface — e lembre que sem modo promíscuo só se vê")
+		fmt.Fprintln(w, "  o tráfego DESTE host.")
+	default:
+		fmt.Fprintf(w, "\nZERO pacotes casaram o filtro — %d passaram e foram descartados por ele.\n",
+			st.Filtrados)
+		fmt.Fprintln(w, "  Isto NÃO é 'não houve tráfego': é 'nada casou o que você pediu'.")
+	}
+	fmt.Fprintln(w, "  O arquivo tem só o cabeçalho, e isso é resultado — não falha.")
 }

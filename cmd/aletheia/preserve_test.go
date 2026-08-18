@@ -6,10 +6,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
+	"github.com/lex0c/aletheia/internal/pcap"
 )
 
 // As recusas de invocação vêm ANTES de qualquer leitura. Este é o único comando
@@ -303,4 +305,74 @@ func nomeArquivo(p string) string {
 		return '_'
 	}, s)
 	return s + ".bin"
+}
+
+// As recusas da captura. Cada uma protege contra um arquivo que ninguém
+// conseguiria interpretar depois — ou que ninguém deveria ter gravado.
+func TestCapturaRecusaPedidoAmbiguo(t *testing.T) {
+	casos := []struct {
+		nome string
+		f    func() (*pcap.Opcoes, int)
+	}{
+		{"--pcap sem --iface", func() (*pcap.Opcoes, int) {
+			return montarCaptura(true, "", "", 0, "", true, time.Second, 0, "256M")
+		}},
+		{"--iface sem --pcap", func() (*pcap.Opcoes, int) {
+			return montarCaptura(false, "lo", "", 0, "", false, time.Second, 0, "256M")
+		}},
+		{"sem filtro e sem --all", func() (*pcap.Opcoes, int) {
+			return montarCaptura(true, "lo", "", 0, "", false, time.Second, 0, "256M")
+		}},
+		{"--all junto com filtro", func() (*pcap.Opcoes, int) {
+			return montarCaptura(true, "lo", "", 443, "", true, time.Second, 0, "256M")
+		}},
+		{"protocolo que não sei decidir", func() (*pcap.Opcoes, int) {
+			return montarCaptura(true, "lo", "", 0, "sctp", false, time.Second, 0, "256M")
+		}},
+		{"nome no lugar de endereço", func() (*pcap.Opcoes, int) {
+			return montarCaptura(true, "lo", "evil.example.com", 0, "", false, time.Second, 0, "256M")
+		}},
+		{"porta fora da faixa", func() (*pcap.Opcoes, int) {
+			return montarCaptura(true, "lo", "", 70000, "", false, time.Second, 0, "256M")
+		}},
+		{"sem prazo", func() (*pcap.Opcoes, int) {
+			return montarCaptura(true, "lo", "", 443, "", false, 0, 0, "256M")
+		}},
+		{"teto sem sentido", func() (*pcap.Opcoes, int) {
+			return montarCaptura(true, "lo", "", 443, "", false, time.Second, 0, "muito")
+		}},
+	}
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			var o *pcap.Opcoes
+			var code int
+			semSaida(t, func() int { o, code = c.f(); return 0 })
+			if code != 3 {
+				t.Errorf("code = %d, queria 3 (ERROR de invocação)", code)
+			}
+			if o != nil {
+				t.Error("uma invocação recusada não pode devolver captura montada")
+			}
+		})
+	}
+}
+
+// O pedido bem formado chega inteiro do outro lado — inclusive o `--all`, que
+// existe para que capturar TUDO seja uma decisão escrita, e não um padrão.
+func TestCapturaMontaOQueFoiPedido(t *testing.T) {
+	o, code := montarCaptura(true, "eth0", "51.91.190.241", 443, "tcp", false, 30*time.Second, 96, "1G")
+	if code != 0 || o == nil {
+		t.Fatalf("code = %d", code)
+	}
+	if o.Iface != "eth0" || o.Snaplen != 96 || o.Duracao != 30*time.Second || o.MaxBytes != 1<<30 {
+		t.Errorf("opções = %+v", o)
+	}
+	if d := o.Filtro.Descricao(); d != "host 51.91.190.241 E porta 443 E protocolo tcp" {
+		t.Errorf("filtro = %q", d)
+	}
+
+	tudo, code := montarCaptura(true, "eth0", "", 0, "", true, time.Minute, 0, "256M")
+	if code != 0 || !tudo.Filtro.Vazio() {
+		t.Errorf("--all deveria montar captura sem filtro: %+v code=%d", tudo, code)
+	}
 }

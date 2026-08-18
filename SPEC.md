@@ -639,9 +639,17 @@ aletheia preserve --pcap --port 443 --duration 5m --snaplen 0 --out $IR
 ```
 
 ```
-implementação   AF_PACKET + filtro BPF nativo, sobre x/sys/unix — ~200 linhas
+implementação   AF_PACKET + escritor de pcap nativos, sobre a syscall da stdlib
 por que nativo  libpcap exigiria cgo, e cgo mata o binário estático (ver 4)
+filtro          em ESPAÇO DE USUÁRIO, não no kernel: um filtro de kernel errado
+                descarta o que foi pedido e a captura sai legitimamente vazia —
+                ninguém revisa arquivo vazio. O preço (o kernel entrega tudo) é
+                medido e declarado por PACKET_STATISTICS
 snaplen         0 = pacote inteiro, como o -s0 da §2.6
+loopback        a cópia de TRANSMISSÃO é descartada: ali cada quadro chega duas
+                vezes, e gravar as duas dobra a contagem. Só na loopback
+promíscuo       NÃO é ligado: alteraria o estado da interface, e a §2.6 trata
+                interface promíscua como achado
 saída           .pcap + sha256, no mesmo padrão de cadeia de custódia do preserve
 ```
 
@@ -1196,7 +1204,10 @@ v2  netlink proc connector   CN_IDX_PROC: o kernel EMPURRA fork/exec/exit (é o 
 —   eBPF                     melhor, mas é toolchain inteira. Fora de escopo aqui
 ```
 
-**`preserve --pcap` — aceitar `golang.org/x/net/bpf`. Segunda exceção à política.**
+**`preserve --pcap` — a exceção NÃO foi usada.** Ver o registro em TASKS.md: o
+filtro ficou em espaço de usuário, e com isso a política de zero dependências
+seguiu intacta. O texto abaixo é o que se planejava.
+
 
 O que fica **nativo**:
 

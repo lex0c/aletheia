@@ -47,6 +47,7 @@ import (
 
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/kbpf"
+	"github.com/lex0c/aletheia/internal/pcap"
 )
 
 // Item é uma linha do manifesto: uma peça de evidência guardada, com a cadeia
@@ -213,6 +214,113 @@ func (c *Coletor) BPF(id uint32) error {
 	}
 	c.Itens = append(c.Itens, item)
 	return nil
+}
+
+// PCAP captura tráfego direto do kernel, sem tcpdump e sem libpcap.
+//
+// É a única peça deste pacote que não copia nada: ela ESPERA o que ainda vai
+// acontecer. As outras preservam o que já existe e some; esta preserva o que só
+// existe enquanto passa.
+//
+// O que ela não pode prometer está no pacote pcap: um eBPF hostil em xdp/tc
+// esconde o pacote antes do socket, e captura confiável é espelhamento fora da
+// máquina (§2.6, §35.4).
+func (c *Coletor) PCAP(o pcap.Opcoes) (pcap.Estatisticas, error) {
+	var st pcap.Estatisticas
+	iface, err := pcap.AbrirInterface(o.Iface)
+	if err != nil {
+		c.falhar("pcap", o.Iface, err)
+		return st, err
+	}
+	if !iface.Ativa {
+		// Não é recusa: interface administrativamente DOWN pode subir no meio da
+		// captura, e capturar zero pacote nela é resultado, não erro. Mas quem
+		// lê o manifesto precisa saber que a placa estava caída.
+		c.falhar("pcap", o.Iface, errors.New("a interface estava DOWN quando a "+
+			"captura começou: zero pacote aqui não significa ausência de tráfego"))
+	}
+
+	nome := "captura-" + nomeSeguro(o.Iface) + ".pcap"
+	destino, err := c.destino(nome)
+	if err != nil {
+		c.falhar("pcap", o.Iface, err)
+		return st, err
+	}
+	fh, err := os.OpenFile(destino, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		c.falhar("pcap", o.Iface, err)
+		return st, err
+	}
+
+	h := sha256.New()
+	st, capErr := pcap.Capturar(fh, h, iface, o)
+	if cerr := fh.Close(); capErr == nil {
+		capErr = cerr
+	}
+	if capErr != nil {
+		// Sem socket não há arquivo: um pcap de zero byte no diretório de
+		// evidência se lê como "capturei e não passou nada".
+		if st.Gravados == 0 {
+			os.Remove(destino)
+		}
+		c.falhar("pcap", o.Iface, capErr)
+		return st, capErr
+	}
+
+	item := Item{
+		ID: "preserve", TS: c.agora(), Tipo: "pcap",
+		Origem:  "AF_PACKET em " + o.Iface,
+		Destino: nome, Bytes: st.Bytes,
+		HashOrigem: hex.EncodeToString(h.Sum(nil)),
+		Nota:       notaDaCaptura(iface, o, st),
+	}
+	item.HashCopia, err = hashDoArquivo(destino)
+	if err != nil {
+		c.falhar("pcap", o.Iface, err)
+		return st, err
+	}
+	c.Itens = append(c.Itens, item)
+
+	// O DESCARTE DO KERNEL É LACUNA DE EVIDÊNCIA, e entra como tal: é o único
+	// número desta captura que não dá para recuperar depois. Sem ele declarado,
+	// "não vi tráfego daquele IP" fica indistinguível de "não coube no buffer".
+	if st.Descartados > 0 {
+		c.falhar("pcap", o.Iface, fmt.Errorf(
+			"o KERNEL descartou %d de %d pacotes por falta de buffer: esta captura "+
+				"está INCOMPLETA, e o que faltou não passa de novo",
+			st.Descartados, st.VistosPeloKernel))
+	}
+	if st.NaoEntendidos > 0 {
+		c.falhar("pcap", o.Iface, fmt.Errorf(
+			"%d pacote(s) não puderam ser decodificados até onde o filtro precisava "+
+				"e ficaram de fora: não é o mesmo que não terem casado", st.NaoEntendidos))
+	}
+	return st, nil
+}
+
+func notaDaCaptura(i pcap.Interface, o pcap.Opcoes, st pcap.Estatisticas) string {
+	n := "filtro: " + o.Filtro.Descricao() +
+		" · " + strconv.Itoa(st.Gravados) + " gravados, " +
+		strconv.Itoa(st.Filtrados) + " fora do filtro, " +
+		strconv.Itoa(st.Descartados) + " descartados pelo kernel"
+	n += " · " + st.Parou
+	if i.Promiscua {
+		n += " · a interface JÁ ESTAVA em modo promíscuo antes desta captura (§2.6): " +
+			"isto não foi feito por esta ferramenta"
+	}
+	if st.SemRelogioDoKernel {
+		n += " · horário de LEITURA, não de chegada: o kernel não forneceu o " +
+			"carimbo por pacote"
+	}
+	if st.Truncados > 0 {
+		n += " · " + strconv.Itoa(st.Truncados) + " pacote(s) cortados pelo snaplen"
+	}
+	if st.Duplicados > 0 {
+		n += " · " + strconv.Itoa(st.Duplicados) + " cópia(s) de transmissão descartadas: " +
+			"na loopback cada quadro é entregue duas vezes, e gravar as duas " +
+			"dobraria a contagem"
+	}
+	return n
 }
 
 // Memoria dumpa as regiões ANÔNIMAS do processo, sem ptrace.

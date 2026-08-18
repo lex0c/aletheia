@@ -96,12 +96,20 @@ func collectModulosCarregados(f *Facts, e *env.Env) {
 		f.Carregados = append(f.Carregados, m)
 	}
 
-	// A lacuna só existe se houver PERGUNTA. Um guest mínimo sem /lib/modules e
-	// sem módulo carregado nenhum não tem nada a responder — declarar cobertura
-	// degradada ali seria inventar uma dúvida que não existe, e degradar por
-	// nada gasta a mesma atenção que uma lacuna de verdade.
-	// Em contêiner a lista é a do HOST e a árvore é a da imagem: não há lacuna
-	// a declarar porque não há pergunta a fazer daqui (ver o check).
+	declararLacunaDeModulos(f)
+}
+
+// declararLacunaDeModulos decide se a ausência de árvore de módulos é uma
+// LACUNA ou uma resposta. São três condições, e nenhuma pode faltar.
+//
+// A lacuna só existe se houver PERGUNTA. Um guest mínimo sem /lib/modules e
+// sem módulo carregado nenhum não tem nada a responder — declarar cobertura
+// degradada ali seria inventar uma dúvida que não existe, e degradar por nada
+// gasta a mesma atenção que uma lacuna de verdade.
+//
+// Em contêiner a lista é a do HOST e a árvore é a da imagem: não há lacuna a
+// declarar porque não há pergunta a fazer daqui (ver o check).
+func declararLacunaDeModulos(f *Facts) {
 	if !f.ArvoreDeModulos && len(f.Carregados) > 0 && !f.Host.EmContainer {
 		f.partial("modulo", strconv.Itoa(len(f.Carregados))+" módulo(s) carregado(s) "+
 			"e nenhum arquivo de módulo encontrado em /lib/modules ou "+

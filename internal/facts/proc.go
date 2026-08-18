@@ -689,6 +689,16 @@ func readCgroup(p *Process) {
 	if err != nil {
 		return
 	}
+	if c := parseCgroup(string(b)); c != "" {
+		p.Cgroup = c
+	}
+}
+
+// parseCgroup separa as duas gramáticas. É função PURA sobre texto porque é
+// nela que o formato morde, e testá-la pelo coletor exigiria um /proc de
+// mentira para responder uma pergunta de string — o mesmo motivo de
+// CronIntervalParaTeste e de ParseLinhaDeReflog existirem.
+func parseCgroup(texto string) string {
 	// Duas gramáticas: v2 é "0::/path", v1 é "N:controller:/path".
 	// O cgroup sobrevive ao daemonizar, então é o que restaura a origem quando
 	// PPid vira 1 (runbook §3.11).
@@ -697,23 +707,21 @@ func readCgroup(p *Process) {
 	// unit. Pegar a primeira — que pode ser cpuset, net_cls, freezer — destrói
 	// exatamente a proveniência que este campo existe para preservar.
 	var fallback string
-	for _, ln := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+	for _, ln := range strings.Split(strings.TrimSpace(texto), "\n") {
 		parts := strings.SplitN(ln, ":", 3)
 		if len(parts) != 3 {
 			continue
 		}
 		switch {
 		case parts[0] == "0" && parts[1] == "": // v2: hierarquia unificada
-			p.Cgroup = parts[2]
-			return
+			return parts[2]
 		case parts[1] == "name=systemd": // v1: a que tem a unit
-			p.Cgroup = parts[2]
-			return
+			return parts[2]
 		case fallback == "":
 			fallback = parts[2]
 		}
 	}
-	p.Cgroup = fallback
+	return fallback
 }
 
 func readNS(p *Process) {

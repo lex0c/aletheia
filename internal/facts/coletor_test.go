@@ -139,3 +139,101 @@ func indexOf(b []byte, c byte) int {
 	}
 	return -1
 }
+
+// O cgroup é a PROVENIÊNCIA do processo: é ele que diz se aquilo veio de uma
+// unit do systemd, de um contêiner, ou de nenhum dos dois. Errar aqui
+// misatribui a origem de todo processo do host, e é sobre isso que
+// proc.ns_divergent conclui "não é container nem unit".
+func TestCgroupV1PegaALinhaDoSystemdENaoAPrimeira(t *testing.T) {
+	// A forma real do v1: uma linha por controlador, em ordem arbitrária, e só
+	// a de name=systemd carrega a unit. Pegar a primeira devolveria o caminho
+	// do cpuset — que não diz nada sobre quem lançou o processo.
+	// A primeira linha tem hierarquia "0" e controlador NÃO vazio: é v1, e
+	// confundi-la com v2 devolveria o caminho do cpuset. Só as DUAS condições
+	// juntas identificam a hierarquia unificada.
+	v1 := `0:cpuset:/nao-eh-o-caminho-da-unit
+11:net_cls,net_prio:/
+1:name=systemd:/system.slice/nginx.service`
+	if got := parseCgroup(v1); got != "/system.slice/nginx.service" {
+		t.Errorf("v1 = %q, queria a linha de name=systemd", got)
+	}
+
+	// E o v2, que é "0::/caminho" — os dois primeiros campos VAZIOS.
+	v2 := "0::/user.slice/user-1000.slice/session-2.scope"
+	if got := parseCgroup(v2); got != "/user.slice/user-1000.slice/session-2.scope" {
+		t.Errorf("v2 = %q", got)
+	}
+
+	// Sem systemd e sem v2, sobra a primeira linha como último recurso — e ela
+	// é melhor que vazio, porque vazio se confunde com "não li".
+	só := "5:memory:/docker/abc123"
+	if got := parseCgroup(só); got != "/docker/abc123" {
+		t.Errorf("fallback = %q", got)
+	}
+}
+
+// Quem pode reescrever o que root executa: as cinco respostas são diferentes e
+// mandam o operador para lugares diferentes. A do arquivo AUSENTE é a mais
+// contraintuitiva — quem criar primeiro ganha a execução.
+func TestQuemGravaDistingueOsCincoCasos(t *testing.T) {
+	casos := []struct {
+		nome string
+		a    AlvoDeRoot
+		quer string
+	}{
+		{"dono não é root", AlvoDeRoot{Existe: true, UID: 1000}, "não é root"},
+		{"arquivo aberto a todos", AlvoDeRoot{Existe: true, Modo: 0o666}, "QUALQUER usuário"},
+		{"grupo que não é o do root", AlvoDeRoot{Existe: true, Modo: 0o664, GID: 1000}, "grupo 1000"},
+		// Grupo de usuário SEM o bit de escrita do grupo: as duas condições são
+		// necessárias, e só a conjunção distingue este caso do de cima.
+		{"grupo de usuário sem bit de escrita", AlvoDeRoot{Existe: true, Modo: 0o644, GID: 1000, DirModo: 0o755}, ""},
+		{"não existe e o diretório aceita", AlvoDeRoot{DirModo: 0o777}, "quem criá-lo"},
+		{"existe, protegido, diretório aceita", AlvoDeRoot{Existe: true, Modo: 0o644, DirModo: 0o777}, "diretório é gravável"},
+	}
+	for _, c := range casos {
+		got := c.a.QuemGrava()
+		if c.quer == "" {
+			if got != "" {
+				t.Errorf("%s: QuemGrava = %q, queria SILÊNCIO", c.nome, got)
+			}
+			continue
+		}
+		if !strings.Contains(got, c.quer) {
+			t.Errorf("%s: QuemGrava = %q, queria conter %q", c.nome, got, c.quer)
+		}
+	}
+	// E o caso em que ninguém além do root grava: silêncio.
+	nada := AlvoDeRoot{Existe: true, Modo: 0o644, DirModo: 0o755}
+	if got := nada.QuemGrava(); got != "" {
+		t.Errorf("arquivo e diretório de root = %q, queria vazio", got)
+	}
+}
+
+// A lacuna de módulos só existe se houver PERGUNTA. Um guest mínimo sem
+// /lib/modules e sem módulo carregado nenhum não tem nada a responder, e
+// degradar por nada gasta a mesma atenção que uma lacuna de verdade.
+func TestLacunaDeModuloExigeModuloCarregado(t *testing.T) {
+	// Sem árvore E sem módulo: não há pergunta, não há lacuna.
+	f := &Facts{}
+	declararLacunaDeModulos(f)
+	if len(f.Partial["modulo"]) != 0 {
+		t.Errorf("sem módulo carregado não há o que declarar: %v", f.Partial["modulo"])
+	}
+
+	// Sem árvore E COM módulo carregado: aí sim.
+	f = &Facts{Carregados: []ModuloCarregado{{Nome: "x"}}}
+	declararLacunaDeModulos(f)
+	if len(f.Partial["modulo"]) == 0 {
+		t.Error("módulo carregado sem árvore de módulos é pergunta sem resposta, " +
+			"e precisa ser declarada")
+	}
+
+	// Em CONTÊINER não há pergunta a fazer daqui: a lista é a do host e a
+	// árvore é a da imagem.
+	f = &Facts{Carregados: []ModuloCarregado{{Nome: "x"}}}
+	f.Host.EmContainer = true
+	declararLacunaDeModulos(f)
+	if len(f.Partial["modulo"]) != 0 {
+		t.Errorf("em contêiner a comparação não se aplica: %v", f.Partial["modulo"])
+	}
+}

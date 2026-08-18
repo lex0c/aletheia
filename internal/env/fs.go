@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"syscall"
 )
 
 // Acesso a filesystem, e o motivo de ele não ser `os.ReadFile(e.Path(p))`.
@@ -77,10 +78,55 @@ func (e *Env) ReadFile(p string) ([]byte, error) {
 	if fi.Size() > MaxLeitura {
 		return nil, ErrGrandeDemais
 	}
-	if e.root == nil {
-		return os.ReadFile(p)
+	fh, err := e.abrirSemTocarAtime(p)
+	if err != nil {
+		return nil, err
 	}
-	return e.root.ReadFile(rel(p))
+	defer fh.Close()
+	b := make([]byte, 0, fi.Size())
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := fh.Read(buf)
+		b = append(b, buf[:n]...)
+		if err == io.EOF {
+			return b, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(b) > MaxLeitura {
+			return nil, ErrGrandeDemais
+		}
+	}
+}
+
+// abrirSemTocarAtime abre para leitura preservando o ATIME do arquivo.
+//
+// Ler um arquivo MOVE o atime dele, e num filesystem montado com `relatime` —
+// o padrão de toda distribuição — isso apaga a data em que o arquivo foi lido
+// pela última vez. Medido: um `authorized_keys` com atime de 1º de junho saía
+// da varredura com o atime de HOJE.
+//
+// A ferramenta usa data como evidência (§9) e não pode destruir uma das três
+// que existem. Quem leu o `authorized_keys` da conta invadida, e quando, é
+// pergunta de incidente — e a resposta estava sendo apagada por quem foi
+// investigar.
+//
+// O_NOATIME exige ser DONO do arquivo ou ter CAP_FOWNER: como root funciona
+// para tudo, e sem root falha com EPERM em arquivo alheio. Aí a leitura
+// acontece do jeito normal, porque não ler é pior que mover o atime — e a
+// varredura sem root já é degradada por motivos maiores.
+func (e *Env) abrirSemTocarAtime(p string) (io.ReadCloser, error) {
+	if e.root == nil {
+		if fh, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOATIME, 0); err == nil {
+			return fh, nil
+		}
+		return os.Open(p)
+	}
+	if fh, err := e.root.OpenFile(rel(p), os.O_RDONLY|syscall.O_NOATIME, 0); err == nil {
+		return fh, nil
+	}
+	return e.root.Open(rel(p))
 }
 
 // Stat segue symlink, mas nunca para fora da raiz.
@@ -113,10 +159,7 @@ func (e *Env) Readlink(p string) (string, error) {
 // megabytes inteiro na memória para depois copiá-lo num hash gasta o dobro do
 // necessário, e alguns candidatos são grandes.
 func (e *Env) Open(p string) (io.ReadCloser, error) {
-	if e.root == nil {
-		return os.Open(p)
-	}
-	return e.root.Open(rel(p))
+	return e.abrirSemTocarAtime(p)
 }
 
 // ReadDir lista um diretório dentro da raiz.

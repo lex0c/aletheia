@@ -98,7 +98,11 @@ type BaselineInfo struct {
 	CapturedAt string
 	Conhecidos int
 	Rebaixados int
-	Ressalvas  []string
+	// SemChave conta os achados que não puderam ser comparados com a baseline.
+	// Eles não são novos nem conhecidos: são indiferenciáveis, e dizer o número
+	// é o que impede a comparação de parecer completa.
+	SemChave  int
+	Ressalvas []string
 }
 
 // Human escreve o relatório de decisão: uma linha por GRUPO de achado, bloco
@@ -150,8 +154,11 @@ func writeHeader(w io.Writer, f *facts.Facts, e *env.Env) {
 	}
 	fmt.Fprintln(w, b.String())
 
+	// Safe também na versão da ferramenta: num `analyze`, ela vem do DUMP —
+	// que é dado do alvo, e portanto escolhido por quem controlava o host.
 	fmt.Fprintf(w, "relógio %s · %s · modo %s · aletheia %s\n",
-		e.Clock, e.Now.Format("2006-01-02T15:04:05Z"), e.Source, nz(e.ToolVersion, "dev"))
+		e.Clock, e.Now.Format("2006-01-02T15:04:05Z"), e.Source,
+		Safe(nz(e.ToolVersion, "dev")))
 	fmt.Fprintln(w)
 }
 
@@ -579,6 +586,12 @@ func writeBaseline(w io.Writer, b *BaselineInfo) {
 	if b.Rebaixados > 0 {
 		fmt.Fprintln(w, "            o que já estava lá desceu um nível e CONTINUA abaixo:")
 		fmt.Fprintln(w, "            estar na baseline diz que não é novo, não que é legítimo")
+	}
+	if b.SemChave > 0 {
+		fmt.Fprintf(w, "            ⚠ %d achado(s) SEM chave estável: não são novos "+
+			"nem conhecidos\n", b.SemChave)
+		fmt.Fprintln(w, "            a comparação não os alcança, e por isso eles "+
+			"NÃO levam a marca ✳NOVO")
 	}
 	for _, m := range b.Ressalvas {
 		fmt.Fprintf(w, "            ⚠ %s\n", Safe(m))

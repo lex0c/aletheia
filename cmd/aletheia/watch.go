@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -387,9 +388,23 @@ func (w *vigia) registra(ev evento) {
 		report.Safe(nome), report.Safe(ev.Fd.Title), ev.Fd.Ref)
 
 	if w.jsonW != nil {
-		fmt.Fprintf(w.jsonW, `{"ts":%q,"event":%q,"id":%q,"ref":%q,"sev":%q,"subject":%q,"title":%q}`+"\n",
-			ev.Quando.UTC().Format(time.RFC3339), ev.Kind, ev.Fd.ID, ev.Fd.Ref,
-			ev.Fd.Sev.String(), ev.Fd.Subject, ev.Fd.Title)
+		// encoding/json e não %q: o verbo de Go escapa para um literal de GO,
+		// não de JSON. Rune inválido vira \xNN, que nenhum parser de JSON
+		// aceita — e Subject e Title vêm do ALVO, onde o byte inválido é
+		// escolha de quem controlava o host. Uma linha inválida no meio do
+		// JSONL quebra o consumidor no lugar onde ele mais precisa funcionar.
+		linha, err := json.Marshal(map[string]string{
+			"ts":      ev.Quando.UTC().Format(time.RFC3339),
+			"event":   ev.Kind,
+			"id":      ev.Fd.ID,
+			"ref":     ev.Fd.Ref,
+			"sev":     ev.Fd.Sev.String(),
+			"subject": ev.Fd.Subject,
+			"title":   ev.Fd.Title,
+		})
+		if err == nil {
+			fmt.Fprintf(w.jsonW, "%s\n", linha)
+		}
 	}
 }
 

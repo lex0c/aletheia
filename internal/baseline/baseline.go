@@ -153,20 +153,30 @@ func Carregar(caminho string) (*Baseline, error) {
 
 // Aplicar marca os achados conhecidos e rebaixa a severidade deles.
 //
-// Devolve quantos foram rebaixados. Nada é removido: o achado continua no
-// relatório com a data em que já estava presente.
-func (b *Baseline) Aplicar(r *check.Report, f *facts.Facts) int {
+// Devolve quantos foram rebaixados e quantos NÃO PUDERAM ser comparados. Nada
+// é removido: o achado continua no relatório com a data em que já estava
+// presente.
+func (b *Baseline) Aplicar(r *check.Report, f *facts.Facts) (rebaixados, semChave int) {
 	conhecido := make(map[string]bool, len(b.Keys))
 	for _, k := range b.Keys {
 		conhecido[k] = true
 	}
 
 	desde := b.CapturedAt
-	var n int
 	for i := range r.Findings {
 		fd := &r.Findings[i]
 		k := Chave(f, *fd)
-		if k == "" || !conhecido[k] {
+		if k == "" {
+			// Sem chave estável não dá para dizer NADA sobre a baseline, e
+			// ✳NOVO é a coluna mais lida do relatório justamente porque é a que
+			// aponta o que mudou. Marcá-lo aqui era afirmar por ignorância — e
+			// pior, para sempre: a captura também não consegue guardar chave
+			// vazia, então o mesmo achado sairia como novidade em toda execução,
+			// todo dia, até ninguém mais acreditar na coluna.
+			semChave++
+			continue
+		}
+		if !conhecido[k] {
 			// Sem baseline não há novidade; COM baseline, o que não estava lá é
 			// a informação mais valiosa da execução.
 			fd.Novo = true
@@ -177,9 +187,9 @@ func (b *Baseline) Aplicar(r *check.Report, f *facts.Facts) int {
 		fd.Evidence = append(fd.Evidence,
 			"já estava presente na baseline de "+b.Host+", capturada em "+desde+
 				" — isso NÃO prova que é legítimo, prova apenas que não é novo")
-		n++
+		rebaixados++
 	}
-	return n
+	return rebaixados, semChave
 }
 
 // rebaixar desce um nível e PARA em INFO.

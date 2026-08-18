@@ -28,7 +28,7 @@ func TestBaselineNuncaApaga(t *testing.T) {
 	b := &Baseline{Schema: Schema, Host: "h", CapturedAt: "2026-01-01T00:00:00Z",
 		Keys: []string{"persist.suid_unowned|/usr/local/sbin/x"}}
 
-	if n := b.Aplicar(r, f); n != 1 {
+	if n, _ := b.Aplicar(r, f); n != 1 {
 		t.Fatalf("rebaixados = %d", n)
 	}
 	if len(r.Findings) != 1 {
@@ -160,5 +160,33 @@ func TestCapturaRegistraCoberturaIncompleta(t *testing.T) {
 	}
 	if b.CoberturaTxt != "40/55" {
 		t.Errorf("cobertura = %q", b.CoberturaTxt)
+	}
+}
+
+// Achado sem chave estável não é novo NEM conhecido.
+//
+// `Chave` devolve "" quando o subject é `pid=N` e o processo já sumiu ou não
+// tem exe legível. A captura não consegue guardar chave vazia, então o mesmo
+// achado nunca entra na baseline — e marcá-lo como ✳NOVO fazia a coluna mais
+// lida do relatório afirmar "isto não estava aqui antes" todo dia, para
+// sempre, sobre algo que ninguém conseguiu comparar.
+func TestAchadoSemChaveNaoViraNovoPorIgnorancia(t *testing.T) {
+	// pid que não existe em f: a chave não pode ser calculada.
+	f := &facts.Facts{}
+	f.Index()
+	r := &check.Report{Findings: []check.Finding{
+		{ID: "proc.rwx_anon", Subject: "pid=4242", Sev: check.SevCritical},
+	}}
+	b := &Baseline{Schema: Schema, Host: "h", CapturedAt: "2026-01-01T00:00:00Z"}
+
+	rebaixados, semChave := b.Aplicar(r, f)
+	if rebaixados != 0 {
+		t.Errorf("rebaixados = %d", rebaixados)
+	}
+	if semChave != 1 {
+		t.Fatalf("semChave = %d: o número precisa ser contado para poder ser dito", semChave)
+	}
+	if r.Findings[0].Novo {
+		t.Error("marcou ✳NOVO um achado que nunca teve como ser comparado")
 	}
 }

@@ -35,15 +35,13 @@ func Cmdline(argv []string) []string {
 			skipNext = false
 			continue
 		}
-		low := strings.ToLower(a)
-
 		// -pSENHA colado (padrão do mysql) e --password=SENHA
-		if red, ok := redactInline(a, low); ok {
+		if red, ok := redactInline(a); ok {
 			out = append(out, red)
 			continue
 		}
 		// flag isolada: o PRÓXIMO argumento é o valor
-		if isSecretFlag(low) {
+		if isSecretFlag(a) {
 			out = append(out, a)
 			skipNext = true
 			continue
@@ -58,9 +56,9 @@ func Cmdline(argv []string) []string {
 	return out
 }
 
-func redactInline(a, low string) (string, bool) {
+func redactInline(a string) (string, bool) {
 	for _, k := range secretAssign {
-		if i := strings.Index(low, k); i >= 0 && i+len(k) < len(a) {
+		if i := indiceSemCaixa(a, k); i >= 0 && i+len(k) < len(a) {
 			return a[:i+len(k)] + "<redacted>", true
 		}
 	}
@@ -74,13 +72,57 @@ func redactInline(a, low string) (string, bool) {
 	return "", false
 }
 
-func isSecretFlag(low string) bool {
+func isSecretFlag(a string) bool {
 	for _, f := range secretFlags {
-		if low == f {
+		if len(a) == len(f) && igualSemCaixa(a, f) {
 			return true
 		}
 	}
 	return false
+}
+
+// indiceSemCaixa acha `alvo` em `s` ignorando caixa, e devolve o índice EM S.
+//
+// `strings.Index(strings.ToLower(s), alvo)` parece a mesma coisa e não é:
+// `ToLower` muda o COMPRIMENTO EM BYTES de alguns pontos de código. O K do
+// sinal de Kelvin ocupa 3 bytes e vira "k" com 1; o İ turco ocupa 2 e vira
+// "i̇" com 3. O índice saía medido numa string e era usado para fatiar OUTRA,
+// e onde a minúscula é maior o corte cai depois do começo do segredo — ou some
+// com a redação inteira, porque a guarda de tamanho é medida na original. O
+// resultado é a senha completa no relatório, que é exatamente o que este
+// pacote existe para impedir.
+//
+// As chaves procuradas são todas ASCII, então dobrar a caixa em ASCII é ao
+// mesmo tempo correto e alinhado byte a byte com a string original.
+func indiceSemCaixa(s, alvo string) int {
+	if alvo == "" || len(alvo) > len(s) {
+		return -1
+	}
+	for i := 0; i+len(alvo) <= len(s); i++ {
+		if igualSemCaixa(s[i:i+len(alvo)], alvo) {
+			return i
+		}
+	}
+	return -1
+}
+
+func igualSemCaixa(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		if minusculaASCII(a[i]) != minusculaASCII(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func minusculaASCII(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 func redactURLCreds(a string) string {

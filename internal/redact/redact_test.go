@@ -43,3 +43,42 @@ func TestCmdlineNaoRedigeArgumentoInocente(t *testing.T) {
 		}
 	}
 }
+
+// O índice vinha da string MINÚSCULA e fatiava a ORIGINAL.
+//
+// `strings.ToLower` muda o comprimento em bytes de dois pontos de código no
+// mapeamento simples do Go: U+023A e U+023E, que ocupam 2 bytes e viram 3. Um
+// deles antes da chave empurra o índice um byte para a FRENTE, e o corte passa
+// a cair DEPOIS do "=" — levando junto o começo do segredo. Com o segredo
+// curto o bastante, a guarda de tamanho (medida na original) reprova e a
+// redação não acontece de jeito nenhum: a senha inteira vai para o relatório,
+// para o ticket e para o e-mail.
+//
+// A asserção é do texto EXATO. `Contains` não serviria: o vazamento é de um
+// byte por caractere desses, e um teste que procura a senha inteira dá o
+// mesmo verde com metade dela na tela.
+func TestSegredoNaoVazaPorCaixaQueMudaDeTamanho(t *testing.T) {
+	casos := []struct{ arg, quer string }{
+		// Um Ⱥ antes da chave: o corte cai um byte depois do "=".
+		{"--Ⱥ--password=S3cr3t", "--Ⱥ--password=<redacted>"},
+		{"--ȾȾȾ--token=abcdef", "--ȾȾȾ--token=<redacted>"},
+		// E o caso em que a guarda reprova e NADA é redigido.
+		{"Ⱥ--secret=x", "Ⱥ--secret=<redacted>"},
+	}
+	for _, c := range casos {
+		got := Cmdline([]string{"app", c.arg})
+		if len(got) != 2 || got[1] != c.quer {
+			t.Errorf("Cmdline(%q) = %q, queria %q", c.arg, got[1], c.quer)
+		}
+	}
+}
+
+// E a redação continua acontecendo em maiúscula pura, que é o caso comum de
+// quem escreve a flag com a caixa da documentação.
+func TestChaveEmMaiusculaAindaEhRedigida(t *testing.T) {
+	got := Cmdline([]string{"app", "--PASSWORD=hunter2", "--Token", "xyz"})
+	juntos := strings.Join(got, " ")
+	if strings.Contains(juntos, "hunter2") || strings.Contains(juntos, "xyz") {
+		t.Errorf("caixa alta escapou da redação: %q", juntos)
+	}
+}

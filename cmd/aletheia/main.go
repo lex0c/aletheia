@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -517,12 +518,13 @@ func aplicarBaseline(r *check.Report, f *facts.Facts, e *env.Env, caminho string
 		fmt.Fprintf(os.Stderr, "--baseline: %v\n", err)
 		return nil, 3
 	}
-	n := bl.Aplicar(r, f)
+	n, semChave := bl.Aplicar(r, f)
 	return &report.BaselineInfo{
 		Host:       bl.Host,
 		CapturedAt: bl.CapturedAt,
 		Conhecidos: len(bl.Keys),
 		Rebaixados: n,
+		SemChave:   semChave,
 		Ressalvas:  bl.Ressalvas(f.Host.Hostname, e.Now),
 	}, 0
 }
@@ -595,8 +597,16 @@ func seNao(ok bool, texto string) string {
 // que deixou de rodar, é dado que não pôde ser lido. Sai da aritmética de
 // checks e continua impedindo um veredito de OK.
 func collectorGaps(r *check.Report, f *facts.Facts) {
-	for collector, reasons := range f.Partial {
-		for _, reason := range reasons {
+	// Ordem FIXA: `f.Partial` é mapa, e a lista sai daqui para o JSONL e para a
+	// baseline. Sem ordenar, duas execuções idênticas produzem arquivos
+	// diferentes — e comparar dois JSONL por diff é como se audita frota.
+	coletores := make([]string, 0, len(f.Partial))
+	for c := range f.Partial {
+		coletores = append(coletores, c)
+	}
+	sort.Strings(coletores)
+	for _, collector := range coletores {
+		for _, reason := range f.Partial[collector] {
 			r.Coverage.CollectorGaps = append(r.Coverage.CollectorGaps, collector+": "+reason)
 		}
 	}

@@ -1,6 +1,8 @@
 package facts
 
 import (
+	"github.com/lex0c/aletheia/internal/env"
+	"os"
 	"strings"
 	"testing"
 )
@@ -112,3 +114,58 @@ func TestCodigoLimpoEExtensaoDesconhecida(t *testing.T) {
 		t.Error(".php tinha de ser reconhecido")
 	}
 }
+
+// Regressão do starvation entre raízes: uma raiz ENORME (muitos arquivos em
+// /var/www) não pode consumir o orçamento e deixar a raiz seguinte (/data, onde
+// mora a aplicação) sem varrer. Foi o que aconteceu num host real: o webshell
+// de /var/www foi achado e o de /data/.../app/bootstrap.php passou.
+//
+// O teste baixa o teto por raiz, enche /var/www além dele e planta o backdoor
+// em /data. Com orçamento POR RAIZ, /data é alcançado.
+func TestVarreduraDeCodigoNaoDeixaRaizPosteriorPassarFome(t *testing.T) {
+	salvoA, salvoD := maxCodigoArquivos, maxCodigoDirs
+	maxCodigoArquivos, maxCodigoDirs = 4, 20000
+	defer func() { maxCodigoArquivos, maxCodigoDirs = salvoA, salvoD }()
+
+	raiz := t.TempDir()
+	must := func(p, conteudo string) {
+		t.Helper()
+		if err := os.MkdirAll(filepathDir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(conteudo), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// /var/www com mais arquivos que o teto por raiz: esgota o orçamento DELE.
+	for i := 0; i < 12; i++ {
+		must(raiz+"/var/www/site/generated/f"+itoa(i)+".php", "<?php // comum\n")
+	}
+	// o backdoor mora numa raiz POSTERIOR (/data).
+	must(raiz+"/data/local/www/consultoria/app/bootstrap.php",
+		"<?php\nif(isset($_REQUEST[0])){echo `$_REQUEST[0]`;die;}\n")
+
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	defer e.Close()
+	f := &Facts{}
+	collectCodigo(f, e)
+
+	var achou bool
+	for _, cs := range f.CodigoSuspeito {
+		if hasSuffix(cs.Path, "app/bootstrap.php") {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Fatalf("com orçamento por raiz, /data tinha de ser alcançado mesmo com "+
+			"/var/www esgotando o teto — achados: %+v", f.CodigoSuspeito)
+	}
+}
+
+func filepathDir(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[:i]
+	}
+	return "."
+}
+func hasSuffix(s, suf string) bool { return strings.HasSuffix(s, suf) }

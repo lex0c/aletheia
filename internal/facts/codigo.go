@@ -182,12 +182,18 @@ func trecho(linha string) string {
 // varredura da ferramenta, o teto é DECLARADO: parar em silêncio diria "nenhum
 // backdoor" quando o que houve foi parar antes.
 const (
-	maxCodigoDirs     = 20000
-	maxCodigoArquivos = 20000
-	maxCodigoDepth    = 12
+	maxCodigoDepth = 12
 	// Teto por arquivo: um webshell cabe em bytes; um bundle minificado de 40 MB
 	// é ruído e custo. O que passar disso é dito.
 	maxCodigoBytes = 2 << 20
+)
+
+// maxCodigoDirs e maxCodigoArquivos são o teto POR RAIZ. São var, não const,
+// só para o teste poder baixá-los e exercitar a exaustão sem plantar 20 mil
+// arquivos.
+var (
+	maxCodigoDirs     = 20000
+	maxCodigoArquivos = 20000
 )
 
 // codigoRaizes são as árvores onde código SERVIDO mora — é ali que um webshell
@@ -217,6 +223,13 @@ func collectCodigo(f *Facts, e *env.Env) {
 	raizes := append([]string{}, codigoRaizes...)
 	raizes = append(raizes, homeDirs(e)...)
 
+	// Orçamento POR RAIZ, não global. Com um contador único, uma raiz enorme —
+	// um /var/www com árvore `generated/` de dezenas de milhares de arquivos —
+	// esgotava o teto e as raízes SEGUINTES (/data, onde muitas vezes mora a
+	// aplicação) nunca eram alcançadas. Num host real a ferramenta achou o
+	// webshell em /var/www e perdeu o de /data/.../app/bootstrap.php por isso.
+	// Cada raiz recebe o seu teto; o tempo (--fs-budget) continua o limite
+	// global para disco lento, e a truncagem de qualquer raiz é declarada.
 	var st varreduraCodigo
 	vistos := map[string]bool{}
 	for _, r := range raizes {
@@ -224,13 +237,18 @@ func collectCodigo(f *Facts, e *env.Env) {
 			continue
 		}
 		vistos[r] = true
-		varrerCodigo(f, e, r, 0, &st, vistos)
+		porRaiz := varreduraCodigo{tempo: st.tempo}
+		varrerCodigo(f, e, r, 0, &porRaiz, vistos)
+		st.truncado = st.truncado || porRaiz.truncado
+		st.tempo = st.tempo || porRaiz.tempo
+		st.grandesPulados += porRaiz.grandesPulados
 	}
 
 	if st.truncado {
-		f.denyPersist("codigo", "a varredura de código parou em "+
+		f.denyPersist("codigo", "a varredura de código atingiu o teto de "+
 			itoa(maxCodigoDirs)+" diretórios ou "+itoa(maxCodigoArquivos)+
-			" arquivos: o excedente NÃO foi analisado")
+			" arquivos em ALGUMA raiz (o teto é por raiz): parte de uma árvore "+
+			"grande NÃO foi analisada — um webshell mais fundo nela passa")
 	}
 	if st.tempo {
 		f.denyPersist("codigo", "a varredura de código parou pelo orçamento de "+

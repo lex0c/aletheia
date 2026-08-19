@@ -94,6 +94,18 @@ insmod /socknd.ko esconder=1
 scan
 echo "socket_fired=$(tem cross.socket_view)"
 
+# --- DUPLO HIDE: esconde a porta de /proc/net/tcp E do SOCK_DIAG ao mesmo tempo.
+# Ataca a premissa do cross.socket_view: as duas fontes concordam, e a
+# comparação não tem divergência para achar. A pergunta é se sobra sinal
+# INDEPENDENTE — e sobra: o hook em tcp4_seq_show aparece em enabled_functions e
+# o kernel.ftrace_hook o pega. O mecanismo do ataque é visível mesmo quando o
+# efeito não é.
+rmmod socknd
+insmod /socknd.ko esconder=2
+scan
+echo "duplo_socketview=$(tem cross.socket_view) duplo_ftracehook=$(tem kernel.ftrace_hook)"
+rmmod socknd
+
 # --- module_view: LKM some de /proc/modules E /sys/module; ftrace o delata ---
 insmod /modhide.ko esconder=2
 echo "modhide_procmodules=$(grep -c '^modhide ' /proc/modules)"
@@ -190,6 +202,18 @@ linha "XDP em lo"       "atribuído (RTM_GETLINK)"    "$(get net_base)"    "$(ge
 linha "cls_bpf (tc)"    "atribuído (RTM_GETTFILTER)" "$(get net_base)"    "$(get tc_attributed)"
 linha "act_bpf"         "atribuído (RTM_GETACTION)"  "$(get net_base)"    "$(get act_attributed)"
 linha "tc em outro netns" "lacuna netns DECLARADA"   "$(get netns_base)"  "$(get netns_lacuna)"
+
+# O duplo-hide tem dois lados: cross.socket_view CALA (as fontes concordam) e o
+# kernel.ftrace_hook DISPARA (o hook em tcp4_seq_show é sinal independente).
+# Se o cross.socket_view disparar aqui, o hook do SOCK_DIAG não funcionou — e a
+# comparação achou a divergência que este cenário existe para eliminar.
+dcv="$(get duplo_socketview)"; dfh="$(get duplo_ftracehook)"
+if [ "${dcv:-1}" = "0" ] && [ "${dfh:-0}" -ge 1 ] 2>/dev/null; then
+	dres="PASS"
+else
+	dres="FALHOU"; falhou=1
+fi
+printf '%-22s %-28s %-12s\n' "duplo-hide (proc+diag)" "ftrace_hook (cross cego OK)" "$dres"
 
 echo
 [ "$falhou" = 0 ] && { echo "OK — todas as técnicas dispararam, e o baseline limpo calou."; exit 0; }

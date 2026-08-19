@@ -93,6 +93,48 @@ func init() {
 	})
 
 	Register(Scenario{
+		ID:   "A12-pacote-malicioso-de-verdade",
+		Desc: "o invasor CONSTRÓI e INSTALA um .deb real: propriedade, hash e base ficam TODOS válidos",
+		// A formalização EXECUTÁVEL do limite que o A1 já declara em prosa. O A1
+		// derrota a pergunta de propriedade adulterando a base do dpkg com um
+		// `echo` — grosseiro, e a ferramenta pega a adulteração. Aqui o invasor
+		// faz a coisa certa: constrói um .deb (control, md5sums, unit) e instala
+		// com `dpkg -i`. Depois disso:
+		//
+		//	propriedade   VÁLIDA    dpkg -S acha o dono
+		//	integridade   VÁLIDA    o md5 na base bate com o arquivo
+		//	base          VÁLIDA    o dpkg a escreveu, não foi editada
+		//	caminho       LEGÍTIMO  /usr/bin, como qualquer pacote
+		//
+		// Só que o pacote INTEIRO é do invasor — um binário SUID root com unit de
+		// systemd, entregue por um pacote que ninguém auditou. Sem verificar
+		// ORIGEM (assinatura, repositório, cadeia de confiança do apt), isso é
+		// indistinguível de um pacote legítimo, e a ferramenta não faz essa
+		// verificação. É LACUNA CONHECIDA, não falha do cenário: reproduzo
+		// perfeitamente e SEI que não pego. Fechar exige debsig/apt — fonte de
+		// proveniência que a ferramenta não tem hoje.
+		Images: []string{"debian:12"},
+		Plant:  pacoteMaliciosoDeVerdade,
+		KnownGap: "pacote do invasor instalado corretamente (propriedade/hash/base/caminho válidos) " +
+			"é indistinguível de um legítimo sem verificar origem/assinatura/repositório",
+		// A AFIRMAÇÃO da ausência. Estes checks são exatamente os que a
+		// propriedade derrota: eles calam sobre o binário do invasor porque a
+		// base responde "tem dono", e o hash bate. Se QUALQUER um disparar, a
+		// lacuna fechou — e o cenário manda promover para Expect.
+		ForbidFinding: []Expect{
+			{ID: "integrity.no_package_owner", Subject: "systemd-security-helper"},
+			{ID: "integrity.pkgdb_tampered"},
+			{ID: "persist.suid_unowned", Subject: "systemd-security-helper"},
+		},
+		// Medido: silêncio TOTAL sobre o pacote (cita_pacote=0), zero WARN, e a
+		// ferramenta sai 1 — NÃO 2. Um SUID root malicioso não vira crítico
+		// porque a base responde "tem dono": é o exit da lacuna, não o da
+		// detecção. Se subir para 2, a lacuna fechou.
+		MaxWarn: SemAvisos,
+		Exit:    1,
+	})
+
+	Register(Scenario{
 		ID:   "A2-sem-binario",
 		Desc: "persistência sem depositar binário: só o que a distribuição já entregou",
 		// O invasor não deixa arquivo executável nenhum. A carga é uma linha
@@ -374,6 +416,32 @@ func init() {
 // ---------------------------------------------------------------------------
 
 // implanteEmpacotado registra o implante na base do dpkg. Uma linha.
+const pacoteMaliciosoDeVerdade = `
+set -e
+mkdir -p /tmp/pkg/DEBIAN /tmp/pkg/usr/bin /tmp/pkg/etc/systemd/system
+
+# O binário do invasor: SUID root, mas ENTREGUE por um pacote de verdade.
+cp /helper /tmp/pkg/usr/bin/systemd-security-helper
+chmod 4755 /tmp/pkg/usr/bin/systemd-security-helper
+printf '[Unit]\nDescription=Systemd Security Helper\n[Service]\nExecStart=/usr/bin/systemd-security-helper sleep 3600\n[Install]\nWantedBy=multi-user.target\n' > /tmp/pkg/etc/systemd/system/systemd-security-helper.service
+
+cat > /tmp/pkg/DEBIAN/control <<EOF
+Package: systemd-security-helper
+Version: 1.0
+Architecture: all
+Maintainer: Debian Security <security@debian.invalid>
+Description: system security helper
+EOF
+
+# md5sums COERENTE: qualquer verificação de hash contra a base vai bater, porque
+# foi o próprio pacote que a escreveu — a integridade fica válida por construção.
+( cd /tmp/pkg && find usr etc -type f -exec md5sum {} + > DEBIAN/md5sums )
+
+dpkg-deb --build /tmp/pkg /tmp/sysh.deb >/dev/null
+dpkg -i /tmp/sysh.deb >/dev/null
+rm -rf /tmp/pkg /tmp/sysh.deb
+`
+
 const implanteEmpacotado = `
 mkdir -p /usr/local/sbin /etc/systemd/system /etc/cron.d
 

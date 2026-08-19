@@ -176,6 +176,21 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 			}
 		}
 	}
+	// ForbidFinding casa por ID+Subject/Sev/Evidence. Num cenário de LACUNA
+	// CONHECIDA é a afirmação da ausência: se ela DISPARA, a lacuna fechou, e a
+	// mensagem manda promover — é a catraca virando a favor.
+	for _, ff := range sc.ForbidFinding {
+		if r.has(ff) {
+			if sc.KnownGap != "" {
+				t.Errorf("cenário %q: a LACUNA CONHECIDA fechou — %s%s agora dispara. "+
+					"Promova este ForbidFinding para Expect e remova KnownGap.\nlacuna: %s\nachados: %v",
+					sc.Desc, ff.ID, subjectHint(ff), sc.KnownGap, r.ids())
+			} else {
+				t.Errorf("cenário %q: %s%s NÃO podia disparar\nachados: %v\nstderr:\n%s",
+					sc.Desc, ff.ID, subjectHint(ff), r.ids(), r.stderr)
+			}
+		}
+	}
 	for _, want := range sc.ExpectOutput {
 		if !strings.Contains(r.stderr, want) {
 			t.Errorf("cenário %q: o relatório humano não contém %q.\nsaída:\n%s",
@@ -511,6 +526,18 @@ func evidenceHint(e scenario.Expect) string {
 	return " com evidência contendo " + strconv.Quote(e.Evidence)
 }
 
+// subjectHint descreve o alvo de um ForbidFinding na mensagem de falha.
+func subjectHint(e scenario.Expect) string {
+	s := ""
+	if e.Subject != "" {
+		s += " (subject=" + e.Subject + ")"
+	}
+	if e.Sev != "" {
+		s += "/" + e.Sev
+	}
+	return s
+}
+
 // binFor escolhe o binário. Outra arquitetura é outro artefato, e um servidor
 // legado de 32 bits é onde tamanho de int e número de syscall divergem.
 func binFor(t *testing.T, bin string, sc scenario.Scenario) string {
@@ -678,7 +705,29 @@ func TestCenarioNaoCitaCheckInexistente(t *testing.T) {
 				t.Errorf("cenário %q espera %q, que não existe", sc.ID, e.ID)
 			}
 		}
+		for _, e := range sc.ForbidFinding {
+			if !ids[e.ID] {
+				t.Errorf("cenário %q proíbe (ForbidFinding) %q, que não existe: um "+
+					"ForbidFinding com ID errado passa calado e não prova nada", sc.ID, e.ID)
+			}
+		}
 	}
+}
+
+// TestDividaDeCobertura imprime as LACUNAS CONHECIDAS — ataques que a suíte
+// REPRODUZ e a ferramenta ainda perde. Não falha: é o inventário da dívida,
+// impresso para não virar conhecimento tácito. Uma lacuna que FECHA falha em
+// TestCenarios (a afirmação de ausência quebra), o que força a promoção para
+// Expect. É por isso que a dívida aqui não pode crescer sem que alguém veja.
+func TestDividaDeCobertura(t *testing.T) {
+	n := 0
+	for _, sc := range scenario.All() {
+		if sc.KnownGap != "" {
+			n++
+			t.Logf("LACUNA CONHECIDA %s: %s", sc.ID, sc.KnownGap)
+		}
+	}
+	t.Logf("%d lacuna(s) conhecida(s) — dívida de cobertura explícita e reproduzível", n)
 }
 
 // exigeImagemLocal pula com motivo quando uma imagem CONSTRUÍDA aqui não existe.

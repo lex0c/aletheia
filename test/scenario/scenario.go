@@ -143,6 +143,15 @@ type Scenario struct {
 	Expect []Expect
 	Forbid []string
 
+	// ForbidFinding é como Forbid, mas casa por ID **e** Subject/Sev/Evidence —
+	// a mesma chave do Expect. Forbid recusa TODO achado de um ID; ForbidFinding
+	// recusa UM achado específico sem proibir os legítimos do mesmo ID no mesmo
+	// cenário. O caso que a pede: um host com um `app.code_backdoor` legítimo
+	// (Elastic APM olhado por regra estrutural) ao lado de um sequestro real —
+	// proibir o ID inteiro apagaria a distinção que o cenário existe para provar.
+	// É também a forma de AFIRMAR uma lacuna conhecida (ver KnownGap).
+	ForbidFinding []Expect
+
 	// Exit é o código esperado. -1 = não verificar.
 	Exit int
 
@@ -186,6 +195,23 @@ type Scenario struct {
 	// com ele, a impossibilidade fica ESCRITA, com motivo, e o pulo aparece na
 	// saída do teste.
 	UntestableChecks []string
+
+	// KnownGap declara uma LACUNA CONHECIDA: o cenário REPRODUZ um ataque que a
+	// ferramenta HOJE não detecta. É a terceira coisa, entre as duas que já
+	// existiam:
+	//
+	//	Untestable   não consigo reproduzir           pulado, documenta o limite
+	//	KnownGap     reproduzo e a ferramenta PERDE   roda, dívida explícita
+	//	Expect       reproduzo e a ferramenta PEGA    roda, vira cobertura
+	//
+	// Uma lacuna conhecida NÃO conta em CoveredCheckIDs — é dívida, não
+	// cobertura. A ausência da detecção é AFIRMADA por ForbidFinding/Forbid/
+	// ForbidOutput, e é isso que a torna uma catraca no sentido certo: quando a
+	// lacuna FECHA (a ferramenta passa a pegar), essa afirmação falha e obriga a
+	// promover o cenário para Expect, apagando a dívida. Uma lacuna reproduzível
+	// e medida vale quase tanto quanto uma detecção — ela diz onde a ferramenta
+	// perde, em vez de deixar isso para o operador descobrir no incidente.
+	KnownGap string
 }
 
 var registry = map[string]Scenario{}
@@ -226,6 +252,15 @@ func Register(s Scenario) {
 				"para provar SILÊNCIO — e precisa declarar o orçamento de ruído " +
 				"(MaxWarn: N, medido; ou SemAvisos, para exigir silêncio)")
 		}
+	}
+	// Uma lacuna conhecida sem prova da ausência não documenta nada: ela precisa
+	// AFIRMAR que a ferramenta ficou calada sobre o artefato do ataque, senão
+	// "known gap" vira comentário não verificado — e não falha quando a lacuna
+	// fecha, que é justamente a catraca que dá valor ao campo.
+	if s.KnownGap != "" && len(s.ForbidFinding) == 0 && len(s.Forbid) == 0 && len(s.ForbidOutput) == 0 {
+		panic("cenário " + s.ID + ": KnownGap sem prova da ausência — afirme o " +
+			"silêncio da ferramenta com ForbidFinding, Forbid ou ForbidOutput, " +
+			"para que o cenário FALHE quando a lacuna fechar")
 	}
 	if _, dup := registry[s.ID]; dup {
 		panic("cenário duplicado: " + s.ID)

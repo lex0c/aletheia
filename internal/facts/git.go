@@ -246,14 +246,31 @@ func ParseConfigGit(texto string) []OpcaoDeGit {
 			continue
 		}
 		if strings.HasPrefix(ln, "[") {
-			corpo := strings.TrimSuffix(strings.TrimPrefix(ln, "["), "]")
+			// O cabeçalho termina no ']', e o git aceita a variável na MESMA
+			// linha: `[alias] ev = !echo pwned` funciona, conferido contra o
+			// binário. Cortar com TrimSuffix no fim da LINHA fazia o corpo
+			// virar "core] fsmonitor = /tmp/.x" — o core.fsmonitor, que o git
+			// EXECUTA a cada `git status`, desaparecia, e toda chave seguinte
+			// até o próximo '[' saía com uma chave inutilizável que não casava
+			// com execDeGit. Uma linha escrita pelo atacante desligava a
+			// leitura da superfície de execução do repositório inteiro dali
+			// para baixo.
+			fim := strings.IndexByte(ln, ']')
+			if fim < 0 {
+				continue // cabeçalho truncado: não abre seção nenhuma
+			}
+			corpo := ln[1:fim]
 			if i := strings.IndexByte(corpo, '"'); i >= 0 {
 				secao = strings.ToLower(strings.TrimSpace(corpo[:i]))
 				sub = strings.Trim(corpo[i:], `" `)
 			} else {
 				secao, sub = strings.ToLower(strings.TrimSpace(corpo)), ""
 			}
-			continue
+			// E o que sobrou da linha é um par chave=valor desta seção.
+			ln = strings.TrimSpace(ln[fim+1:])
+			if ln == "" {
+				continue
+			}
 		}
 		k, v, ok := strings.Cut(ln, "=")
 		if !ok {

@@ -2,11 +2,14 @@ package facts
 
 import (
 	"bufio"
+	"errors"
 	"io/fs"
+	"os"
 	"path"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/lex0c/aletheia/internal/env"
 )
@@ -214,6 +217,16 @@ func detectarPkgDB(e *env.Env) PkgDB {
 // do closure `add`; virou função para que os caminhos vindos do disco possam
 // usá-lo sem passar pelo filtro de metacaractere, que não vale para eles.
 func registrar(e *env.Env, out map[string][]string, p, onde string) {
+	registrarNegando(e, out, p, onde, nil)
+}
+
+// registrarNegando é registrar com a lista de NEGADOS de fora, para que o
+// chamador possa declarar a lacuna. Um EACCES no Lstat não é ausência: com
+// varredura sem root e uma unit apontando para /root/.local/bin/svc (/root é
+// 0700), o caminho não entrava em `candidatos`, não aparecia em f.Ownership, e
+// nenhuma lacuna era emitida — o relatório saía com cobertura completa sobre um
+// binário que ninguém chegou a olhar.
+func registrarNegando(e *env.Env, out map[string][]string, p, onde string, negados *[]string) {
 	// O arquivo precisa EXISTIR.
 	//
 	// Uma unit instalada cujo binário opcional não está no host aponta para
@@ -224,6 +237,9 @@ func registrar(e *env.Env, out map[string][]string, p, onde string) {
 	// é unit QUEBRADA, que é outra conversa e outra severidade.
 	fi, err := e.Lstat(p)
 	if err != nil {
+		if negados != nil && !os.IsNotExist(err) && !errors.Is(err, syscall.ENOTDIR) {
+			*negados = append(*negados, p)
+		}
 		return
 	}
 	// Link vira DOIS candidatos: ele e o alvo final. Sem perguntar pelo
@@ -266,11 +282,12 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 	// pergunta de propriedade em silêncio, porque o filtro que existe para
 	// descartar FRAGMENTO DE SHELL descartava também o nome esquisito de um
 	// arquivo que existe de verdade.
+	var negados []string
 	addDoDisco := func(p, onde string) {
 		if !strings.HasPrefix(p, "/") {
 			return
 		}
-		registrar(e, out, p, onde)
+		registrarNegando(e, out, p, onde, &negados)
 	}
 	// add é para caminho extraído de uma LINHA DE COMANDO — ExecStart, linha de
 	// cron, valor de variável. Ali o metacaractere significa que o token não é
@@ -279,7 +296,7 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 		if !strings.HasPrefix(p, "/") || strings.ContainsAny(p, "*?[]()|;&$\"'`<>") {
 			return
 		}
-		registrar(e, out, p, onde)
+		registrarNegando(e, out, p, onde, &negados)
 	}
 	// Quantos processos de CONTÊINER saíram da pergunta. Não é zero calado: o
 	// número vai para o relatório, porque "não perguntei sobre trinta binários"
@@ -455,6 +472,16 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 	// pacote. Um que não vem é a resposta inteira.
 	for i := range f.Suid {
 		addDoDisco(f.Suid[i].Path, "setuid/setgid")
+	}
+	if n := len(negados); n > 0 {
+		amostra := negados
+		if len(amostra) > 5 {
+			amostra = amostra[:5]
+		}
+		f.denyPersist("pkg", strconv.Itoa(n)+" caminho(s) não puderam ser "+
+			"examinados para a pergunta de propriedade (permissão negada), "+
+			"então 'nenhum pacote reivindica' não pode ser afirmado sobre eles: "+
+			strings.Join(amostra, ", "))
 	}
 	return out
 }

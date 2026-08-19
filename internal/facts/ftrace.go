@@ -81,12 +81,33 @@ func collectFtrace(f *Facts, e *env.Env) {
 	}
 }
 
+// lerFtrace decodifica enabled_functions no formato que t_show escreve
+// (kernel/trace/ftrace.c). A linha é
+//
+//	<simbolo>[ [mod]] (<n>)<flags>[\ttramp: <tramp> (<func>)][\tops: <ops> (<func>)]
+//
+// com uma continuação opcional "\n\tdirect-->%pS" logo abaixo. Quase todo campo
+// é condicional, e é aí que o parser posicional errava: sem FTRACE_FL_TRAMP_EN
+// o kernel não escreve `tramp:` nenhum — escreve " ->%pS", sem parênteses.
 func lerFtrace(f *Facts, texto string) {
 	for _, ln := range strings.Split(texto, "\n") {
-		// Linha continuada pertence à anterior: `direct-->` detalha o destino
-		// do hook que veio acima, e tratá-la como registro próprio inventaria
-		// um símbolo chamado "direct-->alguma_coisa".
-		if ln == "" || ln[0] == '\t' || ln[0] == ' ' {
+		if ln == "" {
+			continue
+		}
+		// Linha continuada pertence à anterior. Tratá-la como registro próprio
+		// inventava um símbolo "direct-->alguma_coisa"; descartá-la calada
+		// perdia a ÚNICA menção a bpf_trampoline_* num hook DIRECT — que é
+		// exatamente o que pareceEBPF procura para não acusar um fentry de eBPF
+		// de ser rootkit.
+		if ln[0] == '\t' || ln[0] == ' ' {
+			if n := len(f.Ftrace); n > 0 {
+				if _, alvo, ok := strings.Cut(ln, "-->"); ok {
+					h := &f.Ftrace[n-1]
+					alvo = strings.TrimSpace(alvo)
+					h.Callback = alvo
+					h.Modulo = moduloDeSimbolo(alvo)
+				}
+			}
 			continue
 		}
 		campos := strings.Fields(ln)
@@ -94,23 +115,77 @@ func lerFtrace(f *Facts, texto string) {
 			continue
 		}
 		h := HookFtrace{Simbolo: campos[0], Contagem: 1}
-		if c := strings.Trim(campos[1], "()"); c != campos[1] {
-			if n := atoiSeguro(c); n > 0 {
-				h.Contagem = n
+
+		// %pS acrescenta " [mod]" quando o símbolo pertence a um módulo
+		// (kallsyms.c). Aqui esse módulo é o dono da função INTERCEPTADA, não
+		// do interceptador — e ele DESLOCA os campos, empurrando a contagem
+		// para campos[2]. Ler campos[1] cegamente perdia a contagem e gravava
+		// o módulo errado em h.Modulo, atribuindo o rootkit a um módulo
+		// inocente sempre que a função interceptada morava num (packet_rcv em
+		// af_packet, por exemplo).
+		resto := campos[1:]
+		if len(resto) > 0 && strings.HasPrefix(resto[0], "[") {
+			resto = resto[1:]
+		}
+		if len(resto) > 0 {
+			if c := strings.Trim(resto[0], "()"); c != resto[0] {
+				if n := atoiSeguro(c); n > 0 {
+					h.Contagem = n
+				}
 			}
 		}
-		// O callback vem entre parênteses no fim, e o módulo dono entre
-		// colchetes quando existe.
-		if i := strings.LastIndex(ln, "("); i > 0 {
-			h.Callback = strings.Trim(ln[i:], "()")
-		}
-		if i := strings.Index(ln, "["); i > 0 {
-			if j := strings.Index(ln[i:], "]"); j > 0 {
-				h.Modulo = ln[i+1 : i+j]
-			}
+
+		if cb, ok := callbackDeFtrace(ln); ok {
+			h.Callback = cb
+			h.Modulo = moduloDeSimbolo(cb)
+		} else if _, alvo, ok := strings.Cut(ln, " ->"); ok {
+			// add_trampoline_func sem ops: o trampolim genérico da arquitetura.
+			// Não nomeia um handler específico, mas é melhor que a contagem.
+			alvo = strings.TrimSpace(alvo)
+			h.Callback = alvo
+			h.Modulo = moduloDeSimbolo(alvo)
 		}
 		f.Ftrace = append(f.Ftrace, h)
 	}
+}
+
+// callbackDeFtrace extrai quem ATENDE a interceptação. O kernel escreve o
+// handler como o SEGUNDO %pS de "tramp: <trampolim> (<func>)" ou de
+// "ops: <ops> (<func>)" — o primeiro é o endereço do trampolim, que não
+// identifica ninguém. As duas formas são condicionais (TRAMP_EN e CALL_OPS_EN),
+// e quando nenhuma sai, um LastIndex("(") acabava capturando o "(2)" da
+// contagem: o callback virava "2) R  I  D …", pareceEBPF falhava, e o check
+// subia de WARN para CRITICAL com a contagem no lugar de quem intercepta.
+func callbackDeFtrace(ln string) (string, bool) {
+	for _, marca := range []string{"tramp: ", "ops: "} {
+		i := strings.Index(ln, marca)
+		if i < 0 {
+			continue
+		}
+		j := strings.Index(ln[i:], "(")
+		if j < 0 {
+			continue // "tramp: ERROR!" e afins: não há handler nomeado
+		}
+		k := strings.Index(ln[i+j:], ")")
+		if k < 2 {
+			continue
+		}
+		return ln[i+j+1 : i+j+k], true
+	}
+	return "", false
+}
+
+// moduloDeSimbolo devolve o módulo que %pS anexa entre colchetes ao símbolo.
+func moduloDeSimbolo(s string) string {
+	i := strings.Index(s, "[")
+	if i < 0 {
+		return ""
+	}
+	j := strings.Index(s[i:], "]")
+	if j < 2 {
+		return ""
+	}
+	return s[i+1 : i+j]
 }
 
 func atoiSeguro(s string) int {

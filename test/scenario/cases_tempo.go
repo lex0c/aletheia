@@ -29,14 +29,14 @@ func init() {
 		Cmd:       "watch",
 		Args:      []string{"--interval", "5s", "--full", "5s", "--for", "16s"},
 		Plant: `ip link set lo up
-			ip addr add 51.91.190.241/32 dev lo
+			ip addr add 198.51.100.241/32 dev lo
 			mkdir -p /usr/local/sbin
 			cp /helper /usr/local/sbin/systemd-timesyncd
-			/helper listen 51.91.190.241:8443 &
+			/helper listen 198.51.100.241:8443 &
 			# O implante só acorda no SEGUNDO ciclo. No instante do ciclo 0 não
 			# há processo, não há conexão, não há nada: um scan comum termina
 			# com "nenhum indicador coberto disparou" e está certo.
-			( sleep 8; /usr/local/sbin/systemd-timesyncd connect 51.91.190.241:8443 ) &
+			( sleep 8; /usr/local/sbin/systemd-timesyncd connect 198.51.100.241:8443 ) &
 			sleep 0.3`,
 		Expect: []Expect{
 			// O achado NASCE durante a vigília. Ele não existe no ciclo 0.
@@ -65,11 +65,11 @@ func init() {
 		Caps:      []string{"NET_ADMIN"},
 		NoNetwork: true,
 		Plant: `ip link set lo up
-			ip addr add 51.91.190.241/32 dev lo
+			ip addr add 198.51.100.241/32 dev lo
 			mkdir -p /usr/local/sbin
 			cp /helper /usr/local/sbin/systemd-timesyncd
-			/helper listen 51.91.190.241:8443 &
-			( sleep 8; /usr/local/sbin/systemd-timesyncd connect 51.91.190.241:8443 ) &
+			/helper listen 198.51.100.241:8443 &
+			( sleep 8; /usr/local/sbin/systemd-timesyncd connect 198.51.100.241:8443 ) &
 			sleep 0.3`,
 		// O implante não aparece em lugar nenhum do relatório: não há processo,
 		// não há conexão, e o binário em disco e nunca executado é a §8 — que
@@ -126,13 +126,13 @@ func init() {
 		Cmd:       "watch",
 		Args:      []string{"--interval", "5s", "--full", "5s", "--for", "26s"},
 		Plant: `ip link set lo up
-			ip addr add 51.91.190.241/32 dev lo
+			ip addr add 198.51.100.241/32 dev lo
 			mkdir -p /usr/local/sbin
 			cp /helper /usr/local/sbin/systemd-timesyncd
-			/helper listen 51.91.190.241:8443 &
+			/helper listen 198.51.100.241:8443 &
 			# dois disparos, com um vale no meio: é o ciclo de um agendamento
-			( sleep 3;  /usr/local/sbin/systemd-timesyncd connect 51.91.190.241:8443 & sleep 5; kill %1 2>/dev/null ) &
-			( sleep 17; /usr/local/sbin/systemd-timesyncd connect 51.91.190.241:8443 ) &
+			( sleep 3;  /usr/local/sbin/systemd-timesyncd connect 198.51.100.241:8443 & sleep 5; kill %1 2>/dev/null ) &
+			( sleep 17; /usr/local/sbin/systemd-timesyncd connect 198.51.100.241:8443 ) &
 			sleep 0.3`,
 		ExpectOutput: []string{
 			"VOLTOU — sumiu e reapareceu: é a forma de algo executado por gatilho",
@@ -158,16 +158,16 @@ func init() {
 		Cmd:       "watch",
 		Args:      []string{"--interval", "1s", "--full", "60s", "--for", "30s"},
 		Plant: `ip link set lo up
-			ip addr add 51.91.190.241/32 dev lo
+			ip addr add 198.51.100.241/32 dev lo
 			mkdir -p /usr/local/sbin /etc/systemd/system
 			cp /helper /usr/local/sbin/systemd-timesyncd
-			/helper listen 51.91.190.241:8443 &
+			/helper listen 198.51.100.241:8443 &
 			# O gatilho DECLARADO, que a varredura completa vai ler.
 			printf '[Timer]\nOnUnitActiveSec=8s\n[Install]\nWantedBy=timers.target\n' \
 				> /etc/systemd/system/systemd-timesyncd.timer
 			# E o pulso, no mesmo ritmo do gatilho: 2s conectado, 6s fora.
 			( while :; do
-				/usr/local/sbin/systemd-timesyncd connect 51.91.190.241:8443 &
+				/usr/local/sbin/systemd-timesyncd connect 198.51.100.241:8443 &
 				p=$!; sleep 2; kill $p 2>/dev/null; sleep 6
 			  done ) &
 			sleep 0.3`,

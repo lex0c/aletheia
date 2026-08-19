@@ -1592,9 +1592,9 @@ var maxCodigoDepth = 12
 // contra laço patológico (o tempo e a profundidade já limitam o resto), e por
 // isso é alto. O de arquivos é o que de fato limita o trabalho caro.
 //
-// Medido num host real (meteorologia, /data com arquivo de imagens e dados de
-// anos): o teto de diretórios em 20 mil ESTOURAVA na árvore de dados e o código
-// servido de uma aplicação IRMÃ — /data/local/www/data/consultoria/app/
+// Medido num host real (/data com um arquivo de imagens e dados de anos): o
+// teto de diretórios em 20 mil ESTOURAVA na árvore de dados e o código
+// servido de uma aplicação IRMÃ — /data/local/www/data/webapp/app/
 // bootstrap.php, com um webshell de crase de verdade — nunca era alcançado. A
 // varredura DECLAROU a lacuna (não mentiu "limpo"), mas declarar não é achar. O
 // teto baixo tratava um readdir como se custasse o mesmo que ler um arquivo.
@@ -1783,7 +1783,7 @@ func varrerCodigo(f *Facts, e *env.Env, raiz string, prof int, st *varreduraCodi
 	// bootstrap.php, o painel — mora raso, na raiz de cada aplicação; o que é
 	// fundo é dado, upload, cache, build. A recursão em profundidade mergulhava
 	// numa árvore de dados IRMÃ e gastava o orçamento antes de listar a
-	// aplicação ao lado (medido: o webshell de /data/local/www/data/consultoria
+	// aplicação ao lado (medido: o webshell de /data/local/www/data/webapp
 	// passou porque uma árvore de dados vizinha consumiu o teto primeiro). A
 	// fila por nível gasta o orçamento no raso primeiro — onde o webshell de
 	// ponto-de-entrada está —, seja qual for a ordem que o readdir devolveu.

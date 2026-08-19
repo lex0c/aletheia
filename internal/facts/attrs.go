@@ -1,7 +1,6 @@
 package facts
 
 import (
-	"os"
 	"sort"
 	"syscall"
 	"unsafe"
@@ -96,11 +95,14 @@ func coletarAtributos(f *Facts, e *env.Env) {
 // não lacuna, porque "este filesystem não tem o conceito" não é o mesmo que
 // "não consegui perguntar".
 func flagsDoArquivo(e *env.Env, p string) (uint32, bool) {
-	fi, err := e.Lstat(p)
-	if err != nil || !fi.Mode().IsRegular() {
-		return 0, false
-	}
-	fh, err := os.OpenFile(e.Path(p), os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	// Pelo Env, nunca por e.Path(): o Lstat anterior resolvia DENTRO da imagem
+	// e o os.OpenFile seguinte resolvia com os symlinks do host do analista.
+	// Com `scan --root <img>` sobre um rootfs que tenha link absoluto de
+	// diretório no caminho — /var/run → /run é padrão de distribuição —, o
+	// ioctl era feito no arquivo do ANALISTA, e o `chattr +i` reportado para a
+	// imagem era o da máquina de quem investiga: dado errado com cara de
+	// medida. OpenFD também já recusa não-regular no descritor.
+	fh, err := e.OpenFD(p)
 	if err != nil {
 		return 0, false
 	}

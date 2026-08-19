@@ -103,6 +103,12 @@ type Facts struct {
 	// bootloader nenhum" têm o mesmo JSON — e são conclusões opostas.
 	BootConfigLido bool     `json:"boot_config_read,omitempty"`
 	ModuleFiles    []string `json:"module_files,omitempty"`
+	// ModuleFilesExternos são os .ko das árvores de compilação local — DKMS,
+	// extra, weak-updates. Ficam FORA da pergunta de propriedade (nada ali vem
+	// de pacote, por desenho) e DENTRO da pergunta "existe arquivo em disco
+	// para este módulo carregado?". Sem a segunda lista, todo host com driver
+	// DKMS reportava os módulos dele como sem arquivo em disco.
+	ModuleFilesExternos []string `json:"module_files_external,omitempty"`
 	// Repos são os repositórios git encontrados sob as árvores de aplicação. O
 	// coletor de hooks já os visita; guardar o caminho é o que permite entregar
 	// a verificação de integridade da §16 com o `-C` preenchido.

@@ -46,43 +46,56 @@ var (
 	ErrGrandeDemais = errors.New("arquivo maior que o teto de leitura: NÃO foi lido")
 	ErrNaoEhArquivo = errors.New("não é arquivo comum (fifo, socket ou dispositivo): " +
 		"NÃO foi lido, porque abrir isto bloqueia ou consome sem fim")
+	// ErrSemRaiz recusa leitura num Env de IMAGEM cuja raiz travada não está
+	// aberta. Ver raizIndisponivel.
+	ErrSemRaiz = errors.New("raiz travada da imagem indisponível: a leitura foi " +
+		"RECUSADA para não cair no filesystem de quem investiga")
 )
+
+// raizIndisponivel é a trava que impede o modo image de degradar para o host do
+// analista sem dizer nada.
+//
+// `root == nil` significa "host vivo" em todos os acessores deste arquivo, e
+// Close() põe exatamente isso — então qualquer leitura depois do Close passava
+// a ler o /etc do ANALISTA enquanto Path() continuava imprimindo o caminho sob
+// a imagem. É a fronteira que este arquivo inteiro existe para defender,
+// falhando aberta. O mesmo estado nasce por construção em dump.Env(), que monta
+// um Env com Root preenchido e Source=SourceImage sem raiz nenhuma.
+//
+// probeCaps já trata este par como ausência de CapFilesystem; aqui ele vira
+// recusa explícita, para que um acessor chamado mesmo assim erre alto.
+func (e *Env) raizIndisponivel() error {
+	if e.Source == SourceImage && e.root == nil {
+		return ErrSemRaiz
+	}
+	return nil
+}
 
 // ReadFile lê um arquivo, travado na raiz quando em modo image.
 //
-// Duas recusas antes de abrir, e as duas foram reproduzidas contra o binário
-// real por uma revisão:
+// Duas recusas, e as duas foram reproduzidas contra o binário real:
 //
 //	fifo       `mkfifo /etc/ld.so.preload` — caminho que a ferramenta SEMPRE lê
 //	           e que o atacante já toca. O open bloqueia para sempre e a
 //	           varredura nunca termina
 //	tamanho    arquivo esparso de 8 GB derruba o processo por falta de memória
 //
-// O `Lstat` antes do open é o que impede as duas. Ele é uma chamada a mais por
-// arquivo lido, e é o preço de ler o disco de um host que não é seu.
+// As duas são decididas no DESCRITOR, nunca no caminho. A versão anterior fazia
+// Lstat, Stat e open como três resoluções independentes do mesmo caminho, e a
+// janela entre elas era vencível sem privilégio nenhum: um usuário alternando o
+// próprio ~/.ssh/authorized_keys entre arquivo comum e fifo num laço fazia a
+// guarda ver "comum, 100 bytes" e o open pegar o fifo. Um open com O_NONBLOCK
+// seguido de fstat responde as duas perguntas sobre o objeto que foi REALMENTE
+// aberto, e não sobra janela para trocar nada no meio.
 func (e *Env) ReadFile(p string) ([]byte, error) {
-	fi, err := e.Lstat(p)
-	if err != nil {
-		return nil, err
-	}
-	// Symlink é seguido de propósito (é assim que /etc/rc.local funciona em
-	// RHEL), mas o ALVO precisa passar pelas mesmas travas.
-	if fi.Mode()&fs.ModeSymlink != 0 {
-		if fi, err = e.Stat(p); err != nil {
-			return nil, err
-		}
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, ErrNaoEhArquivo
-	}
-	if fi.Size() > MaxLeitura {
-		return nil, ErrGrandeDemais
-	}
-	fh, err := e.abrirSemTocarAtime(p)
+	fh, fi, err := e.abrirVerificado(p)
 	if err != nil {
 		return nil, err
 	}
 	defer fh.Close()
+	if fi.Size() > MaxLeitura {
+		return nil, ErrGrandeDemais
+	}
 	b := make([]byte, 0, fi.Size())
 	buf := make([]byte, 32*1024)
 	for {
@@ -116,21 +129,61 @@ func (e *Env) ReadFile(p string) ([]byte, error) {
 // para tudo, e sem root falha com EPERM em arquivo alheio. Aí a leitura
 // acontece do jeito normal, porque não ler é pior que mover o atime — e a
 // varredura sem root já é degradada por motivos maiores.
-func (e *Env) abrirSemTocarAtime(p string) (io.ReadCloser, error) {
+//
+// O_NONBLOCK vai junto e não é detalhe: num arquivo comum ele não tem efeito
+// nenhum, e num fifo é a diferença entre retornar na hora e pendurar a
+// varredura para sempre — `open(2)` de um fifo para leitura bloqueia até
+// aparecer um escritor, e não existe timeout nem cancelamento nesse caminho.
+// Quem decide o tipo do objeto é quem escreve no disco do alvo, então a decisão
+// tem que ser tomada DEPOIS de abrir, sobre o descritor.
+func (e *Env) abrirSemTocarAtime(p string) (*os.File, error) {
+	const flags = os.O_RDONLY | syscall.O_NONBLOCK
+	if err := e.raizIndisponivel(); err != nil {
+		return nil, err
+	}
 	if e.root == nil {
-		if fh, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOATIME, 0); err == nil {
+		if fh, err := os.OpenFile(p, flags|syscall.O_NOATIME, 0); err == nil {
 			return fh, nil
 		}
-		return os.Open(p)
+		return os.OpenFile(p, flags, 0)
 	}
-	if fh, err := e.root.OpenFile(rel(p), os.O_RDONLY|syscall.O_NOATIME, 0); err == nil {
+	if fh, err := e.root.OpenFile(rel(p), flags|syscall.O_NOATIME, 0); err == nil {
 		return fh, nil
 	}
-	return e.root.Open(rel(p))
+	return e.root.OpenFile(rel(p), flags, 0)
+}
+
+// abrirVerificado abre e só então decide se aquilo devia ter sido aberto.
+//
+// É o único ponto onde ReadFile e Open concordam sobre o que é legível, e ele
+// existe porque os dois divergiam: ReadFile gastava um Lstat para recusar fifo
+// e Open não recusava nada. Um `mkfifo /var/log/wtmp` travava lerUtmp em
+// open(2), e um arquivo com dono de pacote trocado por fifo travava
+// hashDoArquivo DENTRO de um worker — com o wg.Wait() do chamador esperando
+// para sempre. Sem timeout e sem lacuna declarada: a varredura simplesmente
+// não terminava.
+func (e *Env) abrirVerificado(p string) (*os.File, fs.FileInfo, error) {
+	fh, err := e.abrirSemTocarAtime(p)
+	if err != nil {
+		return nil, nil, err
+	}
+	fi, err := fh.Stat()
+	if err != nil {
+		fh.Close()
+		return nil, nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		fh.Close()
+		return nil, nil, ErrNaoEhArquivo
+	}
+	return fh, fi, nil
 }
 
 // Stat segue symlink, mas nunca para fora da raiz.
 func (e *Env) Stat(p string) (fs.FileInfo, error) {
+	if err := e.raizIndisponivel(); err != nil {
+		return nil, err
+	}
 	if e.root == nil {
 		return os.Stat(p)
 	}
@@ -140,6 +193,9 @@ func (e *Env) Stat(p string) (fs.FileInfo, error) {
 // Lstat não segue o link final — é o que se quer para DETECTAR um link
 // plantado, em vez de silenciosamente segui-lo.
 func (e *Env) Lstat(p string) (fs.FileInfo, error) {
+	if err := e.raizIndisponivel(); err != nil {
+		return nil, err
+	}
 	if e.root == nil {
 		return os.Lstat(p)
 	}
@@ -148,6 +204,9 @@ func (e *Env) Lstat(p string) (fs.FileInfo, error) {
 
 // Readlink devolve o alvo bruto do link, sem resolvê-lo.
 func (e *Env) Readlink(p string) (string, error) {
+	if err := e.raizIndisponivel(); err != nil {
+		return "", err
+	}
 	if e.root == nil {
 		return os.Readlink(p)
 	}
@@ -158,12 +217,33 @@ func (e *Env) Readlink(p string) (string, error) {
 // image. Existe para o cálculo de hash: carregar um binário de centenas de
 // megabytes inteiro na memória para depois copiá-lo num hash gasta o dobro do
 // necessário, e alguns candidatos são grandes.
+//
+// Recusa não-arquivo pelo mesmo caminho que ReadFile: quem lê em fluxo tem
+// MENOS defesa, não mais — não há teto de tamanho aqui, e o chamador costuma
+// estar dentro de um pool de workers.
 func (e *Env) Open(p string) (io.ReadCloser, error) {
-	return e.abrirSemTocarAtime(p)
+	fh, _, err := e.abrirVerificado(p)
+	if err != nil {
+		return nil, err
+	}
+	return fh, nil
+}
+
+// OpenFD abre um arquivo comum e devolve o DESCRITOR, para quem precisa de
+// ioctl ou fstat e não só de leitura. Mesmas recusas de Open, e a mesma trava
+// de raiz — que é o ponto: `os.OpenFile(e.Path(p))` resolve o caminho com os
+// symlinks do HOST DE QUEM INVESTIGA, e um /var/run → /run dentro da imagem faz
+// a chamada cair no arquivo do analista. Env.Path é para EXIBIÇÃO.
+func (e *Env) OpenFD(p string) (*os.File, error) {
+	fh, _, err := e.abrirVerificado(p)
+	return fh, err
 }
 
 // ReadDir lista um diretório dentro da raiz.
 func (e *Env) ReadDir(p string) ([]fs.DirEntry, error) {
+	if err := e.raizIndisponivel(); err != nil {
+		return nil, err
+	}
 	if e.root == nil {
 		return os.ReadDir(p)
 	}

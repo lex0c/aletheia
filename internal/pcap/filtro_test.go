@@ -13,7 +13,7 @@ func fHost(s string) Filtro { return Filtro{Host: netip.MustParseAddr(s)} }
 // do incidente; estreito demais perde a evidência e a captura sai vazia com cara
 // de resposta.
 func TestFiltroPorHostOlhaAsDuasPontas(t *testing.T) {
-	f := fHost("51.91.190.241")
+	f := fHost("198.51.100.241")
 	casos := []struct {
 		nome      string
 		pkt       []byte
@@ -54,8 +54,8 @@ func TestFiltroPorPortaEProtocolo(t *testing.T) {
 		{"proto icmp", Filtro{Proto: "icmp"}, icmp, true},
 		{"icmp não tem porta", Filtro{Porta: 443}, icmp, false},
 		// As condições combinam por E: o host certo na porta errada fica fora.
-		{"host E porta, os dois", Filtro{Host: netip.MustParseAddr("51.91.190.241"), Porta: 443}, tcp443, true},
-		{"host certo, porta errada", Filtro{Host: netip.MustParseAddr("51.91.190.241"), Porta: 22}, tcp443, false},
+		{"host E porta, os dois", Filtro{Host: netip.MustParseAddr("198.51.100.241"), Porta: 443}, tcp443, true},
+		{"host certo, porta errada", Filtro{Host: netip.MustParseAddr("198.51.100.241"), Porta: 22}, tcp443, false},
 	}
 	for _, c := range casos {
 		if casa, _ := c.f.Casa(LinkEthernet, c.pkt); casa != c.quero {
@@ -86,7 +86,7 @@ func TestSemFiltroTudoEntra(t *testing.T) {
 // captura de dizer "não vi tráfego daquele IP" quando o que houve foi não
 // conseguir olhar dentro dos pacotes.
 func TestOQueNaoFoiEntendidoNaoViraNaoCasou(t *testing.T) {
-	f := fHost("51.91.190.241")
+	f := fHost("198.51.100.241")
 	// Só entra aqui o que é TRUNCADO ou malformado — o que impede decidir.
 	// Quadro de outro protocolo (ARP, LLDP) NÃO entra: ele foi entendido, e
 	// simplesmente não é do tipo que um filtro de IP alcança. Ver
@@ -122,7 +122,7 @@ func TestQuadroComEtiquetaVLAN(t *testing.T) {
 	comVLAN = append(comVLAN, 0x81, 0x00, 0x00, 0x64) // etiqueta, VLAN 100
 	comVLAN = append(comVLAN, base[12:]...)
 
-	f := fHost("51.91.190.241")
+	f := fHost("198.51.100.241")
 	if casa, entendi := f.Casa(LinkEthernet, comVLAN); !casa || !entendi {
 		t.Errorf("quadro com VLAN: casa=%v entendi=%v", casa, entendi)
 	}
@@ -141,7 +141,7 @@ func TestFragmentoIntermediarioNaoTemPorta(t *testing.T) {
 		t.Error("fragmento sem cabeçalho de transporte não pode ser dado como entendido")
 	}
 	// Sem pergunta sobre porta, o fragmento ainda casa por endereço.
-	if casa, entendi := fHost("51.91.190.241").Casa(LinkEthernet, p); !casa || !entendi {
+	if casa, entendi := fHost("198.51.100.241").Casa(LinkEthernet, p); !casa || !entendi {
 		t.Errorf("por endereço o fragmento vale: casa=%v entendi=%v", casa, entendi)
 	}
 }
@@ -176,7 +176,7 @@ func TestIPv6(t *testing.T) {
 // Enlace RAW (tun): não há cabeçalho ethernet, o pacote começa no IP.
 func TestEnlaceRawComecaNoIP(t *testing.T) {
 	p := quadro(alvo, local, protoTCP, 443, 51000)[14:]
-	if casa, entendi := fHost("51.91.190.241").Casa(LinkRaw, p); !casa || !entendi {
+	if casa, entendi := fHost("198.51.100.241").Casa(LinkRaw, p); !casa || !entendi {
 		t.Errorf("DLT_RAW: casa=%v entendi=%v", casa, entendi)
 	}
 	// E o mesmo pacote lido como ethernet não casa: os bytes 12-13 caem no meio
@@ -184,7 +184,7 @@ func TestEnlaceRawComecaNoIP(t *testing.T) {
 	// e não como lacuna — do lado de fora, um quadro de outro protocolo e um
 	// quadro mal rotulado são indistinguíveis. Quem impede o rótulo errado é o
 	// AbrirInterface, que RECUSA ARPHRD que não sabe traduzir.
-	if casa, _ := fHost("51.91.190.241").Casa(LinkEthernet, p); casa {
+	if casa, _ := fHost("198.51.100.241").Casa(LinkEthernet, p); casa {
 		t.Error("um pacote RAW lido como ethernet não pode CASAR um filtro de host")
 	}
 }
@@ -223,7 +223,7 @@ func TestQuadroNaoIPNaoEhLacuna(t *testing.T) {
 	lldp := make([]byte, 60)
 	lldp[12], lldp[13] = 0x88, 0xCC // LLDP
 
-	f := fHost("51.91.190.241")
+	f := fHost("198.51.100.241")
 	for nome, pkt := range map[string][]byte{"ARP": arp, "LLDP": lldp} {
 		casa, entendi := f.Casa(LinkEthernet, pkt)
 		if casa {

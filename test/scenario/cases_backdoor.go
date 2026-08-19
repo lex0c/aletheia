@@ -74,7 +74,7 @@ func init() {
 }
 
 // B3 — o VERDADEIRO POSITIVO que a leva de falsos positivos por pouco não
-// afogou: o cadastro_ena/index.php de um host real (Climatempo). É `eval` de
+// afogou: o index.php de uma app legada de um host real. É `eval` de
 // aritmética sobre `$_GET` — a variável recebe o request cru e entra num `eval`
 // de string; o number_format que a limparia só roda DEPOIS, então a 1ª volta do
 // loop executa o eval com o valor do atacante. RCE pós-autenticação.
@@ -154,8 +154,8 @@ func init() {
 	})
 }
 
-// B6 — duas classes de falso positivo medidas num monorepo de produção
-// (Climatempo), que a peneira alarmava por não ler a ESTRUTURA do callback:
+// B6 — duas classes de falso positivo medidas num monorepo de produção, que a
+// peneira alarmava por não ler a ESTRUTURA do callback:
 //
 //   - closure literal passada a array_map/array_filter: `array_map(function($p){
 //     … $_REQUEST[$p] … }, $params)` monta chave de cache lendo o request DENTRO

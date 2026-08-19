@@ -8,7 +8,7 @@ import "testing"
 func TestResumoAgrupaPorDono(t *testing.T) {
 	var r resumoDeDonos
 	for i := 0; i < 100; i++ {
-		r.ver(false, 1000, false, false, "/home/lex/a")
+		r.ver(false, 1000, false, false, "/home/ana/a")
 	}
 	r.ver(false, 0, true, true, "/usr/bin/ls")
 	if len(r.itens) != 2 {
@@ -97,7 +97,7 @@ func TestTetoDeIdentidadesEhDeclarado(t *testing.T) {
 // não é /usr, e /home/usr/bin também não.
 func TestArvoreDeSistemaNaoPegaVizinho(t *testing.T) {
 	sim := []string{"/usr/bin/ls", "/etc/passwd", "/opt/app/run", "/lib64/x.so"}
-	nao := []string{"/usrlocal/x", "/home/lex/usr/bin/y", "/var/tmp/z", "/srv/etc/a"}
+	nao := []string{"/usrlocal/x", "/home/ana/usr/bin/y", "/var/tmp/z", "/srv/etc/a"}
 	for _, p := range sim {
 		if !ehArvoreDeSistema(p) {
 			t.Errorf("%s devia ser árvore de sistema", p)

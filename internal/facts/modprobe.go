@@ -2,6 +2,7 @@ package facts
 
 import (
 	"strings"
+	"syscall"
 
 	"github.com/lex0c/aletheia/internal/env"
 )
@@ -115,7 +116,16 @@ func lerModprobe(f *Facts, e *env.Env, p string) {
 // de não procurar.
 var dkmsOuExterno = []string{"/updates/dkms/", "/extra/", "/weak-updates/"}
 
-// collectModuleFiles lista os módulos em disco para a pergunta de propriedade.
+// collectModuleFiles lista os módulos em disco.
+//
+// São DUAS listas, e a distinção importa: ModuleFiles alimenta a pergunta de
+// PROPRIEDADE ("que pacote entregou este .ko?"), da qual DKMS está fora por
+// desenho; ModuleFilesExternos guarda justamente os excluídos. Quem pergunta
+// "existe arquivo em disco para este módulo carregado?" precisa das duas —
+// misturar as coisas fazia todo host com nvidia-dkms ou virtualbox-dkms
+// reportar SemArquivo() para módulos que estão lá, e como o kernel marca esses
+// módulos (OE), NaoAssinado() também era verdade: 4 a 6 CRITICAL irreversíveis
+// falsos por estação com placa dedicada.
 //
 // A árvore é grande — alguns milhares de arquivos — mas a pergunta é respondida
 // numa passada só sobre as listas do gerenciador, então o custo é a caminhada e
@@ -134,20 +144,47 @@ func collectModuleFiles(f *Facts, e *env.Env) {
 				anda(p, prof+1)
 				continue
 			}
-			if !ehModulo(ent) || ehDKMS(p) {
+			if !ehModulo(ent) {
+				continue
+			}
+			if ehDKMS(p) {
+				f.ModuleFilesExternos = append(f.ModuleFilesExternos, p)
 				continue
 			}
 			f.ModuleFiles = append(f.ModuleFiles, p)
 		}
 	}
+	// Em distribuição usrmerged /lib é symlink para usr/lib, então as duas
+	// raízes são a MESMA árvore: andar as duas duplicava cada .ko e gastava
+	// metade do teto à toa — com quatro kernels instalados o corte passava a
+	// cair DENTRO da primeira raiz, e todo módulo da subárvore não visitada
+	// virava SemArquivo. Identidade é dev+ino, não prefixo de string.
+	type ident struct{ dev, ino uint64 }
+	vistas := map[ident]bool{}
 	for _, raiz := range []string{"/lib/modules", "/usr/lib/modules"} {
-		if e.IsDir(raiz) {
-			anda(raiz, 0)
+		if !e.IsDir(raiz) {
+			continue
 		}
+		if fi, err := e.Stat(raiz); err == nil {
+			if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+				id := ident{uint64(st.Dev), uint64(st.Ino)}
+				if vistas[id] {
+					continue
+				}
+				vistas[id] = true
+			}
+		}
+		anda(raiz, 0)
 	}
 	if visitados > maxModuleDirs {
 		f.denyPersist("modprobe", "a listagem de módulos parou em "+
 			"muitos diretórios: o excedente NÃO foi verificado")
+		// A lacuna também precisa sair na categoria de quem a CONSOME: o
+		// check de módulo lê Partial["modulo"], e um índice cortado ali vira
+		// SemArquivo() sem que o buraco apareça no check que ele corrompe.
+		f.partial("modulo", "o índice de módulos em disco está INCOMPLETO "+
+			"(teto de diretórios atingido): 'sem arquivo em disco' não pode "+
+			"ser distinguido de 'não indexado'")
 	}
 }
 

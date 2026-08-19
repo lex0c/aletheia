@@ -42,7 +42,7 @@ func TestIOCSemListaNaoFazNada(t *testing.T) {
 // Cada tipo casa no lugar certo, e o achado é CRÍTICO — a SPEC é explícita:
 // não é heurística, é o artefato confirmado deste incidente aparecendo aqui.
 func TestIOCCasaCadaTipoNoSeuLugar(t *testing.T) {
-	e := envComIOC(t, `ips:     [51.91.190.241]
+	e := envComIOC(t, `ips:     [198.51.100.241]
 paths:   ["*/htop/defunct"]
 strings: [gs-netcat]
 users:   [backup2]
@@ -52,7 +52,7 @@ hashes:  [d41d8cd98f00b204e9800998ecf8427e]
 		Processes: []facts.Process{{PID: 42, Comm: "x", Exe: "/home/n/.config/htop/defunct"}},
 		Sockets: []facts.Socket{{
 			Proto: "tcp", Dir: facts.DirOut, PID: 42, Comm: "x", Inode: 9,
-			PeerIP: "51.91.190.241", PeerPort: 443, LocalIP: "10.0.0.5", LocalPort: 51204,
+			PeerIP: "198.51.100.241", PeerPort: 443, LocalIP: "10.0.0.5", LocalPort: 51204,
 		}},
 		Units: []facts.Unit{{
 			Name: "api.service", Path: "/etc/systemd/system/api.service",
@@ -160,7 +160,7 @@ func TestIOCChaveIlegivelNaoCasa(t *testing.T) {
 // Uma linha da lista que não foi entendida é um indicador que NINGUÉM procurou:
 // ela degrada a cobertura deste check em vez de sumir.
 func TestIOCAvisoDaListaDegradaCobertura(t *testing.T) {
-	e := envComIOC(t, `ipss: [51.91.190.241]
+	e := envComIOC(t, `ipss: [198.51.100.241]
 users: [backup2]
 `)
 	r := indicadorDoIncidente.Run(indicadorDoIncidente, &facts.Facts{}, e)

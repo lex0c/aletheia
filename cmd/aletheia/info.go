@@ -51,7 +51,7 @@ func runInfo(args []string) int {
 		fmt.Fprintln(os.Stderr, "info: diga sobre o quê — process, ip, port ou file")
 		fmt.Fprintln(os.Stderr, "  aletheia info process        censo: quem roda o quê, e contra que teto")
 		fmt.Fprintln(os.Stderr, "  aletheia info process 812")
-		fmt.Fprintln(os.Stderr, "  aletheia info ip 51.91.190.241")
+		fmt.Fprintln(os.Stderr, "  aletheia info ip 198.51.100.241")
 		fmt.Fprintln(os.Stderr, "  aletheia info port 4100")
 		fmt.Fprintln(os.Stderr, "  aletheia info net")
 		fmt.Fprintln(os.Stderr, "  aletheia info git [caminho]")

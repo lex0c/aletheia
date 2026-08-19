@@ -258,12 +258,20 @@ func (c *Coletor) PCAP(o pcap.Opcoes) (pcap.Estatisticas, error) {
 	if cerr := fh.Close(); capErr == nil {
 		capErr = cerr
 	}
-	if capErr != nil {
+	// Falha DEPOIS de já ter gravado não descarta a cadeia de custódia.
+	//
+	// O arquivo é mantido (o os.Remove só roda com zero pacote), e a versão
+	// anterior retornava aqui — antes de montar o Item. Ficava um
+	// captura-eth0.pcap de dezenas de MB no diretório e um manifesto com só a
+	// linha preserve_failed: nenhum sha256_source, nenhum sha256_copy, nenhum
+	// byte contado. A cadeia de custódia do ÚNICO artefato que não se recaptura
+	// era justamente a que não era registrada, e o resumo ainda anunciava
+	// "N peça(s)" sem contá-lo.
+	parcial := capErr != nil
+	if parcial && st.Gravados == 0 {
 		// Sem socket não há arquivo: um pcap de zero byte no diretório de
 		// evidência se lê como "capturei e não passou nada".
-		if st.Gravados == 0 {
-			os.Remove(destino)
-		}
+		os.Remove(destino)
 		c.falhar("pcap", o.Iface, capErr)
 		return st, capErr
 	}
@@ -275,12 +283,22 @@ func (c *Coletor) PCAP(o pcap.Opcoes) (pcap.Estatisticas, error) {
 		HashOrigem: hex.EncodeToString(h.Sum(nil)),
 		Nota:       notaDaCaptura(iface, o, st),
 	}
+	if parcial {
+		item.Nota = "PARCIAL — a captura foi interrompida por erro (" +
+			capErr.Error() + "): os " + strconv.Itoa(st.Gravados) + " pacote(s) " +
+			"abaixo estão íntegros e o que vinha DEPOIS deles não foi capturado. " +
+			item.Nota
+	}
 	item.HashCopia, err = hashDoArquivo(destino)
 	if err != nil {
 		c.falhar("pcap", o.Iface, err)
 		return st, err
 	}
 	c.Itens = append(c.Itens, item)
+	if parcial {
+		c.falhar("pcap", o.Iface, capErr)
+		return st, capErr
+	}
 
 	// O DESCARTE DO KERNEL É LACUNA DE EVIDÊNCIA, e entra como tal: é o único
 	// número desta captura que não dá para recuperar depois. Sem ele declarado,

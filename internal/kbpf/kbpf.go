@@ -725,15 +725,26 @@ func BytecodeDePrograma(id uint32) ([]byte, error) {
 		return nil, errSemBytecode
 	}
 
+	// Buffer de info NOVO e ZERADO para a segunda chamada, como nomePorPonteiro
+	// já faz. Reaproveitar o que o kernel preencheu na primeira era fatal: ele
+	// devolve os CONTADORES preenchidos (nr_map_ids, jited_prog_len e
+	// nr_jited_ksyms, que vale `func_cnt ? : 1` e portanto é SEMPRE ≥ 1) com os
+	// ponteiros correspondentes em zero. Na segunda chamada o kernel lê
+	// `ulen = info.nr_jited_ksyms` do NOSSO buffer, acha ≥ 1, e faz
+	// `put_user(ksym_addr, &user_ksyms[0])` sobre NULL — -EFAULT para QUALQUER
+	// programa (rodando como root, bpf_dump_raw_ok é verdadeiro). O resultado
+	// era preserve.BPF() nunca guardar o bytecode — a única cópia da evidência
+	// — e registrar um EFAULT que ninguém consegue interpretar.
+	pedido := make([]byte, len(info))
 	buf := make([]byte, tam)
-	le.PutUint32(info[20:], tam)
-	le.PutUint64(info[32:], uint64(uintptr(unsafe.Pointer(&buf[0]))))
+	le.PutUint32(pedido[20:], tam)
+	le.PutUint64(pedido[32:], uint64(uintptr(unsafe.Pointer(&buf[0]))))
 
-	attr := attrInfo{fd: uint32(fd), tamanho: uint32(len(info)), info: ptr(info)}
+	attr := attrInfo{fd: uint32(fd), tamanho: uint32(len(pedido)), info: ptr(pedido)}
 	_, _, errno := syscall.Syscall(sysBPF, cmdObjGetInfoByFD,
 		uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
 	runtime.KeepAlive(buf)
-	runtime.KeepAlive(info)
+	runtime.KeepAlive(pedido)
 	if errno != 0 {
 		return nil, errno
 	}

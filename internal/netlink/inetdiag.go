@@ -144,8 +144,14 @@ func decodificarInet(b []byte, familia, protocolo uint8) (SocketInet, bool) {
 	// Peer zerado significa socket sem destino: um LISTEN, ou um UDP apenas
 	// ligado a uma porta. É a mesma regra do coletor de /proc/net, e precisa
 	// ser a mesma ou as duas visões divergiriam por formatação.
-	if peer := enderecoDe(b[24:40], familia); !(s.PeerPorta == 0 && ipNaoEspecificado(peer)) {
-		s.PeerIP = peer
+	// A decisão sai dos BYTES, e a string só é formatada quando o peer é
+	// guardado. O caminho anterior formatava o endereço com net.IP.String() e
+	// depois REPARSEAVA a string com net.ParseIP só para perguntar
+	// IsUnspecified() — nas 300 mil mensagens que maxMensagens prevê, eram
+	// ~900 mil alocações e 300 mil parses para responder o que os bytes crus
+	// já dizem.
+	if !(s.PeerPorta == 0 && bytesNaoEspecificados(b[24:40], familia)) {
+		s.PeerIP = enderecoDe(b[24:40], familia)
 	}
 	return s, true
 }
@@ -160,9 +166,21 @@ func enderecoDe(b []byte, familia uint8) string {
 	return net.IP(b[:16]).String()
 }
 
-func ipNaoEspecificado(s string) bool {
-	ip := net.ParseIP(s)
-	return ip != nil && ip.IsUnspecified()
+// bytesNaoEspecificados diz se o endereço cru é o "sem destino" (0.0.0.0 ou ::)
+// sem passar por string nenhuma. O recorte por família é o mesmo de enderecoDe:
+// em IPv4 só os quatro primeiros bytes valem, o resto do campo é lixo do
+// kernel.
+func bytesNaoEspecificados(b []byte, familia uint8) bool {
+	n := 16
+	if familia == FamiliaIPv4 {
+		n = 4
+	}
+	for _, c := range b[:n] {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func nomeDeProto(familia, protocolo uint8) string {

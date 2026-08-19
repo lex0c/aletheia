@@ -179,7 +179,7 @@ func TestArtefatoDeclaraCaminhoIlegivel(t *testing.T) {
 func TestBinarioComSufixoVariavelEhReconhecido(t *testing.T) {
 	f := &facts.Facts{Processes: []facts.Process{{
 		PID: 900,
-		Exe: "/opt/runzero/bin/runzero-agent-c1f4a2e0-9b3d-4a71-8f22-5e6d0b1c7a93",
+		Exe: "/opt/runzero/bin/runzero-agent-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
 	}}}
 	f.Index()
 	r := check.Run([]check.Check{toolBinary}, f, testEnv())

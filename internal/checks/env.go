@@ -175,7 +175,13 @@ var envToolMarker = check.Check{
 				// cenário que pegou isto.
 				if pai := f.ProcessByPID(p.PPID); pai != nil && !pai.Self &&
 					len(keysComQualquerPrefixo(pai.EnvKeys, fam.Env)) > 0 {
-					break
+					// `continue`, não `break`: a supressão é DESTA família, e o
+					// processo pode carregar outra que ele mesmo definiu (herdou
+					// GS_* do shell do atacante e definiu NGROK_* por conta).
+					// Com `break` a segunda família nunca era avaliada — e nem
+					// entrava em `vistos`, que é preenchido dentro deste laço,
+					// então a rede de segurança lá embaixo também não a pegava.
+					continue
 				}
 				ev := []string{
 					"variáveis de ambiente: " + strings.Join(achadas, " "),

@@ -15,7 +15,7 @@ func TestParseHexAddrInverteAsPalavras(t *testing.T) {
 		{"0100007F:1F90", "127.0.0.1", 8080},
 		{"00000000:0016", "0.0.0.0", 22},
 		{"6C00A8C0:CB2E", "192.168.0.108", 52014},
-		{"F15A4B21:01BB", "33.75.90.241", 443},
+		{"F10200C0:01BB", "192.0.2.241", 443},
 		// IPv6 loopback: 4 palavras, a última com o 1
 		{"00000000000000000000000001000000:0050", "::1", 80},
 	}
@@ -52,7 +52,7 @@ func TestScopeOf(t *testing.T) {
 		"169.254.169.254": ScopePrivate, // metadata da nuvem
 		"100.64.0.1":      ScopePrivate, // CGNAT: interno em ambiente de nuvem
 		"fd00::1":         ScopePrivate,
-		"51.91.190.241":   ScopePublic,
+		"198.51.100.241":  ScopePublic,
 		"8.8.8.8":         ScopePublic,
 		"2001:4860::8888": ScopePublic,
 	}
@@ -134,7 +134,7 @@ func TestExposicaoLocalEhOOpostoDoEscopoDePeer(t *testing.T) {
 		t.Error("como peer, 0.0.0.0 não é destino externo")
 	}
 	casos := map[string]bool{
-		"0.0.0.0": true, "::": true, "10.0.0.5": true, "51.91.190.241": true,
+		"0.0.0.0": true, "::": true, "10.0.0.5": true, "198.51.100.241": true,
 		"127.0.0.1": false, "::1": false,
 	}
 	for ip, quer := range casos {

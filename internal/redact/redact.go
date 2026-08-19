@@ -133,3 +133,44 @@ func redactURLCreds(a string) string {
 	}
 	return a[:i+3] + "<redacted>@" + a[i+3+j+1:]
 }
+
+// Linha redige uma linha de comando que veio como STRING, e não como argv.
+//
+// É o caso do `ExecStart=` de uma unit, do comando de uma linha de cron e do
+// valor de uma variável de ambiente de crontab. Todos carregam a mesma classe
+// de segredo que o argv de um processo — `curl -u svc:S3cr3t`, `--token=…` — e
+// todos viajavam INTEIROS: os checks os põem como evidência, e o report.Human
+// e o JSONL os imprimem verbatim. Redigir só o argv protegia o caminho que já
+// estava protegido.
+//
+// A tokenização é por branco, que é grosseira para shell de verdade (não
+// entende aspas), mas erra para o lado seguro: um token com segredo dentro é
+// redigido, e a estrutura da linha continua legível para quem investiga.
+func Linha(s string) string {
+	if s == "" {
+		return s
+	}
+	campos := strings.Fields(s)
+	if len(campos) == 0 {
+		return s
+	}
+	return strings.Join(Cmdline(campos), " ")
+}
+
+// Valor redige o VALOR de uma variável de ambiente, onde não há flag nem
+// estrutura: o nome já veio à parte, e o que sobra é o segredo inteiro ou nada.
+// Só as URLs com credencial embutida são recuperáveis aqui.
+func Valor(nome, v string) string {
+	if v == "" {
+		return v
+	}
+	for _, k := range secretAssign {
+		if igualSemCaixa(nome+"=", k) {
+			return "<redacted>"
+		}
+	}
+	if strings.Contains(v, "://") && strings.Contains(v, "@") {
+		return redactURLCreds(v)
+	}
+	return v
+}

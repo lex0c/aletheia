@@ -53,7 +53,7 @@ var arvoresDeSistema = []string{
 
 // DonoDeArquivo resume tudo que a varredura viu de UMA identidade numérica.
 //
-// Guarda o resumo e não a lista: a lista de 400 mil caminhos de /home/lex seria
+// Guarda o resumo e não a lista: a lista de 400 mil caminhos de um /home seria
 // o relatório inteiro, e não acrescenta nada ao que a contagem já diz.
 type DonoDeArquivo struct {
 	ID int `json:"id"`

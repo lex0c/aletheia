@@ -59,7 +59,7 @@ func TestWtfDetalhaCriticoENaoAviso(t *testing.T) {
 		Findings: []check.Finding{
 			{ID: "correlate.revshell", Sev: check.SevCritical, Subject: "pid=6574",
 				Title: "reverse shell", Ref: "17", Irreversible: true,
-				Evidence:  []string{"fd 0,1,2 → socket:[889]", "peer=51.91.190.241:443", "terceira linha"},
+				Evidence:  []string{"fd 0,1,2 → socket:[889]", "peer=198.51.100.241:443", "terceira linha"},
 				NextSteps: []string{"NÃO mate antes de preservar", "sudo cp /proc/6574/exe x"}},
 			{ID: "net.pivot", Sev: check.SevWarn, Subject: "pid=3311",
 				Title: "pivô", Ref: "12.2", Evidence: []string{"evidência de aviso"}},
@@ -68,7 +68,7 @@ func TestWtfDetalhaCriticoENaoAviso(t *testing.T) {
 	}
 	out := renderWtf(r, nil)
 
-	for _, want := range []string{"socket:[889]", "peer=51.91.190.241:443", "sudo cp /proc/6574/exe"} {
+	for _, want := range []string{"socket:[889]", "peer=198.51.100.241:443", "sudo cp /proc/6574/exe"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("faltou %q na saída:\n%s", want, out)
 		}

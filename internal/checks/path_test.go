@@ -94,7 +94,7 @@ func TestUsrLocalNaoHerdaReputacaoDePacote(t *testing.T) {
 	naoHerda := []string{
 		"/usr/local/bin/node",       // o caso medido
 		"/usr/local/sbin/userdbctl", // a mesma forma no outro check
-		"/tmp/node", "/home/lex/node", "/dev/shm/x", "",
+		"/tmp/node", "/home/ana/node", "/dev/shm/x", "",
 	}
 	for _, p := range naoHerda {
 		if diretorioDeSistema(p) {

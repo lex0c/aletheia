@@ -45,7 +45,7 @@ func stdio(inode uint64) []facts.FD {
 func TestRevshellDisparaEmSaidaParaIPPublico(t *testing.T) {
 	f := &facts.Facts{
 		Processes: []facts.Process{{PID: 6574, Comm: "sh", Exe: "/tmp/.x", FDs: stdio(999)}},
-		Sockets:   []facts.Socket{sock(999, 6574, facts.DirOut, facts.ScopePublic, "51.91.190.241")},
+		Sockets:   []facts.Socket{sock(999, 6574, facts.DirOut, facts.ScopePublic, "198.51.100.241")},
 	}
 	r := revshell.Run(revshell, f, testEnv())
 	if len(r.Findings) != 1 {
@@ -113,7 +113,7 @@ func TestRevshellRegistraPTYComoInterativo(t *testing.T) {
 	fds := append(stdio(999), facts.FD{N: 7, PTY: true, Target: "/dev/pts/3"})
 	f := &facts.Facts{
 		Processes: []facts.Process{{PID: 6574, Comm: "bash", Exe: "/bin/bash", FDs: fds}},
-		Sockets:   []facts.Socket{sock(999, 6574, facts.DirOut, facts.ScopePublic, "51.91.190.241")},
+		Sockets:   []facts.Socket{sock(999, 6574, facts.DirOut, facts.ScopePublic, "198.51.100.241")},
 	}
 	r := revshell.Run(revshell, f, testEnv())
 	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "INTERATIVO") {
@@ -146,8 +146,8 @@ func TestPivotDisparaComSaidaNosDoisLados(t *testing.T) {
 		Processes: []facts.Process{{PID: 3311, Comm: "node", Exe: "/usr/bin/node",
 			FDs: sockFDs(1, 2, 3)}},
 		Sockets: []facts.Socket{
-			sock(1, 3311, facts.DirOut, facts.ScopePublic, "51.91.190.241"), // operador
-			sock(2, 3311, facts.DirOut, facts.ScopePrivate, "10.0.0.9"),     // alvo interno
+			sock(1, 3311, facts.DirOut, facts.ScopePublic, "198.51.100.241"), // operador
+			sock(2, 3311, facts.DirOut, facts.ScopePrivate, "10.0.0.9"),      // alvo interno
 			sock(3, 3311, facts.DirOut, facts.ScopePrivate, "10.0.0.11"),
 		},
 	}
@@ -190,7 +190,7 @@ func TestPivotExigeOsDoisLados(t *testing.T) {
 // o último a escrever no join — fazia um pivô cujo filho ficou com uma das
 // pernas não disparar em ninguém.
 func TestSocketHerdadoPorForkApareceNosDoisProcessos(t *testing.T) {
-	ext := sock(1, 100, facts.DirOut, facts.ScopePublic, "51.91.190.241")
+	ext := sock(1, 100, facts.DirOut, facts.ScopePublic, "198.51.100.241")
 	int1 := sock(2, 100, facts.DirOut, facts.ScopePrivate, "10.0.0.9")
 	f := &facts.Facts{
 		Processes: []facts.Process{
@@ -224,7 +224,7 @@ func TestPivosComDestinosDiferentesNaoSeJuntam(t *testing.T) {
 			{PID: 200, Comm: "app", Exe: "/srv/app", FDs: sockFDs(3, 4)},
 		},
 		Sockets: []facts.Socket{
-			sock(1, 100, facts.DirOut, facts.ScopePublic, "51.91.190.241"),
+			sock(1, 100, facts.DirOut, facts.ScopePublic, "198.51.100.241"),
 			sock(2, 100, facts.DirOut, facts.ScopePrivate, "10.0.0.9"),
 			sock(3, 200, facts.DirOut, facts.ScopePublic, "8.8.8.8"),
 			sock(4, 200, facts.DirOut, facts.ScopePrivate, "10.0.0.9"),
@@ -248,7 +248,7 @@ func TestPoolDeWorkersNaoViraParede(t *testing.T) {
 			FDs: sockFDs(ext, intn),
 		})
 		f.Sockets = append(f.Sockets,
-			sock(ext, pid, facts.DirOut, facts.ScopePublic, "35.231.119.5"),
+			sock(ext, pid, facts.DirOut, facts.ScopePublic, "192.0.2.5"),
 			sock(intn, pid, facts.DirOut, facts.ScopePrivate, "10.142.0.55"))
 	}
 	r := pivot.Run(pivot, f, testEnv())

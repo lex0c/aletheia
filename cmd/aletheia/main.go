@@ -120,7 +120,7 @@ INFO — a pergunta que vem ANTES do veredito
   aletheia info process 812     o dossiê de um processo
   aletheia info net             censo de rede: o que expõe, com quem fala, contra que TETO
   aletheia info git [dir]       censo de um repositório: o que ele EXECUTA e o que foi reescrito
-  aletheia info ip 51.91.190.241
+  aletheia info ip 198.51.100.241
   aletheia info port 4100
   aletheia info file /usr/sbin/nginx
   --from DUMP   responder sobre um retrato do collect, do lado limpo
@@ -391,6 +391,13 @@ func runWtf(args []string) int {
 	if ignoreRecusado(ignore) {
 		return 3
 	}
+	// O destino do --json é aberto AQUI, junto das outras validações e antes da
+	// parte cara. Ver abrirSaidaJSON.
+	jsonFH, err := abrirSaidaJSON(*jsonOut)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 3
+	}
 
 	// O relógio começa a contar ANTES da coleta: a coleta é a parte cara, e um
 	// orçamento que só cobre os checks mediria a parte errada.
@@ -448,12 +455,7 @@ func runWtf(args []string) int {
 		report.Wtf(out, r, f, e, elapsed, len(check.All()), bl)
 	}
 
-	if *jsonOut != "" {
-		if code := writeJSONL(*jsonOut, r, f, e, bl, nil, nil); code != 0 {
-			return code
-		}
-	}
-	return r.Exit()
+	return writeJSONL(jsonFH, r.Exit(), r, f, e, bl, nil, nil)
 }
 
 func runScan(args []string, wtf bool) int {
@@ -505,6 +507,14 @@ func runScan(args []string, wtf bool) int {
 		return 3
 	}
 	if ignoreRecusado(ignore) {
+		return 3
+	}
+	// O --json é o produto consumido por MÁQUINA, e entra na mesma regra: um
+	// destino que não abre precisa recusar aqui, não depois de a varredura ter
+	// achado dois críticos.
+	jsonFH, err := abrirSaidaJSON(*jsonOut)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 3
 	}
 
@@ -563,6 +573,7 @@ func runScan(args []string, wtf bool) int {
 		janela:   janela,
 		ioc:      lista,
 		jsonOut:  *jsonOut,
+		jsonFH:   jsonFH,
 		verbose:  nivel(*verbose, *verbose2),
 	})
 }
@@ -760,22 +771,47 @@ func collectorGaps(r *check.Report, f *facts.Facts) {
 	}
 }
 
-func writeJSONL(path string, r *check.Report, f *facts.Facts, e *env.Env, bl *report.BaselineInfo, jn *report.JanelaInfo, an *report.AnaliseInfo) int {
-	w := os.Stdout
-	if path != "-" {
-		fh, err := openJSONOut(path)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 3
-		}
-		defer fh.Close()
-		w = fh
+// abrirSaidaJSON valida e ABRE o destino do --json ANTES da parte cara.
+//
+// Ele era aberto depois da coleta, dos checks e do relatório humano: numa
+// segunda execução com o mesmo --json, a varredura inteira rodava, os críticos
+// eram impressos, e só então openJSONOut recusava o arquivo existente — o
+// código de erro apagava r.Exit() e o host comprometido virava "erro de
+// invocação" para a automação de frota que ordena por exit code. O --ioc e o
+// --since já eram validados antes da parte cara por esse mesmo princípio, e o
+// --json, que é o produto consumido por máquina, ficou de fora.
+func abrirSaidaJSON(path string) (*os.File, error) {
+	switch path {
+	case "":
+		return nil, nil
+	case "-":
+		return os.Stdout, nil
 	}
-	if err := report.JSONL(w, r, f, e, bl, jn, an); err != nil {
+	return openJSONOut(path)
+}
+
+// writeJSONL escreve no destino JÁ ABERTO. Devolve o exit code final, que NUNCA
+// rebaixa o veredito: uma falha de escrita é reportada em voz alta, mas um host
+// com crítico continua saindo 2 — trocá-lo por 3 esconderia o comprometimento
+// atrás de um problema de disco.
+func writeJSONL(fh *os.File, veredito int, r *check.Report, f *facts.Facts, e *env.Env, bl *report.BaselineInfo, jn *report.JanelaInfo, an *report.AnaliseInfo) int {
+	if fh == nil {
+		return veredito
+	}
+	err := report.JSONL(fh, r, f, e, bl, jn, an)
+	if fh != os.Stdout {
+		if cerr := fh.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "erro ao escrever JSONL: %v\n", err)
+		if veredito >= 2 {
+			return veredito
+		}
 		return 3
 	}
-	return 0
+	return veredito
 }
 
 // openJSONOut abre o destino do JSONL sem NUNCA destruir dado do host.

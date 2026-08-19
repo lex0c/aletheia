@@ -13,7 +13,7 @@ import (
 // Uma saída de `ss -tunap` de um servidor de aplicação em produção: 524
 // processos, 1053 sockets, e a topologia mais banal que existe —
 //
-//	php-fpm  →  35.231.119.5:443    uma API externa
+//	php-fpm  →  192.0.2.5:443    uma API externa
 //	php-fpm  →  10.142.0.55:27017   o MongoDB da casa
 //
 // 497 dos 524 processos tinham as duas pontas abertas ao mesmo tempo, e "saída

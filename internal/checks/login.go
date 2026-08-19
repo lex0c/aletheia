@@ -172,6 +172,14 @@ var forcaBrutaComSucesso = check.Check{
 
 		falhas := map[string]int{}
 		alvos := map[string]map[string]bool{}
+		// Instante da primeira falha, por origem e por conta: é ele que separa
+		// "entrou DEPOIS da campanha" de "entrou muito antes dela".
+		primeiraFalha := map[string]string{}
+		primeiraFalhaConta := map[string]string{}
+		// semOrdem marca que algum sucesso não pôde ser ordenado por falta de
+		// data. Ele continua contando — a alternativa seria perder o achado —,
+		// mas a evidência precisa dizer que a ordem não foi verificada.
+		semOrdem := false
 		for i := range f.Logins {
 			l := &f.Logins[i]
 			// Tentativa recusada é registrada como login em curso ou concluído; o
@@ -180,6 +188,20 @@ var forcaBrutaComSucesso = check.Check{
 				continue
 			}
 			falhas[l.Origem]++
+			// O instante da PRIMEIRA falha é o que define a campanha. Sem ele o
+			// cruzamento era só por chave, e um NAT de escritório com um login
+			// legítimo em janeiro mais 40 falhas de bot em março saía como
+			// CRITICAL irreversível "falhou 40 vezes e depois ENTROU" — com a
+			// data de JANEIRO no achado, o que ainda podia ancorar a
+			// investigação inteira meses antes do incidente.
+			if l.QuandoU != "" {
+				if q, ok := primeiraFalha[l.Origem]; !ok || l.QuandoU < q {
+					primeiraFalha[l.Origem] = l.QuandoU
+				}
+				if q, ok := primeiraFalhaConta[l.User]; !ok || l.QuandoU < q {
+					primeiraFalhaConta[l.User] = l.QuandoU
+				}
+			}
 			if alvos[l.Origem] == nil {
 				alvos[l.Origem] = map[string]bool{}
 			}
@@ -213,13 +235,17 @@ var forcaBrutaComSucesso = check.Check{
 				continue
 			}
 			if falhas[l.Origem] >= minFalhasParaForcaBruta {
-				entrou[l.Origem] = append(entrou[l.Origem], entrada{l.User, l.QuandoU})
+				if depoisDaCampanha(l.QuandoU, primeiraFalha[l.Origem], &semOrdem) {
+					entrou[l.Origem] = append(entrou[l.Origem], entrada{l.User, l.QuandoU})
+				}
 				continue
 			}
 			// O SEGUNDO eixo: a origem sozinha ficou abaixo do limiar, mas a
 			// conta em que ela entrou foi atacada por muitas origens distintas.
 			if len(origensPorConta[l.User]) >= minOrigensPorConta {
-				espalhado[l.User] = append(espalhado[l.User], entrada{l.User, l.QuandoU})
+				if depoisDaCampanha(l.QuandoU, primeiraFalhaConta[l.User], &semOrdem) {
+					espalhado[l.User] = append(espalhado[l.User], entrada{l.User, l.QuandoU})
+				}
 			}
 		}
 
@@ -246,6 +272,10 @@ var forcaBrutaComSucesso = check.Check{
 				"contas tentadas antes: " + strings.Join(tentados, " "),
 				"nenhuma das duas fontes diz isto sozinha: falha em massa é ruído de " +
 					"internet, e entrada bem-sucedida é o host funcionando",
+			}
+			if semOrdem {
+				ev = append(ev, "ressalva: algum registro veio sem data, então a ORDEM "+
+					"entre as falhas e a entrada não pôde ser verificada em todos eles")
 			}
 			fd := self.F(check.SevCritical, o, "", ev...)
 			fd.Quando, fd.QuandoFonte = quandoEntrou(ss), "registro de login bem-sucedido"
@@ -320,6 +350,21 @@ func origemDeRede(o string) bool {
 }
 
 // entrada é um login bem-sucedido, guardado para o cruzamento.
+// depoisDaCampanha diz se um sucesso pode ter vindo DA campanha de falhas.
+//
+// "Falhou muito E depois entrou" é uma afirmação sobre ORDEM, e ela estava
+// sendo feita a partir de uma chave de mapa. Quando falta data dos dois lados a
+// ordem não pode ser verificada: o sucesso continua contando — descartá-lo
+// perderia o achado inteiro num wtmp sem carimbo — e o chamador declara a
+// ressalva na evidência.
+func depoisDaCampanha(sucesso, primeiraFalha string, semOrdem *bool) bool {
+	if sucesso == "" || primeiraFalha == "" {
+		*semOrdem = true
+		return true
+	}
+	return sucesso >= primeiraFalha
+}
+
 type entrada struct{ user, quando string }
 
 // quandoEntrou devolve o instante da PRIMEIRA entrada bem-sucedida daquela

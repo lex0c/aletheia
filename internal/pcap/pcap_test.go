@@ -25,7 +25,7 @@ func quadro(src, dst [4]byte, proto byte, sp, dp int) []byte {
 }
 
 var (
-	alvo  = [4]byte{51, 91, 190, 241}
+	alvo  = [4]byte{198, 51, 100, 241}
 	local = [4]byte{10, 0, 0, 5}
 	outro = [4]byte{8, 8, 8, 8}
 )

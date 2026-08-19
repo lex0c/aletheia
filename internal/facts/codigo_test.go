@@ -143,7 +143,7 @@ func TestVarreduraDeCodigoNaoDeixaRaizPosteriorPassarFome(t *testing.T) {
 		must(raiz+"/var/www/site/generated/f"+itoa(i)+".php", "<?php // comum\n")
 	}
 	// o backdoor mora numa raiz POSTERIOR (/data).
-	must(raiz+"/data/local/www/consultoria/app/bootstrap.php",
+	must(raiz+"/data/local/www/webapp/app/bootstrap.php",
 		"<?php\nif(isset($_REQUEST[0])){echo `$_REQUEST[0]`;die;}\n")
 
 	e := env.Probe(env.Options{Root: raiz, Version: "test"})
@@ -281,7 +281,7 @@ func TestEntradaLocalNaoEhCritica(t *testing.T) {
 	}
 }
 
-// Falsos positivos MEDIDOS num host real (Climatempo): o check gritava no
+// Falsos positivos MEDIDOS num host real: o check gritava no
 // PHPMailer e no Adminer, afogando dois webshells de verdade. Cada um violava a
 // co-ocorrência de um jeito diferente, e cada correção está travada aqui.
 func TestFalsosPositivosDeHostReal(t *testing.T) {
@@ -635,7 +635,7 @@ eval("\$y =".$x.";");
 }
 
 // A varredura é BFS por nível, e isto trava o motivo. O caso real: um webshell
-// em /data/local/www/data/consultoria/app/bootstrap.php passou porque uma
+// em /data/local/www/data/webapp/app/bootstrap.php passou porque uma
 // árvore de DADOS irmã (arquivo de imagens de anos) consumiu o teto por raiz
 // ANTES de a recursão em profundidade chegar na aplicação. Código servido é
 // raso; dado é fundo. A fila por nível gasta o orçamento no raso primeiro.
@@ -663,7 +663,7 @@ func TestVarreduraBFSAchaCodigoRasoAntesDeArvoreFundaIrma(t *testing.T) {
 	}
 	// o webshell: arquivo DIRETO de um diretório de aplicação, raso (nível 2
 	// sob a raiz /data). É a forma do bootstrap.php real.
-	must(raiz+"/data/consultoria/app/bootstrap.php",
+	must(raiz+"/data/webapp/app/bootstrap.php",
 		"<?php\nif(isset($_REQUEST[0])){echo `$_REQUEST[0]`;die;}\n")
 	// a árvore de dados IRMÃ: muitos .php, todos FUNDOS (nível 4+). Sob DFS que
 	// mergulhe aqui primeiro, os 3 arquivos de orçamento morrem aqui.
@@ -678,7 +678,7 @@ func TestVarreduraBFSAchaCodigoRasoAntesDeArvoreFundaIrma(t *testing.T) {
 
 	var achou bool
 	for _, cs := range f.CodigoSuspeito {
-		if hasSuffix(cs.Path, "consultoria/app/bootstrap.php") {
+		if hasSuffix(cs.Path, "webapp/app/bootstrap.php") {
 			achou = true
 		}
 	}

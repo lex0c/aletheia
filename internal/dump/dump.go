@@ -30,6 +30,7 @@
 package dump
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -131,15 +132,60 @@ func redigir(f *facts.Facts) *facts.Facts {
 	for i := range c.Processes {
 		c.Processes[i].Argv = redact.Cmdline(c.Processes[i].Argv)
 	}
+	// O argv de um processo não é o único lugar onde segredo mora, e era o
+	// único redigido. `*/5 * * * * curl -u svc:S3cr3t https://api/… | sh` numa
+	// linha de cron, um `ExecStart=` com --token=, e uma variável de crontab
+	// carregam a mesma classe de segredo — e os checks os põem como EVIDÊNCIA,
+	// que o report.Human e o JSONL imprimem verbatim. Este dump é descrito no
+	// doc do pacote como fixture, anexo de ticket e arquivo em repositório.
+	c.Cron = make([]facts.CronEntry, len(f.Cron))
+	copy(c.Cron, f.Cron)
+	for i := range c.Cron {
+		c.Cron[i].Cmd = redact.Linha(c.Cron[i].Cmd)
+		if n := len(c.Cron[i].Env); n > 0 {
+			env := make([]facts.EnvSetting, n)
+			copy(env, c.Cron[i].Env)
+			for j := range env {
+				env[j].Value = redact.Valor(env[j].Key, env[j].Value)
+			}
+			c.Cron[i].Env = env
+		}
+	}
+	c.Units = make([]facts.Unit, len(f.Units))
+	copy(c.Units, f.Units)
+	for i := range c.Units {
+		if n := len(c.Units[i].Exec); n > 0 {
+			ex := make([]facts.ExecLine, n)
+			copy(ex, c.Units[i].Exec)
+			for j := range ex {
+				ex[j].Cmd = redact.Linha(ex[j].Cmd)
+			}
+			c.Units[i].Exec = ex
+		}
+	}
 	return &c
 }
 
-// Escrever emite o dump. Indentado: ele é lido por gente no meio de um
-// incidente, e `jq` nem sempre está instalado do lado limpo.
+// Escrever emite o dump, em fluxo e SEM indentação.
+//
+// A indentação custava uma segunda materialização do documento INTEIRO na
+// memória do host suspeito: o Encoder já monta tudo num buffer interno, e o
+// SetIndent monta um segundo, maior, antes de qualquer byte sair. Num host com
+// dezenas de milhares de arquivos de código, milhares de units e de sockets,
+// isso é duas a três vezes o tamanho do dump de pico transitório — no exato
+// momento em que a ferramenta prometeu passar pouco tempo e pouco recurso no
+// alvo, e possivelmente com a memória já comida pelo incidente. O caminho de
+// LEITURA tem teto declarado (MaxDump); o de escrita não tinha nenhum.
+//
+// O que se perde é legibilidade a olho nu de um arquivo que ninguém lê a olho
+// nu: o dump é consumido pelo `aletheia analyze`, e do lado limpo `jq .` e
+// `python -m json.tool` resolvem a formatação sem custar nada ao alvo.
 func (d *Dump) Escrever(w io.Writer) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", " ")
-	return enc.Encode(d)
+	bw := bufio.NewWriterSize(w, 256<<10)
+	if err := json.NewEncoder(bw).Encode(d); err != nil {
+		return err
+	}
+	return bw.Flush()
 }
 
 var (

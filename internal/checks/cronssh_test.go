@@ -98,7 +98,7 @@ func TestChaveComComandoForcado(t *testing.T) {
 			Options: `command="/tmp/.x",no-pty`, Type: "ssh-rsa",
 			Fingerprint: "SHA256:abc", Comment: "kali@attacker"},
 		{File: "/root/.ssh/authorized_keys", User: "root", Line: 1,
-			Type: "ssh-ed25519", Fingerprint: "SHA256:def", Comment: "lex@estacao"},
+			Type: "ssh-ed25519", Fingerprint: "SHA256:def", Comment: "ana@estacao"},
 	}}
 	r := sshForcedCommand.Run(sshForcedCommand, f, imgEnv())
 	if len(r.Findings) != 1 {

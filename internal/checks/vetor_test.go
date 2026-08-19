@@ -60,7 +60,7 @@ func TestQuandoOBackendExpostoNaoDispara(t *testing.T) {
 			Sockets: []facts.Socket{
 				escuta(443, "0.0.0.0", 100),
 				conexaoEntrando(443, "127.0.0.1", 100, facts.ScopeLoopback),
-				conexaoEntrando(443, "201.55.53.80", 100, facts.ScopePublic),
+				conexaoEntrando(443, "203.0.113.80", 100, facts.ScopePublic),
 			},
 		},
 		"sem conexão nenhuma: não há evidência de uso": {

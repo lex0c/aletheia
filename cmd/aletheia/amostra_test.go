@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/facts"
 )
 
@@ -96,7 +97,7 @@ func TestAmostradorSoOlhaOQueSai(t *testing.T) {
 			PeerIP: "10.0.0.9", PeerPort: porta, LocalPort: 443}
 	}
 	saida := facts.Socket{Proto: "tcp", State: "ESTAB", Dir: facts.DirOut,
-		PeerIP: "51.91.190.241", PeerPort: 443, LocalPort: 51234}
+		PeerIP: "198.51.100.241", PeerPort: 443, LocalPort: 51234}
 
 	a := novoAmostrador()
 	t0 := tempoDeTeste(0)
@@ -110,8 +111,8 @@ func TestAmostradorSoOlhaOQueSai(t *testing.T) {
 	if len(linhas) != 1 {
 		t.Fatalf("esperava só a conexão de SAÍDA, deu %d linha(s): %v", len(linhas), linhas)
 	}
-	if !contem(linhas[0], "51.91.190.241:443") {
-		t.Errorf("a linha não é a da saída: %q", linhas[0])
+	if !contem(linhas[0].Texto, "198.51.100.241:443") {
+		t.Errorf("a linha não é a da saída: %q", linhas[0].Texto)
 	}
 }
 
@@ -139,7 +140,7 @@ func TestAmostradorMedeORitmoDeQuemVaiEVolta(t *testing.T) {
 	a := novoAmostrador()
 	com := facts.Facts{Sockets: []facts.Socket{{
 		Proto: "tcp", State: "ESTAB", Dir: facts.DirOut,
-		PeerIP: "51.91.190.241", PeerPort: 443, LocalPort: 40000,
+		PeerIP: "198.51.100.241", PeerPort: 443, LocalPort: 40000,
 	}}}
 	sem := facts.Facts{}
 
@@ -151,8 +152,13 @@ func TestAmostradorMedeORitmoDeQuemVaiEVolta(t *testing.T) {
 			f = &com
 		}
 		for _, l := range a.amostra(f, nil, tempoDeTeste(i*5)) {
-			if contem(l, "intervalo constante é AUTOMAÇÃO") && contem(l, "~10s") {
+			if contem(l.Texto, "intervalo constante é AUTOMAÇÃO") && contem(l.Texto, "~10s") {
 				mediu = true
+				// O beacon precisa sair com severidade: é ela que leva o
+				// achado ao exit code e ao JSONL.
+				if l.Sev < check.SevWarn {
+					t.Errorf("o beacon saiu como %v; sem aviso ele não chega ao exit code", l.Sev)
+				}
 			}
 		}
 	}

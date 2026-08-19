@@ -56,7 +56,16 @@ func SondaDoDescritor(pid, fd int) (progID uint32, tipo string, nome string) {
 	_, _, errno := syscall.Syscall(sysBPF, cmdTaskFDQuery,
 		uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
 	runtime.KeepAlive(buf)
-	if errno != 0 {
+	// ENOSPC é sucesso com NOME truncado, não falha.
+	//
+	// bpf_task_fd_query_copy escreve prog_id, fd_type e os offsets de volta ANTES
+	// de propagar o -ENOSPC de bpf_copy_to_user, que acontece sempre que o nome
+	// passa de 127 bytes — um uprobe num caminho longo
+	// (/opt/<app>/jre/lib/.../libjvm.so) chega lá sem esforço. Descartar tudo
+	// nesse caso fazia o perf_event que SEGURA o programa deixar de ser
+	// atribuído, e o programa voltava a aparecer órfão: exatamente o falso
+	// positivo que este arquivo existe para eliminar.
+	if errno != 0 && errno != syscall.ENOSPC {
 		return 0, "", ""
 	}
 	t := nomesDeSonda[attr.fdTipo]
@@ -66,6 +75,9 @@ func SondaDoDescritor(pid, fd int) (progID uint32, tipo string, nome string) {
 	n := cstr(buf, uint32(len(buf)), 0, len(buf))
 	if !imprimivel(n) {
 		n = ""
+	}
+	if errno == syscall.ENOSPC && n != "" {
+		n += "…" // o nome não coube inteiro; dizê-lo é melhor que fingir
 	}
 	return attr.progID, t, n
 }

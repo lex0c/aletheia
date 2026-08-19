@@ -20,7 +20,7 @@ func escrever(t *testing.T, conteudo string) string {
 // operador vai copiar.
 func TestCarregarFormaDaSpec(t *testing.T) {
 	p := escrever(t, `# incidente.yaml
-ips:     [51.91.190.241]
+ips:     [198.51.100.241]
 hashes:  ["sha256:9f2c1b0a7d3e4f5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c"]
 paths:   ["*/htop/defunct", "*.dat"]
 strings: [GS_ARGS, gs-netcat, gsocket_dso]
@@ -56,7 +56,7 @@ users:   [backup2]
 // A forma em bloco é a outra que um arquivo YAML de verdade tem.
 func TestCarregarFormaEmBloco(t *testing.T) {
 	l, err := Carregar(escrever(t, `ips:
-  - 51.91.190.241
+  - 198.51.100.241
   - 10.0.0.9
 users:
   - backup2
@@ -75,7 +75,7 @@ users:
 // E a forma mais comum de todas no meio de um incidente: a lista colada, um
 // indicador por linha, sem chave nenhuma. O tipo sai da FORMA.
 func TestCarregarListaCrua(t *testing.T) {
-	l, err := Carregar(escrever(t, `51.91.190.241
+	l, err := Carregar(escrever(t, `198.51.100.241
 9f2c1b0a7d3e4f5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c
 /usr/local/sbin/systemd-oomd-helper
 gs-netcat
@@ -84,7 +84,7 @@ gs-netcat
 		t.Fatal(err)
 	}
 	esperado := map[string]Tipo{
-		"51.91.190.241": IP,
+		"198.51.100.241": IP,
 		"9f2c1b0a7d3e4f5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c": Hash,
 		"/usr/local/sbin/systemd-oomd-helper":                              Caminho,
 		"gs-netcat":                                                        Texto,
@@ -102,7 +102,7 @@ gs-netcat
 // O caso que decide o desenho: uma lista que carrega pela metade EM SILÊNCIO é
 // pior que uma que falha. Chave escrita errada vira aviso visível, não item.
 func TestChaveDesconhecidaViraAviso(t *testing.T) {
-	l, err := Carregar(escrever(t, `ipss: [51.91.190.241]
+	l, err := Carregar(escrever(t, `ipss: [198.51.100.241]
 users: [backup2]
 `))
 	if err != nil {

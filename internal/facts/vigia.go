@@ -358,7 +358,18 @@ func indiceDeInodes(f *Facts, e *env.Env) map[string][]string {
 
 	// E o DIRETÓRIO de cada um: é ele que sobrevive ao `rm`, e é nele que um
 	// vigia de recriação se pendura.
+	//
+	// As chaves saem para uma slice ANTES do laço porque `add` escreve em
+	// `visto`: inserir num mapa enquanto se itera sobre ele é comportamento
+	// indefinido pelo spec do Go — a entrada nova pode ou não ser produzida.
+	// O efeito era o índice ganhar avós de caminho de forma não determinística,
+	// e o mesmo host, na mesma varredura repetida, ora nomear o alvo de um
+	// fanotify sobre diretório de persistência, ora contabilizá-lo em SemNome.
+	caminhos := make([]string, 0, len(visto))
 	for p := range visto {
+		caminhos = append(caminhos, p)
+	}
+	for _, p := range caminhos {
 		if i := strings.LastIndexByte(p, '/'); i > 0 {
 			add(p[:i])
 		}

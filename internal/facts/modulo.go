@@ -65,9 +65,21 @@ func collectModulosCarregados(f *Facts, e *env.Env) {
 	// A árvore precisa ter sido LIDA para que a ausência signifique alguma
 	// coisa. Sem ela, todo módulo pareceria sem arquivo — e essa é exatamente a
 	// diferença entre "não achei" e "não consegui olhar".
-	f.ArvoreDeModulos = len(f.ModuleFiles) > 0
+	//
+	// As DUAS listas contam aqui. ModuleFiles exclui as árvores de compilação
+	// local porque nada ali vem de pacote, mas a pergunta desta função não é de
+	// propriedade e sim de existência: um nvidia.ko sob /updates/dkms/ existe
+	// em disco tanto quanto qualquer outro, e tratá-lo como ausente produzia
+	// SemArquivo() somado a NaoAssinado() — CRITICAL irreversível — em toda
+	// estação com placa dedicada.
+	f.ArvoreDeModulos = len(f.ModuleFiles) > 0 || len(f.ModuleFilesExternos) > 0
 
 	porNome := indiceDeModulosEmDisco(f.ModuleFiles)
+	for n, p := range indiceDeModulosEmDisco(f.ModuleFilesExternos) {
+		if _, existe := porNome[n]; !existe {
+			porNome[n] = p
+		}
+	}
 	noSys := map[string]bool{}
 	for _, n := range f.Cross.ModSys {
 		noSys[normalizaModulo(n)] = true
@@ -85,9 +97,12 @@ func collectModulosCarregados(f *Facts, e *env.Env) {
 			m.Estado = campos[4]
 		}
 		// As letras vêm entre parênteses no fim da linha: "… Live 0x0 (OE)".
+		// O '+'/'-' de MODULE_STATE_COMING/GOING sai junto e não é taint —
+		// aparar aqui mantém este parser e o de taint.go dizendo a mesma coisa
+		// sobre a mesma linha, que era a divergência.
 		if i := strings.LastIndex(ln, "("); i >= 0 {
 			if j := strings.Index(ln[i:], ")"); j > 1 {
-				m.Letras = ln[i+1 : i+j]
+				m.Letras = strings.TrimRight(ln[i+1:i+j], "+-")
 			}
 		}
 		chave := normalizaModulo(m.Nome)

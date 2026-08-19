@@ -36,7 +36,7 @@ func TestArgNeutralizaCaminhoQueEhComando(t *testing.T) {
 
 // E o caminho comum não ganha aspas: o relatório continua legível.
 func TestArgNaoEnfeiaOCaminhoComum(t *testing.T) {
-	for _, p := range []string{"/usr/sbin/nginx", "/tmp/.x", "/etc/cron.d/app", "51.91.190.241"} {
+	for _, p := range []string{"/usr/sbin/nginx", "/tmp/.x", "/etc/cron.d/app", "198.51.100.241"} {
 		if got := Arg(p); got != p {
 			t.Errorf("Arg(%q) = %q — caminho comum não precisa de aspas", p, got)
 		}

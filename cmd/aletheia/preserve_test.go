@@ -361,14 +361,14 @@ func TestCapturaRecusaPedidoAmbiguo(t *testing.T) {
 // O pedido bem formado chega inteiro do outro lado — inclusive o `--all`, que
 // existe para que capturar TUDO seja uma decisão escrita, e não um padrão.
 func TestCapturaMontaOQueFoiPedido(t *testing.T) {
-	o, code := montarCaptura(true, "eth0", "51.91.190.241", 443, "tcp", false, 30*time.Second, 96, "1G")
+	o, code := montarCaptura(true, "eth0", "198.51.100.241", 443, "tcp", false, 30*time.Second, 96, "1G")
 	if code != 0 || o == nil {
 		t.Fatalf("code = %d", code)
 	}
 	if o.Iface != "eth0" || o.Snaplen != 96 || o.Duracao != 30*time.Second || o.MaxBytes != 1<<30 {
 		t.Errorf("opções = %+v", o)
 	}
-	if d := o.Filtro.Descricao(); d != "host 51.91.190.241 E porta 443 E protocolo tcp" {
+	if d := o.Filtro.Descricao(); d != "host 198.51.100.241 E porta 443 E protocolo tcp" {
 		t.Errorf("filtro = %q", d)
 	}
 

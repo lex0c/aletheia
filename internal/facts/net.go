@@ -1,9 +1,11 @@
 package facts
 
 import (
+	"bufio"
 	"encoding/binary"
 	"encoding/hex"
 	"net"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -103,15 +105,19 @@ func collectSockets(f *Facts, e *env.Env) {
 		{"/proc/net/udp", "udp"},
 		{"/proc/net/udp6", "udp6"},
 	} {
-		body, ok := readTrim(src.path)
-		if !ok {
+		tabela, cortou, err := lerTabelaSockets(src.path, src.proto)
+		if err != nil {
 			// A variante v6 ausente é normal em host sem IPv6; a v4 não é.
 			if src.proto == "tcp" || src.proto == "udp" {
 				f.partial("net", src.path+" ilegível: nenhuma conexão desse protocolo foi avaliada")
 			}
 			continue
 		}
-		socks = append(socks, parseTCPTable(body, src.proto)...)
+		if cortou {
+			f.partial("net", src.path+" tem mais de "+strconv.Itoa(maxLinhasSocket)+
+				" linhas e foi CORTADO: as conexões seguintes NÃO foram avaliadas")
+		}
+		socks = append(socks, tabela...)
 	}
 
 	// A direção sai de uma comparação, não de heurística de faixa de porta:
@@ -183,13 +189,25 @@ func collectSockets(f *Facts, e *env.Env) {
 			}
 		}
 	}
+	// Inode 0 NÃO é socket sem dono: é socket que não tem dono para ninguém.
+	// TIME-WAIT e SYN-RECV são impressos com inode zero por construção —
+	// get_timewait4_sock imprime 0, e get_openreq4 traz o comentário literal
+	// "open_requests have no inode". Contá-los inflava a lacuna com sockets
+	// inertes e diluía a cobertura real: um servidor com milhares de TIME-WAIT
+	// declarava não ter avaliado o que nunca teve o que avaliar. A conta é
+	// sobre o que CAPTURA, como o coletor irmão já faz.
+	var comDono int
 	for i := range socks {
+		if socks[i].Inode == 0 {
+			continue
+		}
+		comDono++
 		if socks[i].PID == 0 {
 			orphan++
 		}
 	}
 	if orphan > 0 && !e.Has(env.CapRoot) {
-		f.partial("net", strconv.Itoa(orphan)+" de "+strconv.Itoa(len(socks))+
+		f.partial("net", strconv.Itoa(orphan)+" de "+strconv.Itoa(comDono)+
 			" sockets sem dono identificado (sem root, /proc/<pid>/fd de processo alheio "+
 			"é ilegível): pivô e reverse shell não puderam ser avaliados neles")
 	}
@@ -206,38 +224,113 @@ func parseTCPTable(body, proto string) []Socket {
 		if i == 0 { // cabeçalho
 			continue
 		}
-		fs := strings.Fields(ln)
-		if len(fs) < 10 {
-			continue
+		if s, ok := parseLinhaSocket([]byte(ln), proto); ok {
+			out = append(out, s)
 		}
-		lip, lport, ok := parseHexAddr(fs[1])
-		if !ok {
-			continue
-		}
-		rip, rport, ok := parseHexAddr(fs[2])
-		if !ok {
-			continue
-		}
-		state, ok := tcpStates[strings.ToUpper(fs[3])]
-		if !ok {
-			state = "?" + fs[3]
-		}
-		uid, _ := strconv.Atoi(fs[7])
-		inode, _ := strconv.ParseUint(fs[9], 10, 64)
-
-		s := Socket{
-			Proto: proto, State: state,
-			LocalIP: lip, LocalPort: lport,
-			Inode: inode, UID: uid,
-		}
-		// Peer zerado significa socket sem destino: LISTEN em TCP, e UDP
-		// apenas ligado a uma porta.
-		if state != "LISTEN" && !(rport == 0 && isUnspecifiedIP(rip)) {
-			s.PeerIP, s.PeerPort = rip, rport
-		}
-		out = append(out, s)
 	}
 	return out
+}
+
+// maxLinhasSocket é o teto por tabela. Num proxy, 260 mil sockets em TIME-WAIT
+// é o normal — `tcp_max_tw_buckets` sozinho chega lá —, e o custo precisa ser
+// limitado e DECLARADO em vez de silenciosamente ilimitado.
+const maxLinhasSocket = 400000
+
+// lerTabelaSockets lê /proc/net/{tcp,tcp6,udp,udp6} em FLUXO.
+//
+// O caminho anterior era os.ReadFile sem teto sobre um arquivo que o kernel
+// reporta com tamanho 0 (fs/proc/generic.c), então o buffer crescia por
+// duplicação — ~16 realocações com cópia para 40 MB —, e em seguida
+// TrimSpace(string(b)) copiava tudo de novo, Split criava uma string por linha
+// e Fields um slice por conexão. É exatamente o custo que lerMaps já mediu e
+// eliminou ("36% do tempo de coleta e 67% de toda a memória alocada"), num
+// arquivo que é MAIOR que o maps.
+func lerTabelaSockets(caminho, proto string) (socks []Socket, cortou bool, err error) {
+	fh, err := os.Open(caminho)
+	if err != nil {
+		return nil, false, err
+	}
+	defer fh.Close()
+	sc := bufio.NewScanner(fh)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	n := 0
+	for sc.Scan() {
+		if n == 0 { // cabeçalho
+			n++
+			continue
+		}
+		if n > maxLinhasSocket {
+			cortou = true
+			break
+		}
+		n++
+		if s, ok := parseLinhaSocket(sc.Bytes(), proto); ok {
+			socks = append(socks, s)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return socks, cortou, err
+	}
+	return socks, cortou, nil
+}
+
+// parseLinhaSocket decodifica UMA linha. Campos: sl local rem st tx:rx tr:tm
+// retrnsmt uid timeout inode …
+//
+// Fatia por índice sobre os bytes crus: strings.Fields alocava um slice por
+// conexão, e são centenas de milhares delas nas tabelas grandes.
+func parseLinhaSocket(ln []byte, proto string) (Socket, bool) {
+	var f [10][]byte
+	if camposSocket(ln, f[:]) < 10 {
+		return Socket{}, false
+	}
+	lip, lport, ok := parseHexAddr(string(f[1]))
+	if !ok {
+		return Socket{}, false
+	}
+	rip, rport, ok := parseHexAddr(string(f[2]))
+	if !ok {
+		return Socket{}, false
+	}
+	state, ok := tcpStates[strings.ToUpper(string(f[3]))]
+	if !ok {
+		state = "?" + string(f[3])
+	}
+	uid, _ := strconv.Atoi(string(f[7]))
+	inode, _ := strconv.ParseUint(string(f[9]), 10, 64)
+
+	s := Socket{
+		Proto: proto, State: state,
+		LocalIP: lip, LocalPort: lport,
+		Inode: inode, UID: uid,
+	}
+	// Peer zerado significa socket sem destino: LISTEN em TCP, e UDP apenas
+	// ligado a uma porta.
+	if state != "LISTEN" && !(rport == 0 && isUnspecifiedIP(rip)) {
+		s.PeerIP, s.PeerPort = rip, rport
+	}
+	return s, true
+}
+
+// camposSocket fatia os primeiros len(out) campos separados por branco, sem
+// alocar nada. Devolve quantos preencheu.
+func camposSocket(ln []byte, out [][]byte) int {
+	i, n := 0, 0
+	for n < len(out) {
+		for i < len(ln) && (ln[i] == ' ' || ln[i] == '\t') {
+			i++
+		}
+		if i >= len(ln) {
+			break
+		}
+		ini := i
+		for i < len(ln) && ln[i] != ' ' && ln[i] != '\t' {
+			i++
+		}
+		out[n] = ln[ini:i]
+		n++
+	}
+	return n
 }
 
 // parseHexAddr decodifica "0100007F:1F90". O endereço vem em hex com cada

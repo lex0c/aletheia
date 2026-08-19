@@ -61,11 +61,36 @@ var hookDeEnumeracao = check.Check{
 		// Agrupado por PROPÓSITO: cinco hooks para esconder arquivo são um
 		// fato, não cinco.
 		porMotivo := map[string][]facts.HookFtrace{}
+		// naoClassificados é o resto de enabled_functions: hook real, em função
+		// que este check não sabe interpretar. Descartá-lo com um `continue`
+		// mudo fazia um rootkit em __x64_sys_openat, vfs_statx ou
+		// security_bprm_check produzir zero linha, zero Partial e cobertura
+		// completa — a restrição de escopo existia só no comentário do código.
+		var naoClassificados []string
+		vistoNC := map[string]bool{}
 		for i := range f.Ftrace {
 			h := &f.Ftrace[i]
-			if motivo, ok := funcaoDeEnumeracao(h.Simbolo); ok {
-				porMotivo[motivo] = append(porMotivo[motivo], *h)
+			motivo, ok := funcaoDeEnumeracao(h.Simbolo)
+			if !ok {
+				if !vistoNC[h.Simbolo] {
+					vistoNC[h.Simbolo] = true
+					naoClassificados = append(naoClassificados, h.Simbolo)
+				}
+				continue
 			}
+			porMotivo[motivo] = append(porMotivo[motivo], *h)
+		}
+		if n := len(naoClassificados); n > 0 {
+			sort.Strings(naoClassificados)
+			amostra := naoClassificados
+			if len(amostra) > 8 {
+				amostra = append(amostra[:8:8], "… (+"+strconv.Itoa(n-8)+")")
+			}
+			r.Partial = append(r.Partial, strconv.Itoa(n)+" função(ões) do kernel "+
+				"estão interceptadas AGORA e não são das que este check classifica "+
+				"(ele olha as de enumeração — listar processo, arquivo, módulo, "+
+				"socket): "+strings.Join(amostra, " ")+". Interceptação fora dessa "+
+				"lista NÃO foi avaliada")
 		}
 
 		motivos := make([]string, 0, len(porMotivo))

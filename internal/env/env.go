@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lex0c/aletheia/internal/ioc"
@@ -402,26 +403,43 @@ func (e *Env) Workers(cap int) int {
 	return n
 }
 
-func (e *Env) probeSelf() {
-	p, err := os.Executable()
-	if err != nil {
-		return
-	}
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		p = r
-	}
-	e.ToolPath = p
+// A identidade do binário EM EXECUÇÃO não muda durante o processo, e reler o
+// caminho depois já responderia sobre outro arquivo. Medido: 8,2 ms por
+// chamada, dominados pelo SHA-256 dos ~6 MB do próprio binário — e o `watch`
+// chamava env.Probe a cada amostra, com intervalo mínimo de 1 s. Numa vigília
+// de uma hora eram 3.600 re-hashes do mesmo arquivo, ~5% do custo de cada
+// amostra, num host que o próprio código descreve como possivelmente já
+// sobrecarregado. A resondagem de probeCaps por ciclo é deliberada — alimenta o
+// aviso "COBERTURA MUDOU" — e continua acontecendo.
+var (
+	selfUma  sync.Once
+	selfPath string
+	selfSoma string
+)
 
-	f, err := os.Open(p)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return
-	}
-	e.ToolSHA256 = hex.EncodeToString(h.Sum(nil))
+func (e *Env) probeSelf() {
+	selfUma.Do(func() {
+		p, err := os.Executable()
+		if err != nil {
+			return
+		}
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			p = r
+		}
+		selfPath = p
+
+		f, err := os.Open(p)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		h := sha256.New()
+		if _, err := io.Copy(h, f); err != nil {
+			return
+		}
+		selfSoma = hex.EncodeToString(h.Sum(nil))
+	})
+	e.ToolPath, e.ToolSHA256 = selfPath, selfSoma
 }
 
 func (e *Env) grant(c Cap, ok bool, reason string) {

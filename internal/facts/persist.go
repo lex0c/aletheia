@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"os"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -324,15 +325,36 @@ func collectLoader(f *Facts, e *env.Env) {
 			}
 		}
 	}
-	for _, c := range confs {
+	// Índice, não `range`: o laço APPENDA em `confs` ao seguir um include.
+	vistosConf := map[string]bool{}
+	for i := 0; i < len(confs) && i < maxConfsLoader; i++ {
+		c := confs[i]
+		if vistosConf[c] {
+			continue
+		}
+		vistosConf[c] = true
 		b, err := e.ReadFile(c)
 		if err != nil {
 			continue
 		}
 		for _, ln := range strings.Split(string(b), "\n") {
 			ln = strings.TrimSpace(ln)
-			if ln == "" || strings.HasPrefix(ln, "#") || strings.HasPrefix(ln, "include") {
+			if ln == "" || strings.HasPrefix(ln, "#") {
 				continue
+			}
+			// O ldconfig OBEDECE o include, e quem escreve o alvo é quem edita
+			// o /etc/ld.so.conf. Descartar a linha junto com os comentários
+			// cobria o caso de fábrica (ld.so.conf.d é lido à parte) e deixava
+			// passar um `include /tmp/x.conf`: o diretório de busca injetado
+			// nunca chegava a l.SearchDirs, que é sobre o que o check pergunta
+			// se algum diretório de busca é gravável.
+			if v, ok := strings.CutPrefix(ln, "include"); ok {
+				if v == "" || v[0] == ' ' || v[0] == '\t' {
+					for _, campo := range strings.Fields(v) {
+						confs = append(confs, expandirIncludeLoader(e, campo)...)
+					}
+					continue
+				}
 			}
 			l.SearchDirs = append(l.SearchDirs, LoaderDir{
 				Dir: ln, From: c, Exists: e.IsDir(ln),
@@ -362,6 +384,35 @@ func collectLoader(f *Facts, e *env.Env) {
 
 // envAssign reconhece as formas que esses arquivos aceitam: "K=v", "K v",
 // "export K=v" e o formato do pam_env ("K DEFAULT=v").
+// maxConfsLoader limita a cadeia de include do ld.so.conf.
+const maxConfsLoader = 64
+
+// expandirIncludeLoader resolve o alvo de um include do ld.so.conf. Caminho
+// relativo é relativo a /etc, como o ldconfig faz, e o glob é expandido pelo
+// diretório — sem filepath.Glob, que resolveria fora da raiz travada em modo
+// image.
+func expandirIncludeLoader(e *env.Env, padrao string) []string {
+	if !strings.HasPrefix(padrao, "/") {
+		padrao = "/etc/" + padrao
+	}
+	if !strings.ContainsAny(padrao, "*?[") {
+		return []string{padrao}
+	}
+	dir, base := path.Split(padrao)
+	dir = strings.TrimSuffix(dir, "/")
+	if strings.ContainsAny(dir, "*?[") {
+		return nil
+	}
+	var out []string
+	for _, n := range e.ReadDirNames(dir) {
+		if ok, err := path.Match(base, n); err == nil && ok {
+			out = append(out, dir+"/"+n)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func envAssign(line, key string) (string, bool) {
 	s := strings.TrimPrefix(strings.TrimSpace(line), "export ")
 	if !strings.HasPrefix(s, key) {

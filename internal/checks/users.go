@@ -353,6 +353,21 @@ var sudoSemSenha = check.Check{
 				ev = append(ev, "a especificação de comando é ALL, mas como "+runas+
 					" — NÃO como root: quem usa a regra vira aquela conta sem "+
 					"responder nada, que é como se entrega um serviço a um time")
+			case naoAutentica && defaultsGlobal(s.Text):
+				// `Defaults !authenticate` SEM alvo desliga a senha para o host
+				// inteiro — é NOPASSWD amplo escrito de outro jeito, e o coletor
+				// guarda essa linha justamente por isso. Como ela não tem
+				// `NOPASSWD:` nem `=`, regraAmpla varria a linha inteira, não
+				// achava ALL, e o caso caía no `default` — que imprimia
+				// "restrita a comando nomeado", contradizendo a evidência
+				// anterior do próprio achado, com exit 1 em vez de 2.
+				sev = check.SevCritical
+				ev = append(ev, "e é um `Defaults` SEM alvo: vale para TODO usuário "+
+					"e TODO comando deste host — é NOPASSWD amplo escrito de outra "+
+					"forma, não uma restrição")
+			case naoAutentica:
+				ev = append(ev, "o `!authenticate` está restrito a um alvo nomeado, "+
+					"mas continua desligando a senha para ele")
 			default:
 				ev = append(ev, "restrita a comando nomeado — é desenho de menor "+
 					"privilégio, e vale conferir só se ninguém reconhecer a regra")
@@ -421,6 +436,25 @@ func viraRoot(texto string) (bool, string) {
 
 // regraAmpla diz se a regra concede QUALQUER comando. É o que separa "root
 // inteiro sem senha" de "pode reiniciar o nginx sem senha".
+// defaultsGlobal diz se a linha é um `Defaults` sem alvo. O sudoers permite
+// restringir com `Defaults:usuario`, `Defaults@host`, `Defaults>runas` e
+// `Defaults!comando`; sem nenhum desses, a diretiva vale para o host inteiro.
+func defaultsGlobal(texto string) bool {
+	t := strings.TrimSpace(texto)
+	if !strings.HasPrefix(strings.ToLower(t), "defaults") {
+		return false
+	}
+	resto := t[len("defaults"):]
+	if resto == "" {
+		return false
+	}
+	switch resto[0] {
+	case ':', '@', '>', '!':
+		return false
+	}
+	return resto[0] == ' ' || resto[0] == '\t'
+}
+
 func regraAmpla(texto string) bool {
 	// A especificação de comando é o que vem depois do último `=` ou dos
 	// dois-pontos do NOPASSWD.

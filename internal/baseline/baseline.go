@@ -135,11 +135,35 @@ func (b *Baseline) Escrever(w io.Writer) error {
 // ErrEsquema é devolvido quando a baseline é de outra versão de chave.
 var ErrEsquema = errors.New("baseline de esquema incompatível: recapture")
 
+// MaxBaseline é o teto do arquivo de baseline.
+//
+// Ele é apontado pelo operador e, num IR real, mora no diretório de incidente
+// DO HOST INVESTIGADO — quem tem escrita ali escolhe o tamanho. Um
+// `truncate -s 8G baseline.json` (esparso, 0 byte de disco) fazia o os.ReadFile
+// alocar os 8 GB e o processo sair com `fatal error: out of memory`, status 2 —
+// que o contrato desta ferramenta lê como "CRITICAL: indicador de alta
+// confiança". É o mesmo raciocínio de env.MaxLeitura e de dump.MaxDump, que
+// este caminho não tinha.
+var MaxBaseline int64 = 64 << 20
+
+// ErrGrandeDemais recusa uma baseline acima do teto, em vez de tentar lê-la.
+var ErrGrandeDemais = errors.New("baseline maior que o teto de leitura: NÃO foi lida")
+
 // Carregar lê uma baseline do disco.
 func Carregar(caminho string) (*Baseline, error) {
-	b, err := os.ReadFile(caminho)
+	fh, err := os.Open(caminho)
 	if err != nil {
 		return nil, err
+	}
+	defer fh.Close()
+	// LimitReader a MaxBaseline+1: um byte além do teto é o que distingue
+	// "coube" de "estourou" sem precisar confiar no tamanho declarado.
+	b, err := io.ReadAll(io.LimitReader(fh, MaxBaseline+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > MaxBaseline {
+		return nil, ErrGrandeDemais
 	}
 	var bl Baseline
 	if err := json.Unmarshal(b, &bl); err != nil {

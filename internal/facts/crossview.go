@@ -252,10 +252,20 @@ func sondarPids(f *Facts, visiveis map[int]bool, maior int) {
 		f.Cross.Hidden = confirmarOcultos(f.Cross.Hidden)
 	}
 
-	if f.Cross.ProbeTeto {
+	// A lacuna é "há faixa não sondada", não "batemos no teto de 65536". Elas
+	// não são a mesma coisa: num guest com pid_max de 4194304 e maior PID
+	// visível 900, a sondagem para em 2948 sem chegar perto do teto — e nada
+	// era dito sobre os outros 4,19 milhões, onde cabe um processo cujo PID foi
+	// posicionado de propósito via ns_last_pid antes do fork. ProbeTeto continua
+	// existindo para nomear POR QUE a faixa acabou.
+	if f.Cross.PidMax > ate {
+		motivo := "a sondagem para em maior_pid+" + strconv.Itoa(probeMargem)
+		if f.Cross.ProbeTeto {
+			motivo = "teto de " + strconv.Itoa(maxProbePids) + " sondagens"
+		}
 		f.partial("cross", "sondagem de PID foi até "+strconv.Itoa(ate)+
-			" de um pid_max de "+strconv.Itoa(f.Cross.PidMax)+
-			": PID oculto acima disso NÃO foi procurado")
+			" de um pid_max de "+strconv.Itoa(f.Cross.PidMax)+" ("+motivo+
+			"): PID oculto acima disso NÃO foi procurado")
 	}
 	sort.Slice(f.Cross.Hidden, func(i, j int) bool {
 		return f.Cross.Hidden[i].PID < f.Cross.Hidden[j].PID

@@ -57,6 +57,9 @@ type Escritor struct {
 	h       hash.Hash
 	Bytes   int64
 	Pacotes int
+	// reg é o buffer de UM registro (cabeçalho + payload), reusado entre
+	// pacotes. Ver Pacote.
+	reg []byte
 }
 
 const (
@@ -84,16 +87,24 @@ func NovoEscritor(w io.Writer, h hash.Hash, snaplen uint32, tipoEnlace uint32) (
 // snaplen corta, é esse número que diz que o corte aconteceu — e sem ele um
 // pacote truncado passa por pacote pequeno.
 func (e *Escritor) Pacote(quando time.Time, dados []byte, original int) error {
-	var hdr [16]byte
-	le := binary.LittleEndian
-	le.PutUint32(hdr[0:], uint32(quando.Unix()))
-	le.PutUint32(hdr[4:], uint32(quando.Nanosecond()/1000))
-	le.PutUint32(hdr[8:], uint32(len(dados)))
-	le.PutUint32(hdr[12:], uint32(original))
-	if err := e.escrever(hdr[:]); err != nil {
-		return err
+	// UMA escrita por pacote, não duas.
+	//
+	// Cabeçalho e payload saíam em write(2) separados sobre um *os.File cru: 2
+	// syscalls e 2 sha256.Write por quadro. A ~50k pps o laço de leitura ficava
+	// atrás do ring do AF_PACKET e o tp_drops subia — e esse é justamente o
+	// número que o pacote usa para declarar a captura incompleta. A lentidão do
+	// escritor virava "evidência" de perda no fio.
+	if cap(e.reg) < 16+len(dados) {
+		e.reg = make([]byte, 16+len(dados)+2048)
 	}
-	if err := e.escrever(dados); err != nil {
+	reg := e.reg[:16+len(dados)]
+	le := binary.LittleEndian
+	le.PutUint32(reg[0:], uint32(quando.Unix()))
+	le.PutUint32(reg[4:], uint32(quando.Nanosecond()/1000))
+	le.PutUint32(reg[8:], uint32(len(dados)))
+	le.PutUint32(reg[12:], uint32(original))
+	copy(reg[16:], dados)
+	if err := e.escrever(reg); err != nil {
 		return err
 	}
 	e.Pacotes++

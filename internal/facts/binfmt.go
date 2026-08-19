@@ -37,6 +37,35 @@ type BinfmtRegistro struct {
 	// Habilitado distingue um registro ativo de um desativado. Desativado não
 	// roteia agora, mas continua registrado — e some do relatório sem este bit.
 	Habilitado bool `json:"enabled"`
+	// BPFOps é o nome do conjunto de operações quando o registro é do tipo 'B'
+	// (bpf-backed): o kernel escreve "bpf <nome>" e NUNCA escreve
+	// "interpreter ". Sem este campo o registro inteiro era descartado dentro
+	// do coletor — o kernel roteando execução agora, e a ferramenta em
+	// silêncio, sem achado e sem lacuna.
+	BPFOps string `json:"bpf_ops,omitempty"`
+	// BPFInterpretadores são os caminhos das linhas "bpf-interpreter <nome>
+	// <caminho>". São interpretadores tanto quanto o campo Interpreter.
+	BPFInterpretadores []string `json:"bpf_interpreters,omitempty"`
+	// NaoEntendido marca registro cujo corpo não trouxe nenhum campo de
+	// interpretador reconhecido. Guardá-lo é o que impede "não entendi" de
+	// virar "não há" quando o formato do arquivo mudar de novo.
+	NaoEntendido bool `json:"not_understood,omitempty"`
+}
+
+// TemInterpretador diz se o registro nomeia alguém que passa a receber a
+// execução, em qualquer das formas que o kernel escreve.
+func (r BinfmtRegistro) TemInterpretador() bool {
+	return r.Interpreter != "" || len(r.BPFInterpretadores) > 0
+}
+
+// Interpretadores devolve TODOS os caminhos que recebem execução por este
+// registro. Um registro 'B' pode ligar vários, e cada um é uma porta.
+func (r BinfmtRegistro) Interpretadores() []string {
+	var out []string
+	if r.Interpreter != "" {
+		out = append(out, r.Interpreter)
+	}
+	return append(out, r.BPFInterpretadores...)
 }
 
 // BinfmtConfig é o mesmo registro em ARQUIVO, que o systemd-binfmt reaplica no
@@ -76,9 +105,19 @@ func collectBinfmt(f *Facts) {
 			continue
 		}
 		r := parseBinfmtRegistro(nome, base+"/"+nome, corpo)
-		if r.Interpreter != "" {
-			f.Binfmt = append(f.Binfmt, r)
+		// O registro entra MESMO sem interpretador reconhecido. Descartá-lo
+		// convertia "não entendi este corpo" em "não há registro aqui", e o
+		// kernel pode estar roteando execução por uma forma que este parser
+		// ainda não conhece — foi o que aconteceu com o tipo 'B' (bpf), que
+		// escreve "bpf <ops>" e "bpf-interpreter <nome> <caminho>" e nunca
+		// escreve "interpreter ".
+		if !r.TemInterpretador() {
+			r.NaoEntendido = true
+			f.partial("binfmt", "o registro binfmt_misc "+nome+" está ATIVO e "+
+				"nenhum campo de interpretador dele foi reconhecido: para onde "+
+				"ele roteia a execução NÃO foi determinado")
 		}
+		f.Binfmt = append(f.Binfmt, r)
 	}
 }
 
@@ -97,6 +136,18 @@ func parseBinfmtRegistro(nome, fonte, corpo string) BinfmtRegistro {
 		}
 		if v, ok := strings.CutPrefix(ln, "interpreter "); ok {
 			r.Interpreter = strings.TrimSpace(v)
+		}
+		// Tipo 'B': "bpf <ops>" seguido de uma ou mais "bpf-interpreter <nome>
+		// <caminho>". A ordem do switch importa — "bpf-interpreter " também
+		// casaria com o prefixo "bpf ", não fosse o hífen no lugar do espaço.
+		if v, ok := strings.CutPrefix(ln, "bpf-interpreter "); ok {
+			if _, caminho, achou := strings.Cut(strings.TrimSpace(v), " "); achou {
+				if caminho = strings.TrimSpace(caminho); caminho != "" {
+					r.BPFInterpretadores = append(r.BPFInterpretadores, caminho)
+				}
+			}
+		} else if v, ok := strings.CutPrefix(ln, "bpf "); ok {
+			r.BPFOps = strings.TrimSpace(v)
 		}
 		if v, ok := strings.CutPrefix(ln, "flags:"); ok {
 			r.Flags = strings.TrimSpace(v)

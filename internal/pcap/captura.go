@@ -250,7 +250,19 @@ func Capturar(w io.Writer, h hash.Hash, iface Interface, o Opcoes) (Estatisticas
 			semRelogio = true
 		}
 
-		casa, entendi := o.Filtro.Casa(iface.TipoEnlace, buf[:n])
+		// Com MSG_TRUNC, `n` é o tamanho do quadro NO FIO, que pode ser MAIOR
+		// que `buf` — e `buf` tem exatamente `snap` bytes. O clamp precisa vir
+		// antes do primeiro uso, não antes da escrita: com --snaplen 1500 e GRO
+		// ligado, um quadro agregado de 2962 bytes fazia `buf[:n]` estourar a
+		// capacidade e derrubar a captura por slice bounds out of range, sem
+		// Fim, sem estatísticas do kernel e sem manifesto.
+		original := n
+		copiado := n
+		if copiado > snap {
+			copiado = snap
+		}
+
+		casa, entendi := o.Filtro.Casa(iface.TipoEnlace, buf[:copiado])
 		switch {
 		case !entendi:
 			st.NaoEntendidos++
@@ -260,12 +272,8 @@ func Capturar(w io.Writer, h hash.Hash, iface Interface, o Opcoes) (Estatisticas
 			continue
 		}
 
-		// Com MSG_TRUNC, `n` é o tamanho do quadro NO FIO; o que coube em `buf`
-		// é o mínimo entre ele e o snaplen.
-		original := n
-		copiado := n
-		if copiado > snap {
-			copiado = snap
+		// Truncados conta o que foi GRAVADO cortado, então só depois do filtro.
+		if copiado < original {
 			st.Truncados++
 		}
 		if err := esc.Pacote(quando, buf[:copiado], original); err != nil {

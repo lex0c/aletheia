@@ -11,9 +11,19 @@ import (
 // factsDeRede monta o mínimo para os dois checks: um processo, seu socket e a
 // resposta da base de pacotes sobre o executável.
 func factsDeRede(exe string, dono bool, s facts.Socket) *facts.Facts {
+	// O vínculo processo→socket é o FD, não o campo Socket.PID: em produção o
+	// PID só é preenchido a partir da varredura de /proc/<pid>/fd (net.go), e é
+	// dali que Facts.Index constrói socketsByPID. Uma fixture que preenchesse
+	// só o PID descrevia um estado que a coleta nunca produz — e escondia de
+	// todo check que usa o índice o caso do socket herdado por fork.
+	const inode = 4242
 	s.PID = 7
+	s.Inode = inode
 	return &facts.Facts{
-		Processes: []facts.Process{{PID: 7, Comm: "x", Exe: exe}},
+		Processes: []facts.Process{{
+			PID: 7, Comm: "x", Exe: exe,
+			FDs: []facts.FD{{N: 3, Socket: true, SocketInode: inode}},
+		}},
 		Sockets:   []facts.Socket{s},
 		Ownership: []facts.Ownership{{Path: exe, Owned: dono}},
 		Pkg:       facts.PkgDB{Kind: "dpkg"},
@@ -25,7 +35,7 @@ func factsDeRede(exe string, dono bool, s facts.Socket) *facts.Facts {
 func TestSaidaSoDisparaSemDonoDePacote(t *testing.T) {
 	sock := facts.Socket{
 		Proto: "tcp", State: "ESTAB", Dir: facts.DirOut,
-		PeerIP: "51.91.190.241", PeerPort: 443, PeerScope: facts.ScopePublic,
+		PeerIP: "198.51.100.241", PeerPort: 443, PeerScope: facts.ScopePublic,
 	}
 
 	comDono := factsDeRede("/usr/bin/curl", true, sock)
@@ -42,7 +52,7 @@ func TestSaidaSoDisparaSemDonoDePacote(t *testing.T) {
 	if r.Findings[0].Sev != check.SevWarn {
 		t.Errorf("sev = %v, /usr/local sem dono é AVISO", r.Findings[0].Sev)
 	}
-	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "51.91.190.241:443") {
+	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "198.51.100.241:443") {
 		t.Error("o destino precisa aparecer: é o que vale como IOC de frota")
 	}
 }

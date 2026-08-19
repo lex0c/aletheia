@@ -5,7 +5,7 @@ package scenario
 // O caso veio de uma saída de `ss -tunap` de produção: 524 processos, 1053
 // sockets, e a topologia mais banal que existe num servidor web —
 //
-//	php-fpm  →  35.231.119.5:443    uma API externa (público)
+//	php-fpm  →  192.0.2.5:443    uma API externa (público)
 //	php-fpm  →  10.142.0.55:27017   o MongoDB da casa (privado)
 //
 // 497 dos 524 processos tinham as DUAS pontas abertas ao mesmo tempo. E "saída
@@ -24,16 +24,16 @@ package scenario
 // com uma conexão para cada — a forma exata do host que originou o caso.
 //
 // Os endereços são apelidos em `lo` dentro de um guest sem placa de rede: o
-// 35.231.119.5 é público para quem classifica, e nenhum pacote sai da máquina.
+// 192.0.2.5 é público para quem classifica, e nenhum pacote sai da máquina.
 const poolPHP = `
-	ip addr add 35.231.119.5/32 dev lo
+	ip addr add 192.0.2.5/32 dev lo
 	ip addr add 10.142.0.55/32 dev lo
-	/helper listen 35.231.119.5:443 &
+	/helper listen 192.0.2.5:443 &
 	/helper listen 10.142.0.55:27017 &
 	sleep 0.5
 	i=0
 	while [ $i -lt 30 ]; do
-		/helper argv0 "php-fpm: pool www" /helper connect 35.231.119.5:443 10.142.0.55:27017 &
+		/helper argv0 "php-fpm: pool www" /helper connect 192.0.2.5:443 10.142.0.55:27017 &
 		i=$((i + 1))
 	done
 	sleep 1.5
@@ -51,7 +51,7 @@ func init() {
 		Expect: []Expect{
 			// O pivô continua sendo dito — o que muda é quantas vezes.
 			{ID: "net.pivot", Sev: "WARN"},
-			{ID: "net.pivot", Evidence: "35.231.119.5:443"},
+			{ID: "net.pivot", Evidence: "192.0.2.5:443"},
 			{ID: "net.pivot", Evidence: "10.142.0.55:27017"},
 		},
 		// O TETO É O CENÁRIO. Trinta workers idênticos não podem virar trinta

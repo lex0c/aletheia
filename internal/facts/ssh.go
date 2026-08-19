@@ -3,6 +3,8 @@ package facts
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"path"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -65,6 +67,35 @@ func collectSSH(f *Facts, e *env.Env) {
 	collectAuthorizedKeys(f, e)
 }
 
+// maxArquivosSSH limita a cadeia de Include. Um ciclo já é barrado por
+// `vistos`; o teto é contra a expansão explosiva de globs encadeados.
+const maxArquivosSSH = 64
+
+// expandirIncludeSSH resolve o alvo de um Include. Caminho relativo é relativo
+// a /etc/ssh, como o sshd faz, e o glob é expandido pelo diretório — sem
+// filepath.Glob, que resolveria fora da raiz travada em modo image.
+func expandirIncludeSSH(e *env.Env, padrao string) []string {
+	if !strings.HasPrefix(padrao, "/") {
+		padrao = "/etc/ssh/" + padrao
+	}
+	if !strings.ContainsAny(padrao, "*?[") {
+		return []string{padrao}
+	}
+	dir, base := path.Split(padrao)
+	dir = strings.TrimSuffix(dir, "/")
+	if strings.ContainsAny(dir, "*?[") {
+		return nil // glob no DIRETÓRIO: fora do que o sshd aceita
+	}
+	var out []string
+	for _, n := range e.ReadDirNames(dir) {
+		if ok, err := path.Match(base, n); err == nil && ok {
+			out = append(out, dir+"/"+n)
+		}
+	}
+	sort.Strings(out) // o sshd aplica em ordem lexicográfica
+	return out
+}
+
 func collectSSHConfig(f *Facts, e *env.Env) {
 	arquivos := []string{"/etc/ssh/sshd_config"}
 	// Include é o padrão nas distribuições atuais, e ignorá-lo faria a
@@ -76,7 +107,15 @@ func collectSSHConfig(f *Facts, e *env.Env) {
 	}
 
 	c := &f.SSH
-	for _, p := range arquivos {
+	// Índice, não `range`: o laço APPENDA nos próprios `arquivos` ao seguir um
+	// Include, e `range` congela o comprimento na entrada.
+	vistos := map[string]bool{}
+	for i := 0; i < len(arquivos) && i < maxArquivosSSH; i++ {
+		p := arquivos[i]
+		if vistos[p] {
+			continue // Include circular: A inclui B que inclui A
+		}
+		vistos[p] = true
 		// Ilegível é o oposto de ausente. O sshd_config é 0600 em host
 		// endurecido, e um `continue` mudo aqui esvaziava c.Files — que é
 		// exatamente o mesmo estado de "esta máquina não tem servidor SSH".
@@ -99,6 +138,21 @@ func collectSSHConfig(f *Facts, e *env.Env) {
 				}
 			}
 			v = strings.TrimSpace(v)
+			// Include REDIRECIONA a configuração para outro arquivo, e quem
+			// escolhe o caminho é quem escreve o sshd_config. Ler só o
+			// diretório fixo da distribuição cobria o caso de fábrica e deixava
+			// o buraco: um `Include /etc/ssh/extra.conf` na primeira linha leva
+			// junto PermitRootLogin e AuthorizedKeysFile, e como no sshd vence a
+			// PRIMEIRA ocorrência, o relatório imprimia o valor do arquivo
+			// principal como se fosse o efetivo. Pior, collectAuthorizedKeys
+			// depende de c.AuthorizedKeysFile para saber onde procurar chave —
+			// o arquivo de chaves real também não era lido, sem lacuna.
+			if strings.EqualFold(k, "include") {
+				for _, campo := range strings.Fields(v) {
+					arquivos = append(arquivos, expandirIncludeSSH(e, campo)...)
+				}
+				continue
+			}
 			// A PRIMEIRA ocorrência vence no sshd. Sobrescrever com a última
 			// reportaria uma configuração que não é a efetiva.
 			switch strings.ToLower(k) {

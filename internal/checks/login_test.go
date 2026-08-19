@@ -54,12 +54,12 @@ func TestPoucasOrigensNaoSaoAtaqueEspalhado(t *testing.T) {
 	f := &facts.Facts{}
 	for o := 0; o < 3; o++ {
 		f.Logins = append(f.Logins, facts.Login{
-			Tipo: facts.TipoLoginUsuario, User: "lex", Falhou: true,
+			Tipo: facts.TipoLoginUsuario, User: "ana", Falhou: true,
 			Origem: "10.0.0." + strconv.Itoa(10+o), QuandoU: "2026-08-18T01:00:00Z",
 		})
 	}
 	f.Logins = append(f.Logins, facts.Login{
-		Tipo: facts.TipoLoginUsuario, User: "lex", Origem: "10.0.0.10",
+		Tipo: facts.TipoLoginUsuario, User: "ana", Origem: "10.0.0.10",
 		QuandoU: "2026-08-18T02:00:00Z",
 	})
 	f.Index()

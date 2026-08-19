@@ -197,6 +197,24 @@ var dataFalsificada = check.Check{
 // A comparação é pelo PRIMEIRO TOKEN e não por prefixo: prefixo faria
 // `/usr/local/bin/foo` casar com um comando que executa `/usr/local/bin/foobar`,
 // e a diferença entre os dois é um arquivo diferente.
+// gatilhoComPoder separa o gatilho que é alvo de persistência do dotfile que a
+// distribuição entregou e ninguém tocou.
+//
+// A distinção não é cosmética. mtime ANTERIOR a ctime é o resultado normal de
+// upgrade de pacote, rsync, tar e git checkout — todos preservam o mtime e
+// reescrevem o ctime —, e um .bash_logout intacto casa esse padrão em toda
+// máquina. Promover isso a CRITICAL rendeu OITO falsos críticos irreversíveis
+// num desktop limpo, que é a forma pior de falso positivo: uniforme,
+// convincente e presente em toda a frota.
+//
+// Só gatilho de SISTEMA promove. O rc.local, o init.d, o MOTD, o sshrc, o hook
+// de pacote, o PAM e o udev executam com alcance de máquina e ninguém os edita
+// por gosto; o .bashrc de uma conta é editado por todo mundo, e uma linha ali
+// que não está no /etc/skel é o normal, não um sinal. Os dotfiles por usuário
+// continuam saindo como AVISO pelo check de timestomp — que é onde já estavam —,
+// e o que muda aqui é apenas a PROMOÇÃO a crítico.
+func gatilhoComPoder(t *facts.Trigger) bool { return t.User == "" }
+
 func arquivoComPoder(f *facts.Facts, p string) string {
 	for i := range f.Suid {
 		if f.Suid[i].Path == p {
@@ -215,6 +233,40 @@ func arquivoComPoder(f *facts.Facts, p string) string {
 	for i := range f.Cron {
 		if primeiroCaminho(f.Cron[i].Cmd) == p {
 			return "e o agendamento em " + f.Cron[i].File + " o executa: a data foi " +
+				"mexida num alvo de persistência"
+		}
+	}
+	// GATILHO tem exatamente o mesmo poder que unit e cron, e ficava de fora:
+	// rc.local, init.d, MOTD, sshrc, hook de pacote, generator, hook de git,
+	// PAM, udev. Um `touch -r /bin/ls /etc/rc.local` depois de acrescentar a
+	// linha produzia o Timestomp, e o check fazia `continue` — nenhum achado,
+	// nenhuma linha de Partial, cobertura completa. Como esta função também
+	// pesa a severidade de attrs, o `chattr +i` no mesmo arquivo deixava de ser
+	// promovido junto.
+	for i := range f.Triggers {
+		t := &f.Triggers[i]
+		if t.File == p && gatilhoComPoder(t) {
+			return "e é um gatilho de " + t.Kind + " (" + t.When + "): a data foi " +
+				"mexida num alvo de persistência"
+		}
+		for _, ln := range t.Lines {
+			if facts.PrimeiroCaminhoAbsoluto(ln.Text) == p {
+				return "e o gatilho " + t.File + " o executa: a data foi mexida " +
+					"num alvo de persistência"
+			}
+		}
+	}
+	// O que o KERNEL invoca sozinho — modprobe, core_pattern, uevent_helper.
+	for i := range f.Helpers {
+		if f.Helpers[i].Alvo == p {
+			return "e o kernel o invoca por " + f.Helpers[i].Nome + ": a data foi " +
+				"mexida num alvo de persistência"
+		}
+	}
+	// E o que algo executa COMO ROOT.
+	for i := range f.AlvosDeRoot {
+		if f.AlvosDeRoot[i].Caminho == p {
+			return "e " + f.AlvosDeRoot[i].Onde + " o executa como root: a data foi " +
 				"mexida num alvo de persistência"
 		}
 	}

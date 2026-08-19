@@ -124,7 +124,15 @@ func collectLogins(f *Facts, e *env.Env) {
 func lerUtmp(f *Facts, e *env.Env, caminho string, falhou, agora bool) bool {
 	fi, err := e.Lstat(caminho)
 	if err != nil {
-		return true // não existe: não é lacuna, é ausência de fonte
+		// Só a AUSÊNCIA é ausência de fonte. Qualquer outro erro — e o que
+		// acontece na prática é EACCES, com /var/log em 0750 root:adm — é
+		// lacuna, e devolver true aqui marcaria HistoricoDeLoginLido sem ter
+		// lido um byte. Como /run/utmp (0644) continua entregando as sessões
+		// abertas, o resultado era "sessão aberta e histórico vazio": o
+		// CRITICAL irreversível de histórico zerado, fabricado a partir de
+		// permissão negada. É o mesmo falso positivo que collectLogins
+		// descreve acima, reintroduzido uma camada abaixo dele.
+		return errors.Is(err, os.ErrNotExist)
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
 		if fi, err = e.Stat(caminho); err != nil {

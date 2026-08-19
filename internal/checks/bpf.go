@@ -84,6 +84,11 @@ var bpfSemDono = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+		// Antes de qualquer retorno antecipado. Quando kbpf.Programas() falha o
+		// coletor registra o partial mas deixa Enumerado=false E Lacuna=false,
+		// então sair por baixo do `if` levava o check para Coverage.Complete
+		// tendo enumerado zero programas — e este é kernelBreaker.
+		r.Partial = append(r.Partial, f.Partial["bpf"]...)
 		if !f.BPF.Enumerado {
 			if f.BPF.Lacuna {
 				r.Partial = append(r.Partial, f.BPF.Motivo)
@@ -203,7 +208,6 @@ var bpfSemDono = check.Check{
 			r.Partial = append(r.Partial, "a enumeração de eBPF bateu no teto: "+
 				"a lista não é o total")
 		}
-		r.Partial = append(r.Partial, f.Partial["bpf"]...)
 		return r
 	},
 }
@@ -235,6 +239,10 @@ var bpfInventario = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+		// Antes dos retornos antecipados: ver a nota no primeiro check do
+		// arquivo. Enumerado=false com Lacuna=false é o caso de falha do
+		// coletor, e ele precisa chegar à cobertura por todos os caminhos.
+		r.Partial = append(r.Partial, f.Partial["bpf"]...)
 
 		if !f.BPF.Enumerado {
 			if f.BPF.Lacuna {
@@ -359,6 +367,11 @@ var bpfOculto = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+		// Antes de qualquer retorno antecipado. Quando kbpf.Programas() falha o
+		// coletor registra o partial mas deixa Enumerado=false E Lacuna=false,
+		// então sair por baixo do `if` levava o check para Coverage.Complete
+		// tendo enumerado zero programas — e este é kernelBreaker.
+		r.Partial = append(r.Partial, f.Partial["bpf"]...)
 		if !f.BPF.Enumerado {
 			if f.BPF.Lacuna {
 				r.Partial = append(r.Partial, f.BPF.Motivo)

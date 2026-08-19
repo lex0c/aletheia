@@ -424,12 +424,24 @@ func anexosDeCgroup(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]
 		if err != nil {
 			continue // cgroup que sumiu ou sem permissão de abrir: segue
 		}
-		porTipo, _ := kbpf.AnexosDeCgroup(fd, kbpf.TiposDeCgroup)
+		porTipo, errosPorTipo := kbpf.AnexosDeCgroup(fd, kbpf.TiposDeCgroup)
 		syscall.Close(fd)
 		consultados++
 		rel := strings.TrimPrefix(p, base)
 		if rel == "" {
 			rel = "/"
+		}
+		// AnexosDeCgroup já filtra EINVAL/ENOTSUPP lá dentro como "este ponto
+		// não existe neste kernel", então o que sobra neste mapa é lacuna de
+		// verdade — EPERM num cgroup delegado, ENOSPC quando um tipo passa do
+		// teto de programas. Descartá-lo fazia um cgroup/connect4 anexado sumir
+		// do inventário com o cgroup contado como consultado: ausência afirmada
+		// a partir de cegueira, que é a única classe de erro que esta
+		// ferramenta não pode cometer.
+		for at, err := range errosPorTipo {
+			f.partial("bpf", "cgroup "+rel+": a consulta de anexo "+
+				kbpf.NomeDeAnexo(at)+" falhou ("+err.Error()+"): os programas "+
+				"anexados ali NÃO foram enumerados")
 		}
 		for at, ids := range porTipo {
 			for _, id := range ids {

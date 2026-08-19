@@ -18,10 +18,10 @@ func tabelaNormal() *facts.Facts {
 	return &facts.Facts{
 		Donos: []facts.DonoDeArquivo{{ID: 0, Arquivos: 400000, Executaveis: 9000}},
 		Accounts: []facts.Account{
-			{Name: "root", UID: 0}, {Name: "daemon", UID: 1}, {Name: "lex", UID: 1000},
+			{Name: "root", UID: 0}, {Name: "daemon", UID: 1}, {Name: "ana", UID: 1000},
 		},
 		Grupos: []facts.Grupo{
-			{Name: "root", GID: 0}, {Name: "daemon", GID: 1}, {Name: "lex", GID: 1000},
+			{Name: "root", GID: 0}, {Name: "daemon", GID: 1}, {Name: "ana", GID: 1000},
 		},
 	}
 }
@@ -83,7 +83,7 @@ func TestDonoSoDeDadoEhObservacaoENaoAchado(t *testing.T) {
 	f := tabelaNormal()
 	f.Donos = append(f.Donos, facts.DonoDeArquivo{
 		ID: 999, Arquivos: 1,
-		Exemplos: []string{"/home/lex/proj/data/redis/dump.rdb"},
+		Exemplos: []string{"/home/ana/proj/data/redis/dump.rdb"},
 	})
 	r := donoSemConta.Run(donoSemConta, f, testEnv())
 	if len(r.Findings) != 1 {

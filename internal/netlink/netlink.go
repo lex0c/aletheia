@@ -155,6 +155,20 @@ func (c *Conexao) Dump(tipo uint16, req []byte, fn func(dados []byte) error) err
 			}
 			switch m.Header.Type {
 			case syscall.NLMSG_DONE:
+				// O errno de encerramento do dump vem NO PAYLOAD do DONE:
+				// netlink_dump copia nlk->dump_done_errno para o corpo da
+				// mensagem (net/netlink/af_netlink.c). Um dump que ABORTOU no
+				// meio não vira NLMSG_ERROR — ele termina em DONE com código
+				// negativo. Tratar isso como sucesso fazia um host sem
+				// tcp_diag carregável (onde __inet_diag_dump devolve -ENOENT
+				// depois de o netlink_dump_start ter sucedido) declarar a
+				// capacidade PRESENTE e entregar zero sockets sem erro — e a
+				// visão cruzada lia esse zero como fato.
+				if len(m.Data) >= 4 {
+					if code := int32(ordemNativa.Uint32(m.Data[0:4])); code < 0 {
+						return traduzir(syscall.Errno(-code), "dump netlink")
+					}
+				}
 				return nil
 			case syscall.NLMSG_ERROR:
 				if len(m.Data) < 4 {

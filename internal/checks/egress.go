@@ -318,12 +318,19 @@ func pesoDoCaminho(exe string) (check.Severity, string) {
 
 // destinosPublicos lista para onde o processo fala. Um só destino é integração;
 // vários, ou um que ninguém reconhece, é a pergunta que interessa.
+// destinosPublicos usa o ÍNDICE por PID, e não uma varredura da tabela inteira.
+//
+// A varredura era O(S) por PID dentro de um laço que já percorre f.Sockets ou
+// f.Processes — O(S²)/O(P·S). Num host de contêineres, onde os FalsePositives
+// deste check já declaram que quase nenhum binário tem dono de pacote, isso dá
+// ~500 processos × ~100 mil sockets. O índice também é MAIS CORRETO: Socket.PID
+// guarda um dono só (o último a vencer o join), então filtrar por s.PID != pid
+// perdia os destinos de um socket herdado por fork.
 func destinosPublicos(f *facts.Facts, pid int) []string {
 	var out []string
 	visto := map[string]bool{}
-	for i := range f.Sockets {
-		s := &f.Sockets[i]
-		if s.PID != pid || s.Dir != facts.DirOut || s.PeerScope != facts.ScopePublic {
+	for _, s := range f.SocketsOf(pid) {
+		if s.Dir != facts.DirOut || s.PeerScope != facts.ScopePublic {
 			continue
 		}
 		d := s.PeerIP + ":" + strconv.Itoa(s.PeerPort)

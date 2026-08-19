@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/lex0c/aletheia/internal/check"
@@ -89,18 +90,37 @@ func runCollect(args []string) int {
 	// `preserve` hasheia em fluxo enquanto copia.
 	soma := sha256.New()
 	w := io.Writer(io.MultiWriter(os.Stdout, soma))
+	var fh *os.File
 	if *out != "-" {
-		fh, err := openJSONOut(*out)
+		var err error
+		fh, err = openJSONOut(*out)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 3
 		}
-		defer fh.Close()
+		defer fh.Close() // rede de segurança; o Close que VALE é o de baixo
 		w = io.MultiWriter(fh, soma)
 	}
 	if err := d.Escrever(w); err != nil {
 		fmt.Fprintf(os.Stderr, "collect: erro ao escrever o dump: %v\n", err)
 		return 3
+	}
+	// O Close PRECISA ser conferido antes de o hash ser anunciado como custódia.
+	//
+	// O hash é calculado em memória, em fluxo. Num destino NFS/CIFS ou num disco
+	// quase cheio — que é o caso normal de `collect -o /mnt/evidencia/...` — o
+	// write entra em cache e o ENOSPC/EIO só aparece no close. Com o erro
+	// descartado num `defer`, ficava no disco um dump TRUNCADO com um .sha256
+	// atestando o completo, e a função devolvia 0. Meses depois o `analyze`
+	// imprimia "o arquivo mudou depois de coletado": um defeito de escrita
+	// apresentado como adulteração de evidência, sobre uma coleta irrepetível.
+	if fh != nil {
+		if err := fh.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "collect: o dump NÃO foi gravado por inteiro "+
+				"(%v). O arquivo em %s está truncado e a soma abaixo não vale como "+
+				"custódia — repita a coleta para outro destino.\n", err, *out)
+			return 3
+		}
 	}
 	hash := hex.EncodeToString(soma.Sum(nil))
 
@@ -110,8 +130,15 @@ func runCollect(args []string) int {
 	// é o que vale como custódia, porque vai para o war log, para o ticket e
 	// para a cabeça de quem coletou, que é fora do alcance do host.
 	if *out != "-" {
-		if err := os.WriteFile(*out+".sha256", []byte(hash+"  "+
-			filepath.Base(*out)+"\n"), 0o600); err != nil {
+		// Pelo MESMO caminho do dump, e não com os.WriteFile: este é
+		// O_CREATE|O_TRUNC e SEGUE symlink, enquanto o dump ao lado passa por
+		// openJSONOut, que recusa arquivo existente e falha em symlink por
+		// O_EXCL. Com o diretório de incidente no próprio disco — o modo que o
+		// README recomenda —, um implante que criasse
+		// `dump.json.sha256 -> /var/log/auth.log` fazia o collect zerar aquele
+		// log; e sem adversário nenhum, uma segunda coleta com o mesmo --out
+		// sobrescrevia a soma da anterior.
+		if err := escreverSoma(*out+".sha256", hash, filepath.Base(*out)); err != nil {
 			fmt.Fprintf(os.Stderr, "collect: o dump foi escrito, mas o arquivo de "+
 				"soma não: %v\n", err)
 		}
@@ -235,6 +262,12 @@ func runAnalyze(args []string) int {
 	if code != 0 {
 		return code
 	}
+	// Junto das outras validações, antes de carregar o dump e rodar os checks.
+	jsonFH, err := abrirSaidaJSON(*jsonOut)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 3
+	}
 
 	d, err := dump.Carregar(fs.Arg(0))
 	if err != nil {
@@ -292,6 +325,7 @@ func runAnalyze(args []string) int {
 		janela:   janela,
 		ioc:      lista,
 		jsonOut:  *jsonOut,
+		jsonFH:   jsonFH,
 		verbose:  nivel(*verbose, *verbose2),
 		analise: &report.AnaliseInfo{
 			Arquivo:      fs.Arg(0),
@@ -347,9 +381,12 @@ type saida struct {
 	baseline string
 	janela   check.Janela
 	ioc      *ioc.Lista
-	jsonOut  string
-	verbose  int
-	analise  *report.AnaliseInfo
+	// jsonOut é o caminho, só para decidir se o relatório humano vai para
+	// stderr; jsonFH é o destino JÁ ABERTO, antes da parte cara.
+	jsonOut string
+	jsonFH  *os.File
+	verbose int
+	analise *report.AnaliseInfo
 }
 
 func emitir(r *check.Report, f *facts.Facts, e *env.Env, o saida) int {
@@ -370,12 +407,7 @@ func emitir(r *check.Report, f *facts.Facts, e *env.Env, o saida) int {
 		Janela: jn, Analise: o.analise,
 	})
 
-	if o.jsonOut != "" {
-		if code := writeJSONL(o.jsonOut, r, f, e, bl, jn, o.analise); code != 0 {
-			return code
-		}
-	}
-	return r.Exit()
+	return writeJSONL(o.jsonFH, r.Exit(), r, f, e, bl, jn, o.analise)
 }
 
 func nivel(v, vv bool) int {
@@ -412,9 +444,20 @@ func conferirSoma(w io.Writer, caminho string) {
 	if caminho == "-" {
 		return
 	}
-	esperado, err := os.ReadFile(caminho + ".sha256")
+	// Com teto, pelo mesmo motivo que dump.Carregar tem: o sidecar veio do
+	// mesmo pendrive e do mesmo host que o dump, e "tamanho é entrada não
+	// confiável" vale para ele também. O arquivo grande era defendido e o
+	// pequeno não — um `truncate -s 8G dump.jsonl.sha256` derrubava o
+	// ANALISADOR por falta de memória, na máquina limpa, depois de o dump já
+	// ter carregado. 64 bytes de hex mais um nome é tudo que o formato admite.
+	sfh, err := os.Open(caminho + ".sha256")
 	if err != nil {
 		return // sem arquivo de soma: dump de outra versão, ou de stdout
+	}
+	esperado, err := io.ReadAll(io.LimitReader(sfh, 8<<10))
+	sfh.Close()
+	if err != nil {
+		return
 	}
 	campos := strings.Fields(string(esperado))
 	if len(campos) == 0 {
@@ -441,4 +484,19 @@ func conferirSoma(w io.Writer, caminho string) {
 	fmt.Fprintln(w, "  se não bater com nenhum dos dois, os dois foram.")
 	fmt.Fprintln(w, "  A análise continua — mas o que sair dela descreve outro arquivo.")
 	fmt.Fprintln(w)
+}
+
+// escreverSoma grava o arquivo de soma com as mesmas recusas do dump: não
+// sobrescreve, não segue symlink, e confere o Close antes de dizer que gravou.
+func escreverSoma(caminho, hash, base string) error {
+	fh, err := os.OpenFile(caminho,
+		os.O_CREATE|os.O_WRONLY|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := fh.WriteString(hash + "  " + base + "\n"); err != nil {
+		fh.Close()
+		return err
+	}
+	return fh.Close()
 }

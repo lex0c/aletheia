@@ -169,11 +169,27 @@ func (r *Report) DerivarAncora(j Janela) Ancora {
 			Origem: "informado em --since " + j.Spec,
 		}
 	}
+	// Data no FUTURO não ancora nada.
+	//
+	// f.Quando vem de mtime em dezenas de checks, e mtime é forjável com um
+	// `touch` — coletarTimestomp existe justamente por isso. Sem esta guarda,
+	// um `touch -d 2099-01-01 /etc/systemd/system/backdoor.service` vencia o
+	// desempate por ser o mais recente e o relatório imprimia a âncora da
+	// investigação setenta e três anos à frente, com Origem "derivado desta
+	// execução": a ferramenta afirmando uma data que o adversário escreveu.
+	// Data no futuro é SINAL por si, e quem o levanta é o check de timestomp —
+	// aqui ela só não pode servir de âncora.
+	agora := time.Now().UTC()
 	var melhor Finding
 	var melhorT time.Time
+	var futuros int
 	for _, f := range r.Findings {
 		t, ok := instante(f.Quando)
 		if !ok {
+			continue
+		}
+		if t.After(agora) {
+			futuros++
 			continue
 		}
 		if melhor.ID == "" || f.Sev > melhor.Sev ||
@@ -182,6 +198,10 @@ func (r *Report) DerivarAncora(j Janela) Ancora {
 		}
 	}
 	if melhor.ID == "" {
+		if futuros > 0 {
+			return Ancora{Origem: "NÃO derivada: os achados datados têm data no " +
+				"FUTURO, que é sinal de data forjada e não serve de âncora"}
+		}
 		return Ancora{}
 	}
 	de := melhor.ID
@@ -191,9 +211,14 @@ func (r *Report) DerivarAncora(j Janela) Ancora {
 	if melhor.QuandoFonte != "" {
 		de += " (" + melhor.QuandoFonte + ")"
 	}
+	origem := "derivado desta execução"
+	if futuros > 0 {
+		origem += " (" + strconv.Itoa(futuros) + " achado(s) com data no FUTURO " +
+			"foram descartados como âncora: data forjada)"
+	}
 	return Ancora{
 		Quando: melhorT.Format(time.RFC3339),
-		Origem: "derivado desta execução",
+		Origem: origem,
 		De:     de,
 	}
 }

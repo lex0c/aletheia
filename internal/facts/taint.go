@@ -157,7 +157,13 @@ func modulosComTaint(texto string) []ModuloTaint {
 		if len(ultimo) < 3 || ultimo[0] != '(' || ultimo[len(ultimo)-1] != ')' {
 			continue
 		}
-		letras := ultimo[1 : len(ultimo)-1]
+		// module_flags() acrescenta '-' (MODULE_STATE_GOING) ou '+'
+		// (MODULE_STATE_COMING) DENTRO dos parênteses: "nvidia … (OE+)".
+		// Rejeitar a linha inteira por causa desse byte descartava o módulo do
+		// inventário, e se ele fosse o único a admitir O/E essas marcas passavam
+		// a figurar em TaintSemDono — que a ferramenta lê como "o módulo foi
+		// removido para não deixar rastro". Um rmmod lento abria a janela.
+		letras := strings.TrimRight(ultimo[1:len(ultimo)-1], "+-")
 		if !soLetrasMaiusculas(letras) {
 			continue
 		}

@@ -29,9 +29,18 @@ package ioc
 
 import (
 	"errors"
+	"io"
 	"os"
 	"strings"
 )
+
+// MaxLista é o teto do arquivo de indicadores, pela mesma razão que
+// env.MaxLeitura existe: o caminho é escolhido pelo operador, mas o CONTEÚDO
+// costuma vir do host investigado.
+var MaxLista int64 = 16 << 20
+
+// ErrGrandeDemais recusa uma lista acima do teto em vez de tentar lê-la.
+var ErrGrandeDemais = errors.New("lista de IoC maior que o teto de leitura: NÃO foi lida")
 
 // Tipo é a natureza do indicador. É ele que decide a COMPARAÇÃO: caminho casa
 // com curinga, texto casa por conteúdo, IP casa exato.
@@ -90,9 +99,21 @@ var chavesDeLista = map[string]Tipo{
 // Carregar lê o arquivo. Falha quando ele não abre e quando não produz
 // indicador nenhum; linhas soltas que não foram entendidas viram aviso.
 func Carregar(caminho string) (*Lista, error) {
-	b, err := os.ReadFile(caminho)
+	fh, err := os.Open(caminho)
 	if err != nil {
 		return nil, err
+	}
+	defer fh.Close()
+	// Teto, pela mesma razão de env.MaxLeitura: o arquivo é apontado pelo
+	// operador e num IR real vem do host investigado, no mesmo pendrive que o
+	// dump. Sem teto, um arquivo esparso de 8 GB derruba a ferramenta por falta
+	// de memória com status 2 — que o contrato lê como CRITICAL.
+	b, err := io.ReadAll(io.LimitReader(fh, MaxLista+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > MaxLista {
+		return nil, ErrGrandeDemais
 	}
 	l := &Lista{Arquivo: caminho}
 	var contexto Tipo // chave aberta, para a forma em bloco

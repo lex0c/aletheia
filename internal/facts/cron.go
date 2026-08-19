@@ -297,8 +297,16 @@ func parseCronFile(f *Facts, e *env.Env, path, kind, user string) []CronEntry {
 // e os atalhos com @.
 func cutSchedule(ln string) (sched, rest string, ok bool) {
 	if strings.HasPrefix(ln, "@") {
-		s, r, found := strings.Cut(ln, " ")
-		return s, r, found
+		// Qualquer branco separa, não só o espaço: o cronie/Vixie pula brancos
+		// com get_string, e `@reboot\t/tmp/.x.sh` é crontab válido. Cortar só
+		// no espaço fazia a linha inteira ser descartada pelo chamador — a
+		// persistência de boot mais barata que existe ficava invisível, e quem
+		// escolhe o byte separador é quem escreve o crontab.
+		i := strings.IndexAny(ln, " \t")
+		if i < 0 {
+			return ln, "", false
+		}
+		return ln[:i], strings.TrimLeft(ln[i:], " \t"), true
 	}
 	campos := 0
 	i := 0

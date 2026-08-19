@@ -74,22 +74,51 @@ var backendExposto = check.Check{
 			paresLocais      []string
 		}
 		por := map[string]*escutaAberta{}
+		// porPorta resolve a conexão para o listener certo: o socket ESTAB traz
+		// o IP local CONCRETO, e o listener pode estar num curinga (0.0.0.0).
+		porPorta := map[string][]*escutaAberta{}
 		var ordem []string
+		// resolveEscuta casa uma conexão estabelecida com o listener que a
+		// atende. O IP local de um socket ESTAB é sempre concreto; o do
+		// listener pode ser curinga (0.0.0.0 / ::). Correspondência EXATA vence
+		// a curinga — é o que separa dois serviços na mesma porta em endereços
+		// diferentes.
+		resolveEscuta := func(cands []*escutaAberta, ipLocal string) *escutaAberta {
+			var curinga *escutaAberta
+			for _, a := range cands {
+				if a.ip == ipLocal {
+					return a
+				}
+				if curinga == nil && (a.ip == "0.0.0.0" || a.ip == "::") {
+					curinga = a
+				}
+			}
+			return curinga
+		}
 
 		for i := range f.Sockets {
 			s := &f.Sockets[i]
 			if s.State != "LISTEN" || ehLoopback(s.LocalIP) {
 				continue
 			}
-			k := s.Proto + ":" + strconv.Itoa(s.LocalPort)
+			// O IP entra na chave. Sem ele, um serviço em 10.0.0.1:8080 e outro
+			// em 127.0.0.1:8080 colapsavam num só: o segundo é pulado por
+			// ehLoopback, mas as conexões DELE eram contadas no primeiro, que
+			// passava a satisfazer "locais > 0 && externas == 0" e saía como
+			// "escuta exposta usada só pelo loopback" — com o pid e o comm do
+			// listener errado.
+			k := s.Proto + ":" + s.LocalIP + ":" + strconv.Itoa(s.LocalPort)
 			if _, visto := por[k]; !visto {
 				p := f.ProcessByPID(s.PID)
 				comm := s.Comm
 				if p != nil {
 					comm = p.Comm
 				}
-				por[k] = &escutaAberta{porta: s.LocalPort, ip: s.LocalIP,
+				a := &escutaAberta{porta: s.LocalPort, ip: s.LocalIP,
 					proto: s.Proto, pid: s.PID, comm: comm}
+				por[k] = a
+				porPorta[s.Proto+":"+strconv.Itoa(s.LocalPort)] = append(
+					porPorta[s.Proto+":"+strconv.Itoa(s.LocalPort)], a)
 				ordem = append(ordem, k)
 			}
 		}
@@ -104,8 +133,8 @@ var backendExposto = check.Check{
 			if s.State != "ESTAB" || s.Dir != facts.DirIn {
 				continue
 			}
-			a, ok := por[s.Proto+":"+strconv.Itoa(s.LocalPort)]
-			if !ok {
+			a := resolveEscuta(porPorta[s.Proto+":"+strconv.Itoa(s.LocalPort)], s.LocalIP)
+			if a == nil {
 				continue
 			}
 			if ehLoopback(s.PeerIP) {

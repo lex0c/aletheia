@@ -106,31 +106,64 @@ func runPreserve(args []string) int {
 		return 3
 	}
 
+	// O tratamento de sinal cobre a coleta INTEIRA, não só a captura.
+	//
+	// Ele era registrado apenas dentro do ramo do --pcap. Num
+	// `preserve --pid 4242 --mem --mem-max 2G` o dump de memória leva minutos, e
+	// um Ctrl-C (ou o SIGTERM de um wrapper com timeout) matava o processo no
+	// comportamento padrão, ANTES de escreverManifesto: ficavam os .bin no
+	// diretório e nenhum aletheia-manifest.jsonl. Os hashes da ORIGEM — que são
+	// o que prova que a cópia bate com o alvo, e que só existem na memória deste
+	// processo — sumiam para sempre. É o desfecho que este arquivo declara pior
+	// que coleta nenhuma.
+	interrompido := make(chan struct{})
+	sinais := make(chan os.Signal, 1)
+	signal.Notify(sinais, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sinais)
+	go func() {
+		<-sinais
+		close(interrompido)
+		fmt.Fprintln(os.Stderr, "\npreserve: interrompido — fechando a peça em curso "+
+			"e escrevendo o manifesto do que JÁ foi preservado")
+	}()
+	parou := func() bool {
+		select {
+		case <-interrompido:
+			return true
+		default:
+			return false
+		}
+	}
+
 	// A ORDEM é a da §19: primeiro o que morre com o processo, depois o que
 	// morre com o boot, por último o que está em disco e não vai a lugar nenhum.
 	for _, n := range numPids {
+		if parou() {
+			break
+		}
 		_ = c.Exe(int(n))
 		if *mem {
 			_ = c.Memoria(int(n))
 		}
 	}
 	for _, n := range numBPFs {
+		if parou() {
+			break
+		}
 		_ = c.BPF(uint32(n))
 	}
 	for _, p := range files {
+		if parou() {
+			break
+		}
 		_ = c.Arquivo(p)
 	}
 	// A captura por último, e não por acomodação: ela ESPERA — de segundos a
 	// minutos —, e as outras peças morrem se o processo morrer nesse meio tempo.
-	if opcoesPcap != nil {
+	if opcoesPcap != nil && !parou() {
 		avisoDaCaptura(os.Stderr, *opcoesPcap)
-		parar := make(chan struct{})
-		sinais := make(chan os.Signal, 1)
-		signal.Notify(sinais, os.Interrupt, syscall.SIGTERM)
-		go func() { <-sinais; close(parar) }()
-		opcoesPcap.Parar = parar
+		opcoesPcap.Parar = interrompido
 		st, _ := c.PCAP(*opcoesPcap)
-		signal.Stop(sinais)
 		resumoDaCaptura(os.Stderr, st)
 	}
 
@@ -162,6 +195,10 @@ func runPreserve(args []string) int {
 	}
 
 	switch {
+	case parou():
+		// 130 é o que um shell espera de um SIGINT, e o manifesto acima JÁ foi
+		// escrito: o que se preservou até aqui tem cadeia de custódia.
+		return 130
 	case len(c.Integro()) > 0:
 		// O arquivo MUDOU enquanto era lido. Num incidente isso não é falha de
 		// cópia: é o alvo se mexendo, e vale o mesmo que um achado crítico.

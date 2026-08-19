@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/facts"
+	"github.com/lex0c/aletheia/internal/redact"
 	"github.com/lex0c/aletheia/internal/report"
 )
 
@@ -82,8 +84,8 @@ func novoAmostrador() *amostrador {
 //
 // `completo` é o último Facts da varredura completa, usado só para nomear o
 // gatilho quando um período é medido. Pode ser nil.
-func (a *amostrador) amostra(f *facts.Facts, completo *facts.Facts, agora time.Time) []string {
-	var out []string
+func (a *amostrador) amostra(f *facts.Facts, completo *facts.Facts, agora time.Time) []linhaAmostra {
+	var out []linhaAmostra
 	primeira := a.amostras == 0
 	a.amostras++
 
@@ -99,16 +101,24 @@ func (a *amostrador) amostra(f *facts.Facts, completo *facts.Facts, agora time.T
 			continue
 		}
 		if _, tinha := a.pids[p.PID]; !tinha {
-			out = append(out, fmt.Sprintf("%s ＋ processo pid=%d %s%s%s%s",
-				agora.Format("15:04:05"), p.PID, report.Safe(exeOuComm(p)),
-				argvDe(p), cgroupDe(p), paiDe(p, atuais, a.pids)))
+			out = append(out, linhaAmostra{
+				Sev: check.SevInfo, ID: "watch.process_new",
+				Assunto: "pid=" + strconv.Itoa(p.PID),
+				Texto: fmt.Sprintf("%s ＋ processo pid=%d %s%s%s%s",
+					agora.Format("15:04:05"), p.PID, report.Safe(exeOuComm(p)),
+					argvDe(p), cgroupDe(p), paiDe(p, atuais, a.pids)),
+			})
 		}
 	}
 	if !primeira {
 		for pid, p := range a.pids {
 			if _, ainda := atuais[pid]; !ainda {
-				out = append(out, fmt.Sprintf("%s － processo pid=%d %s terminou",
-					agora.Format("15:04:05"), pid, report.Safe(exeOuComm(&p))))
+				out = append(out, linhaAmostra{
+					Sev: check.SevInfo, ID: "watch.process_gone",
+					Assunto: "pid=" + strconv.Itoa(pid),
+					Texto: fmt.Sprintf("%s － processo pid=%d %s terminou",
+						agora.Format("15:04:05"), pid, report.Safe(exeOuComm(&p))),
+				})
 			}
 		}
 	}
@@ -151,14 +161,20 @@ func (a *amostrador) amostra(f *facts.Facts, completo *facts.Facts, agora time.T
 			continue
 		}
 		if len(r.aparicoes) == 1 {
-			out = append(out, fmt.Sprintf("%s ＋ conexão %s%s",
-				agora.Format("15:04:05"), report.Safe(chave), porQuem(r)))
+			out = append(out, linhaAmostra{
+				Sev: check.SevInfo, ID: "watch.peer_new", Assunto: chave,
+				Texto: fmt.Sprintf("%s ＋ conexão %s%s",
+					agora.Format("15:04:05"), report.Safe(chave), porQuem(r)),
+			})
 		} else {
 			d := agora.Sub(r.aparicoes[len(r.aparicoes)-2])
-			out = append(out, fmt.Sprintf("%s ↻ conexão %s%s — voltou depois de %s",
-				agora.Format("15:04:05"), report.Safe(chave), porQuem(r), d.Round(time.Second)))
+			out = append(out, linhaAmostra{
+				Sev: check.SevInfo, ID: "watch.peer_back", Assunto: chave,
+				Texto: fmt.Sprintf("%s ↻ conexão %s%s — voltou depois de %s",
+					agora.Format("15:04:05"), report.Safe(chave), porQuem(r), d.Round(time.Second)),
+			})
 		}
-		if l := a.concluiPeriodo(chave, r, completo); l != "" {
+		if l := a.concluiPeriodo(chave, r, completo); l.Texto != "" {
 			out = append(out, l)
 		}
 	}
@@ -170,10 +186,24 @@ func (a *amostrador) amostra(f *facts.Facts, completo *facts.Facts, agora time.T
 	return out
 }
 
+// linhaAmostra é o que o amostrador produz.
+//
+// O texto é o que o humano lê; a severidade, o id e o assunto são o que o exit
+// code e o JSONL precisam. Enquanto isto era []string, o amostrador DETECTAVA e
+// não conseguia reportar: nada em w.amostra tocava w.pior, w.eventos ou w.jsonW,
+// então `watch --for 8h --json f.jsonl` achava o beacon, imprimia a linha em
+// stderr e saía 0 com o arquivo sem uma única linha vinda daqui.
+type linhaAmostra struct {
+	Texto   string
+	Sev     check.Severity
+	ID      string
+	Assunto string
+}
+
 // concluiPeriodo afirma periodicidade, uma vez só por destino.
-func (a *amostrador) concluiPeriodo(chave string, r *ritmo, completo *facts.Facts) string {
+func (a *amostrador) concluiPeriodo(chave string, r *ritmo, completo *facts.Facts) linhaAmostra {
 	if a.jaFalouDoPeriodo[chave] || len(r.aparicoes) < minAparicoesParaPeriodo {
-		return ""
+		return linhaAmostra{}
 	}
 	var deltas []float64
 	for i := 1; i < len(r.aparicoes); i++ {
@@ -183,7 +213,7 @@ func (a *amostrador) concluiPeriodo(chave string, r *ritmo, completo *facts.Fact
 	if !ok {
 		// Irregular é conclusão também, e é a oposta: humano, não automação.
 		// Não vira linha para não competir com o achado.
-		return ""
+		return linhaAmostra{}
 	}
 	a.jaFalouDoPeriodo[chave] = true
 
@@ -194,7 +224,14 @@ func (a *amostrador) concluiPeriodo(chave string, r *ritmo, completo *facts.Fact
 	if quem := gatilhoComPeriodo(completo, media); quem != "" {
 		l += "\n           ⏱ e casa com um gatilho já lido nesta máquina: " + report.Safe(quem)
 	}
-	return l
+	// AVISO, e não informação: período constante é o discriminador entre
+	// automação e pessoa, e é o único achado que só este comando produz — a
+	// varredura completa de 60 s não vê a conexão de 2 s que se repete. Sem
+	// severidade ele não chegava ao exit code nem ao JSONL, e a frota lia "host
+	// limpo" exatamente sobre ele.
+	return linhaAmostra{
+		Sev: check.SevWarn, ID: "watch.beacon", Assunto: chave, Texto: l,
+	}
 }
 
 // constante diz se os intervalos são regulares o bastante para se chamarem um
@@ -289,7 +326,12 @@ func argvDe(p *facts.Process) string {
 	if len(p.Argv) < 2 {
 		return ""
 	}
-	args := strings.Join(p.Argv[1:], " ")
+	// Redigir ANTES do corte de 60 colunas, como linhaCurta já faz. report.Safe
+	// sanitiza controle e não redige nada: este era o único consumidor de argv
+	// que não passava por redact.Cmdline — e é o que roda por HORAS com a saída
+	// sendo capturada. Um `watch` aberto durante o backup noturno punha
+	// `mysqldump -u root -pS3cr3t` na tela e no log do operador.
+	args := strings.Join(redact.Cmdline(p.Argv)[1:], " ")
 	if len(args) > 60 {
 		args = args[:59] + "…"
 	}

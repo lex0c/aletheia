@@ -638,8 +638,13 @@ func readCwd(p *Process) {
 }
 
 func readCmdline(p *Process) {
-	argv, err := readNULErr(procPath(p.PID, "cmdline"))
+	argv, cortado, err := readNULTrunc(procPath(p.PID, "cmdline"))
 	p.Argv = argv
+	if cortado {
+		p.Truncated = append(p.Truncated, "a linha de comando passa de "+
+			strconv.Itoa(maxNUL>>20)+" MB e foi CORTADA: os argumentos "+
+			"seguintes não foram examinados")
+	}
 	if len(argv) > 0 || err != nil {
 		return
 	}
@@ -710,7 +715,12 @@ func reconfirmCmdline(f *Facts) {
 }
 
 func readEnviron(p *Process) {
-	kv := readNUL(procPath(p.PID, "environ"))
+	kv, cortado, _ := readNULTrunc(procPath(p.PID, "environ"))
+	if cortado {
+		p.Truncated = append(p.Truncated, "o ambiente passa de "+
+			strconv.Itoa(maxNUL>>20)+" MB e foi CORTADO: as variáveis "+
+			"seguintes não foram examinadas")
+	}
 	if len(kv) == 0 {
 		return
 	}
@@ -936,6 +946,16 @@ func lerMaps(p *Process, r io.Reader) {
 		if !ok {
 			continue
 		}
+		// O kernel escapa o caminho com seq_path(m, path, "\n"): uma nova
+		// linha no nome do arquivo sai como \012. Sem desescapar, uma .so
+		// chamada "lib\nevil.so" virava um caminho IMPOSSÍVEL — o Lstat de
+		// pkg.go devolvia ENOENT e o candidato era descartado em silêncio, sem
+		// nunca fazer a pergunta "que pacote entregou esta biblioteca?".
+		// A verificação é um scan por byte e a alocação só acontece quando há
+		// barra invertida, que é o caso raro.
+		if bytes.IndexByte(path, '\\') >= 0 {
+			path = []byte(desescapaMtree(string(path)))
+		}
 		executavel := bytes.IndexByte(perms, 'x') >= 0
 		gravavel := bytes.IndexByte(perms, 'w') >= 0
 		if gravavel && executavel {
@@ -1156,24 +1176,59 @@ func readNUL(p string) []string {
 	return v
 }
 
-// readNULErr separa "não consegui ler" de "está vazio" — a confusão entre os
-// dois fabricava achado a partir de processo morto.
+// maxNUL é o teto de cmdline e environ.
+//
+// O kernel NÃO limita esses dois arquivos na leitura: get_mm_cmdline devolve
+// `env_end - arg_start` e environ_read devolve `env_end - env_start`. O único
+// teto é o do execve — bprm_stack_limits, em fs/exec.c, dá
+// max(min(_STK_LIM/4*3, rlim_stack/4), ARG_MAX) —, que com `ulimit -s
+// unlimited` e um argv grande chega a ~6 MB POR PROCESSO, para qualquer usuário
+// sem privilégio. Duzentos processos assim eram 1,2 GB e um
+// `fatal error: out of memory` com status 2, que o contrato desta ferramenta lê
+// como CRITICAL.
+//
+// 1 MB é folgado para qualquer linha de comando real e barato de cortar.
+const maxNUL = 1 << 20
+
 func readNULErr(p string) ([]string, error) {
-	b, err := os.ReadFile(p)
+	v, _, err := readNULTrunc(p)
+	return v, err
+}
+
+// readNULTrunc separa "não consegui ler" de "está vazio" — a confusão entre os
+// dois fabricava achado a partir de processo morto — e devolve também se o
+// conteúdo foi CORTADO, para que o chamador possa dizê-lo em vez de entregar
+// uma linha de comando incompleta como se fosse inteira.
+func readNULTrunc(p string) ([]string, bool, error) {
+	fh, err := os.Open(p)
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	defer fh.Close()
+	// Um byte além do teto é o que distingue "coube" de "estourou". O tamanho
+	// declarado não serve: /proc reporta 0 no stat (fs/proc/generic.c).
+	b, err := io.ReadAll(io.LimitReader(fh, maxNUL+1))
+	if err != nil {
+		return nil, false, err
+	}
+	cortado := len(b) > maxNUL
+	if cortado {
+		b = b[:maxNUL]
 	}
 	if len(b) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 	parts := strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
-	out := parts[:0]
+	out := make([]string, 0, len(parts))
 	for _, s := range parts {
 		if s != "" {
-			out = append(out, s)
+			// Clone: strings.Split devolve fatias do MESMO array, então guardar
+			// uma única chave de environ prendia o buffer inteiro na memória
+			// pelo tempo de vida do Facts.
+			out = append(out, strings.Clone(s))
 		}
 	}
-	return out, nil
+	return out, cortado, nil
 }
 
 func classifyErr(err error) string {

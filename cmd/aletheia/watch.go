@@ -229,6 +229,11 @@ type vigia struct {
 	// não sabe de onde vem; a coleta completa sabe quais agendamentos existem.
 	ultimoCompleto *facts.Facts
 
+	// jsonQuebrado marca que alguma linha do JSONL não pôde ser gravada. O
+	// arquivo deixa de ser um registro completo, e isso precisa aparecer no
+	// exit code — ver escreveJSON e exit.
+	jsonQuebrado bool
+
 	ciclos    int
 	amostras  int
 	eventos   []evento
@@ -384,7 +389,22 @@ func (w *vigia) amostra() {
 	f := facts.CollectVolatile(e)
 	w.amostras++
 	for _, l := range w.am.amostra(f, w.ultimoCompleto, e.Now) {
-		fmt.Fprintln(w.humano, l)
+		fmt.Fprintln(w.humano, l.Texto)
+		// O que o amostrador vê precisa chegar ao exit code e ao JSONL. Ele é a
+		// ÚNICA fonte de alguns achados — a conexão de 2 s que se repete a cada
+		// 10 min não aparece em varredura completa nenhuma —, e enquanto ele só
+		// imprimia, `watch --json` saía 0 com o arquivo vazio sobre eles.
+		if l.Sev > w.pior {
+			w.pior = l.Sev
+		}
+		w.escreveJSON(map[string]string{
+			"ts":      e.Now.UTC().Format(time.RFC3339),
+			"event":   "amostra",
+			"id":      l.ID,
+			"sev":     l.Sev.String(),
+			"subject": l.Assunto,
+			"title":   l.Texto,
+		})
 	}
 }
 
@@ -400,24 +420,42 @@ func (w *vigia) registra(ev evento) {
 		ev.Quando.Format("15:04:05"), marca, ev.Fd.Sev.Mark(),
 		report.Safe(nome), report.Safe(ev.Fd.Title), ev.Fd.Ref)
 
-	if w.jsonW != nil {
-		// encoding/json e não %q: o verbo de Go escapa para um literal de GO,
-		// não de JSON. Rune inválido vira \xNN, que nenhum parser de JSON
-		// aceita — e Subject e Title vêm do ALVO, onde o byte inválido é
-		// escolha de quem controlava o host. Uma linha inválida no meio do
-		// JSONL quebra o consumidor no lugar onde ele mais precisa funcionar.
-		linha, err := json.Marshal(map[string]string{
-			"ts":      ev.Quando.UTC().Format(time.RFC3339),
-			"event":   ev.Kind,
-			"id":      ev.Fd.ID,
-			"ref":     ev.Fd.Ref,
-			"sev":     ev.Fd.Sev.String(),
-			"subject": ev.Fd.Subject,
-			"title":   ev.Fd.Title,
-		})
-		if err == nil {
-			fmt.Fprintf(w.jsonW, "%s\n", linha)
-		}
+	w.escreveJSON(map[string]string{
+		"ts":      ev.Quando.UTC().Format(time.RFC3339),
+		"event":   ev.Kind,
+		"id":      ev.Fd.ID,
+		"ref":     ev.Fd.Ref,
+		"sev":     ev.Fd.Sev.String(),
+		"subject": ev.Fd.Subject,
+		"title":   ev.Fd.Title,
+	})
+}
+
+// escreveJSON emite UMA linha do JSONL e CONFERE que ela saiu.
+//
+// encoding/json e não %q: o verbo de Go escapa para um literal de GO, não de
+// JSON. Rune inválido vira \xNN, que nenhum parser de JSON aceita — e Subject e
+// Title vêm do ALVO, onde o byte inválido é escolha de quem controlava o host.
+// Uma linha inválida no meio do JSONL quebra o consumidor no lugar onde ele
+// mais precisa funcionar.
+//
+// E o erro de escrita não é descartado: numa vigília de oito horas com a
+// partição enchendo às 03:00, as linhas seguintes — inclusive o ＋ do implante —
+// deixavam de ser gravadas sem uma palavra, e o exit continuava vindo da
+// severidade vista em MEMÓRIA. O arquivo que a frota consome ficava truncado
+// exatamente onde a informação apareceu.
+func (w *vigia) escreveJSON(campos map[string]string) {
+	if w.jsonW == nil {
+		return
+	}
+	linha, err := json.Marshal(campos)
+	if err == nil {
+		_, err = fmt.Fprintf(w.jsonW, "%s\n", linha)
+	}
+	if err != nil && !w.jsonQuebrado {
+		w.jsonQuebrado = true
+		fmt.Fprintf(os.Stderr, "watch: o JSONL parou de ser gravado (%v): "+
+			"o arquivo está INCOMPLETO a partir daqui\n", err)
 	}
 }
 
@@ -498,6 +536,11 @@ func (w *vigia) exit() int {
 		// nunca conseguiu ler /proc de ninguém terminava com exit 0, que é a
 		// ferramenta dizendo "olhei a noite toda e não vi nada" sobre uma noite
 		// em que ela não olhou.
+		return 1
+	case w.jsonQuebrado:
+		// Pela mesma razão: o JSONL é o produto que a frota consome, e um
+		// arquivo truncado com exit 0 é a ferramenta afirmando completude sobre
+		// um registro que ela sabe estar incompleto.
 		return 1
 	}
 	return 0

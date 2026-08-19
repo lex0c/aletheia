@@ -469,7 +469,7 @@ sudo ./aletheia scan --all-fs
 sudo ./aletheia scan --all-fs --ignore /data/xmls --ignore /var/backups
 
 # mirar direto numa árvore suspeita, sem varrer o resto:
-./aletheia scan --root /data/local/www/data/consultoria
+./aletheia scan --root /data/local/www/data/webapp
 ```
 
 Quando a varredura estoura um teto (árvore gigante) ou você exclui um caminho, o

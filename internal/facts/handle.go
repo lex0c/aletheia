@@ -23,7 +23,7 @@ import (
 //
 // O `f_handle` resolve os dois: é a identidade que o PRÓPRIO filesystem usa,
 // e `name_to_handle_at` devolve exatamente os bytes que o fdinfo imprime.
-// Verificado: /home/lex/.config sai 0601…17000000 tipo 4d nos dois lados.
+// Verificado num diretório de home: sai 0601…17000000 tipo 4d nos dois lados.
 
 // tamMaxHandle é o teto do MAX_HANDLE_SZ do kernel.
 const tamMaxHandle = 128

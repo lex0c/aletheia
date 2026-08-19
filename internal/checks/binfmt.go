@@ -67,11 +67,25 @@ var binfmtInterpreter = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+		// Registro ativo cujo corpo o coletor não entendeu vira lacuna, não
+		// silêncio: o kernel está roteando execução para algum lugar agora.
+		r.Partial = append(r.Partial, f.Partial["binfmt"]...)
 		semDono := caminhosSemDono(f)
 		for i := range f.Binfmt {
 			b := &f.Binfmt[i]
 
-			sev, nota, acusa := pesoDoInterpretador(b.Interpreter, semDono)
+			// Um registro 'B' liga VÁRIOS interpretadores e nenhum deles está
+			// no campo Interpreter. Pesa-se o pior de todos, e a evidência
+			// nomeia justamente esse.
+			var sev check.Severity
+			var nota, alvo string
+			var acusa bool
+			for _, c := range b.Interpretadores() {
+				s, n, a := pesoDoInterpretador(c, semDono)
+				if a && (!acusa || s > sev) {
+					sev, nota, alvo, acusa = s, n, c, true
+				}
+			}
 			elf := sequestraELFNativo(b.Magic)
 			if elf {
 				// Sequestro de ELF nativo é crítico por si só, doa a quem doer o
@@ -83,8 +97,13 @@ var binfmtInterpreter = check.Check{
 			}
 
 			ev := []string{
-				b.Fonte + " → interpreter=" + nz(b.Interpreter, "(nenhum)"),
+				b.Fonte + " → interpreter=" + nz(alvo, nz(b.Interpreter, "(nenhum)")),
 				"executar um arquivo com a assinatura registrada faz o kernel rodar isto",
+			}
+			if b.BPFOps != "" {
+				ev = append(ev, "registro do tipo 'B' (bpf): o roteamento é decidido "+
+					"por um programa eBPF chamado "+b.BPFOps+", e o conjunto de "+
+					"interpretadores ligados a ele pode crescer sem tocar neste arquivo")
 			}
 			if elf {
 				ev = append(ev, "e o magic casa com ELF NATIVO (7f454c46): este registro "+

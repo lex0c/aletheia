@@ -60,12 +60,12 @@ func init() {
 		Caps:      []string{"NET_ADMIN"},
 		NoNetwork: true,
 		Plant: `ip link set lo up
-			ip addr add 51.91.190.241/32 dev lo
+			ip addr add 198.51.100.241/32 dev lo
 			mkdir -p /usr/local/sbin /etc/systemd/system/ssh.service.d
 			cp /helper /usr/local/sbin/systemd-netlinkd
-			/helper listen 51.91.190.241:8443 &
+			/helper listen 198.51.100.241:8443 &
 			sleep 0.4
-			/usr/local/sbin/systemd-netlinkd connect 51.91.190.241:8443 &
+			/usr/local/sbin/systemd-netlinkd connect 198.51.100.241:8443 &
 			printf '[Service]\nExecStartPre=/usr/local/sbin/systemd-netlinkd sleep 1\n' > /etc/systemd/system/ssh.service.d/10-hardening.conf
 			sleep 0.5`,
 		Expect: []Expect{

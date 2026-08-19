@@ -420,6 +420,9 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 	for i := range f.BinfmtConfig {
 		addDoDisco(f.BinfmtConfig[i].Interpreter, "interpretador binfmt em "+baseNome(f.BinfmtConfig[i].Fonte))
 	}
+	for i := range f.Initramfs {
+		addDoDisco(f.Initramfs[i].Path, "initramfs ("+f.Initramfs[i].Mecanismo+")")
+	}
 	for i := range f.Helpers {
 		add(f.Helpers[i].Alvo, "helper do kernel ("+f.Helpers[i].Nome+")")
 	}

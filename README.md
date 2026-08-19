@@ -314,6 +314,7 @@ dump pode conter:
 | Loader | `/etc/ld.so.preload`, configuração do dynamic loader e variáveis de preload persistentes |
 | modprobe | regras `install`, `alias` e outras configurações relevantes de carregamento de módulos |
 | Linha de boot | `/proc/cmdline` (com o que o kernel subiu) e a configuração do bootloader — GRUB, systemd-boot e UKI — (com o que o próximo boot vai aplicar) |
+| initramfs | scripts de GERAÇÃO do initramfs (hooks de initramfs-tools, módulos do dracut, hooks do mkinitcpio, drop-ins do kernel-install) e arquivos embutidos por `install_items`/`FILES` — persistência que roda antes do userland |
 | Filesystem | paths relevantes, ownership, permissões, timestamps, symlinks e metadata usada pelos checks |
 | Pacotes | ownership de arquivos e hashes declarados pelo gerenciador de pacotes quando o formato é suportado |
 | Integridade | hashes e metadata dos arquivos selecionados pela coleta para verificação |

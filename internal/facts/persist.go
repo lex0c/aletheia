@@ -159,6 +159,9 @@ func collectPersist(f *Facts, e *env.Env) {
 	// Vale em modo image, e o interpretador dela entra na pergunta de
 	// propriedade como qualquer outro alvo executado por conta do sistema.
 	collectBinfmtConfig(f, e)
+	// Os scripts que GERAM o initramfs: persistência antes do userland, em
+	// disco. Também alimenta a pergunta de propriedade.
+	collectInitramfs(f, e)
 	// ANTES do collectPkg: o ALVO de um hook de interpretador é candidato a
 	// propriedade, e é a resposta dessa pergunta que separa configuração de
 	// deploy de implante. Depois do collectPkg ele nunca era perguntado, e o

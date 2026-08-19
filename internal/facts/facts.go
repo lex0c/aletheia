@@ -90,6 +90,10 @@ type Facts struct {
 	// volta depois do reboot.
 	Binfmt       []BinfmtRegistro `json:"binfmt,omitempty"`
 	BinfmtConfig []BinfmtConfig   `json:"binfmt_config,omitempty"`
+	// Initramfs são os scripts e arquivos que ENTRAM na geração do initramfs —
+	// a persistência que roda antes do userland, pega em disco sem descompactar
+	// a imagem.
+	Initramfs []ArtefatoInitramfs `json:"initramfs,omitempty"`
 	// Boot são as linhas de comando de kernel: a que está RODANDO e as que a
 	// configuração do bootloader entregaria no PRÓXIMO boot. As duas respondem
 	// perguntas diferentes, e é na diferença entre elas que mora o achado.

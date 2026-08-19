@@ -705,7 +705,12 @@ func runBaseline(args []string) int {
 
 	w := io.Writer(os.Stdout)
 	if *out != "-" {
-		fh, err := os.Create(*out)
+		// openJSONOut e não os.Create: aquele é O_TRUNC e SEGUE symlink — um erro
+		// de digitação apagaria um arquivo do host, e um symlink plantado
+		// redirecionaria a escrita. A baseline é capturada em máquina possivelmente
+		// comprometida; vale a mesma regra de "nunca destruir dado do host" do
+		// scan --json.
+		fh, err := openJSONOut(*out)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "baseline: %v\n", err)
 			return 3
@@ -783,7 +788,7 @@ func openJSONOut(path string) (*os.File, error) {
 		if fi.Mode().IsRegular() {
 			return nil, fmt.Errorf(
 				"%s é um arquivo existente. Esta ferramenta nunca sobrescreve arquivo no\n"+
-					"host sob investigação: escolha outro nome, ou use --json - para stdout.", path)
+					"host sob investigação: escolha outro nome, ou use '-' para a saída padrão.", path)
 		}
 		// device, fifo ou socket: escreve sem criar e sem truncar
 		fh, err := os.OpenFile(path, os.O_WRONLY, 0)

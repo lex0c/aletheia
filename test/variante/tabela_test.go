@@ -60,6 +60,23 @@ var tabela = []tecnica{
 		},
 	},
 	{
+		attack: "T1548.003", nome: "doas_nopasswd",
+		variantes: []variante{
+			{nome: "permit nopass grupo", esperaID: "priv.doas_nopasswd", esperaSev: check.SevCritical,
+				arquivos: map[string]string{"etc/doas.conf": "permit nopass keepenv :wheel\n"},
+				nota:     "root sem senha para todo o grupo wheel"},
+			{nome: "permit nopass usuario", esperaID: "priv.doas_nopasswd", esperaSev: check.SevCritical,
+				arquivos: map[string]string{"etc/doas.conf": "permit nopass eviluser\n"},
+				nota:     "root sem senha, qualquer comando"},
+			{nome: "permit COM senha nao dispara", esperaID: "priv.doas_nopasswd", cego: true,
+				arquivos: map[string]string{"etc/doas.conf": "permit :wheel\n"},
+				nota:     "sem nopass a senha ainda é pedida: não é backdoor"},
+			{nome: "via doas.d", esperaID: "priv.doas_nopasswd", esperaSev: check.SevCritical,
+				arquivos: map[string]string{"etc/doas.d/50-x.conf": "permit nopass backdoor\n"},
+				nota:     "drop-in em doas.d, como o sudoers.d"},
+		},
+	},
+	{
 		attack: "T1021.004", nome: "host_trust",
 		variantes: []variante{
 			{nome: "hosts.equiv curinga", esperaID: "persist.host_trust", esperaSev: check.SevCritical,
@@ -110,6 +127,11 @@ var tabela = []tecnica{
 				arquivos: map[string]string{
 					"etc/systemd/system/x.service": "[Service]\nExecStart=/dev/shm/agent\n"},
 				nota: "binário em tmpfs: some no reboot"},
+			{nome: "LD_PRELOAD via EnvironmentFile", esperaID: "persist.env_preload", esperaSev: check.SevCritical,
+				arquivos: map[string]string{
+					"etc/systemd/system/x.service": "[Service]\nExecStart=/usr/bin/d\nEnvironmentFile=/etc/.env\n",
+					"etc/.env":                     "LD_PRELOAD=/tmp/.evil.so\n"},
+				nota: "o preload escondido no arquivo referenciado, não na unit"},
 		},
 	},
 }

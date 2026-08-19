@@ -15,6 +15,7 @@ func init() {
 	check.Register(contaDeServicoComShell)
 	check.Register(grupoEquivalenteARoot)
 	check.Register(sudoSemSenha)
+	check.Register(doasSemSenha)
 }
 
 // uidZero — runbook §7.9.
@@ -475,6 +476,83 @@ func regraAmpla(texto string) bool {
 }
 
 // campoInicial é o alvo da regra: usuário, %grupo ou Defaults:alvo.
+// doas é o sudo do OpenBSD, e vem por padrão em Alpine e Arch. `permit nopass`
+// é escalada SEM senha — o mesmo backdoor que o NOPASSWD do sudoers, num arquivo
+// que quase ninguém audita porque o reflexo é procurar em /etc/sudoers.
+//
+//	permit nopass user             root sem senha para `user`, QUALQUER comando
+//	permit nopass keepenv :wheel   idem para todo o grupo wheel
+//	permit nopass user as postgres vira `postgres` sem senha — não é root
+var doasSemSenha = check.Check{
+	ID:       "priv.doas_nopasswd",
+	Ref:      "7.9",
+	Title:    "regra de doas que escala sem pedir senha",
+	Group:    "priv",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Optional: env.CapRoot,
+	Wtf:      true,
+	FalsePositives: []string{
+		"em Alpine e Arch o doas é o mecanismo NORMAL de escalada, e uma regra " +
+			"`permit :wheel` (COM senha) é o desenho de fábrica — o sinal é o " +
+			"`nopass`, não a existência da regra",
+		"automação sem operador precisa de nopass pela mesma razão do sudo: não " +
+			"há ninguém para digitar a senha. Um `permit nopass` restrito a UM " +
+			"comando é menor privilégio, e sai com severidade menor",
+		"conceder acesso como OUTRA conta (`as postgres`) não é root, e sai como " +
+			"aviso — é como um time recebe o serviço que administra",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		var r check.Result
+		for i := range f.Doas {
+			d := &f.Doas[i]
+			// `deny` restringe, não concede; e sem nopass a senha ainda é pedida.
+			if !d.Permit || !d.NoPass {
+				continue
+			}
+
+			// alvo vazio = root (o padrão do doas). E comando vazio = QUALQUER
+			// comando, que é o que torna a regra ampla.
+			comoRoot := d.Alvo == "" || d.Alvo == "root"
+			amplo := d.Comando == ""
+
+			ev := []string{
+				d.File + ":" + strconv.Itoa(d.Line) + " — " + d.Text,
+				"`permit nopass` concede escalada SEM pedir senha",
+			}
+			quem := d.Identidade
+			if strings.HasPrefix(quem, ":") {
+				ev = append(ev, "vale para todo o GRUPO "+quem[1:])
+			}
+
+			sev := check.SevWarn
+			switch {
+			case amplo && comoRoot:
+				sev = check.SevCritical
+				ev = append(ev, "e é root, QUALQUER comando, sem senha: é escalada "+
+					"irrestrita para "+quem)
+			case comoRoot:
+				ev = append(ev, "restrita ao comando `"+d.Comando+"` — menor privilégio, "+
+					"vale conferir se ninguém reconhece a regra")
+			default:
+				ev = append(ev, "escala como `"+d.Alvo+"`, não root — quem usa vira "+
+					"aquela conta sem senha")
+			}
+
+			fd := self.F(sev, quem, "", ev...)
+			fd.NextSteps = []string{
+				"leia a regra: `permit nopass` sem `as` é root; com `cmd` é restrita",
+				"se ninguém reconhecer a identidade liberada, remova a linha e " +
+					"rotacione o acesso da conta",
+			}
+			r.Findings = append(r.Findings, fd)
+		}
+		r.Partial = append(r.Partial, f.PersistDenied["users"]...)
+		return r
+	},
+}
+
 func campoInicial(texto string) string {
 	fs := strings.Fields(texto)
 	if len(fs) == 0 {

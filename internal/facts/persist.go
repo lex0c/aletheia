@@ -104,6 +104,9 @@ type Unit struct {
 	// Environment= da unit. Vai para o mesmo lugar que /etc/environment: é a
 	// rota da §7.8 que ninguém associa a execução de código.
 	Environment []EnvSetting `json:"environment,omitempty"`
+	// EnvFilesIlegiveis são os EnvironmentFile= que a unit referencia e que não
+	// puderam ser lidos — um LD_PRELOAD ali fica sem avaliação.
+	EnvFilesIlegiveis []string `json:"env_files_unreadable,omitempty"`
 
 	ModUTC string `json:"mod_utc,omitempty"`
 
@@ -190,6 +193,11 @@ func collectPersist(f *Facts, e *env.Env) {
 			case "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT":
 				f.Loader.EnvVars = append(f.Loader.EnvVars, s)
 			}
+		}
+		for _, arq := range f.Units[i].EnvFilesIlegiveis {
+			f.denyPersist("loader", "a unit "+f.Units[i].Name+" carrega env de "+arq+
+				", que não pôde ser lido: um LD_PRELOAD/LD_AUDIT definido ali NÃO "+
+				"foi avaliado")
 		}
 	}
 }
@@ -659,6 +667,35 @@ func parseUnitFile(e *env.Env, path, scope string, vendor bool) Unit {
 		case k == "PathExists", k == "PathChanged", k == "PathModified",
 			k == "PathExistsGlob", k == "DirectoryNotEmpty":
 			u.WatchPaths = append(u.WatchPaths, v)
+		case k == "EnvironmentFile":
+			// A unit carrega env de um ARQUIVO à parte, e um LD_PRELOAD ali é a
+			// mesma rota da §7.8 escondida um nível abaixo: quem lê a unit vê só
+			// `EnvironmentFile=/tmp/.env`, não o preload dentro dela. O `-` no
+			// começo é "ignore se faltar". As linhas do arquivo são KEY=value
+			// no estilo shell.
+			arq := strings.TrimSpace(v)
+			arq = strings.TrimPrefix(arq, "-")
+			if eb, err := e.ReadFile(arq); err == nil {
+				for _, el := range strings.Split(string(eb), "\n") {
+					el = strings.TrimSpace(el)
+					if el == "" || strings.HasPrefix(el, "#") {
+						continue
+					}
+					el = strings.TrimPrefix(el, "export ")
+					kk, vv, ok := strings.Cut(el, "=")
+					if !ok {
+						continue
+					}
+					u.Environment = append(u.Environment, EnvSetting{
+						File: arq, Key: strings.TrimSpace(kk),
+						Value: strings.Trim(strings.TrimSpace(vv), `"'`),
+					})
+				}
+			} else if env.EhLacuna(err) {
+				// Arquivo referenciado e ilegível: um LD_PRELOAD ali NÃO foi
+				// avaliado. Registra no Unit; collectUnits declara a lacuna.
+				u.EnvFilesIlegiveis = append(u.EnvFilesIlegiveis, arq)
+			}
 		case k == "Environment":
 			// Environment=LD_PRELOAD=… numa unit é a rota da §7.8 que ninguém
 			// associa a execução de código: entra no mesmo lugar que o

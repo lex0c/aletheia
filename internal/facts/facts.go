@@ -66,6 +66,7 @@ type Facts struct {
 	Accounts        []Account         `json:"accounts,omitempty"`
 	Grupos          []Grupo           `json:"groups,omitempty"`
 	Sudoers         []SudoRule        `json:"sudoers,omitempty"`
+	Doas            []DoasRule        `json:"doas,omitempty"`
 	Suid            []SuidFile        `json:"suid,omitempty"`
 	Donos           []DonoDeArquivo   `json:"file_owners,omitempty"`
 	// SuidDirs e SuidArquivos medem o CUSTO da varredura de filesystem, para o

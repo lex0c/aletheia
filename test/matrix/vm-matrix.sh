@@ -13,9 +13,6 @@
 # se escondem/hookam morrem com a VM.
 #
 # Exige docker, qemu-system-x86_64 e o binário estático. Imprime a tabela e sai 0/1.
-#
-# A fazer (precisa de um carregador de BPF dentro da VM): cgroup-bpf ->
-# atribuição por BPF_PROG_QUERY. Declarado, não silenciado.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
@@ -51,6 +48,8 @@ rootfs="$work/rootfs"; mkdir -p "$rootfs"
 cid="$(docker create alpine:3.20 true)"; docker export "$cid" | tar -x -C "$rootfs"; docker rm -f "$cid" >/dev/null
 cp "$work"/socknd.ko "$work"/modhide.ko "$work"/inet_diag.ko "$work"/tcp_diag.ko "$rootfs/"
 install -m 0755 "$alet" "$rootfs/aletheia"
+CGO_ENABLED=0 go build -trimpath -o "$work/plant" "$root/test/matrix/plant"
+install -m 0755 "$work/plant" "$rootfs/plant"
 
 cat > "$rootfs/init" <<'INIT'
 #!/bin/sh
@@ -60,6 +59,7 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mount -t tmpfs tmpfs /tmp 2>/dev/null
 mkdir -p /sys/kernel/tracing; mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null
 mount -t binfmt_misc none /proc/sys/fs/binfmt_misc 2>/dev/null
+mkdir -p /sys/fs/cgroup; mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null
 exec > /dev/console 2>&1
 
 insmod /inet_diag.ko 2>/dev/null; insmod /tcp_diag.ko 2>/dev/null
@@ -91,6 +91,17 @@ echo ':evilm:E::evx::/tmp/.evilbin:' > /proc/sys/fs/binfmt_misc/register 2>/tmp/
 echo "binfmt_registrado=$(ls /proc/sys/fs/binfmt_misc/ | grep -c evilm) reg_err=$(cat /tmp/reg.err)"
 scan
 echo "binfmt_fired=$(tem kernel.binfmt_interpreter)"
+
+# --- cgroup BPF: programa anexado a um cgroup, atribuído por BPF_PROG_QUERY.
+# a prova é a ATRIBUIÇÃO no dump (o programa não é acusado; ele é NOMEADO). ---
+/aletheia collect --out /tmp/dc0.json --no-progress >/dev/null 2>&1
+echo "cgroup_base=$(grep -c 'cgroup inet_ingress' /tmp/dc0.json 2>/dev/null)"
+/plant cgroup-attach >/tmp/cg.out 2>/tmp/cg.err &
+sleep 1
+echo "cg_err=$(tr -d '\n' </tmp/cg.err)"
+/aletheia collect --out /tmp/dc1.json --no-progress >/dev/null 2>&1
+echo "cgroup_attributed=$(grep -c 'cgroup inet_ingress' /tmp/dc1.json 2>/dev/null)"
+
 
 echo "===END==="
 poweroff -f 2>/dev/null || echo o > /proc/sysrq-trigger
@@ -124,6 +135,7 @@ linha() { # nome, check, baseline_val, fired_val
 linha "hook seq_show"   "cross.socket_view"        "$(get base_socket)"  "$(get socket_fired)"
 linha "LKM escondido"   "cross.module_view"        "$(get base_module)"  "$(get module_fired)"
 linha "binfmt live"     "kernel.binfmt_interpreter" "$(get base_binfmt)" "$(get binfmt_fired)"
+linha "cgroup BPF"      "atribuído (BPF_PROG_QUERY)" "$(get cgroup_base)" "$(get cgroup_attributed)"
 
 echo
 [ "$falhou" = 0 ] && { echo "OK — os três dispararam, e o baseline limpo calou."; exit 0; }

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"syscall"
 	"time"
 	"unsafe"
@@ -23,6 +24,7 @@ import (
 const (
 	sysMemfdCreate = 319
 	sysExecveat    = 322
+	sysBPF         = 321
 )
 
 func must(err error, o string) {
@@ -70,6 +72,49 @@ func mapDeArquivo(path string, prot int, apagar bool) []byte {
 	return b
 }
 
+// carregarCgroupSkb carrega um programa cgroup_skb mínimo (r0=1; exit) e
+// devolve o descritor. É o que um implante de cgroup BPF faz — sem o payload.
+func carregarCgroupSkb() int {
+	insns := []byte{
+		0xb7, 0, 0, 0, 1, 0, 0, 0, // BPF_MOV64_IMM(R0, 1)
+		0x95, 0, 0, 0, 0, 0, 0, 0, // BPF_EXIT
+	}
+	lic := []byte("GPL\x00")
+	log := make([]byte, 4096)
+	var a struct {
+		progType, insnCnt  uint32
+		insns, license     uint64
+		logLevel, logSize  uint32
+		logBuf             uint64
+		kernVer, progFlags uint32
+	}
+	a.progType = 8 // BPF_PROG_TYPE_CGROUP_SKB
+	a.insnCnt = 2
+	a.insns = uint64(uintptr(unsafe.Pointer(&insns[0])))
+	a.license = uint64(uintptr(unsafe.Pointer(&lic[0])))
+	a.logLevel, a.logSize = 1, uint32(len(log))
+	a.logBuf = uint64(uintptr(unsafe.Pointer(&log[0])))
+	fd, _, e := syscall.Syscall(sysBPF, 5 /*BPF_PROG_LOAD*/, uintptr(unsafe.Pointer(&a)), unsafe.Sizeof(a))
+	runtime.KeepAlive(insns)
+	runtime.KeepAlive(lic)
+	runtime.KeepAlive(log)
+	if e != 0 {
+		must(fmt.Errorf("%v — %s", e, log), "BPF_PROG_LOAD")
+	}
+	return int(fd)
+}
+
+func anexarCgroup(cgFD, progFD int) {
+	var a struct{ targetFD, attachBpfFD, attachType, attachFlags uint32 }
+	a.targetFD = uint32(cgFD)
+	a.attachBpfFD = uint32(progFD)
+	a.attachType = 0 // BPF_CGROUP_INET_INGRESS
+	_, _, e := syscall.Syscall(sysBPF, 8 /*BPF_PROG_ATTACH*/, uintptr(unsafe.Pointer(&a)), unsafe.Sizeof(a))
+	if e != 0 {
+		must(fmt.Errorf("%v", e), "BPF_PROG_ATTACH")
+	}
+}
+
 // vivos impede o GC de fechar sockets e pipes que a técnica precisa manter
 // abertos enquanto a aletheia escaneia.
 var vivos []any
@@ -102,6 +147,7 @@ func main() {
 		os.Exit(2)
 	}
 	var manter [][]byte
+	anunciou := false
 	switch os.Args[1] {
 	// --- REGRESSÃO: cada uma é o que um check afirma pegar ---
 	case "rwx-anon": // proc.maps_rwx_anon
@@ -168,6 +214,7 @@ func main() {
 		sfd := socketFD(c)
 		fmt.Printf("PLANT pid=%d tech=revshell-direct\n", os.Getpid())
 		os.Stdout.Sync()
+		anunciou = true
 		syscall.Dup2(sfd, 0)
 		syscall.Dup2(sfd, 1)
 		syscall.Dup2(sfd, 2)
@@ -189,6 +236,7 @@ func main() {
 		r.Close() // só o shell precisa da leitura
 		fmt.Printf("PLANT pid=%d tech=revshell-bridge\n", shPid)
 		os.Stdout.Sync()
+		anunciou = true
 
 	case "revshell-pty": // ponte por PTY: o revshell_bridge só cobre pipe, e o
 		// PTY não compartilha inode de pipe — o ponto cego declarado.
@@ -212,13 +260,27 @@ func main() {
 		slave.Close()
 		fmt.Printf("PLANT pid=%d tech=revshell-pty\n", shPid)
 		os.Stdout.Sync()
+		anunciou = true
+
+	case "cgroup-attach": // kernel.bpf: programa de cgroup atribuído por BPF_PROG_QUERY
+		prog := carregarCgroupSkb()
+		cgfd, err := syscall.Open("/sys/fs/cgroup", syscall.O_RDONLY, 0)
+		must(err, "abrir /sys/fs/cgroup")
+		anexarCgroup(cgfd, prog)
+		// fecha o fd do PROGRAMA: o único detentor agora é o anexo no cgroup.
+		// Sem isso, o descritor aberto já atribuiria, e não seria o cgroup query
+		// que estaria sendo provado.
+		syscall.Close(prog)
+		syscall.Close(cgfd)
 
 	default:
 		fmt.Fprintln(os.Stderr, "técnica desconhecida:", os.Args[1])
 		os.Exit(2)
 	}
 	_ = manter
-	fmt.Printf("PLANT pid=%d tech=%s\n", os.Getpid(), os.Args[1])
-	os.Stdout.Sync()
+	if !anunciou {
+		fmt.Printf("PLANT pid=%d tech=%s\n", os.Getpid(), os.Args[1])
+		os.Stdout.Sync()
+	}
 	time.Sleep(120 * time.Second)
 }

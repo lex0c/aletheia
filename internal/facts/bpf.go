@@ -357,12 +357,15 @@ func anexosDeCgroup(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]
 			semTempo = len(paths) - i
 			break
 		}
-		fd, err := os.Open(p)
+		// FD cru com O_DIRECTORY, no idioma de syscall do resto do kbpf: o
+		// BPF_PROG_QUERY só quer o descritor do diretório do cgroup. Evita o
+		// finalizer do *os.File e falha cedo se o caminho não for diretório.
+		fd, err := syscall.Open(p, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
 		if err != nil {
 			continue // cgroup que sumiu ou sem permissão de abrir: segue
 		}
-		porTipo, _ := kbpf.AnexosDeCgroup(int(fd.Fd()), kbpf.TiposDeCgroup)
-		fd.Close()
+		porTipo, _ := kbpf.AnexosDeCgroup(fd, kbpf.TiposDeCgroup)
+		syscall.Close(fd)
 		consultados++
 		rel := strings.TrimPrefix(p, base)
 		if rel == "" {

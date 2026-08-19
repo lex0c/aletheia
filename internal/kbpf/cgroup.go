@@ -21,7 +21,11 @@ import (
 // atribuição faz é "ONDE ele foi preso?", e essa é a attached. A herança se
 // reconstrói percorrendo a árvore inteira: o ponto original está em algum
 // ancestral que também é visitado.
-const cmdProgQuery = 20
+// BPF_PROG_QUERY é 16 — NÃO 20, que é BPF_TASK_FD_QUERY. O número errado passou
+// pelos unit tests (cobriam a travessia, não a consulta viva) e só a matriz
+// adversarial, com um programa real anexado numa VM, pegou: a query devolvia
+// EBADF em silêncio e nenhuma atribuição saía.
+const cmdProgQuery = 16
 
 // ENOTSUPP é errno interno do kernel (524), não exportado pelo pacote syscall.
 // Alguns pontos de anexação o devolvem no lugar de EINVAL quando não existem.

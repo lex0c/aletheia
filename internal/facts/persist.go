@@ -145,6 +145,7 @@ func collectPersist(f *Facts, e *env.Env) {
 	collectSSH(f, e)
 	collectTriggers(f, e)
 	collectTrust(f, e)
+	collectConfiancaDeHost(f, e)
 	collectGitHooks(f, e)
 	collectSuid(f, e)
 	collectModprobe(f, e)

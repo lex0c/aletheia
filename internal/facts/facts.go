@@ -48,23 +48,26 @@ type Facts struct {
 	Loader Loader `json:"loader"`
 	// HooksInterp são as variáveis que fazem um interpretador carregar código
 	// de terceiro — o LD_PRELOAD de quem não é ELF.
-	HooksInterp   []HookInterp    `json:"interpreter_hooks,omitempty"`
-	Units         []Unit          `json:"units,omitempty"`
-	ToolArtifacts []ToolArtifact  `json:"tool_artifacts,omitempty"`
-	Cron          []CronEntry     `json:"cron,omitempty"`
-	SSH           SSHConfig       `json:"ssh"`
-	SSHKeys       []SSHKey        `json:"ssh_keys,omitempty"`
-	Triggers      []Trigger       `json:"triggers,omitempty"`
-	CACerts       []CACert        `json:"ca_certs,omitempty"`
-	Hosts         []HostEntry     `json:"hosts,omitempty"`
-	Resolver      Resolver        `json:"resolver"`
-	Pkg           PkgDB           `json:"pkg"`
-	Ownership     []Ownership     `json:"ownership,omitempty"`
-	Accounts      []Account       `json:"accounts,omitempty"`
-	Grupos        []Grupo         `json:"groups,omitempty"`
-	Sudoers       []SudoRule      `json:"sudoers,omitempty"`
-	Suid          []SuidFile      `json:"suid,omitempty"`
-	Donos         []DonoDeArquivo `json:"file_owners,omitempty"`
+	HooksInterp   []HookInterp   `json:"interpreter_hooks,omitempty"`
+	Units         []Unit         `json:"units,omitempty"`
+	ToolArtifacts []ToolArtifact `json:"tool_artifacts,omitempty"`
+	Cron          []CronEntry    `json:"cron,omitempty"`
+	SSH           SSHConfig      `json:"ssh"`
+	SSHKeys       []SSHKey       `json:"ssh_keys,omitempty"`
+	Triggers      []Trigger      `json:"triggers,omitempty"`
+	// ConfiancaDeHost são as entradas .rhosts/hosts.equiv — login sem senha
+	// host-based (ATT&CK T1021.004).
+	ConfiancaDeHost []ConfiancaDeHost `json:"host_trust,omitempty"`
+	CACerts         []CACert          `json:"ca_certs,omitempty"`
+	Hosts           []HostEntry       `json:"hosts,omitempty"`
+	Resolver        Resolver          `json:"resolver"`
+	Pkg             PkgDB             `json:"pkg"`
+	Ownership       []Ownership       `json:"ownership,omitempty"`
+	Accounts        []Account         `json:"accounts,omitempty"`
+	Grupos          []Grupo           `json:"groups,omitempty"`
+	Sudoers         []SudoRule        `json:"sudoers,omitempty"`
+	Suid            []SuidFile        `json:"suid,omitempty"`
+	Donos           []DonoDeArquivo   `json:"file_owners,omitempty"`
 	// SuidDirs e SuidArquivos medem o CUSTO da varredura de filesystem, para o
 	// relatório de tempo dizer por que ela demorou.
 	SuidDirs     int `json:"suid_dirs,omitempty"`

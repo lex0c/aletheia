@@ -58,6 +58,25 @@ var tabela = []tecnica{
 		},
 	},
 	{
+		attack: "T1021.004", nome: "host_trust",
+		variantes: []variante{
+			{nome: "hosts.equiv curinga", esperaID: "persist.host_trust",
+				arquivos: map[string]string{"etc/hosts.equiv": "+\n"},
+				nota:     "o + confia em qualquer host e qualquer usuário: login sem senha de qualquer lugar"},
+			{nome: "hosts.equiv com comentario", esperaID: "persist.host_trust",
+				arquivos: map[string]string{"etc/hosts.equiv": "# trust\n+\n"},
+				nota:     "comentário antes do + não esconde o curinga"},
+			{nome: "shosts.equiv nomeado", esperaID: "persist.host_trust",
+				arquivos: map[string]string{"etc/shosts.equiv": "buildserver\n"},
+				nota:     "host nomeado é raro em sistema moderno: aviso, mas achado"},
+			{nome: "rhosts de root", esperaID: "persist.host_trust",
+				arquivos: map[string]string{
+					"etc/passwd":   "root:x:0:0::/root:/bin/sh\n",
+					"root/.rhosts": "outro\n"},
+				nota: ".rhosts de usuário: quem entra vira aquela conta sem autenticar"},
+		},
+	},
+	{
 		attack: "T1543.002", nome: "unit_download",
 		variantes: []variante{
 			{nome: "ExecStart pipe sh", esperaID: "persist.unit_exec_suspect",

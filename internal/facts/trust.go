@@ -279,3 +279,100 @@ func lerHooks(f *Facts, e *env.Env, dir string) {
 		}
 	}
 }
+
+// ConfiancaDeHost é uma entrada de confiança HOST-BASED — .rhosts, .shosts,
+// /etc/hosts.equiv, /etc/shosts.equiv (runbook §7.12, ATT&CK T1021.004).
+//
+// É a forma mais antiga de acesso sem senha que existe no Unix, e continua
+// viva: um host listado num destes arquivos entra COMO O DONO do arquivo, sem
+// autenticar. Um `+` sozinho é o pior — confia em QUALQUER host e QUALQUER
+// usuário. Em sistema moderno esses arquivos quase nunca são legítimos, e é
+// essa raridade que dá valor ao sinal.
+//
+// Não é gatilho (não executa nada), é AUTENTICAÇÃO: por isso mora aqui, ao lado
+// da CA plantada e do /etc/hosts, e não em Triggers.
+type ConfiancaDeHost struct {
+	// Path é o arquivo; Escopo diz se ele vale para um usuário (o dono) ou para
+	// o host inteiro (hosts.equiv).
+	Path   string `json:"path"`
+	Escopo string `json:"scope"` // "usuario" | "sistema"
+	Conta  string `json:"account,omitempty"`
+
+	// Curinga marca a presença de um `+` — confiança IRRESTRITA. É o que
+	// transforma o achado de "confie neste host" em "confie em qualquer um".
+	Curinga bool `json:"wildcard,omitempty"`
+	// Linhas são as entradas não-comentário: os hosts (ou host+usuário)
+	// confiados. Curtas por natureza; guardadas inteiras.
+	Linhas []string `json:"entries,omitempty"`
+
+	// Gravavel diz que grupo ou outros podem ESCREVER no arquivo — qualquer um
+	// acrescenta um host de confiança. O rlogind recusa .rhosts gravável por
+	// grupo/outros, mas o fato de existir gravável já é anomalia.
+	Gravavel bool   `json:"group_or_world_writable,omitempty"`
+	Modo     string `json:"mode,omitempty"`
+	ModUTC   string `json:"mod_utc,omitempty"`
+}
+
+// arquivosDeConfiancaDeSistema: caminho fixo, valem para o host inteiro.
+var arquivosDeConfiancaDeSistema = []string{"/etc/hosts.equiv", "/etc/shosts.equiv"}
+
+// arquivosDeConfiancaDeHome: relativos ao home de cada conta.
+var arquivosDeConfiancaDeHome = []string{".rhosts", ".shosts"}
+
+// collectConfiancaDeHost lê os arquivos de confiança host-based.
+func collectConfiancaDeHost(f *Facts, e *env.Env) {
+	for _, p := range arquivosDeConfiancaDeSistema {
+		if c, ok := lerConfiancaDeHost(e, p, "sistema", ""); ok {
+			f.ConfiancaDeHost = append(f.ConfiancaDeHost, c)
+		} else if _, negado := lookup(e, p); negado {
+			f.denyPersist("trust", p+" existe e não pôde ser lido: uma confiança "+
+				"host-based (login sem senha) plantada ali NÃO foi avaliada")
+		}
+	}
+	for _, home := range homeDirs(e) {
+		conta := home[strings.LastIndexByte(home, '/')+1:]
+		for _, rel := range arquivosDeConfiancaDeHome {
+			p := home + "/" + rel
+			if c, ok := lerConfiancaDeHost(e, p, "usuario", conta); ok {
+				f.ConfiancaDeHost = append(f.ConfiancaDeHost, c)
+			} else if _, negado := lookup(e, p); negado {
+				f.denyPersist("trust", p+" existe e não pôde ser lido: a confiança "+
+					"host-based da conta "+conta+" NÃO foi avaliada")
+			}
+		}
+	}
+}
+
+func lerConfiancaDeHost(e *env.Env, p, escopo, conta string) (ConfiancaDeHost, bool) {
+	fi, err := e.Lstat(p)
+	if err != nil {
+		return ConfiancaDeHost{}, false
+	}
+	c := ConfiancaDeHost{Path: p, Escopo: escopo, Conta: conta,
+		Modo:   fi.Mode().Perm().String(),
+		ModUTC: fi.ModTime().UTC().Format(time.RFC3339),
+		// Gravável por grupo (0o020) ou por outros (0o002).
+		Gravavel: fi.Mode().Perm()&0o022 != 0,
+	}
+	b, err := e.ReadFile(p)
+	if err != nil {
+		return c, true // existe; ilegível é tratado pelo chamador via lookup
+	}
+	for _, ln := range strings.Split(string(b), "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		// Um `+` como PRIMEIRO token de qualquer linha é curinga de host; um `+`
+		// no SEGUNDO token é curinga de usuário. Os dois são confiança
+		// irrestrita — basta o token isolado.
+		for _, tok := range strings.Fields(ln) {
+			if tok == "+" {
+				c.Curinga = true
+				break
+			}
+		}
+		c.Linhas = append(c.Linhas, ln)
+	}
+	return c, true
+}

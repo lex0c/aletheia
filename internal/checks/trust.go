@@ -13,6 +13,91 @@ func init() {
 	check.Register(caPlantada)
 	check.Register(hostsOverride)
 	check.Register(cloudMetadata)
+	check.Register(confiancaHostBased)
+}
+
+// confiancaHostBased — runbook §7.12, ATT&CK T1021.004.
+//
+// .rhosts, .shosts, /etc/hosts.equiv e /etc/shosts.equiv são a forma mais
+// antiga de login SEM SENHA do Unix: um host listado entra COMO O DONO do
+// arquivo, sem autenticar. Sobrevive porque quase ninguém olha — não há
+// processo estranho, porta aberta nem erro; só um arquivo que concede acesso.
+//
+// A severidade sai do CONTEÚDO:
+//
+//	`+` sozinho   confia em QUALQUER host e QUALQUER usuário — acesso irrestrito
+//	              sem senha. É o backdoor, e é CRÍTICO
+//	host nomeado  confia num host específico. Raro em sistema moderno, e a
+//	              pergunta é quem o colocou — AVISO
+//
+// Não confunda com known_hosts nem com authorized_keys: aqueles autenticam por
+// CHAVE; este autentica por ENDEREÇO de origem, que o atacante forja.
+var confiancaHostBased = check.Check{
+	ID:       "persist.host_trust",
+	Ref:      "7.12",
+	Title:    "confiança host-based: login sem senha por .rhosts/hosts.equiv",
+	Group:    "persist",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Wtf:      true,
+	FalsePositives: []string{
+		"host-based trust ainda é usado em cluster HPC e em automação legada de " +
+			"laboratório — rsh/rlogin entre nós de confiança. Ali é desenho, e " +
+			"alguém no time reconhece as máquinas listadas",
+		"a presença do arquivo já é rara em sistema moderno; o `+` curinga quase " +
+			"nunca é: é ele que separa 'confia num host' de 'confia em qualquer um'",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		var r check.Result
+		for i := range f.ConfiancaDeHost {
+			c := &f.ConfiancaDeHost[i]
+
+			alvo := c.Path
+			if c.Escopo == "usuario" && c.Conta != "" {
+				alvo = c.Path + " (conta " + c.Conta + ")"
+			}
+
+			ev := []string{c.Path + " concede login SEM SENHA por confiança de endereço de origem"}
+			if c.Escopo == "sistema" {
+				ev = append(ev, "escopo de SISTEMA: vale para o host inteiro, não para uma conta")
+			} else {
+				ev = append(ev, "escopo de USUÁRIO: quem entrar vira a conta "+c.Conta+" sem autenticar")
+			}
+			if len(c.Linhas) > 0 {
+				amostra := c.Linhas
+				if len(amostra) > 6 {
+					amostra = append(amostra[:6:6], "…")
+				}
+				ev = append(ev, "entradas: "+strings.Join(amostra, " · "))
+			}
+			if c.Gravavel {
+				ev = append(ev, "e o arquivo é gravável por grupo/outros: qualquer conta "+
+					"acrescenta um host de confiança nele")
+			}
+
+			sev := check.SevWarn
+			if c.Curinga {
+				sev = check.SevCritical
+				ev = append(ev, "contém `+`: confia em QUALQUER host e QUALQUER usuário — "+
+					"é login de root/da conta sem senha a partir de qualquer lugar")
+			}
+
+			fd := self.F(sev, alvo, "", ev...)
+			fd.Quando, fd.QuandoFonte = c.ModUTC, "mtime do arquivo de confiança"
+			fd.NextSteps = []string{
+				"leia o arquivo: cada linha é um host (ou host+usuário) que entra sem senha",
+				"host-based trust depende de rsh/rlogin ou de pam_rhosts — confira se " +
+					"o serviço está ativo (runbook §7.5); mesmo inativo, o arquivo é " +
+					"reativado ao subir o serviço",
+				"se ninguém reconhecer as máquinas listadas, remova o arquivo e rotacione " +
+					"o acesso da conta",
+			}
+			r.Findings = append(r.Findings, fd)
+		}
+		r.Partial = append(r.Partial, f.PersistDenied["trust"]...)
+		return r
+	},
 }
 
 // caPlantada — runbook §7.12.

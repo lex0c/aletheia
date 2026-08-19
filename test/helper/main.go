@@ -81,6 +81,16 @@ const usage = `helper — monta situações para a suíte de cenários
       mapeia uma região ANÔNIMA gravável e executável e a mantém. É a assinatura
       que o malfind procura (runbook §3.10) — sem escrever código nela: só a forma.
 
+  helper rx-anon
+      injeção W^X: mmap RW, grava bytes, mprotect RX. No instante da varredura a
+      região é r-xp anônima e NUNCA foi RWX — a forma que escapa de quem só
+      procura W+X simultâneo.
+
+  helper deleted-exec <caminho>
+      mapeia um arquivo como EXECUTÁVEL e o APAGA em seguida. O mapeamento fica
+      "(deleted)" em /proc/<pid>/maps, com o exe principal íntegro: a lib
+      carregada com dlopen e removida do disco.
+
   helper proxy <ip:porta-escuta> <ip:porta-backend>
       aceita conexão de fora e abre outra para o backend. É a forma do proxy
       reverso: entrada externa + saída interna. Não pode ser lida como pivô.
@@ -314,6 +324,15 @@ func main() {
 
 	case "rwx":
 		die(mapRWX())
+		hold()
+
+	case "rx-anon":
+		die(mapRXAnon())
+		hold()
+
+	case "deleted-exec":
+		need(3)
+		die(mapDeletedExec(os.Args[2]))
 		hold()
 
 	case "vigia":
@@ -553,6 +572,52 @@ func mapRWX() error {
 
 // rwx é global para o mapeamento não ser recolhido antes da varredura.
 var rwx []byte
+
+// mapRXAnon é a injeção W^X: grava numa região RW e a torna RX. No retrato ela é
+// r-xp anônima e nunca foi gravável-e-executável ao mesmo tempo — quem só
+// procura RWX simultâneo não vê, e é isso que proc.maps_exec_anon tem de pegar.
+func mapRXAnon() error {
+	b, err := syscall.Mmap(-1, 0, 4096,
+		syscall.PROT_READ|syscall.PROT_WRITE,
+		syscall.MAP_PRIVATE|syscall.MAP_ANONYMOUS)
+	if err != nil {
+		return fmt.Errorf("mmap: %w", err)
+	}
+	copy(b, []byte{0x90, 0x90, 0xc3}) // nop; nop; ret — bytes plausíveis de código
+	if err := syscall.Mprotect(b, syscall.PROT_READ|syscall.PROT_EXEC); err != nil {
+		return fmt.Errorf("mprotect rx: %w", err)
+	}
+	rxAnon = b
+	return nil
+}
+
+var rxAnon []byte
+
+// mapDeletedExec mapeia um arquivo como executável e o apaga: o mapeamento fica
+// "(deleted)" enquanto vive na memória, que é a lib aberta com dlopen e removida
+// do disco. O exe principal do processo (o /helper) continua íntegro.
+func mapDeletedExec(path string) error {
+	if err := os.WriteFile(path, make([]byte, 8192), 0o755); err != nil {
+		return err
+	}
+	fh, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer fh.Close()
+	b, err := syscall.Mmap(int(fh.Fd()), 0, 8192,
+		syscall.PROT_READ|syscall.PROT_EXEC, syscall.MAP_PRIVATE)
+	if err != nil {
+		return fmt.Errorf("mmap exec: %w", err)
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	delMap = b
+	return nil
+}
+
+var delMap []byte
 
 // sessaoComPTY monta o que o kernel considera uma sessão interativa: um
 // pseudoterminal em fd 0, 1 e 2. Sem terminal de verdade o check não teria o

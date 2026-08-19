@@ -240,6 +240,13 @@ sudo ./aletheia preserve \
   --duration 60s
 ```
 
+Se a coleta for interrompida (Ctrl-C, ou o `SIGTERM` de um wrapper com timeout),
+`preserve` fecha a peça em curso, **escreve o manifesto do que já foi preservado**
+e sai com 130. Isso importa porque os hashes da origem — o que prova que a cópia
+bate com o alvo — só existem na memória daquele processo: um dump de memória de
+vários minutos morto no meio deixaria os arquivos no disco sem cadeia de custódia
+nenhuma.
+
 Aletheia não mata processos, remove persistência ou altera regras de firewall.
 
 ---
@@ -325,6 +332,12 @@ dump pode conter:
 | Cross-view | fatos usados para comparar visões independentes de processos, threads, módulos e BPF |
 | Cobertura | quais fontes foram observadas, quais estavam parciais, quais não puderam ser verificadas e por quê |
 | Aquisição | instante da coleta, versão/hash da ferramenta, capabilities disponíveis e lacunas encontradas |
+
+O dump é JSON de uma linha, sem indentação: ele é consumido pelo `analyze`, e
+formatar custaria uma segunda cópia do documento inteiro na memória do host
+suspeito — no exato momento em que a ferramenta prometeu passar pouco tempo e
+pouco recurso ali. Do lado limpo, `jq .` ou `python -m json.tool` resolvem a
+leitura a olho nu.
 
 O conjunto exato depende do host.
 
@@ -505,6 +518,14 @@ sudo ./aletheia watch \
   --full 30s \
   --for 10m
 ```
+
+O que o amostrador conclui entra no exit code e no `--json` junto com o resto: um
+destino que reaparece em intervalo constante é automação, não pessoa, e sai como
+aviso — mesmo que a varredura completa nunca veja aquela conexão, porque ela dura
+menos que um ciclo. Se o JSONL parar de ser gravado no meio da vigília (disco
+cheio, por exemplo), o `watch` diz isso em stderr e não sai 0: um arquivo
+truncado com exit 0 seria a ferramenta afirmando completude sobre um registro que
+ela sabe estar incompleto.
 
 Esse mecanismo usa polling. Um processo ou conexão que exista por menos tempo
 que o intervalo pode escapar.

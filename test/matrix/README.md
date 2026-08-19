@@ -40,9 +40,20 @@ sem sinal.
 | `rx-anon`          | `proc.maps_exec_anon`  | regressão    |
 | `deleted-exec`     | `proc.deleted_mapping` | regressão    |
 | `memfd`            | `proc.memfd_exec`      | regressão    |
+| `revshell-direct`  | `correlate.revshell`   | regressão    |
+| `revshell-bridge`  | `correlate.revshell_bridge` | regressão |
 | `rx-anon-rotulada` | (nenhum)               | ponto cego¹  |
 | `deleted-data`     | (nenhum)               | ponto cego²  |
+| `jit-inject`       | (nenhum)               | ponto cego³  |
 
 1. rótulo de VMA (`PR_SET_VMA_ANON_NAME`) é spoofável, e o check só conta região
    SEM rótulo — o próprio check declara esse limite.
 2. o check exige segmento EXECUTÁVEL; um segmento de dado apagado passa.
+3. `maps_exec_anon` isenta runtime com JIT em diretório de sistema. Rodar o
+   payload como `/usr/bin/node` — com uma região executável sem rótulo — cai na
+   isenção e passa. Declarado, mas a matriz o demonstra como bypass real: um
+   candidato a apertar a isenção (exigir que o processo REALMENTE pareça node —
+   dono de pacote, biblioteca de runtime mapeada).
+
+Os cenários de rede usam TEST-NET-3 num alias de `lo` e um C2 falso local
+(`plant listen`); precisam de `--cap-add=NET_ADMIN`, que `matrix.sh` já passa.

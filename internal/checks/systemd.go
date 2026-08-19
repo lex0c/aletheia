@@ -327,10 +327,20 @@ func calendarInterval(cal string) (int, string, bool) {
 // porque ele vai direto para a evidência: o operador precisa saber POR QUE,
 // não só que disparou.
 func execSuspect(cmd string) (string, check.Severity, bool) {
-	low := strings.ToLower(cmd)
+	// A comparação é sobre a linha NORMALIZADA. Todo padrão abaixo tem espaço
+	// embutido — "curl ", "base64 -d", " -c", "trap " —, e um espaço literal é
+	// a coisa mais fácil de evadir que existe: `curl\t-s`, `base64  -d`,
+	// `curl$IFS-s`. Quem escreve a linha escolhe o byte; o classificador tem de
+	// olhar a FORMA. O caminho do executável continua saindo do `cmd` original,
+	// porque ali o branco separa tokens e não decora.
+	low := colapsaBranco(strings.ToLower(cmd))
 
 	// Interpretador consumindo código de fora: o payload não está aqui.
-	for _, pat := range []string{"curl ", "wget ", "base64 -d", "base64 --decode"} {
+	//
+	// `fetch` é o downloader de FreeBSD e existe em imagem Alpine; `lwp-download`
+	// vem com o perl. Nenhum deles é curl, e todos entregam a mesma coisa.
+	for _, pat := range []string{"curl ", "wget ", "fetch ", "lwp-download ",
+		"aria2c ", "base64 -d", "base64 --decode"} {
 		if strings.Contains(low, pat) && pipesToShell(low) {
 			return "baixa e executa: o payload não está na unit, está do outro lado da rede",
 				check.SevCritical, true
@@ -470,6 +480,7 @@ func unitContext(u *facts.Unit) []string {
 // temInterpretadorEmLinha diz se o comando entrega código pela linha de
 // comando, em vez de apontar para um arquivo que se pode ler.
 func temInterpretadorEmLinha(low string) bool {
+	low = colapsaBranco(low)
 	var temInterp bool
 	for _, i := range []string{"python", "perl", "ruby", "php", "node", "bash", "sh ", "zsh"} {
 		if strings.Contains(low, i) {
@@ -487,16 +498,81 @@ func temInterpretadorEmLinha(low string) bool {
 // ofuscaPayload reconhece as primitivas que transformam texto ilegível em
 // código executável. É a forma, não a família.
 func ofuscaPayload(low string) bool {
+	low = colapsaBranco(low)
 	for _, p := range []string{
 		"b64decode", "base64.b64", "atob(", "codecs.decode", "unhexlify",
-		"decode('hex", "fromcharcode", "pack(\"h", "eval(", "exec(",
-		"base64 -d", "base64 --decode", "openssl enc -d", "|xxd -r", "| xxd -r",
+		"decode('hex", "fromcharcode", "pack(\"h",
+		"base64 -d", "base64 --decode", "openssl enc -d", "xxd -r",
 	} {
 		if strings.Contains(low, p) {
 			return true
 		}
 	}
+	// `eval` e `exec` são CHAMADAS: o parêntese pode vir colado ou separado, e
+	// casar só "eval(" deixava `eval (x)` passar. O nome tem de estar isolado —
+	// senão `retrieval(x)` e `exec_hook(y)` viravam achado.
+	for _, nome := range []string{"eval", "exec"} {
+		if chamaFuncao(low, nome) {
+			return true
+		}
+	}
 	return false
+}
+
+// chamaFuncao acha `nome` seguido de parêntese, com ou sem espaço entre os
+// dois, e exige que o nome não seja sufixo de outro identificador.
+func chamaFuncao(low, nome string) bool {
+	for i := 0; ; {
+		j := strings.Index(low[i:], nome)
+		if j < 0 {
+			return false
+		}
+		p := i + j
+		i = p + len(nome)
+		if p > 0 && (ehIdent(low[p-1]) || low[p-1] == '_') {
+			continue // sufixo de outro identificador: retrieval(, exec_hook(
+		}
+		resto := strings.TrimLeft(low[i:], " ")
+		if strings.HasPrefix(resto, "(") {
+			return true
+		}
+	}
+}
+
+func ehIdent(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+}
+
+// colapsaBranco troca todo branco por UM espaço e expande $IFS.
+//
+// Existe porque todo classificador deste arquivo casa padrão com espaço
+// embutido, e espaço literal é a evasão mais barata que há: trocar por tab,
+// duplicar, ou usar `$IFS` — que o shell expande para branco e que aparece em
+// dropper real justamente para derrotar peneira de texto.
+func colapsaBranco(s string) string {
+	if !strings.ContainsAny(s, "\t\n\r$") && !strings.Contains(s, "  ") {
+		return s // caminho comum: nada a normalizar
+	}
+	s = strings.ReplaceAll(s, "${ifs}", " ")
+	s = strings.ReplaceAll(s, "${IFS}", " ")
+	s = strings.ReplaceAll(s, "$ifs", " ")
+	s = strings.ReplaceAll(s, "$IFS", " ")
+	var b strings.Builder
+	b.Grow(len(s))
+	espaco := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f' {
+			espaco = true
+			continue
+		}
+		if espaco && b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		espaco = false
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // trapDeShell reconhece a persistência por armadilha de sinal.
@@ -515,6 +591,7 @@ func ofuscaPayload(low string) bool {
 // arquivo de rc de shell interativo ele quase não tem razão de existir, e é
 // por isso que o classificador só o vê onde vê: nas linhas de gatilho.
 func trapDeShell(low string) (string, bool) {
+	low = colapsaBranco(low)
 	i := strings.Index(low, "trap ")
 	if i != 0 && (i < 0 || !ehInicioDeComando(low, i)) {
 		return "", false

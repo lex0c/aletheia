@@ -154,15 +154,27 @@ func seguirRunParts(f *Facts, e *env.Env) {
 // para decidir se a linha é plumbing da distribuição — e a resposta não pode
 // divergir entre os dois.
 func DiretorioDoRunParts(cmd string) (string, bool) {
+	// O run-parts não precisa ser o PRIMEIRO token. A linha de fábrica do
+	// /etc/crontab do Debian é `cd / && run-parts --report /etc/cron.hourly`, e
+	// a diária vem embrulhada em `test -x /usr/sbin/anacron || ( ... )`. Exigir
+	// a primeira posição fazia a isenção não reconhecer o agendador da própria
+	// distribuição — hoje sem efeito visível porque o horário passa do teto de
+	// beacon antes de chegar aqui, mas é falso positivo esperando o teto mudar.
+	//
+	// Alargar não dá escolha ao adversário: quem decide a isenção é
+	// RunPartsDaDistro sobre o DIRETÓRIO, e o conteúdo desses diretórios é
+	// inventariado como entrada própria.
 	campos := strings.Fields(cmd)
-	if len(campos) < 2 || baseNome(campos[0]) != "run-parts" {
-		return "", false
-	}
-	for _, a := range campos[1:] {
-		if strings.HasPrefix(a, "-") {
-			continue // --report e afins
+	for i, c := range campos {
+		if baseNome(strings.TrimLeft(c, "(")) != "run-parts" {
+			continue
 		}
-		return strings.TrimRight(a, "/"), true
+		for _, a := range campos[i+1:] {
+			if strings.HasPrefix(a, "-") {
+				continue // --report e afins
+			}
+			return strings.TrimRight(strings.TrimRight(a, ")"), "/"), true
+		}
 	}
 	return "", false
 }

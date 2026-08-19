@@ -489,9 +489,13 @@ var udevRun = check.Check{
 // classificador ver o caminho de verdade.
 func linhaExecutavel(s string) string {
 	s = strings.TrimSpace(s)
-	for _, p := range []string{"source ", ". ", "eval ", "exec "} {
-		if r, ok := strings.CutPrefix(s, p); ok {
-			return strings.TrimSpace(r)
+	// Compara o primeiro TOKEN, não um prefixo com espaço literal: `source ` só
+	// casa com espaço, e `source\t/tmp/.x` é linha de rc perfeitamente válida
+	// que passava inteira adiante como se fosse o nome de um programa.
+	if i := strings.IndexAny(s, " \t"); i > 0 {
+		switch s[:i] {
+		case "source", ".", "eval", "exec":
+			return strings.TrimSpace(s[i+1:])
 		}
 	}
 	// Alias e .forward: uma linha |"/caminho/comando" faz o MTA executar aquilo

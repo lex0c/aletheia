@@ -244,8 +244,13 @@ var envToolMarker = check.Check{
 // Errar aqui para CRITICAL enche a tela de desktop; errar para WARN esconde o
 // rootkit de userland mais comum. O corte é o mesmo do ld.so.conf.
 func preloadSev(valor string) (check.Severity, string) {
+	// O separador é QUALQUER branco, não só o espaço: o man do ld.so define
+	// /etc/ld.so.preload como "lista separada por branco", e o ':' vem do
+	// LD_PRELOAD. Cortar só em ' ' e ':' fazia `/usr/lib/ok.so\t/tmp/x.so` ser
+	// lido como UM caminho — que não começa por '/' depois do primeiro token,
+	// não casa nenhum diretório suspeito, e saía como AVISO em vez de crítico.
 	for _, lib := range strings.FieldsFunc(valor, func(r rune) bool {
-		return r == ' ' || r == ':'
+		return r == ' ' || r == ':' || r == '\t' || r == '\n' || r == '\r'
 	}) {
 		if !strings.HasPrefix(lib, "/") {
 			continue // nome relativo: resolvido pela busca normal de bibliotecas

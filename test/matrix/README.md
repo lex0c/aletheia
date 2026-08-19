@@ -15,10 +15,13 @@ Monta técnicas de ataque e mede **quais a aletheia pega**. Dois eixos:
 - **Contêiner** (`matrix.sh`) — técnicas de **userspace**: injeção em memória,
   mapeamento apagado, memfd. A aletheia roda como **root** dentro do contêiner e
   enxerga tudo; nada toca o kernel do HOST. É o que roda por padrão.
-- **VM descartável** (`../vm/*-proof.sh`) — técnicas de **kernel**: hook em
-  `tcp4_seq_show` (socket_view), LKM que se esconde (module_view), e — a fazer —
-  cgroup BPF, binfmt live. Contêiner NÃO serve para kernel: ele compartilha o do
-  host, e um hook ali esconderia conexão do host inteiro.
+- **VM descartável** (`vm-matrix.sh`) — técnicas de **kernel**, numa tabela só,
+  com baseline limpo como controle negativo: hook em `tcp4_seq_show`
+  (`cross.socket_view`), LKM que se esconde de `/proc/modules` e `/sys/module`
+  (`cross.module_view`), e registro de `binfmt` live (`kernel.binfmt_interpreter`).
+  Contêiner NÃO serve para kernel: ele compartilha o do host, e um hook ali
+  esconderia conexão do host inteiro. A fazer (precisa de um carregador de BPF na
+  VM): cgroup BPF por `BPF_PROG_QUERY` — declarado, não silenciado.
 
 Nenhum cenário conecta na internet. Os de rede usam TEST-NET-3
 (`203.0.113.0/24`), que nunca é roteada. Nada escreve fora de `/tmp` do contêiner.
@@ -26,7 +29,8 @@ Nenhum cenário conecta na internet. Os de rede usam TEST-NET-3
 ## Uso
 
 ```sh
-make matrix          # tier de contêiner (exige docker)
+make matrix          # tier de contêiner (userspace; exige docker)
+make vm-matrix       # tier de kernel (exige docker e qemu)
 ```
 
 Sai 0 se não houver regressão; 1 se uma técnica que um check afirma pegar passou

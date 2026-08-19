@@ -7,7 +7,7 @@ GOFLAGS := -trimpath
 # LD_PRELOAD e a binário de sistema trojanizado (SPEC 4).
 export CGO_ENABLED = 0
 
-.PHONY: all build helper vm-image test lint verify clean dist scenarios images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix arches
+.PHONY: all build helper vm-image test lint verify clean dist scenarios images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix vm-matrix arches
 
 all: verify
 
@@ -107,6 +107,13 @@ vm-socket-proof:
 # sem sinal (ponto cego). Exige docker. Não toca o kernel do host.
 matrix:
 	./test/matrix/matrix.sh
+
+# vm-matrix é o tier de KERNEL da matriz: numa VM descartável, hook em
+# tcp4_seq_show (cross.socket_view), LKM que se esconde (cross.module_view) e
+# binfmt live (kernel.binfmt_interpreter), com baseline limpo como controle
+# negativo. Exige docker e qemu. Não toca o kernel do host.
+vm-matrix:
+	./test/matrix/vm-matrix.sh
 
 # Servidor legado de 32 bits ainda existe. Cross-compilar custa segundos e é a
 # única forma de provar que a ferramenta roda lá — tamanho de int e número de

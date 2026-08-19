@@ -152,17 +152,36 @@ var (
 	ErrVazio = errors.New("dump sem fatos: não há o que analisar")
 )
 
+// MaxDump é o teto do dump inteiro lido no lado limpo. O dump vem de um host
+// possivelmente comprometido, então tamanho é entrada não confiável: sem teto,
+// um arquivo gigante (malicioso ou acidental) estoura a memória do analisador
+// por OOM antes de qualquer erro controlado — e o json.Unmarshal ainda mantém
+// uma segunda cópia. É o análogo, na fronteira de replay, do env.MaxLeitura que
+// já protege cada arquivo coletado. Generoso: os coletores já são limitados
+// (40k arquivos de código etc.), então um dump real fica muito abaixo disto.
+var MaxDump int64 = 512 << 20
+
 // Carregar lê um dump do disco, ou de "-" para a entrada padrão.
 func Carregar(caminho string) (*Dump, error) {
-	var b []byte
-	var err error
-	if caminho == "-" {
-		b, err = io.ReadAll(os.Stdin)
-	} else {
-		b, err = os.ReadFile(caminho)
+	var r io.Reader = os.Stdin
+	if caminho != "-" {
+		fh, err := os.Open(caminho)
+		if err != nil {
+			return nil, err
+		}
+		defer fh.Close()
+		r = fh
 	}
+	// LimitReader a MaxDump+1: lê no máximo um byte além do teto para saber que
+	// ESTOUROU sem carregar o resto. Vale para stdin (que não dá para statar) e
+	// para arquivo, sem corrida entre statar e ler.
+	b, err := io.ReadAll(io.LimitReader(r, MaxDump+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(b)) > MaxDump {
+		return nil, fmt.Errorf("dump grande demais: passa de %d MiB — recusado "+
+			"para não estourar a memória do analisador", MaxDump>>20)
 	}
 	var d Dump
 	if err := json.Unmarshal(b, &d); err != nil {

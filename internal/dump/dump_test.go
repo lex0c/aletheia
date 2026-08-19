@@ -214,3 +214,19 @@ func TestOrigemDesconhecidaNaoViraHostVivo(t *testing.T) {
 		}
 	}
 }
+
+// O dump vem de um host possivelmente comprometido: tamanho é entrada não
+// confiável. Acima de MaxDump ele é recusado com erro controlado, em vez de
+// estourar a memória do analisador (o LimitReader nem carrega o resto).
+func TestDumpAcimaDoTetoEhRecusado(t *testing.T) {
+	orig := MaxDump
+	MaxDump = 64
+	defer func() { MaxDump = orig }()
+	p := filepath.Join(t.TempDir(), "grande.json")
+	if err := os.WriteFile(p, []byte(`{"schema":1`+strings.Repeat(" ", 300)+`}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Carregar(p); err == nil {
+		t.Error("dump acima de MaxDump devia ser recusado, não carregado")
+	}
+}

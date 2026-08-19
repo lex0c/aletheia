@@ -1,7 +1,5 @@
 # Aletheia
 
-**Triagem de comprometimento e resposta a incidente em Linux, em um único binário estático.**
-
 Aletheia coleta e correlaciona sinais de comprometimento em processos, memória,
 rede, persistência, integridade de arquivos e kernel. O objetivo não é procurar
 uma assinatura específica de malware, mas responder três perguntas durante um
@@ -66,12 +64,6 @@ Por isso a ferramenta tenta:
 - declarar explicitamente quando uma fonte não pôde ser observada;
 - impedir que cobertura incompleta seja apresentada como resultado limpo.
 
-O nome, portanto, não significa que Aletheia "descobre a verdade" sobre um host.
-Significa algo mais específico e mais defensável:
-
-> **tornar explícito o que pôde ser observado, o que parece estar oculto e onde
-> a própria observação deixa de ser confiável.**
-
 ---
 
 ## O que ela procura
@@ -83,12 +75,12 @@ Alguns exemplos de sinais implementados:
 
 | Área | Exemplos |
 | --- | --- |
-| Processos e memória | execução via `memfd`, executável apagado ainda em execução, processo userspace disfarçado de kernel thread, mapas anônimos RWX, namespaces divergentes, `LD_PRELOAD`/`LD_AUDIT` em processos |
-| Rede | provável reverse shell pela estrutura de FDs, processo fazendo conexões públicas e privadas compatíveis com pivot, correlação socket-processo |
-| Persistência | `/etc/ld.so.preload`, cron suspeito ou excessivamente frequente, units/drop-ins/timers systemd, SSH `authorized_keys`, `modprobe install`, processos observando arquivos de persistência |
+| Processos e memória | execução via `memfd`, executável apagado ainda em execução, processo userspace disfarçado de kernel thread, mapas anônimos RWX, código executável anônimo e **sem rótulo** (a forma que sobra depois de `mmap(RW)`→`mprotect(RX)`), biblioteca apagada do disco e ainda mapeada, namespaces divergentes, `LD_PRELOAD`/`LD_AUDIT` em processos |
+| Rede | provável reverse shell pela estrutura de FDs, processo fazendo conexões públicas e privadas compatíveis com pivot, correlação socket-processo, **socket que o `NETLINK_INET_DIAG` mostra e `/proc/net` não** — as duas visões vêm do mesmo kernel por caminhos de código diferentes |
+| Persistência | `/etc/ld.so.preload`, cron suspeito ou excessivamente frequente, units/drop-ins/timers systemd, SSH `authorized_keys`, `modprobe install`, processos observando arquivos de persistência, parâmetro de boot que desliga proteção do kernel (`selinux=0`, `audit=0`, `lockdown=none`, `init=`) confrontado com o que o kernel responde |
 | Integridade | arquivo de pacote modificado, sinais de timestomp, executável usado por root mas gravável por usuário menos privilegiado, arquivo cujo dono (uid/gid) não existe em `passwd`/`group` |
 | Código servido | padrão de backdoor/webshell em PHP, JS e Python: sink de execução sobre entrada de request (`eval($_POST)`, `` `$_GET` ``, `system`, `subprocess shell=True`), com micro-taint de fluxo de duas linhas que respeita escopo de função e allowlist (`switch` de literais, `in_array` de lista fixa), e distinção entre entrada remota e local. Varre os web roots por padrão, a FS montada inteira com `--all-fs`, e `--ignore PATH` exclui uma árvore (a exclusão é declarada) |
-| Kernel | divergência entre três visões independentes de módulos (`/proc/modules`, `/sys/module`, ftrace), módulos sem arquivo correspondente, taint inexplicado, hooks ftrace em funções sensíveis, programas BPF sem owner identificado, inconsistências na enumeração BPF e cross-views de processos |
+| Kernel | divergência entre três visões independentes de módulos (`/proc/modules`, `/sys/module`, ftrace), módulos sem arquivo correspondente, taint inexplicado, hooks ftrace em funções sensíveis, programas BPF sem owner identificado — com o anexo de **tc e XDP resolvido por rtnetlink**, de modo que só resta sem atribuição o que está em cgroup ou em ação de tc —, inconsistências na enumeração BPF e cross-views de processos |
 | IOC | IPs, hashes, paths e strings fornecidos pelo investigador |
 
 Um finding isolado nem sempre significa comprometimento. JITs legítimos,
@@ -314,11 +306,14 @@ dump pode conter:
 | Memória de processos | mappings de `/proc/<pid>/maps` e informações necessárias para identificar `memfd`, executável apagado e mappings executáveis/anônimos |
 | Ambiente | variáveis relevantes como `LD_PRELOAD`, `LD_AUDIT` e marcadores conhecidos de ferramentas |
 | Rede | sockets TCP/UDP, endereços locais/remotos, estados, inode, associação socket-processo e direção inferida |
+| Rede (segunda visão) | a mesma tabela de conexões enumerada por `NETLINK_INET_DIAG`, para confronto com `/proc/net` |
+| eBPF | programas carregados, seus detentores (descritor, pin, link, tail call) e o ponto de anexação em interface (`XDP` e filtros de `tc`, lidos por rtnetlink) |
 | Cron e `at` | crontabs, jobs periódicos, frequência e jobs `at` observáveis |
 | systemd | units, drop-ins, timers e comandos configurados para execução |
 | SSH | `authorized_keys`, opções de chave e configurações relevantes do `sshd` |
 | Loader | `/etc/ld.so.preload`, configuração do dynamic loader e variáveis de preload persistentes |
 | modprobe | regras `install`, `alias` e outras configurações relevantes de carregamento de módulos |
+| Linha de boot | `/proc/cmdline` (com o que o kernel subiu) e a configuração do bootloader — GRUB, systemd-boot e UKI — (com o que o próximo boot vai aplicar) |
 | Filesystem | paths relevantes, ownership, permissões, timestamps, symlinks e metadata usada pelos checks |
 | Pacotes | ownership de arquivos e hashes declarados pelo gerenciador de pacotes quando o formato é suportado |
 | Integridade | hashes e metadata dos arquivos selecionados pela coleta para verificação |

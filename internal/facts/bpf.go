@@ -244,11 +244,23 @@ func anexosDeRede(f *Facts, e *env.Env, porID map[uint32]*ProgramaBPF, citados m
 		f.partial("bpf", strconv.Itoa(semFiltro)+" interface(s) com filtro de tc "+
 			"ilegível: programa preso nelas não pôde ser atribuído")
 	}
-	// A AÇÃO de tc (act_bpf) pendura programa DENTRO do filtro e não é lida
-	// aqui. A ressalva não vira lacuna incondicional — isso degradaria a
-	// cobertura de todo host, inclusive os que não têm tc nenhum. Ela mora no
-	// motivo da fixação (kbpf.FixNetlink), que só é impresso para o programa
-	// que de fato ficou sem atribuição.
+
+	// A AÇÃO de tc (act_bpf): programa preso numa ação, não num filtro. É
+	// enumerada por RTM_GETACTION, que pega inclusive a ação standalone que
+	// nenhum filtro referencia ainda.
+	acoes, err := netlink.AcoesBPF(c)
+	if err != nil {
+		f.partial("bpf", "ações de tc (act_bpf) não puderam ser lidas ("+err.Error()+
+			"): programa preso numa AÇÃO não pôde ser atribuído")
+		return
+	}
+	for _, ac := range acoes {
+		onde := "act_bpf"
+		if ac.Nome != "" {
+			onde += " (" + ac.Nome + ")"
+		}
+		anotar(ac.ProgID, onde)
+	}
 }
 
 // Tetos da varredura de cgroup. A árvore INTEIRA é percorrida — limitar por

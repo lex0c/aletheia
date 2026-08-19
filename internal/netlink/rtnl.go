@@ -245,3 +245,100 @@ func direcaoDoPai(pai uint32) string {
 	}
 	return "parent=" + strconv.FormatUint(uint64(pai), 16)
 }
+
+// A AÇÃO de tc (act_bpf) — runbook §35, o último detentor de rede.
+//
+// Um programa eBPF pode estar preso num FILTRO (cls_bpf, já lido acima) ou numa
+// AÇÃO de tc: `tc action add action bpf …`, que o filtro referencia. O commit do
+// rtnetlink declarou este ponto sem leitura; aqui ele é fechado.
+//
+// A enumeração é por RTM_GETACTION, que lista as ações de um TIPO — mais geral
+// que caçar a ação aninhada em cada filtro, porque pega também a ação
+// standalone que nenhum filtro referencia ainda.
+const (
+	rtmGetAction = 50
+
+	tcaActTab     = 1 // TCA_ACT_TAB / TCA_ROOT_TAB
+	tcaActKind    = 1 // TCA_ACT_KIND
+	tcaActOptions = 2 // TCA_ACT_OPTIONS
+
+	// enum de tc_act/tc_bpf.h
+	tcaActBPFName = 6 // TCA_ACT_BPF_NAME
+	tcaActBPFID   = 7 // TCA_ACT_BPF_ID
+
+	tamTcamsg = 4 // struct tcamsg (family + pad)
+)
+
+// AcaoBPF é um programa eBPF preso numa ação de tc.
+type AcaoBPF struct {
+	ProgID uint32
+	Nome   string
+}
+
+// nlattr monta um atributo de netlink: cabeçalho (len, tipo) + payload alinhado
+// a 4. É o espelho de `atributos`, para o lado de CONSTRUIR o request.
+func nlattr(tipo uint16, payload []byte) []byte {
+	tam := 4 + len(payload)
+	b := make([]byte, (tam+3)&^3)
+	ordemNativa.PutUint16(b[0:2], uint16(tam))
+	ordemNativa.PutUint16(b[2:4], tipo)
+	copy(b[4:], payload)
+	return b
+}
+
+// AcoesBPF enumera as ações de tc do tipo "bpf". O request pede ao kernel para
+// dumpar as ações de um KIND: tcamsg + TCA_ACT_TAB{ [1]{ TCA_ACT_KIND="bpf" } }.
+func AcoesBPF(c *Conexao) ([]AcaoBPF, error) {
+	kind := nlattr(tcaActKind, []byte("bpf\x00"))
+	indice := nlattr(1, kind)        // a ação no índice 1 da tabela
+	tab := nlattr(tcaActTab, indice) // TCA_ACT_TAB
+	req := make([]byte, tamTcamsg)   // tcamsg zerado (family=AF_UNSPEC)
+	req = append(req, tab...)
+
+	var out []AcaoBPF
+	err := c.Dump(rtmGetAction, req, func(dados []byte) error {
+		if len(dados) < tamTcamsg {
+			return nil
+		}
+		// dados = tcamsg(4) + TCA_ACT_TAB aninhado.
+		for _, a := range atributos(dados[tamTcamsg:]) {
+			if a.Tipo != tcaActTab {
+				continue
+			}
+			// dentro da tabela, uma entrada por ÍNDICE; cada uma é uma ação.
+			for _, idx := range atributos(a.Dados) {
+				if ac, ok := decodificarAcaoBPF(idx.Dados); ok {
+					out = append(out, ac)
+				}
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
+// decodificarAcaoBPF lê uma ação: só as de KIND "bpf" com um ID de programa.
+func decodificarAcaoBPF(dados []byte) (AcaoBPF, bool) {
+	as := atributos(dados)
+	kind, ok := atributo(as, tcaActKind)
+	if !ok || stringDe(kind) != "bpf" {
+		return AcaoBPF{}, false
+	}
+	opts, ok := atributo(as, tcaActOptions)
+	if !ok {
+		return AcaoBPF{}, false
+	}
+	sub := atributos(opts)
+	var ac AcaoBPF
+	if b, ok := atributo(sub, tcaActBPFID); ok {
+		ac.ProgID, _ = u32De(b)
+	}
+	if b, ok := atributo(sub, tcaActBPFName); ok {
+		ac.Nome = stringDe(b)
+	}
+	// Sem id não há programa no espaço de ids a que atribuir.
+	if ac.ProgID == 0 {
+		return AcaoBPF{}, false
+	}
+	return ac, true
+}

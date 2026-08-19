@@ -156,3 +156,57 @@ func TestDirecaoDeParentDesconhecidoSaiCru(t *testing.T) {
 		t.Errorf("direção = %q", got)
 	}
 }
+
+// A ação de tc (act_bpf) vem aninhada: TCA_ACT_KIND="bpf" + TCA_ACT_OPTIONS que
+// contém o TCA_ACT_BPF_ID. Extrair o id do atributo errado o faria virar o
+// nome, ou zero.
+func TestDecodificarAcaoBPF(t *testing.T) {
+	opts := attr(tcaActBPFID, u32(88))
+	opts = append(opts, attr(tcaActBPFName, []byte("cil_xdp\x00"))...)
+	acao := append(attr(tcaActKind, []byte("bpf\x00")), attr(tcaActOptions, opts)...)
+
+	ac, ok := decodificarAcaoBPF(acao)
+	if !ok {
+		t.Fatal("ação bpf válida não foi reconhecida")
+	}
+	if ac.ProgID != 88 {
+		t.Errorf("prog id = %d, quer 88", ac.ProgID)
+	}
+	if ac.Nome != "cil_xdp" {
+		t.Errorf("nome = %q", ac.Nome)
+	}
+}
+
+// Ação de OUTRO tipo (mirred, gact) não carrega programa: não pode virar
+// atribuição a partir de bytes que significam outra coisa.
+func TestDecodificarAcaoBPFIgnoraOutroKind(t *testing.T) {
+	acao := append(attr(tcaActKind, []byte("mirred\x00")), attr(tcaActOptions, u32(1))...)
+	if _, ok := decodificarAcaoBPF(acao); ok {
+		t.Error("mirred não é act_bpf")
+	}
+}
+
+// Ação bpf sem id (bytecode embutido, forma antiga) não tem programa no espaço
+// de ids a que atribuir.
+func TestDecodificarAcaoBPFSemIDNaoAtribui(t *testing.T) {
+	acao := append(attr(tcaActKind, []byte("bpf\x00")),
+		attr(tcaActOptions, attr(tcaActBPFName, []byte("x\x00")))...)
+	if _, ok := decodificarAcaoBPF(acao); ok {
+		t.Error("ação bpf sem id não pode atribuir")
+	}
+}
+
+// O construtor de nlattr é o espelho do parser: o que ele monta, atributos()
+// tem de reler. Alinhamento a 4 incluído.
+func TestNlattrIdaEVolta(t *testing.T) {
+	b := nlattr(tcaActKind, []byte("bpf\x00"))
+	as := atributos(b)
+	if len(as) != 1 || as[0].Tipo != tcaActKind || stringDe(as[0].Dados) != "bpf" {
+		t.Errorf("nlattr/atributos não fecham: %+v", as)
+	}
+	// payload de tamanho ímpar precisa do padding para o próximo atributo casar.
+	dois := append(nlattr(1, []byte("ab")), nlattr(2, u32(9))...)
+	if a := atributos(dois); len(a) != 2 || a[1].Tipo != 2 {
+		t.Errorf("padding quebrou o segundo atributo: %+v", a)
+	}
+}

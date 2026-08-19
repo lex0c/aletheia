@@ -69,11 +69,11 @@ var bpfSemDono = check.Check{
 			"de sk_reuseport preso por setsockopt fica sem dono aparente, e " +
 			"servidor que usa reuseport com eBPF (dnsdist, haproxy) produz " +
 			"exatamente esta forma — legitimamente",
-		"tc e xdp são RESOLVIDOS por rtnetlink, e CGROUP por BPF_PROG_QUERY " +
-			"(attached): o programa preso a uma interface ou a um cgroup aparece " +
-			"com o ponto de anexação em vez de órfão. struct_ops e a AÇÃO de tc " +
-			"(act_bpf) continuam sem leitura, e o que a ferramenta faz com eles " +
-			"é declarar a lacuna em vez de acusar",
+		"tc (filtro E ação), xdp são RESOLVIDOS por rtnetlink, e CGROUP por " +
+			"BPF_PROG_QUERY (attached): o programa preso a uma interface ou a um " +
+			"cgroup aparece com o ponto de anexação em vez de órfão. struct_ops e " +
+			"sockmap (segurados por MAPA) continuam sem leitura, e o que a " +
+			"ferramenta faz com eles é declarar a lacuna em vez de acusar",
 		"varredura de DENTRO de contêiner não produz achado nenhum aqui, mesmo " +
 			"quando a enumeração funciona: o espaço de ids do eBPF é global e os " +
 			"donos estão fora do namespace de PID, então TODO programa do host " +

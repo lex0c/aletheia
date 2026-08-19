@@ -191,3 +191,11 @@ func TestSondaOuFuncionaOuExplica(t *testing.T) {
 		t.Error("erro sem errno: quem chama não consegue decidir por ele")
 	}
 }
+
+// A bpf_attr é uma UNIÃO: um campo fora de lugar faz o kernel ler outro, sem
+// falhar a compilação. O tamanho do BPF_PROG_QUERY é contrato desde o 4.15.
+func TestLayoutProgQuery(t *testing.T) {
+	if got := unsafe.Sizeof(attrProgQuery{}); got != 32 {
+		t.Errorf("sizeof(attrProgQuery) = %d, quer 32", got)
+	}
+}

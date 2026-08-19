@@ -40,7 +40,8 @@ import (
 //	pin no bpffs       arquivo                  → visível
 //	link               enumerável pela bpf(2)   → visível
 //	tail call          entrada de prog_array    → visível
-//	tc/xdp, cgroup     netlink, BPF_PROG_QUERY  → NÃO, e o tipo do programa diz
+//	tc/xdp             netlink (rtnetlink)      → SIM
+//	cgroup             BPF_PROG_QUERY (attached)  → SIM
 //
 // Os cinco primeiros são resolvidos aqui. O sexto é declarado pelo tipo
 // (kbpf.FixacaoDe), e o check não acusa o que a ferramenta não sabe olhar.
@@ -173,6 +174,11 @@ func collectBPF(f *Facts, e *env.Env) {
 	// aparecia como "sem dono visível" e virava lacuna; num nó com cilium isso
 	// é a maioria deles, e lacuna desse tamanho é indistinguível de não olhar.
 	anexosDeRede(f, e, porID, citados)
+	// O QUINTO detentor: programa preso a um CGROUP. Quem sabe é o próprio
+	// kernel, por um FD do diretório do cgroup. Fecha o gap que o FixCgroup
+	// declarava, e os IDs vistos aqui entram na lista de citados — um programa
+	// que o kernel nega ter e um cgroup afirma segurar é a forma do bpf_hidden.
+	anexosDeCgroup(f, porID, citados)
 	tailCalls(f)
 
 	f.BPF.Ocultos = confirmarOcultosBPF(citados, porID)
@@ -245,7 +251,137 @@ func anexosDeRede(f *Facts, e *env.Env, porID map[uint32]*ProgramaBPF, citados m
 	// que de fato ficou sem atribuição.
 }
 
-// quandoCarregou traduz o relógio de boot para UTC. Sem boot conhecido a
+// Tetos da varredura de cgroup. A árvore INTEIRA é percorrida — limitar por
+// "topo + slices conhecidos" viraria regra de evasão documentada: bastaria
+// anexar fora dos caminhos vigiados. Os slices conhecidos só decidem a ORDEM,
+// para que o corte por orçamento caia nas folhas genéricas, não neles.
+const (
+	maxCgroups     = 16384
+	maxCgroupDepth = 64
+	prazoCgroup    = 5 * time.Second
+)
+
+// slicesPrioritarios são visitados PRIMEIRO em cada nível: é onde anexo de
+// cgroup de fato mora (systemd põe device/skb no nível de slice; runtimes de
+// contêiner, nos seus troncos). Prioridade de travessia, não fronteira.
+var slicesPrioritarios = []string{
+	"system.slice", "user.slice", "init.scope", "machine.slice",
+	"kubepods", "docker", "libpod", "containerd", "crio", "buildkit",
+}
+
+func cgroupPrioritario(nome string) bool {
+	for _, sl := range slicesPrioritarios {
+		if strings.HasPrefix(nome, sl) {
+			return true
+		}
+	}
+	return false
+}
+
+// percorrerCgroups faz BFS da árvore, prioritários primeiro em cada nível. O
+// teto de quantidade corta a cauda; o de profundidade é fusível contra árvore
+// patológica. Devolve os caminhos, e se cada teto foi atingido — cada um é uma
+// lacuna diferente.
+func percorrerCgroups(raiz string, teto int) (paths []string, cortouTeto, cortouFundo bool) {
+	type no struct {
+		path  string
+		depth int
+	}
+	fila := []no{{raiz, 0}}
+	for len(fila) > 0 {
+		if len(paths) >= teto {
+			cortouTeto = true
+			break
+		}
+		cur := fila[0]
+		fila = fila[1:]
+		paths = append(paths, cur.path)
+		if cur.depth >= maxCgroupDepth {
+			cortouFundo = true
+			continue
+		}
+		ents, err := os.ReadDir(cur.path)
+		if err != nil {
+			continue
+		}
+		var filhos []string
+		for _, ent := range ents {
+			if ent.IsDir() {
+				filhos = append(filhos, ent.Name())
+			}
+		}
+		sort.SliceStable(filhos, func(i, j int) bool {
+			pi, pj := cgroupPrioritario(filhos[i]), cgroupPrioritario(filhos[j])
+			if pi != pj {
+				return pi
+			}
+			return filhos[i] < filhos[j]
+		})
+		for _, nome := range filhos {
+			fila = append(fila, no{cur.path + "/" + nome, cur.depth + 1})
+		}
+	}
+	return
+}
+
+// anexosDeCgroup pergunta ao kernel, por FD de cada cgroup, quais programas
+// estão ANEXADOS ali (não os efetivos: attached é o ponto real de anexação, e a
+// herança se reconstrói porque a árvore inteira é percorrida).
+func anexosDeCgroup(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]bool) {
+	const base = "/sys/fs/cgroup"
+	// cgroup.controllers só existe na raiz de uma hierarquia v2. Sem ele, ou é
+	// v1 (outra interface, que esta ferramenta não lê) ou não está montado.
+	if _, err := os.Stat(base + "/cgroup.controllers"); err != nil {
+		f.partial("bpf", "cgroup v2 não encontrado em /sys/fs/cgroup: anexo BPF de "+
+			"cgroup NÃO foi lido (cgroup v1 usa outra interface)")
+		return
+	}
+
+	paths, cortouTeto, cortouFundo := percorrerCgroups(base, maxCgroups)
+	prazo := time.Now().Add(prazoCgroup)
+	var consultados, semTempo int
+	for i, p := range paths {
+		if time.Now().After(prazo) {
+			semTempo = len(paths) - i
+			break
+		}
+		fd, err := os.Open(p)
+		if err != nil {
+			continue // cgroup que sumiu ou sem permissão de abrir: segue
+		}
+		porTipo, _ := kbpf.AnexosDeCgroup(int(fd.Fd()), kbpf.TiposDeCgroup)
+		fd.Close()
+		consultados++
+		rel := strings.TrimPrefix(p, base)
+		if rel == "" {
+			rel = "/"
+		}
+		for at, ids := range porTipo {
+			for _, id := range ids {
+				citados[id] = true
+				if pr := porID[id]; pr != nil {
+					pr.Anexos = append(pr.Anexos, "cgroup "+kbpf.NomeDeAnexo(at)+" em "+rel)
+				}
+			}
+		}
+	}
+	if cortouTeto {
+		f.partial("bpf", strconv.Itoa(consultados)+" cgroups consultados; o teto de "+
+			strconv.Itoa(maxCgroups)+" foi atingido e os demais NÃO foram avaliados "+
+			"para anexo BPF")
+	}
+	if cortouFundo {
+		f.partial("bpf", "árvore de cgroup mais funda que "+strconv.Itoa(maxCgroupDepth)+
+			" níveis: os cgroups abaixo NÃO foram descidos")
+	}
+	if semTempo > 0 {
+		f.partial("bpf", strconv.Itoa(semTempo)+" cgroups NÃO foram consultados: o "+
+			"prazo de "+strconv.Itoa(int(prazoCgroup/time.Second))+"s da varredura de "+
+			"cgroup esgotou")
+	}
+}
+
+// quandoCarregou traduz o relógio de boot para UTC.// quandoCarregou traduz o relógio de boot para UTC. Sem boot conhecido a
 // resposta é vazia: uma data errada aqui apontaria a investigação para o dia
 // errado.
 func quandoCarregou(f *Facts, ns uint64) string {

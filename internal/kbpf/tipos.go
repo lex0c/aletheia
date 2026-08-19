@@ -157,9 +157,10 @@ func (f Fixacao) Motivo() string {
 			"continua sem leitura é a AÇÃO de tc (act_bpf), que pendura " +
 			"programa dentro do filtro"
 	case FixCgroup:
-		return "programa deste tipo é anexado a um CGROUP, e resolver isso " +
-			"exigiria BPF_PROG_QUERY em cada cgroup da árvore: quem o segura " +
-			"não foi verificado"
+		return "programa deste tipo é anexado a um CGROUP: a ferramenta percorre " +
+			"a árvore de cgroups por BPF_PROG_QUERY (attached), e o que aparece " +
+			"ali recebe o ponto de anexação. O que resta sem leitura é o anexo " +
+			"EFETIVO herdado e os cgroups que o teto ou a permissão não alcançou"
 	case FixMapa:
 		return "programa deste tipo é segurado por um MAPA (struct_ops, " +
 			"sockmap), e o conteúdo desses mapas não foi lido"

@@ -377,7 +377,13 @@ func execSuspect(cmd string) (string, check.Severity, bool) {
 	// usado sobre linha de SHELL, onde o primeiro token pode ser qualquer
 	// coisa: `/dev/tty[0-9]*)` é um padrão de `case`, não um programa, e sem
 	// esta guarda o /etc/profile.d/gpm.sh de qualquer Arch virava achado.
-	bin := strings.TrimLeft(firstToken(cmd), "-@+!:")
+	// O ALVO EFETIVO, não o primeiro token. Um wrapper que roda outro programa
+	// — `sh -c /tmp/.x`, `sudo /tmp/.x`, `env /tmp/.x`, `tcpd /tmp/.x` — deixa
+	// `/bin/sh`, `/usr/bin/sudo`, `/usr/sbin/tcpd` como primeiro token: todos
+	// legítimos, e o payload em /tmp/.x desaparecia da decisão. É a mesma
+	// evasão em systemd (ExecStart=/bin/sh -c /tmp/.x), em gatilho e agora em
+	// inetd/xinetd, então mora aqui, num só lugar.
+	bin := strings.TrimLeft(alvoEfetivo(cmd), "-@+!:")
 	if !pareceCaminho(bin) {
 		return "", 0, false
 	}
@@ -388,6 +394,70 @@ func execSuspect(cmd string) (string, check.Severity, bool) {
 		return "executa de diretório pessoal: " + bin, check.SevWarn, true
 	}
 	return "", 0, false
+}
+
+// alvoEfetivo desembrulha os wrappers que executam OUTRO programa e devolve o
+// que de fato roda. Sem isto, "o primeiro executável" — legítimo em todo
+// wrapper — é uma regra de evasão que vale para systemd, gatilho e inetd/xinetd.
+//
+//	sudo|env|nohup|setsid|doas|exec|stdbuf|tcpd PROG  ->  PROG (pulando flags e VAR=val)
+//	sh|bash|... -c "PROG …"                           ->  o primeiro caminho de PROG
+//	PROG (sem wrapper)                                ->  PROG
+func alvoEfetivo(cmd string) string {
+	toks := strings.Fields(colapsaBranco(cmd))
+	// Teto de desembrulho: `sudo env nohup …` aninhado é raro, mas o laço não
+	// pode girar para sempre num token que ele não consome.
+	for passo := 0; passo < 8 && len(toks) > 0; passo++ {
+		base := baseDe(strings.TrimLeft(toks[0], "-@+!:"))
+		switch {
+		case base == "sudo" || base == "env" || base == "nohup" || base == "setsid" ||
+			base == "doas" || base == "exec" || base == "stdbuf" || base == "tcpd" ||
+			base == "ionice" || base == "nice" || base == "timeout":
+			// pula o wrapper e as opções que o precedem (VAR=val do env, -flags).
+			// `timeout` leva um argumento de DURAÇÃO; trata-se como opção.
+			toks = toks[1:]
+			for len(toks) > 0 && (strings.HasPrefix(toks[0], "-") ||
+				strings.Contains(toks[0], "=") || ehDuracao(toks[0])) {
+				toks = toks[1:]
+			}
+		case interpretadoresDePipe[base]:
+			// shell: o alvo real está no argumento do -c. Sem -c, o próprio
+			// shell é o alvo (um shell interativo de serviço já é anômalo).
+			for i := 1; i < len(toks); i++ {
+				if toks[i] == "-c" && i+1 < len(toks) {
+					// O alvo do -c costuma vir entre aspas ('/tmp/.x -flag'); a
+					// aspa de abertura gruda no primeiro token e o descaracteriza
+					// como caminho. Descasca-se só a da ponta.
+					if c := primeiroCaminho(strings.Join(toks[i+1:], " ")); c != "" {
+						return strings.TrimLeft(c, "'\"")
+					}
+					return toks[0]
+				}
+			}
+			return toks[0]
+		default:
+			return toks[0]
+		}
+	}
+	return ""
+}
+
+// ehDuracao reconhece o argumento de `timeout`: um número com sufixo opcional
+// s/m/h/d. Não é caminho nem opção, e não pode ser confundido com o alvo.
+func ehDuracao(s string) bool {
+	if s == "" {
+		return false
+	}
+	s = strings.TrimRight(s, "smhd")
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if (s[i] < '0' || s[i] > '9') && s[i] != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 // pareceCaminho recusa o que não pode ser caminho de executável. Metacaractere

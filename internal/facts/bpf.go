@@ -106,6 +106,22 @@ type BPF struct {
 	// devolveu — e que continuam existindo quando perguntados um a um.
 	Ocultos []uint32 `json:"hidden_ids,omitempty"`
 
+	// OcultosConfirmados é uma ASSERÇÃO POSITIVA: a confirmação de duas passadas
+	// (reenumerar + perguntar id a id, AMBAS completas) rodou até o fim. Sem ela,
+	// Ocultos não pode virar acusação.
+	//
+	// Existe por causa do replay. O bug de truncamento — Ocultos preenchido a
+	// partir de uma enumeração já cortada — foi corrigido em CÓDIGO, sem mudar o
+	// esquema do dump. Um retrato tirado pelo binário bugado (mesmo schema 1)
+	// atravessa o loader e traz Ocultos falso. Como Ocultos e Cortado estão
+	// dessincronizados (Cortado pode ser ligado DEPOIS, por corte de link/pin,
+	// sobre um Ocultos legítimo de enumeração completa), "ignora Ocultos se
+	// Cortado" suprimiria achado real. A asserção positiva resolve os dois: o
+	// dump antigo não a tem (vira false no unmarshal), então seu Ocultos é
+	// desconfiado; o dump novo com corte tardio de link a mantém, e o achado
+	// legítimo sobrevive. É o "não olhei ≠ não há" na dimensão do tempo.
+	OcultosConfirmados bool `json:"hidden_confirmed,omitempty"`
+
 	// Cortado marca que algum teto foi atingido: a lista não é o total.
 	Cortado bool `json:"truncated,omitempty"`
 	// CoberturaAnexo diz se a busca pelo ponto de ANEXAÇÃO foi completa, por
@@ -839,6 +855,13 @@ func confirmarOcultosBPF(f *Facts, citados map[uint32]bool, porID map[uint32]*Pr
 		f.partial("bpf", "a reconfirmação de programa eBPF oculto não pôde ser "+
 			"feita (segunda enumeração incompleta): a divergência não é conclusiva")
 		return nil
+	}
+	// Aqui as DUAS passadas completaram (primeiraCompleta acima, e a segunda não
+	// cortou logo agora): a confirmação é fidedigna, seja o resultado vazio ou
+	// não. É esta asserção que o check exige antes de acusar, e que um dump
+	// antigo não carrega.
+	if f != nil {
+		f.BPF.OcultosConfirmados = true
 	}
 	agora := map[uint32]bool{}
 	for _, id := range segunda {

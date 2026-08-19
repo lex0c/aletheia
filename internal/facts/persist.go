@@ -380,6 +380,16 @@ func collectLoader(f *Facts, e *env.Env) {
 			})
 		}
 	}
+	// O teto de include existe contra um ld.so.conf que se inclui em ciclo ou
+	// aponta para uma árvore enorme — mas cortar em silêncio transforma "parei
+	// de olhar" em "não há". Se a cadeia passou do teto, um diretório de busca
+	// gravável declarado além dele NÃO foi avaliado, e isso precisa constar.
+	if len(confs) > maxConfsLoader {
+		f.denyPersist("loader", "a cadeia de include do ld.so.conf passou de "+
+			strconv.Itoa(maxConfsLoader)+" arquivos e foi cortada no teto: os "+
+			"diretórios de busca de biblioteca declarados além dele NÃO foram "+
+			"avaliados")
+	}
 
 	// Lidos pelo PAM a cada sessão.
 	for _, p := range []string{"/etc/environment", "/etc/security/pam_env.conf"} {
@@ -491,6 +501,11 @@ func collectUnits(f *Facts, e *env.Env) {
 		}
 		ents, err := e.ReadDir(d.dir)
 		if err != nil {
+			if env.EhLacuna(err) {
+				f.denyPersist("unit", d.dir+" não pôde ser listado ("+
+					env.MotivoDoErro(err)+"): as units declaradas nesta árvore NÃO "+
+					"foram avaliadas — uma unit de persistência plantada aqui passaria")
+			}
 			continue
 		}
 		for _, ent := range ents {

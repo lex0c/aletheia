@@ -134,7 +134,11 @@ func TestColetorIlegivelDeclaraLacuna(t *testing.T) {
 			arquivos: []string{"etc/sudoers"}, rodar: collectUsers},
 		{nome: "logins", arquivos: []string{"var/log/wtmp", "var/log/btmp", "run/utmp"}, rodar: collectLogins},
 		{nome: "boot", dirs: []string{"boot"}, arquivos: []string{"etc/default/grub"}, rodar: collectBoot},
-		{nome: "mac", dirs: []string{"etc/selinux"}, arquivos: []string{"etc/apparmor.d/x"}, rodar: collectMAC},
+		// Só /etc/selinux: collectMAC lê o config do SELinux e o selinuxfs, e
+		// NÃO consulta o estado do AppArmor (aa-status / apparmorfs). Injetar um
+		// /etc/apparmor.d ilegível testaria o que o coletor não faz — dívida de
+		// FEATURE registrada abaixo, não lacuna de leitura silenciosa.
+		{nome: "mac", dirs: []string{"etc/selinux"}, rodar: collectMAC},
 		{nome: "trust/hosts", arquivos: []string{"etc/hosts"}, rodar: collectTrust},
 		{nome: "trust/resolv", arquivos: []string{"etc/resolv.conf"}, rodar: collectTrust},
 		{nome: "trust/ca", dirs: []string{"usr/local/share/ca-certificates"}, rodar: collectTrust},
@@ -172,6 +176,11 @@ func TestColetorIlegivelDeclaraLacuna(t *testing.T) {
 	//	helpers    lê /proc, que não existe sob --root: o coletor é live-only e
 	//	           este harness roda em modo image. Cobri-lo exige injeção de
 	//	           falha na camada de leitura, não uma raiz travada.
+	//	apparmor   collectMAC lê SÓ o SELinux (config + selinuxfs). O estado do
+	//	           AppArmor — aa-status, /sys/kernel/security/apparmor/profiles —
+	//	           não é coletado, então antiforense.mac_downgraded é cego a um
+	//	           AppArmor desligado. Dívida de FEATURE (falta a coleta), não de
+	//	           leitura silenciosa (o que se lê já declara lacuna).
 	//
 	// Dívida declarada, não esquecimento — é a mesma regra que o código aplica
 	// a si mesmo.
@@ -187,11 +196,16 @@ func TestColetorIlegivelDeclaraLacuna(t *testing.T) {
 			// exatamente assim que o silêncio do /etc/ld.so.conf se escondeu atrás
 			// do denyPersist do /etc/ld.so.preload.
 			//
-			// O casamento é pelo BASENAME (o coletor pode citar o caminho sob a
-			// raiz temporária, não o absoluto do sistema).
+			// O casamento é pelo CAMINHO LÓGICO completo, não pelo basename. O
+			// basename colidia: `etc/systemd/system` e `usr/lib/systemd/system`
+			// têm ambos "system", então o caso passava se UM só declarasse — o
+			// exato buraco que este harness existe para fechar. O coletor cita o
+			// caminho lógico com barra inicial (`/etc/systemd/system`), e mesmo
+			// quando o erro do SO traz o caminho rooteado, o lógico aparece como
+			// sufixo dele.
 			for _, caminho := range append(append([]string{}, c.arquivos...), c.dirs...) {
-				base := caminho[strings.LastIndexByte(caminho, '/')+1:]
-				if !strings.Contains(todas, base) {
+				alvo := "/" + strings.TrimPrefix(caminho, "/")
+				if !strings.Contains(todas, alvo) {
 					t.Errorf("%s: %q é ILEGÍVEL e NÃO aparece em nenhuma lacuna — "+
 						"ausência afirmada a partir de disco que não foi lido.\nlacunas:\n%s",
 						c.nome, caminho, todas)

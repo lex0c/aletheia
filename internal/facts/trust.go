@@ -276,7 +276,14 @@ func procurarHooks(f *Facts, e *env.Env, dir string, prof int, vistos *int, trun
 }
 
 func lerHooks(f *Facts, e *env.Env, dir string) {
-	for _, n := range e.ReadDirNames(dir) {
+	nomes, err := e.ReadDirNamesErr(dir)
+	if env.EhLacuna(err) {
+		f.denyPersist("trust", dir+" não pôde ser listado ("+env.MotivoDoErro(err)+
+			"): os git hooks — que rodam a cada operação de git e sobrevivem ao "+
+			"redeploy — NÃO foram avaliados")
+		return
+	}
+	for _, n := range nomes {
 		// Os .sample vêm com o git e não executam.
 		if strings.HasSuffix(n, ".sample") {
 			continue
@@ -284,6 +291,10 @@ func lerHooks(f *Facts, e *env.Env, dir string) {
 		p := dir + "/" + n
 		if t, ok := lerTrigger(e, p, "git_hook",
 			"a cada operação de git — sobrevive ao redeploy e não mora em /etc", ""); ok {
+			if t.Ilegvel {
+				f.denyPersist("trust", p+" existe e não pôde ser LIDO: um git hook "+
+					"plantado ali — que roda a cada operação de git — NÃO foi avaliado")
+			}
 			f.Triggers = append(f.Triggers, t)
 		}
 	}
@@ -331,31 +342,38 @@ var arquivosDeConfiancaDeHome = []string{".rhosts", ".shosts"}
 // collectConfiancaDeHost lê os arquivos de confiança host-based.
 func collectConfiancaDeHost(f *Facts, e *env.Env) {
 	for _, p := range arquivosDeConfiancaDeSistema {
-		if c, ok := lerConfiancaDeHost(e, p, "sistema", ""); ok {
+		c, existe, ilegivel := lerConfiancaDeHost(e, p, "sistema", "")
+		if ilegivel {
+			f.denyPersist("trust", p+" existe e não pôde ser LIDO: uma confiança "+
+				"host-based (login sem senha, inclusive `+` irrestrito) plantada ali "+
+				"NÃO foi avaliada")
+			continue
+		}
+		if existe {
 			f.ConfiancaDeHost = append(f.ConfiancaDeHost, c)
-		} else if _, negado := lookup(e, p); negado {
-			f.denyPersist("trust", p+" existe e não pôde ser lido: uma confiança "+
-				"host-based (login sem senha) plantada ali NÃO foi avaliada")
 		}
 	}
 	for _, home := range homeDirs(e) {
 		conta := home[strings.LastIndexByte(home, '/')+1:]
 		for _, rel := range arquivosDeConfiancaDeHome {
 			p := home + "/" + rel
-			if c, ok := lerConfiancaDeHost(e, p, "usuario", conta); ok {
+			c, existe, ilegivel := lerConfiancaDeHost(e, p, "usuario", conta)
+			if ilegivel {
+				f.denyPersist("trust", p+" existe e não pôde ser LIDO: a confiança "+
+					"host-based da conta "+conta+" (login sem senha) NÃO foi avaliada")
+				continue
+			}
+			if existe {
 				f.ConfiancaDeHost = append(f.ConfiancaDeHost, c)
-			} else if _, negado := lookup(e, p); negado {
-				f.denyPersist("trust", p+" existe e não pôde ser lido: a confiança "+
-					"host-based da conta "+conta+" NÃO foi avaliada")
 			}
 		}
 	}
 }
 
-func lerConfiancaDeHost(e *env.Env, p, escopo, conta string) (ConfiancaDeHost, bool) {
+func lerConfiancaDeHost(e *env.Env, p, escopo, conta string) (r ConfiancaDeHost, existe, ilegivel bool) {
 	fi, err := e.Lstat(p)
 	if err != nil {
-		return ConfiancaDeHost{}, false
+		return ConfiancaDeHost{}, false, false
 	}
 	c := ConfiancaDeHost{Path: p, Escopo: escopo, Conta: conta,
 		Modo:   fi.Mode().Perm().String(),
@@ -365,7 +383,12 @@ func lerConfiancaDeHost(e *env.Env, p, escopo, conta string) (ConfiancaDeHost, b
 	}
 	b, err := e.ReadFile(p)
 	if err != nil {
-		return c, true // existe; ilegível é tratado pelo chamador via lookup
+		// EXISTE e não pôde ser LIDO. Devolver isto como regra válida de
+		// conteúdo vazio era o bug: um arquivo com `+` (login sem senha de
+		// qualquer lugar) caía de CRÍTICO para AVISO porque Curinga nunca foi
+		// lido, e o chamador nem declarava lacuna. lstat funcionar não prova que
+		// o conteúdo é legível — a permissão de stat vem do diretório.
+		return c, true, env.EhLacuna(err)
 	}
 	for _, ln := range strings.Split(string(b), "\n") {
 		ln = strings.TrimSpace(ln)
@@ -383,5 +406,5 @@ func lerConfiancaDeHost(e *env.Env, p, escopo, conta string) (ConfiancaDeHost, b
 		}
 		c.Linhas = append(c.Linhas, ln)
 	}
-	return c, true
+	return c, true, false
 }

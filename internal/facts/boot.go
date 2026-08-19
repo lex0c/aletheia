@@ -169,6 +169,11 @@ func lerDefaultGrub(f *Facts, e *env.Env, add adicionaBoot) {
 	for _, p := range []string{"/etc/default/grub", "/etc/sysconfig/grub"} {
 		b, err := e.ReadFile(p)
 		if err != nil {
+			if env.EhLacuna(err) {
+				f.denyPersist("boot", p+" existe e não pôde ser lido ("+
+					env.MotivoDoErro(err)+"): uma linha de comando de kernel "+
+					"enfraquecida ou um init substituído aqui NÃO foi avaliado")
+			}
 			continue
 		}
 		f.BootConfigLido = true

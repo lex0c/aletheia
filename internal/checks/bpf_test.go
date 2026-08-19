@@ -230,13 +230,36 @@ func TestBPFInventarioCalaEmHostSemEBPF(t *testing.T) {
 // A visão cruzada: citado por descritor e ausente da lista, já confirmado pelo
 // coletor.
 func TestBPFOcultoEhCritico(t *testing.T) {
-	f := &facts.Facts{BPF: facts.BPF{Enumerado: true, Ocultos: []uint32{42}}}
+	// OcultosConfirmados: a confirmação de duas passadas rodou completa. Sem
+	// ela o achado é suprimido — ver TestBPFOcultoSemConfirmacaoNaoAcusa.
+	f := &facts.Facts{BPF: facts.BPF{Enumerado: true, Ocultos: []uint32{42}, OcultosConfirmados: true}}
 	r := bpfOculto.Run(bpfOculto, f, testEnv())
 	if len(r.Findings) != 1 || r.Findings[0].Sev != check.SevCritical {
 		t.Fatalf("id citado e não listado é crítico: %v", r.Findings)
 	}
 	if !r.Findings[0].Irreversible {
 		t.Error("a prova some no reboot: o achado é irreversível")
+	}
+}
+
+// Replay de dump antigo: o binário bugado gravava Ocultos SEM a asserção de
+// confirmação completa (o campo nem existia). O binário novo, ao ler esse
+// retrato, NÃO pode acusar a partir de Ocultos — declara lacuna. É a proteção
+// contra o CRÍTICO irreversível fabricado a partir de um dump de outra versão.
+func TestBPFOcultoSemConfirmacaoNaoAcusa(t *testing.T) {
+	f := &facts.Facts{BPF: facts.BPF{Enumerado: true, Ocultos: []uint32{42}}} // OcultosConfirmados: false
+	r := bpfOculto.Run(bpfOculto, f, testEnv())
+	if len(r.Findings) != 0 {
+		t.Fatalf("sem a asserção de confirmação, não se acusa: %v", r.Findings)
+	}
+	achouLacuna := false
+	for _, p := range r.Partial {
+		if strings.Contains(p, "confirmação de ocultamento") {
+			achouLacuna = true
+		}
+	}
+	if !achouLacuna {
+		t.Errorf("a incapacidade de confirmar tem de virar lacuna declarada: %v", r.Partial)
 	}
 }
 

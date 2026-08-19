@@ -203,3 +203,41 @@ func TestEvasaoAgendadorDaDistro(t *testing.T) {
 		{"run-parts /tmp/meus", false, "diretório do atacante"},
 	})
 }
+
+// ---------------------------------------------------------------- alvo efetivo (wrapper)
+//
+// "O primeiro executável" virou uma regra de evasão comum entre systemd,
+// gatilho e inetd/xinetd: todo wrapper legítimo — sudo, env, sh -c, tcpd —
+// deixa a si mesmo como primeiro token e empurra o payload para o argumento.
+// alvoEfetivo desembrulha; este bloco é a rede que impede alguém de estreitá-lo
+// e reabrir a porta. Testa-se pela DECISÃO real (execSuspect), não pelo formato
+// do alvo: o eixo é o WRAPPER, e cada linha custa um prefixo a mais.
+func TestEvasaoAlvoEfetivo(t *testing.T) {
+	f := func(s string) bool { _, _, ok := execSuspect(s); return ok }
+	roda(t, "execSuspect/wrapper", f, []ev{
+		{"/tmp/.x", true, "sem wrapper: forma base"},
+		{"sudo /tmp/.x", true, "sudo"},
+		{"/usr/bin/env /tmp/.x", true, "env por caminho"},
+		{"env FOO=bar /tmp/.x", true, "env com VAR=val antes do alvo"},
+		{"nohup /tmp/.x", true, "nohup"},
+		{"setsid /tmp/.x", true, "setsid"},
+		{"doas /tmp/.x", true, "doas"},
+		{"exec /tmp/.x", true, "exec"},
+		{"stdbuf -oL /tmp/.x", true, "stdbuf com flag"},
+		{"/usr/sbin/tcpd /tmp/.x", true, "tcpd (NAMEINARGS do inetd)"},
+		{"ionice -c3 /tmp/.x", true, "ionice com flag"},
+		{"nice -n 10 /tmp/.x", true, "nice com flag e valor"},
+		{"timeout 30 /tmp/.x", true, "timeout: 30 é duração, não o alvo"},
+		{"timeout 1.5h /tmp/.x", true, "timeout com sufixo de hora"},
+		{"sh -c /tmp/.x", true, "sh -c com caminho nu"},
+		{"/bin/sh -c /tmp/.x", true, "sh por caminho absoluto"},
+		{"bash -c '/tmp/.x -flag'", true, "bash -c com aspas e flag"},
+		{"sudo env nohup /tmp/.x", true, "wrappers aninhados"},
+		{"tcpd sh -c /tmp/.x", true, "tcpd embrulhando sh -c"},
+		// Negativos: o alvo real é legítimo, mesmo embrulhado.
+		{"/usr/bin/legit", false, "programa legítimo sem wrapper"},
+		{"sudo /usr/bin/legit", false, "sudo não torna legítimo suspeito"},
+		{"sh -c /usr/bin/legit", false, "sh -c de um caminho legítimo"},
+		{"env /usr/sbin/sshd", false, "env de daemon legítimo"},
+	})
+}

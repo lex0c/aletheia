@@ -223,7 +223,14 @@ func procurarPHP(f *Facts, e *env.Env, dir string, prof int) {
 	if prof > 3 {
 		return
 	}
-	for _, n := range e.ReadDirNames(dir) {
+	nomes, err := e.ReadDirNamesErr(dir)
+	if env.EhLacuna(err) {
+		f.denyPersist("startup", dir+" não pôde ser listado ("+env.MotivoDoErro(err)+
+			"): o auto_prepend_file do PHP, que roda antes de CADA requisição, "+
+			"NÃO foi avaliado")
+		return
+	}
+	for _, n := range nomes {
 		p := dir + "/" + n
 		if e.IsDir(p) {
 			procurarPHP(f, e, p, prof+1)
@@ -382,14 +389,14 @@ func collectInetd(f *Facts, e *env.Env) {
 			continue
 		}
 		// service(0) socket_type(1) proto(2) flags(3) user(4) server(5) args...
-		// O programa é o campo 6 (índice 5); `internal` é serviço embutido no
-		// inetd, sem programa externo. O `user` pode vir como `user.group`, mas
-		// isso não desloca o server — continua no 5.
-		prog := campos[5]
-		if prog == "internal" {
+		// Guarda o server E os args: `root /bin/sh sh -c /tmp/.x` sem os args
+		// vira só `/bin/sh`, e o /tmp/.x — o alvo real — some da decisão. O
+		// alvoEfetivo do check desembrulha o `sh -c`, mas só se os args
+		// chegarem até ele. `internal` é serviço embutido, sem programa externo.
+		if campos[5] == "internal" {
 			continue
 		}
-		linhas = append(linhas, TriggerLine{N: i + 1, Text: prog})
+		linhas = append(linhas, TriggerLine{N: i + 1, Text: strings.Join(campos[5:], " ")})
 	}
 	if len(linhas) > 0 {
 		registrarServicoLegado(f, e, "/etc/inetd.conf", "inetd",
@@ -401,46 +408,187 @@ func collectInetd(f *Facts, e *env.Env) {
 // `server =` é o programa, e `disable = yes` desliga o serviço (mas o arquivo
 // continua lá, reativável).
 func collectXinetd(f *Facts, e *env.Env) {
+	// A árvore inteira do xinetd: o arquivo raiz E o includedir que ele aponta.
+	// Ler só o /etc/xinetd.d é o buraco clássico — um serviço declarado direto
+	// no xinetd.conf (forma antiga, ainda válida) passava invisível.
+	textos := map[string]string{}
+	if b, err := e.ReadFile("/etc/xinetd.conf"); err == nil {
+		textos["/etc/xinetd.conf"] = string(b)
+	} else if env.EhLacuna(err) {
+		f.denyPersist("startup", "/etc/xinetd.conf existe e não pôde ser lido: "+
+			"serviços declarados nele NÃO foram avaliados")
+	}
+
 	nomes, err := e.ReadDirNamesErr("/etc/xinetd.d")
 	if env.EhLacuna(err) {
 		f.denyPersist("startup", "/etc/xinetd.d não pôde ser listado: os serviços "+
 			"que rodam no connect NÃO foram avaliados")
-		return
 	}
 	for _, n := range nomes {
-		p := "/etc/xinetd.d/" + n
-		if e.IsDir(p) {
+		q := "/etc/xinetd.d/" + n
+		if e.IsDir(q) {
 			continue
 		}
-		b, err := e.ReadFile(p)
+		b, err := e.ReadFile(q)
 		if err != nil {
 			if env.EhLacuna(err) {
-				f.denyPersist("startup", p+" existe e não pôde ser lido: o servidor "+
+				f.denyPersist("startup", q+" existe e não pôde ser lido: o servidor "+
 					"xinetd dele NÃO foi avaliado")
 			}
 			continue
 		}
-		var server string
-		var linha int
-		desabilitado := false
-		for i, raw := range strings.Split(string(b), "\n") {
-			ln := strings.TrimSpace(raw)
-			if k, v, ok := strings.Cut(ln, "="); ok {
-				k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-				switch k {
-				case "server":
-					server, linha = v, i+1
-				case "disable":
-					desabilitado = strings.EqualFold(v, "yes")
+		textos[q] = string(b)
+	}
+
+	// defaults{} governa TODA a árvore, mesmo que more no xinetd.conf e o serviço
+	// esteja num arquivo do includedir. Por isso a decisão de "está ligado?" só
+	// pode ser tomada depois de ler tudo — dois passos, não um.
+	desabilitadosGlobal := map[string]bool{}
+	habilitadosGlobal := map[string]bool{}
+	temEnabled := false
+	type svc struct {
+		arquivo, nome, cmd string
+		linha              int
+	}
+	var servicos []svc
+	for arq, txt := range textos {
+		for _, bl := range parseXinetd(txt) {
+			if bl.ehDefaults {
+				for _, nm := range strings.Fields(bl.attrs["disabled"]) {
+					desabilitadosGlobal[nm] = true
 				}
+				if v, ok := bl.attrs["enabled"]; ok {
+					temEnabled = true
+					for _, nm := range strings.Fields(v) {
+						habilitadosGlobal[nm] = true
+					}
+				}
+				continue
 			}
+			if strings.EqualFold(strings.TrimSpace(bl.attrs["disable"]), "yes") {
+				continue
+			}
+			server := strings.TrimSpace(bl.attrs["server"])
+			if server == "" {
+				continue
+			}
+			cmd := server
+			if sa := strings.TrimSpace(bl.attrs["server_args"]); sa != "" {
+				// server + server_args: com NAMEINARGS o server é um wrapper
+				// (tcpd) e o programa real está nos args. O alvoEfetivo do check
+				// desembrulha, mas precisa dos args.
+				cmd = server + " " + sa
+			}
+			servicos = append(servicos, svc{arq, bl.nome, cmd, bl.serverLinha})
 		}
-		if server == "" || desabilitado {
+	}
+
+	for _, sv := range servicos {
+		if desabilitadosGlobal[sv.nome] {
+			continue // defaults{ disabled = ... } desligou este
+		}
+		if temEnabled && !habilitadosGlobal[sv.nome] {
+			continue // defaults{ enabled = ... } é lista branca: fora dela, off
+		}
+		registrarServicoLegado(f, e, sv.arquivo, "xinetd",
+			"quando alguém conecta na porta do serviço",
+			[]TriggerLine{{N: sv.linha, Text: sv.cmd}})
+	}
+}
+
+// blocoXinetd é um bloco `service NAME { ... }` ou `defaults { ... }` já lido.
+type blocoXinetd struct {
+	nome        string // vazio para defaults
+	ehDefaults  bool
+	attrs       map[string]string // última atribuição vence; server guarda a linha
+	serverLinha int
+}
+
+// parseXinetd entende a gramática do xinetd o suficiente para a pergunta desta
+// ferramenta: quais serviços estão declarados, com qual server, e ligados?
+//
+// A forma ingênua — varrer o arquivo pegando o último `server=` — funde blocos
+// e mistura o server de um serviço com o disable de outro. Um arquivo com dois
+// `service {}` (raro, mas válido) plantava um backdoor no segundo bloco e a
+// leitura só via o primeiro. Aqui cada bloco é isolado por chaves.
+func parseXinetd(texto string) []blocoXinetd {
+	var blocos []blocoXinetd
+	var cur *blocoXinetd
+	esperandoAbre := false
+	for i, raw := range strings.Split(texto, "\n") {
+		ln := raw
+		if j := strings.IndexByte(ln, '#'); j >= 0 {
+			ln = ln[:j]
+		}
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
 			continue
 		}
-		registrarServicoLegado(f, e, p, "xinetd",
-			"quando alguém conecta na porta do serviço",
-			[]TriggerLine{{N: linha, Text: server}})
+		if cur == nil {
+			campos := strings.Fields(ln)
+			switch campos[0] {
+			case "service", "defaults":
+				b := blocoXinetd{attrs: map[string]string{}, ehDefaults: campos[0] == "defaults"}
+				if campos[0] == "service" && len(campos) >= 2 {
+					b.nome = campos[1]
+				}
+				cur = &b
+				if idx := strings.IndexByte(ln, '{'); idx >= 0 {
+					// `{` na mesma linha; o que vier depois é atributo.
+					esperandoAbre = false
+					resto := strings.TrimSpace(ln[idx+1:])
+					if resto != "" {
+						aplicaAtributoXinetd(cur, resto, i+1)
+					}
+				} else {
+					esperandoAbre = true
+				}
+			}
+			continue
+		}
+		if esperandoAbre {
+			if idx := strings.IndexByte(ln, '{'); idx >= 0 {
+				esperandoAbre = false
+				ln = strings.TrimSpace(ln[idx+1:])
+				if ln == "" {
+					continue
+				}
+			} else {
+				// bloco malformado sem `{`; abandona-o para não engolir o resto.
+				cur = nil
+				continue
+			}
+		}
+		if strings.HasPrefix(ln, "}") {
+			blocos = append(blocos, *cur)
+			cur = nil
+			continue
+		}
+		aplicaAtributoXinetd(cur, ln, i+1)
+	}
+	if cur != nil {
+		blocos = append(blocos, *cur)
+	}
+	return blocos
+}
+
+// aplicaAtributoXinetd registra uma linha `chave OP valor` (OP = `=`, `+=` ou
+// `-=`) no bloco. Para esta ferramenta += e -= tratam-se como =: o interesse é
+// SE um server foi nomeado, não a composição exata da lista.
+func aplicaAtributoXinetd(b *blocoXinetd, ln string, linha int) {
+	eq := strings.IndexByte(ln, '=')
+	if eq < 0 {
+		return
+	}
+	chave := strings.TrimRight(strings.TrimSpace(ln[:eq]), "+-")
+	chave = strings.TrimSpace(chave)
+	valor := strings.TrimSpace(ln[eq+1:])
+	if chave == "" {
+		return
+	}
+	b.attrs[chave] = valor
+	if chave == "server" {
+		b.serverLinha = linha
 	}
 }
 

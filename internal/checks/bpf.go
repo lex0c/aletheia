@@ -395,22 +395,34 @@ var bpfOculto = check.Check{
 			return r
 		}
 
-		for _, id := range f.BPF.Ocultos {
-			fd := self.F(check.SevCritical, "bpf prog id="+strconv.Itoa(int(id)), "", []string{
-				"o id " + strconv.Itoa(int(id)) + " é citado por um descritor aberto, " +
-					"por um pin ou por um link, e a enumeração do kernel não o devolve",
-				"perguntar pelo id e pedir a lista são caminhos diferentes dentro " +
-					"do kernel: divergir significa que um deles foi manipulado",
-				"é a mesma forma do PID que responde a stat e não aparece na " +
-					"listagem de /proc (runbook §32)",
-			}...)
-			fd.Irreversible = true
-			fd.NextSteps = []string{
-				"a partir daqui, NADA que dependa deste kernel vale como prova: " +
-					"analise a imagem DE FORA (runbook §35.6)",
-				"guarde o id e o processo que o cita antes de qualquer outra coisa",
+		// A acusação exige a ASSERÇÃO de que a confirmação de duas passadas rodou
+		// completa. Ocultos sem ela é dump antigo (binário anterior à correção do
+		// truncamento) ou confirmação inconclusiva: não se acusa a partir dele —
+		// declara-se a lacuna. Ver Facts.BPF.OcultosConfirmados.
+		if len(f.BPF.Ocultos) > 0 && !f.BPF.OcultosConfirmados {
+			r.Partial = append(r.Partial, "há ids de eBPF citados e não listados, MAS "+
+				"a confirmação de ocultamento (duas enumerações completas) não consta "+
+				"neste retrato — dump anterior à correção do truncamento, ou coleta "+
+				"inconclusiva: inconclusivo, não acusado")
+		}
+		if f.BPF.OcultosConfirmados {
+			for _, id := range f.BPF.Ocultos {
+				fd := self.F(check.SevCritical, "bpf prog id="+strconv.Itoa(int(id)), "", []string{
+					"o id " + strconv.Itoa(int(id)) + " é citado por um descritor aberto, " +
+						"por um pin ou por um link, e a enumeração do kernel não o devolve",
+					"perguntar pelo id e pedir a lista são caminhos diferentes dentro " +
+						"do kernel: divergir significa que um deles foi manipulado",
+					"é a mesma forma do PID que responde a stat e não aparece na " +
+						"listagem de /proc (runbook §32)",
+				}...)
+				fd.Irreversible = true
+				fd.NextSteps = []string{
+					"a partir daqui, NADA que dependa deste kernel vale como prova: " +
+						"analise a imagem DE FORA (runbook §35.6)",
+					"guarde o id e o processo que o cita antes de qualquer outra coisa",
+				}
+				r.Findings = append(r.Findings, fd)
 			}
-			r.Findings = append(r.Findings, fd)
 		}
 
 		// Só com a enumeração COMPLETA. Com a lista truncada, um programa

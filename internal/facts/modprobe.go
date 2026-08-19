@@ -78,6 +78,11 @@ func collectModprobe(f *Facts, e *env.Env) {
 func lerCargaDeModulo(f *Facts, e *env.Env, p string) {
 	b, err := e.ReadFile(p)
 	if err != nil {
+		if env.EhLacuna(err) {
+			f.denyPersist("modprobe", p+" existe e não pôde ser lido ("+
+				env.MotivoDoErro(err)+"): os módulos que ele manda carregar no boot "+
+				"NÃO foram avaliados")
+		}
 		return
 	}
 	for i, raw := range strings.Split(string(b), "\n") {
@@ -96,6 +101,11 @@ func lerCargaDeModulo(f *Facts, e *env.Env, p string) {
 func lerModprobe(f *Facts, e *env.Env, p string) {
 	b, err := e.ReadFile(p)
 	if err != nil {
+		if env.EhLacuna(err) {
+			f.denyPersist("modprobe", p+" existe e não pôde ser lido ("+
+				env.MotivoDoErro(err)+"): a diretiva `install`, que EXECUTA como root "+
+				"na carga de um módulo, NÃO foi avaliada")
+		}
 		return
 	}
 	for i, raw := range strings.Split(string(b), "\n") {

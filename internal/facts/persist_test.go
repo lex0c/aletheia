@@ -3,6 +3,7 @@ package facts
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -279,5 +280,27 @@ func TestUnitsLeAsDuasArvoresSemUsrMerge(t *testing.T) {
 	}
 	if !vistos["a.service"] || !vistos["b.service"] {
 		t.Errorf("as duas árvores separadas têm que ser lidas: %v", vistos)
+	}
+}
+
+// O teto de include do ld.so.conf (maxConfsLoader) não pode cortar em silêncio:
+// um diretório de busca gravável declarado além dele viraria "não há" quando o
+// certo é "parei de olhar". Com mais arquivos que o teto, a lacuna é declarada.
+func TestLoaderTetoDeIncludeDeclaraLacuna(t *testing.T) {
+	arqs := map[string]string{
+		"etc/ld.so.conf": "/usr/lib\n",
+	}
+	for i := 0; i < maxConfsLoader+8; i++ {
+		arqs["etc/ld.so.conf.d/"+strconv.Itoa(i)+".conf"] = "/opt/lib" + strconv.Itoa(i) + "\n"
+	}
+	f := imagem(t, arqs)
+	achou := false
+	for _, m := range f.PersistDenied["loader"] {
+		if strings.Contains(m, "teto") {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Errorf("cadeia acima do teto tem de declarar lacuna: %v", f.PersistDenied["loader"])
 	}
 }

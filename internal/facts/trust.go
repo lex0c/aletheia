@@ -122,6 +122,11 @@ func collectHosts(f *Facts, e *env.Env) {
 	f.Resolver.HostsModUTC = modUTC(e, "/etc/hosts")
 	b, err := e.ReadFile("/etc/hosts")
 	if err != nil {
+		if env.EhLacuna(err) {
+			f.denyPersist("trust", "/etc/hosts não pôde ser lido ("+env.MotivoDoErro(err)+
+				"): um redirecionamento de domínio de atualização plantado ali NÃO "+
+				"foi avaliado")
+		}
 		return
 	}
 	for i, raw := range strings.Split(string(b), "\n") {
@@ -144,6 +149,10 @@ func collectResolver(f *Facts, e *env.Env) {
 	for _, p := range []string{"/etc/resolv.conf", "/etc/systemd/resolved.conf"} {
 		b, err := e.ReadFile(p)
 		if err != nil {
+			if env.EhLacuna(err) {
+				f.denyPersist("trust", p+" não pôde ser lido ("+env.MotivoDoErro(err)+
+					"): o servidor DNS configurado NÃO foi avaliado")
+			}
 			continue
 		}
 		if f.Resolver.File == "" {

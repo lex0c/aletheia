@@ -1,5 +1,7 @@
 package variante
 
+import "github.com/lex0c/aletheia/internal/check"
+
 // tabela: cada técnica ATT&CK em várias formas.
 //
 // As FIRE são formas que um atacante escolhe de graça e que o check tem de
@@ -9,7 +11,7 @@ var tabela = []tecnica{
 	{
 		attack: "T1574.006", nome: "ld_preload",
 		variantes: []variante{
-			{nome: "lib em tmp", esperaID: "persist.ld_preload_global",
+			{nome: "lib em tmp", esperaID: "persist.ld_preload_global", esperaSev: check.SevCritical,
 				arquivos: map[string]string{"etc/ld.so.preload": "/tmp/.x.so\n"},
 				nota:     "o caminho da lib é escolha do atacante"},
 			{nome: "lib em usr local", esperaID: "persist.ld_preload_global",
@@ -60,13 +62,13 @@ var tabela = []tecnica{
 	{
 		attack: "T1021.004", nome: "host_trust",
 		variantes: []variante{
-			{nome: "hosts.equiv curinga", esperaID: "persist.host_trust",
+			{nome: "hosts.equiv curinga", esperaID: "persist.host_trust", esperaSev: check.SevCritical,
 				arquivos: map[string]string{"etc/hosts.equiv": "+\n"},
 				nota:     "o + confia em qualquer host e qualquer usuário: login sem senha de qualquer lugar"},
 			{nome: "hosts.equiv com comentario", esperaID: "persist.host_trust",
 				arquivos: map[string]string{"etc/hosts.equiv": "# trust\n+\n"},
 				nota:     "comentário antes do + não esconde o curinga"},
-			{nome: "shosts.equiv nomeado", esperaID: "persist.host_trust",
+			{nome: "shosts.equiv nomeado", esperaID: "persist.host_trust", esperaSev: check.SevWarn,
 				arquivos: map[string]string{"etc/shosts.equiv": "buildserver\n"},
 				nota:     "host nomeado é raro em sistema moderno: aviso, mas achado"},
 			{nome: "rhosts de root", esperaID: "persist.host_trust",
@@ -79,7 +81,7 @@ var tabela = []tecnica{
 	{
 		attack: "T1543", nome: "servico_legado",
 		variantes: []variante{
-			{nome: "inetd shell no connect", esperaID: "persist.trigger_exec",
+			{nome: "inetd shell no connect", esperaID: "persist.trigger_exec", esperaSev: check.SevCritical,
 				arquivos: map[string]string{"etc/inetd.conf": "9999 stream tcp nowait root /tmp/.x bash -i\n"},
 				nota:     "o server (campo 6) é o programa que roda no connect"},
 			{nome: "xinetd server em tmpfs", esperaID: "persist.trigger_exec",
@@ -88,7 +90,7 @@ var tabela = []tecnica{
 			{nome: "xinetd desabilitado nao dispara", esperaID: "persist.trigger_exec", cego: true,
 				arquivos: map[string]string{"etc/xinetd.d/off": "service off {\n server = /tmp/.y\n disable = yes\n}\n"},
 				nota:     "disable = yes: o arquivo fica, mas não roteia; não é achado"},
-			{nome: "inittab respawn de tmpfs", esperaID: "persist.trigger_exec",
+			{nome: "inittab respawn de tmpfs", esperaID: "persist.trigger_exec", esperaSev: check.SevCritical,
 				arquivos: map[string]string{"etc/inittab": "x:2345:respawn:/tmp/.boot\n"},
 				nota:     "respawn roda no boot e reergue"},
 		},

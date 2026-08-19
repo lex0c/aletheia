@@ -413,7 +413,17 @@ var bpfOculto = check.Check{
 			r.Findings = append(r.Findings, fd)
 		}
 
-		if simbolos := trampolimSemPrograma(f); len(simbolos) > 0 {
+		// Só com a enumeração COMPLETA. Com a lista truncada, um programa
+		// legítimo de tracing/lsm/ext/struct_ops pode ter ficado depois do teto,
+		// e "nenhum programa explica o trampolim" viraria um CRÍTICO
+		// irreversível a partir do próprio limite da ferramenta. Este check é
+		// kernelBreaker: a exigência de prova precisa ser máxima.
+		if f.BPF.Cortado && len(trampolimSemPrograma(f)) > 0 {
+			r.Partial = append(r.Partial, "há trampolim de eBPF sem programa que o "+
+				"explique, MAS a enumeração de programas foi truncada: o programa "+
+				"que explicaria pode estar além do teto — inconclusivo, não acusado")
+		}
+		if simbolos := trampolimSemPrograma(f); len(simbolos) > 0 && !f.BPF.Cortado {
 			fd := self.F(check.SevCritical, "trampolim de eBPF", "", []string{
 				strconv.Itoa(len(simbolos)) + " função(ões) do kernel interceptada(s) " +
 					"por trampolim de eBPF: " + strings.Join(corta(simbolos, 6), " "),

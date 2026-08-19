@@ -182,10 +182,12 @@ echo "netns_lacuna=$(grep -c 'network namespace' /tmp/dnl.json 2>/dev/null)"
 # e medido, não afirmado.
 /plant bpfdoor >/tmp/bd.out 2>&1 &
 sleep 1
-BDPID=$(sed -n 's/PLANT pid=\([0-9]*\).*/\1/p' /tmp/bd.out)
+BDPROG=$(sed -n 's/.*prog_id=\([0-9]*\).*/\1/p' /tmp/bd.out)
 scan
-# quantos socket_filter SEM dono visível o bpf_unowned aponta (0 = todos atribuídos)
-echo "bpfdoor_pid=$BDPID bpfdoor_unowned=$(tem kernel.bpf_unowned)"
+# bpf_unowned para O PROGRAMA que o plant criou, não qualquer um: os outros
+# objetos BPF da VM (cgroup, xdp, tc) continuam vivos, e "existe algum
+# bpf_unowned" passaria mesmo que o socket_filter específico sumisse.
+echo "bpfdoor_prog=$BDPROG bpfdoor_unowned=$(grep "\"id\":\"kernel.bpf_unowned\"" /tmp/o.jsonl 2>/dev/null | grep -c "prog id=$BDPROG")"
 
 echo "===END==="
 poweroff -f 2>/dev/null || echo o > /proc/sysrq-trigger
@@ -224,7 +226,7 @@ linha "XDP em lo"       "atribuído (RTM_GETLINK)"    "$(get net_base)"    "$(ge
 linha "cls_bpf (tc)"    "atribuído (RTM_GETTFILTER)" "$(get net_base)"    "$(get tc_attributed)"
 linha "act_bpf"         "atribuído (RTM_GETACTION)"  "$(get net_base)"    "$(get act_attributed)"
 linha "tc em outro netns" "lacuna netns DECLARADA"   "$(get netns_base)"  "$(get netns_lacuna)"
-linha "bpfdoor socket_filter" "kernel.bpf_unowned (órfão)" "0"           "$(get bpfdoor_unowned)"
+linha "bpfdoor prog $(get bpfdoor_prog)" "kernel.bpf_unowned (órfão)" "0"     "$(get bpfdoor_unowned)"
 
 # O duplo-hide tem dois lados: cross.socket_view CALA (as fontes concordam) e o
 # kernel.ftrace_hook DISPARA (o hook em tcp4_seq_show é sinal independente).

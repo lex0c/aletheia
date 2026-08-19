@@ -200,7 +200,7 @@ func collectBPF(f *Facts, e *env.Env) {
 	anexosDeCgroup(f, porID, citados)
 	tailCalls(f)
 
-	f.BPF.Ocultos = confirmarOcultosBPF(citados, porID)
+	f.BPF.Ocultos = confirmarOcultosBPF(f, citados, porID, !f.BPF.Cortado)
 
 	sort.Slice(f.BPF.Programas, func(i, j int) bool {
 		return f.BPF.Programas[i].ID < f.BPF.Programas[j].ID
@@ -809,7 +809,7 @@ func tailCalls(f *Facts) {
 // As duas primeiras são descartadas do jeito mais barato possível: reenumerar
 // (quem nasceu no meio aparece agora) e perguntar pelo id (quem morreu não
 // responde). O que sobreviver às duas é a terceira.
-func confirmarOcultosBPF(citados map[uint32]bool, porID map[uint32]*ProgramaBPF) []uint32 {
+func confirmarOcultosBPF(f *Facts, citados map[uint32]bool, porID map[uint32]*ProgramaBPF, primeiraCompleta bool) []uint32 {
 	enumerados := make(map[uint32]bool, len(porID))
 	for id := range porID {
 		enumerados[id] = true
@@ -819,10 +819,25 @@ func confirmarOcultosBPF(citados map[uint32]bool, porID map[uint32]*ProgramaBPF)
 		return nil
 	}
 
-	segunda, _, err := kbpf.IDsDePrograma()
-	if err != nil {
-		// Sem a segunda enumeração não há confirmação, e acusar sem ela seria
-		// pior que não acusar.
+	// "citado e não enumerado" só significa OCULTO se a enumeração foi
+	// COMPLETA. Com a lista truncada no teto de 4096, um programa legítimo
+	// depois do corte é citado (por um fd, um pin, um anexo) e não aparece na
+	// lista — pelo teto, não por manipulação. Acusar isso é um CRÍTICO
+	// irreversível fabricado a partir do próprio limite da ferramenta.
+	if !primeiraCompleta {
+		f.partial("bpf", "a enumeração de programas eBPF foi truncada (teto), então "+
+			"'citado e não listado' NÃO pode ser distinguido de 'além do teto': a "+
+			"confirmação de programa OCULTO foi suprimida")
+		return nil
+	}
+
+	segunda, segundaCortou, err := kbpf.IDsDePrograma()
+	if err != nil || segundaCortou {
+		// Sem uma segunda enumeração COMPLETA não há confirmação: um id que não
+		// aparece na segunda lista truncada pode ter ficado depois do teto.
+		// Acusar sem ela seria pior que não acusar.
+		f.partial("bpf", "a reconfirmação de programa eBPF oculto não pôde ser "+
+			"feita (segunda enumeração incompleta): a divergência não é conclusiva")
 		return nil
 	}
 	agora := map[uint32]bool{}

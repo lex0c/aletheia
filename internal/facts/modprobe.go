@@ -155,7 +155,17 @@ func collectModuleFiles(f *Facts, e *env.Env) {
 			return
 		}
 		visitados++
-		for _, ent := range e.ReadDirNames(dir) {
+		nomes, err := e.ReadDirNamesErr(dir)
+		if env.EhLacuna(err) {
+			// Subárvore de módulos ilegível: os .ko dela não entram no índice, e
+			// "este módulo não tem arquivo em disco" deixa de ser distinguível de
+			// "não consegui listar onde ele estaria" — que vira SemArquivo() e um
+			// falso CRÍTICO no check de módulo.
+			f.denyPersist("modprobe", dir+" (sob /lib/modules) não pôde ser listado ("+
+				env.MotivoDoErro(err)+"): os módulos em disco dali NÃO foram indexados")
+			return
+		}
+		for _, ent := range nomes {
 			p := dir + "/" + ent
 			if e.IsDir(p) {
 				anda(p, prof+1)

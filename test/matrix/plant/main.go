@@ -478,10 +478,21 @@ func criarMapa() int {
 // (uma instrução LD_MAP_FD), para que exista o vínculo prog->map. O programa é
 // trivial no resto: devolve 0. Devolve o fd do programa.
 func carregarSocketFilterComMapa(mapFD int) int {
-	// LD64 R1, map_fd (pseudo BPF_PSEUDO_MAP_FD=1); r0=0; exit.
+	// BPF_LD_MAP_FD(R1, map_fd) — o LD_IMM64 pseudo que cria a referência
+	// prog->map. A codificação exata importa (conferida contra
+	// samples/bpf/bpf_insn.h e struct bpf_insn do UAPI):
+	//
+	//   struct bpf_insn { u8 code; u8 dst_reg:4, src_reg:4; s16 off; s32 imm; }
+	//
+	// O segundo byte empacota dst_reg no nibble BAIXO e src_reg no ALTO. Para
+	// dst=R1 e src=BPF_PSEUDO_MAP_FD(=1) isso é 0x11, NÃO 0x01 — com 0x01 o
+	// src_reg é 0, e o kernel lê um LD_IMM64 COMUM que carrega o valor do fd
+	// como constante em R1 (que nem é usado), sem referência ao mapa nenhuma. E
+	// a segunda metade do LD_IMM64 leva a parte ALTA do immediate, que para um
+	// fd pequeno é 0 — não 1.
 	insns := []byte{
-		0x18, 0x01, 0, 0, byte(mapFD), byte(mapFD >> 8), byte(mapFD >> 16), byte(mapFD >> 24),
-		0x00, 0x00, 0, 0, 0x01, 0, 0, 0, // parte alta do LD64: src_reg=1 (MAP_FD)
+		0x18, 0x11, 0, 0, byte(mapFD), byte(mapFD >> 8), byte(mapFD >> 16), byte(mapFD >> 24),
+		0x00, 0x00, 0, 0, 0, 0, 0, 0, // parte ALTA do immediate de 64 bits: 0
 		0xb7, 0, 0, 0, 0, 0, 0, 0, // MOV64 R0, 0
 		0x95, 0, 0, 0, 0, 0, 0, 0, // EXIT
 	}
@@ -510,6 +521,27 @@ func carregarSocketFilterComMapa(mapFD int) int {
 	return int(fd)
 }
 
+// idDoObjetoBPF lê o id que o kernel atribui a um programa ou mapa, por
+// BPF_OBJ_GET_INFO_BY_FD. O id fica no offset 4 tanto do bpf_prog_info quanto do
+// bpf_map_info (type u32 em 0, id u32 em 4). Devolve 0 se falhar.
+func idDoObjetoBPF(fd int) uint32 {
+	info := make([]byte, 256)
+	var a struct {
+		bpfFD, infoLen uint32
+		info           uint64
+	}
+	a.bpfFD = uint32(fd)
+	a.infoLen = uint32(len(info))
+	a.info = uint64(uintptr(unsafe.Pointer(&info[0])))
+	_, _, e := syscall.Syscall(sysBPF, 15, /*BPF_OBJ_GET_INFO_BY_FD*/
+		uintptr(unsafe.Pointer(&a)), unsafe.Sizeof(a))
+	runtime.KeepAlive(info)
+	if e != 0 {
+		return 0
+	}
+	return uint32(info[4]) | uint32(info[5])<<8 | uint32(info[6])<<16 | uint32(info[7])<<24
+}
+
 func plantarBPFDoor() {
 	mapFD := criarMapa() // o processo SEGURA o mapa
 	prog := carregarSocketFilterComMapa(mapFD)
@@ -526,11 +558,16 @@ func plantarBPFDoor() {
 	if e != 0 {
 		must(fmt.Errorf("%v", e), "SO_ATTACH_BPF")
 	}
+	// Os ids ANTES de fechar o fd do programa: é por eles que a matriz confirma
+	// que o achado é DESTE programa, não de outro objeto BPF vivo na VM.
+	progID := idDoObjetoBPF(prog)
+	mapID := idDoObjetoBPF(mapFD)
 	// Fecha o fd do PROGRAMA: agora ele é órfão de descritor. Quem o segura é o
 	// socket; e o único fio de volta ao PID, além do socket, é o mapa que este
 	// processo ainda tem aberto.
 	syscall.Close(prog)
-	fmt.Printf("PLANT pid=%d bpfdoor: socket_filter órfão de fd, preso pelo socket, mapa compartilhado\n", os.Getpid())
+	fmt.Printf("PLANT pid=%d prog_id=%d map_id=%d bpfdoor: socket_filter órfão de fd, preso pelo socket, mapa compartilhado\n",
+		os.Getpid(), progID, mapID)
 	// segura socket e mapa abertos e dorme
 	for {
 		time.Sleep(time.Hour)

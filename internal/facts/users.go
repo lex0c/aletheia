@@ -90,7 +90,10 @@ func collectUsers(f *Facts, e *env.Env) {
 		f.Accounts = append(f.Accounts, a)
 	}
 
-	if b, err := e.ReadFile("/etc/group"); err == nil {
+	if b, err := e.ReadFile("/etc/group"); env.EhLacuna(err) {
+		f.denyPersist("users", "/etc/group não pôde ser lido: a resolução de GID→nome "+
+			"degrada, e um GID sem conta no group não pode ser afirmado")
+	} else if err == nil {
 		for _, ln := range strings.Split(string(b), "\n") {
 			fs := strings.Split(ln, ":")
 			if len(fs) < 4 {

@@ -124,13 +124,25 @@ func TestColetorIlegivelDeclaraLacuna(t *testing.T) {
 		{nome: "modprobe", dirs: []string{"etc/modprobe.d", "lib/modules"}, rodar: collectModprobe},
 		{nome: "binfmt", dirs: []string{"etc/binfmt.d"}, rodar: collectBinfmtConfig},
 		{nome: "initramfs", dirs: []string{"usr/lib/dracut/modules.d", "etc/dracut.conf.d", "etc/mkinitcpio.conf.d"}, arquivos: []string{"etc/mkinitcpio.conf"}, rodar: collectInitramfs},
-		{nome: "users", arquivos: []string{"etc/passwd", "etc/group", "etc/sudoers"}, rodar: collectUsers},
+		// passwd LEGÍVEL: senão collectUsers para nele e nunca chega aos outros
+		// (short-circuit legítimo). Os alvos ilegíveis são shadow, group e sudoers.
+		{nome: "users/shadow", legiveis: map[string]string{"etc/passwd": passwdDeTeste},
+			arquivos: []string{"etc/shadow"}, rodar: collectUsers},
+		{nome: "users/group", legiveis: map[string]string{"etc/passwd": passwdDeTeste},
+			arquivos: []string{"etc/group"}, rodar: collectUsers},
+		{nome: "users/sudoers", legiveis: map[string]string{"etc/passwd": passwdDeTeste},
+			arquivos: []string{"etc/sudoers"}, rodar: collectUsers},
 		{nome: "logins", arquivos: []string{"var/log/wtmp", "var/log/btmp", "run/utmp"}, rodar: collectLogins},
 		{nome: "boot", dirs: []string{"boot"}, arquivos: []string{"etc/default/grub"}, rodar: collectBoot},
 		{nome: "mac", dirs: []string{"etc/selinux"}, arquivos: []string{"etc/apparmor.d/x"}, rodar: collectMAC},
-		{nome: "trust", dirs: []string{"usr/local/share/ca-certificates", "etc/pki"}, arquivos: []string{"etc/hosts", "etc/resolv.conf"}, rodar: collectTrust},
+		{nome: "trust/hosts", arquivos: []string{"etc/hosts"}, rodar: collectTrust},
+		{nome: "trust/resolv", arquivos: []string{"etc/resolv.conf"}, rodar: collectTrust},
+		{nome: "trust/ca", dirs: []string{"usr/local/share/ca-certificates"}, rodar: collectTrust},
 		{nome: "logs", dirs: []string{"var/log"}, rodar: collectLogs},
-		{nome: "auditoria", dirs: []string{"etc/audit/rules.d"}, arquivos: []string{"etc/audit/auditd.conf", "etc/audit/audit.rules"}, rodar: collectAuditoria},
+		// auditd.conf NÃO é LIDO por collectAuditoria (só e.Exists checa presença);
+		// injetá-lo ilegível testaria o que o coletor não faz. O que é lido é
+		// audit.rules e rules.d.
+		{nome: "auditoria", dirs: []string{"etc/audit/rules.d"}, arquivos: []string{"etc/audit/audit.rules"}, rodar: collectAuditoria},
 		{nome: "interpretador", arquivos: []string{"etc/environment", "etc/security/pam_env.conf"}, rodar: collectInterpretador},
 		{nome: "suid", dirs: []string{"usr/bin", "usr/local/bin"}, rodar: collectSuid},
 		{nome: "mounts", arquivos: []string{"proc/self/mountinfo"}, rodar: collectMounts},
@@ -167,12 +179,24 @@ func TestColetorIlegivelDeclaraLacuna(t *testing.T) {
 		t.Run(c.nome, func(t *testing.T) {
 			f := raizIlegivel(t, c)
 			ls := lacunasDe(f)
-			if len(ls) == 0 {
-				t.Errorf("o coletor %q leu ZERO e não declarou lacuna nenhuma: "+
-					"ausência afirmada a partir de disco ilegível", c.nome)
-				return
+			todas := strings.Join(ls, "\n")
+
+			// RIGOR: cada caminho ilegível injetado tem de aparecer, POR NOME,
+			// em alguma lacuna. Sem isso, um caso com vários arquivos passava se
+			// UM deles declarasse — mascarando que os outros são silenciosos. Foi
+			// exatamente assim que o silêncio do /etc/ld.so.conf se escondeu atrás
+			// do denyPersist do /etc/ld.so.preload.
+			//
+			// O casamento é pelo BASENAME (o coletor pode citar o caminho sob a
+			// raiz temporária, não o absoluto do sistema).
+			for _, caminho := range append(append([]string{}, c.arquivos...), c.dirs...) {
+				base := caminho[strings.LastIndexByte(caminho, '/')+1:]
+				if !strings.Contains(todas, base) {
+					t.Errorf("%s: %q é ILEGÍVEL e NÃO aparece em nenhuma lacuna — "+
+						"ausência afirmada a partir de disco que não foi lido.\nlacunas:\n%s",
+						c.nome, caminho, todas)
+				}
 			}
-			t.Logf("%-10s %d lacuna(s): %s", c.nome, len(ls), primeira(ls))
 		})
 	}
 }

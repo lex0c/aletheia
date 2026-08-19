@@ -35,8 +35,12 @@ type variante struct {
 	arquivos map[string]string
 	// dispara: o check tem de acender. cego: tem de calar, e a nota diz por quê.
 	esperaID string
-	cego     bool
-	nota     string
+	// esperaSev, quando != 0, exige a severidade — uma regressão CRITICAL->INFO
+	// que mantivesse o ID passaria sem isto, e a severidade é parte da
+	// propriedade que a variante afirma.
+	esperaSev check.Severity
+	cego      bool
+	nota      string
 }
 
 // tecnica agrupa as variantes de uma mesma técnica ATT&CK.
@@ -69,12 +73,24 @@ func rodar(t *testing.T, v variante) *check.Report {
 }
 
 func disparou(r *check.Report, id string) bool {
+	_, ok := severidadeDe(r, id)
+	return ok
+}
+
+// severidadeDe devolve a MAIOR severidade de um achado com aquele ID (um check
+// pode emitir vários), e se houve algum.
+func severidadeDe(r *check.Report, id string) (check.Severity, bool) {
+	var pior check.Severity
+	achou := false
 	for i := range r.Findings {
 		if r.Findings[i].ID == id {
-			return true
+			achou = true
+			if r.Findings[i].Sev > pior {
+				pior = r.Findings[i].Sev
+			}
 		}
 	}
-	return false
+	return pior, achou
 }
 
 func TestVariantes(t *testing.T) {
@@ -83,7 +99,7 @@ func TestVariantes(t *testing.T) {
 			for _, v := range tec.variantes {
 				t.Run(v.nome, func(t *testing.T) {
 					r := rodar(t, v)
-					got := disparou(r, v.esperaID)
+					sev, got := severidadeDe(r, v.esperaID)
 					switch {
 					case v.cego && got:
 						t.Errorf("SURPRESA: %s passou a disparar %s — o ponto cego "+
@@ -91,6 +107,9 @@ func TestVariantes(t *testing.T) {
 					case !v.cego && !got:
 						t.Errorf("VARIANTE ESCAPOU: %q não disparou %s.\nnota: %s\n"+
 							"achados: %s", v.nome, v.esperaID, v.nota, idsDe(r))
+					case !v.cego && v.esperaSev != 0 && sev != v.esperaSev:
+						t.Errorf("SEVERIDADE ERRADA: %q disparou %s como %v, esperado %v.\n"+
+							"nota: %s", v.nome, v.esperaID, sev, v.esperaSev, v.nota)
 					}
 				})
 			}

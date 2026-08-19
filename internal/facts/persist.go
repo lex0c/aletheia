@@ -320,11 +320,15 @@ func collectLoader(f *Facts, e *env.Env) {
 	}
 
 	confs := []string{"/etc/ld.so.conf"}
-	if ents, err := e.ReadDir("/etc/ld.so.conf.d"); err == nil {
-		for _, ent := range ents {
-			if !ent.IsDir() {
-				confs = append(confs, "/etc/ld.so.conf.d/"+ent.Name())
-			}
+	ents, errCD := e.ReadDir("/etc/ld.so.conf.d")
+	if env.EhLacuna(errCD) {
+		f.denyPersist("loader", "/etc/ld.so.conf.d não pôde ser listado ("+
+			env.MotivoDoErro(errCD)+"): um diretório de busca de biblioteca "+
+			"injetado ali NÃO foi avaliado")
+	}
+	for _, ent := range ents {
+		if !ent.IsDir() {
+			confs = append(confs, "/etc/ld.so.conf.d/"+ent.Name())
 		}
 	}
 	// Índice, não `range`: o laço APPENDA em `confs` ao seguir um include.
@@ -337,6 +341,11 @@ func collectLoader(f *Facts, e *env.Env) {
 		vistosConf[c] = true
 		b, err := e.ReadFile(c)
 		if err != nil {
+			if env.EhLacuna(err) {
+				f.denyPersist("loader", c+" não pôde ser lido ("+env.MotivoDoErro(err)+
+					"): os diretórios de busca de biblioteca que ele declara NÃO "+
+					"foram avaliados")
+			}
 			continue
 		}
 		for _, ln := range strings.Split(string(b), "\n") {
@@ -353,7 +362,7 @@ func collectLoader(f *Facts, e *env.Env) {
 			if v, ok := strings.CutPrefix(ln, "include"); ok {
 				if v == "" || v[0] == ' ' || v[0] == '\t' {
 					for _, campo := range strings.Fields(v) {
-						confs = append(confs, expandirIncludeLoader(e, campo)...)
+						confs = append(confs, expandirIncludeLoader(f, e, campo)...)
 					}
 					continue
 				}
@@ -368,6 +377,10 @@ func collectLoader(f *Facts, e *env.Env) {
 	for _, p := range []string{"/etc/environment", "/etc/security/pam_env.conf"} {
 		b, err := e.ReadFile(p)
 		if err != nil {
+			if env.EhLacuna(err) {
+				f.denyPersist("loader", p+" não pôde ser lido ("+env.MotivoDoErro(err)+
+					"): um LD_PRELOAD/LD_AUDIT global definido ali NÃO foi avaliado")
+			}
 			continue
 		}
 		for _, ln := range strings.Split(string(b), "\n") {
@@ -393,7 +406,7 @@ const maxConfsLoader = 64
 // relativo é relativo a /etc, como o ldconfig faz, e o glob é expandido pelo
 // diretório — sem filepath.Glob, que resolveria fora da raiz travada em modo
 // image.
-func expandirIncludeLoader(e *env.Env, padrao string) []string {
+func expandirIncludeLoader(f *Facts, e *env.Env, padrao string) []string {
 	if !strings.HasPrefix(padrao, "/") {
 		padrao = "/etc/" + padrao
 	}
@@ -406,7 +419,12 @@ func expandirIncludeLoader(e *env.Env, padrao string) []string {
 		return nil
 	}
 	var out []string
-	for _, n := range e.ReadDirNames(dir) {
+	nomes, err := e.ReadDirNamesErr(dir)
+	if env.EhLacuna(err) {
+		f.denyPersist("loader", dir+" (include de ld.so.conf) não pôde ser listado ("+
+			env.MotivoDoErro(err)+"): os arquivos incluídos dali NÃO foram lidos")
+	}
+	for _, n := range nomes {
 		if ok, err := path.Match(base, n); err == nil && ok {
 			out = append(out, dir+"/"+n)
 		}

@@ -129,19 +129,51 @@ var gatilhosDeHome = []struct{ nome, when string }{
 var phpDirs = []string{"/etc/php", "/etc/php.d", "/etc/php5", "/etc/php7", "/etc/php8"}
 
 func collectTriggers(f *Facts, e *env.Env) {
+	// Os gatilhos de SISTEMA declaravam ausência em silêncio: lerTrigger devolve
+	// ok=false tanto para "não existe" quanto para "não pude olhar", e só o laço
+	// dos homes tinha o denyPersist. Com /etc/profile ilegível, trigger_exec,
+	// shell_startup, bash_env e shell_env ficavam todos mudos sobre um arquivo
+	// que roda em toda sessão.
+	// registrar guarda o gatilho e DECLARA quando ele veio ilegível.
+	//
+	// O caminho do EACCES não era o que parecia: lstat de um arquivo modo 000
+	// FUNCIONA — a permissão de stat vem do diretório, não do inode —, então
+	// lerTrigger montava o Trigger, falhava no ReadFile e devolvia ok=true com
+	// Ilegvel marcado. E `Ilegvel` era escrito e lido por NINGUÉM: os checks
+	// iteram t.Lines, que estava vazio, e concluíam que o arquivo não executa
+	// nada. Um /etc/profile sem permissão de leitura silenciava trigger_exec,
+	// shell_startup, bash_env e shell_env de uma vez.
+	registrar := func(t Trigger, quando string) {
+		f.Triggers = append(f.Triggers, t)
+		if t.Ilegvel {
+			f.denyPersist("startup", t.File+" existe e não pôde ser LIDO: o que ele "+
+				"executa "+quando+" NÃO foi avaliado")
+		}
+	}
 	for _, g := range gatilhosDeSistema {
 		if t, ok := lerTrigger(e, g.path, g.kind, g.when, ""); ok {
-			f.Triggers = append(f.Triggers, t)
+			registrar(t, g.when)
+			continue
+		}
+		if _, negado := lookup(e, g.path); negado {
+			f.denyPersist("startup", g.path+" não pôde ser examinado: o que ele "+
+				"executa "+g.when+" NÃO foi avaliado")
 		}
 	}
 	for _, g := range gatilhosDeDiretorio {
-		for _, n := range e.ReadDirNames(g.dir) {
+		nomes, err := e.ReadDirNamesErr(g.dir)
+		if env.EhLacuna(err) {
+			f.denyPersist("startup", g.dir+" não pôde ser listado ("+
+				env.MotivoDoErro(err)+"): o que roda "+g.when+" NÃO foi avaliado")
+			continue
+		}
+		for _, n := range nomes {
 			p := g.dir + "/" + n
 			if e.IsDir(p) {
 				continue
 			}
 			if t, ok := lerTrigger(e, p, g.kind, g.when, ""); ok {
-				f.Triggers = append(f.Triggers, t)
+				registrar(t, g.when)
 			}
 		}
 	}
@@ -171,6 +203,9 @@ func collectTriggers(f *Facts, e *env.Env) {
 			for i := range t.Lines {
 				t.Lines[i].Added = !skel[g.nome][normaliza(t.Lines[i].Text)]
 			}
+			if t.Ilegvel {
+				negados = append(negados, p)
+			}
 			f.Triggers = append(f.Triggers, t)
 		}
 	}
@@ -199,6 +234,10 @@ func procurarPHP(f *Facts, e *env.Env, dir string, prof int) {
 		}
 		if t, ok := lerTrigger(e, p, "php",
 			"antes de CADA requisição, em qualquer rota", ""); ok {
+			if t.Ilegvel {
+				f.denyPersist("startup", p+" existe e não pôde ser LIDO: o "+
+					"auto_prepend_file, que roda antes de CADA requisição, NÃO foi avaliado")
+			}
 			f.Triggers = append(f.Triggers, t)
 		}
 	}

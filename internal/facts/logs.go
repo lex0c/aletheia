@@ -42,6 +42,7 @@ func collectLogs(f *Facts, e *env.Env) {
 	var anda func(dir string, prof int)
 	visitados := 0
 	truncou := false
+	var ilegiveis []string
 	anda = func(dir string, prof int) {
 		if visitados > maxLogDirs {
 			truncou = true
@@ -51,7 +52,15 @@ func collectLogs(f *Facts, e *env.Env) {
 			return
 		}
 		visitados++
-		for _, ent := range e.ReadDirNames(dir) {
+		nomes, err := e.ReadDirNamesErr(dir)
+		if env.EhLacuna(err) {
+			// antiforense.log_rotation_gap e wtmp_cleared perguntam se alguém
+			// APAGOU registro. Diretório de log ilegível produzia a mesma
+			// observação — "não há log ali" — que apagar tudo.
+			ilegiveis = append(ilegiveis, dir)
+			return
+		}
+		for _, ent := range nomes {
 			p := dir + "/" + ent
 			if e.IsDir(p) {
 				anda(p, prof+1)
@@ -69,6 +78,15 @@ func collectLogs(f *Facts, e *env.Env) {
 	}
 	if e.IsDir("/var/log") {
 		anda("/var/log", 0)
+	}
+	if n := len(ilegiveis); n > 0 {
+		amostra := ilegiveis
+		if len(amostra) > 3 {
+			amostra = amostra[:3]
+		}
+		f.partial("logs", strconv.Itoa(n)+" diretório(s) de log não puderam ser "+
+			"listados: o que há neles NÃO entrou no inventário, e buraco de rotação "+
+			"não pode ser distinguido de diretório ilegível — "+strings.Join(amostra, ", "))
 	}
 	if truncou {
 		// O inventário de log alimenta o buraco de rotação (§10), e "nenhum

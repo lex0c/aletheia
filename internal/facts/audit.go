@@ -56,7 +56,13 @@ type RegraAudit struct {
 
 func collectAuditoria(f *Facts, e *env.Env) {
 	arquivos := []string{"/etc/audit/audit.rules"}
-	for _, n := range e.ReadDirNames("/etc/audit/rules.d") {
+	nomes, err := e.ReadDirNamesErr("/etc/audit/rules.d")
+	if env.EhLacuna(err) {
+		f.denyPersist("audit", "/etc/audit/rules.d não pôde ser listado ("+
+			env.MotivoDoErro(err)+"): as regras de auditoria NÃO foram lidas, e "+
+			"'nenhuma regra' não pode ser afirmado")
+	}
+	for _, n := range nomes {
 		if strings.HasSuffix(n, ".rules") {
 			arquivos = append(arquivos, "/etc/audit/rules.d/"+n)
 		}
@@ -68,6 +74,13 @@ func collectAuditoria(f *Facts, e *env.Env) {
 	for _, p := range arquivos {
 		b, err := e.ReadFile(p)
 		if err != nil {
+			// O achado que este coletor alimenta é antiforense.audit_disabled:
+			// "a auditoria não está registrando". Um arquivo de regras ilegível
+			// produzia exatamente a mesma observação que auditoria ausente.
+			if env.EhLacuna(err) {
+				f.denyPersist("audit", p+" não pôde ser lido ("+env.MotivoDoErro(err)+
+					"): as regras dele NÃO foram avaliadas")
+			}
 			continue
 		}
 		a.Instalada = true

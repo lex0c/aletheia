@@ -99,6 +99,14 @@ func collectInterpretador(f *Facts, e *env.Env) {
 	for _, p := range []string{"/etc/environment", "/etc/security/pam_env.conf"} {
 		b, err := e.ReadFile(p)
 		if err != nil {
+			// Estes dois são lidos a CADA sessão e são onde um PYTHONSTARTUP ou
+			// um NODE_OPTIONS global se esconde. Ilegível calava o achado sem
+			// distingui-lo de "não há hook nenhum".
+			if env.EhLacuna(err) {
+				f.denyPersist("interpretador", p+" não pôde ser lido ("+
+					env.MotivoDoErro(err)+"): hook de interpretador definido ali NÃO "+
+					"foi avaliado")
+			}
 			continue
 		}
 		for _, ln := range strings.Split(string(b), "\n") {

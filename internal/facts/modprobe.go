@@ -41,15 +41,32 @@ func collectModprobe(f *Facts, e *env.Env) {
 
 	// Carga automática no boot: as duas formas dizem a mesma coisa.
 	lerCargaDeModulo(f, e, "/etc/modules")
-	for _, n := range e.ReadDirNames("/etc/modules-load.d") {
-		if strings.HasSuffix(n, ".conf") {
-			lerCargaDeModulo(f, e, "/etc/modules-load.d/"+n)
+	for _, dir := range []string{"/etc/modules-load.d", "/usr/lib/modules-load.d"} {
+		nomes, err := e.ReadDirNamesErr(dir)
+		if env.EhLacuna(err) {
+			f.denyPersist("modprobe", dir+" não pôde ser listado ("+
+				env.MotivoDoErro(err)+"): os módulos carregados no boot NÃO foram lidos")
+			continue
+		}
+		for _, n := range nomes {
+			if strings.HasSuffix(n, ".conf") {
+				lerCargaDeModulo(f, e, dir+"/"+n)
+			}
 		}
 	}
 
-	// modprobe.d: aqui mora a diretiva que EXECUTA.
+	// modprobe.d: aqui mora a diretiva que EXECUTA. Um diretório ilegível aqui
+	// silenciava persist.modprobe_install — o `install <mod> /bin/sh -c …` que
+	// roda como root na carga do módulo.
 	for _, dir := range []string{"/etc/modprobe.d", "/lib/modprobe.d", "/usr/lib/modprobe.d"} {
-		for _, n := range e.ReadDirNames(dir) {
+		nomes, err := e.ReadDirNamesErr(dir)
+		if env.EhLacuna(err) {
+			f.denyPersist("modprobe", dir+" não pôde ser listado ("+
+				env.MotivoDoErro(err)+"): a diretiva `install`, que EXECUTA como "+
+				"root na carga de um módulo, NÃO foi avaliada")
+			continue
+		}
+		for _, n := range nomes {
 			if !strings.HasSuffix(n, ".conf") {
 				continue
 			}

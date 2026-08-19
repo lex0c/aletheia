@@ -45,7 +45,17 @@ type MAC struct {
 }
 
 func collectMAC(f *Facts, e *env.Env) {
-	if b, err := e.ReadFile("/etc/selinux/config"); err == nil {
+	// MAC ilegível não é MAC ausente, e a diferença decide um achado: o
+	// antiforense.mac_downgraded pergunta se alguém desligou o SELinux/AppArmor,
+	// e um /etc/selinux/config sem permissão de leitura fazia a resposta sair
+	// como "não há configuração" — indistinguível de host que nunca teve MAC.
+	b, err := e.ReadFile("/etc/selinux/config")
+	if env.EhLacuna(err) {
+		f.partial("mac", "/etc/selinux/config não pôde ser lido ("+
+			env.MotivoDoErro(err)+"): o modo configurado do SELinux NÃO foi lido, "+
+			"e ausência de configuração não pode ser afirmada")
+	}
+	if err == nil {
 		for _, ln := range strings.Split(string(b), "\n") {
 			ln = strings.TrimSpace(ln)
 			if v, ok := strings.CutPrefix(ln, "SELINUX="); ok {
@@ -55,7 +65,12 @@ func collectMAC(f *Facts, e *env.Env) {
 		}
 	}
 	f.MAC.FSPresente = e.IsDir("/sys/fs/selinux")
-	if b, err := e.ReadFile("/sys/fs/selinux/enforce"); err == nil {
-		f.MAC.Ativo = strings.TrimSpace(string(b))
+	ativo, err := e.ReadFile("/sys/fs/selinux/enforce")
+	if env.EhLacuna(err) {
+		f.partial("mac", "/sys/fs/selinux/enforce não pôde ser lido ("+
+			env.MotivoDoErro(err)+"): o modo EM VIGOR não foi lido")
+	}
+	if err == nil {
+		f.MAC.Ativo = strings.TrimSpace(string(ativo))
 	}
 }

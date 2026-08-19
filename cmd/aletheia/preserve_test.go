@@ -12,6 +12,7 @@ import (
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
 	"github.com/lex0c/aletheia/internal/pcap"
+	"github.com/lex0c/aletheia/internal/preserve"
 )
 
 // As recusas de invocação vêm ANTES de qualquer leitura. Este é o único comando
@@ -374,5 +375,27 @@ func TestCapturaMontaOQueFoiPedido(t *testing.T) {
 	tudo, code := montarCaptura(true, "eth0", "", 0, "", true, time.Minute, 0, "256M")
 	if code != 0 || !tudo.Filtro.Vazio() {
 		t.Errorf("--all deveria montar captura sem filtro: %+v code=%d", tudo, code)
+	}
+}
+
+// O diretório de evidência fica no host sob investigação. Um adversário pode
+// plantar o nome do manifesto como symlink antes da coleta; sem O_NOFOLLOW o
+// append iria para o alvo do link, fora do --out. anexar tem de recusar e não
+// tocar no alvo.
+func TestManifestoRecusaSymlinkPlantado(t *testing.T) {
+	dir := t.TempDir()
+	alvo := filepath.Join(dir, "fora.txt")
+	if err := os.WriteFile(alvo, []byte("original\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "aletheia-manifest.jsonl")
+	if err := os.Symlink(alvo, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := anexar(link, &preserve.Coletor{}); err == nil {
+		t.Error("anexar seguiu um symlink plantado — devia recusar (O_NOFOLLOW)")
+	}
+	if b, _ := os.ReadFile(alvo); string(b) != "original\n" {
+		t.Errorf("o alvo do symlink foi escrito através do link: %q", b)
 	}
 }

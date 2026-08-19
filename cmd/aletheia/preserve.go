@@ -239,7 +239,12 @@ func manifestoJSONL(path string, c *preserve.Coletor, e *env.Env) int {
 // pela mesma razão do run log: um diretório de IR acumula coletas, e a ordem
 // delas faz parte da história do caso.
 func anexar(path string, c *preserve.Coletor) error {
-	fh, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	// O_NOFOLLOW: o diretório de evidência fica no host sob investigação, e um
+	// adversário pode plantar este nome como symlink antes da coleta. Sem ele o
+	// append iria para o ALVO do link — fora do --out, quebrando a garantia de
+	// que nada foi escrito fora dali e a própria cadeia de custódia. As amostras
+	// já abrem com O_EXCL|O_NOFOLLOW; o manifesto que as atesta merece o mesmo.
+	fh, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return err
 	}
@@ -274,8 +279,10 @@ func escreverLinhas(w io.Writer, c *preserve.Coletor) int {
 // da história. Sobrescrever apagaria a coleta anterior — o mesmo erro que a
 // recusa de sobrescrever amostra evita.
 func registrarExecucao(dir string, c *preserve.Coletor, e *env.Env) error {
+	// O_NOFOLLOW pela mesma razão de anexar(): o log de execuções não pode ser
+	// desviado para fora do diretório de incidente por um symlink plantado.
 	fh, err := os.OpenFile(filepath.Join(dir, "aletheia-runs.jsonl"),
-		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		os.O_CREATE|os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return err
 	}

@@ -42,12 +42,15 @@ sem sinal.
 | `memfd`            | `proc.memfd_exec`      | regressão    |
 | `revshell-direct`  | `correlate.revshell`   | regressão    |
 | `revshell-bridge`  | `correlate.revshell_bridge` | regressão |
-| `rx-anon-rotulada` | (nenhum)               | ponto cego¹  |
+| `rx-anon-rotulada` | `proc.maps_exec_anon`  | regressão¹   |
 | `deleted-data`     | (nenhum)               | ponto cego²  |
 | `jit-inject`       | `proc.maps_exec_anon`  | regressão³   |
 
-1. rótulo de VMA (`PR_SET_VMA_ANON_NAME`) é spoofável, e o check só conta região
-   SEM rótulo — o próprio check declara esse limite.
+1. era ponto cego: o rótulo de VMA (`PR_SET_VMA_ANON_NAME`) é spoofável, e o
+   check só contava região SEM rótulo — bastava nomear a região de injeção
+   `[anon:js-executable-memory]`. FECHADO na mesma classe do exe /usr/bin/node:
+   o rótulo só é confiado em runtime confiável; num não-JIT, região rotulada
+   conta como qualquer injeção.
 2. o check exige segmento EXECUTÁVEL; um segmento de dado apagado passa.
 3. era ponto cego: `maps_exec_anon` isentava runtime com JIT só pelo nome e
    diretório, e rodar o payload como `/usr/bin/node` caía na isenção. A matriz

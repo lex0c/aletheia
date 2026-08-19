@@ -448,3 +448,35 @@ func TestJITSemBaseDePacotesMantemIsencao(t *testing.T) {
 		t.Errorf("sem base de pacotes, a isenção continua: %v", r.Findings)
 	}
 }
+
+// O segundo bypass da mesma classe: um processo que NÃO é JIT confiável usando
+// o rótulo [anon:js-executable-memory] para escapar da contagem. O rótulo é
+// settável por prctl; num não-JIT ele não vale nada, e a região dispara.
+func TestExecAnonRotuloRoubadoEmNaoJITDispara(t *testing.T) {
+	f := &facts.Facts{Processes: []facts.Process{
+		{PID: 10, Comm: "app", Exe: "/usr/bin/app",
+			MapsExecNomes: []string{"[anon:js-executable-memory]"}}, // rotulada, 0 sem rótulo
+	}}
+	r := mapsExecAnon.Run(mapsExecAnon, f, testEnv())
+	if len(r.Findings) != 1 {
+		t.Fatalf("rótulo de JIT em não-JIT tem de disparar: %d achados", len(r.Findings))
+	}
+	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "roubada") {
+		t.Errorf("a evidência precisa dizer que o rótulo foi roubado: %v", r.Findings[0].Evidence)
+	}
+}
+
+// E o outro lado: um JIT de PACOTE que rotula as próprias regiões e não tem
+// nenhuma sem rótulo é o normal — não pode virar FP.
+func TestExecAnonJITConfiavelRotuladoNaoDispara(t *testing.T) {
+	e := testEnv()
+	e.Caps |= env.CapPkgDB
+	f := &facts.Facts{
+		Processes: []facts.Process{{PID: 10, Comm: "firefox", Exe: "/usr/lib/firefox/firefox",
+			MapsExecNomes: []string{"[anon:js-executable-memory]"}}},
+		Ownership: []facts.Ownership{{Path: "/usr/lib/firefox/firefox", Owned: true}},
+	}
+	if r := mapsExecAnon.Run(mapsExecAnon, f, e); len(r.Findings) != 0 {
+		t.Errorf("firefox de pacote que rotula suas regiões é o normal: %v", r.Findings)
+	}
+}

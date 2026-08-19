@@ -190,8 +190,10 @@ var mapsExecAnon = check.Check{
 			"NÃO é isento (o bypass que a matriz adversarial demonstrou)",
 		"empacotador (UPX e afins) que descomprime para memória e protege a " +
 			"região depois: binário legítimo empacotado cai aqui",
-		"o rótulo é escrito pelo PROCESSO (prctl), não pelo kernel: quem injeta " +
-			"pode copiar o nome que o runtime usa. Ele descarta ruído, não acusa",
+		"o rótulo é escrito pelo PROCESSO (prctl), não pelo kernel: por isso ele " +
+			"só é confiado em RUNTIME confiável (nome de JIT conhecido, diretório de " +
+			"sistema, dono de pacote). Num não-JIT, região executável rotulada conta " +
+			"como qualquer injeção — o rótulo roubado não protege",
 		"BLIND SPOT: em runtime com JIT de kernel antigo, injeção DENTRO dele " +
 			"não é distinguível daqui — o sinal para esses é o proc.tracer e a §29",
 	},
@@ -211,29 +213,48 @@ var mapsExecAnon = check.Check{
 			if p.MapsDenied {
 				denied++
 			}
-			if p.MapsExecAnonN == 0 {
-				continue
-			}
+			confiavel := ehJITConfiavel(p, semDono, temPkgDB)
 			// O runtime que rotula as PRÓPRIAS regiões executáveis se
 			// autodenuncia como capaz de rotular. Nesse processo, uma região
 			// sem rótulo não é explicada pelo que ele gera — e é justamente o
 			// BLIND SPOT que o check irmão declara e não consegue cobrir.
 			autorrotula := len(p.MapsExecNomes) > 0
-			if ehJITConfiavel(p, semDono, temPkgDB) && !autorrotula {
+
+			// Rótulos ROUBADOS, o segundo bypass da mesma classe que o exe
+			// /usr/bin/node: o rótulo de região é settável por prctl, e um
+			// processo que NÃO é um JIT confiável usando [anon:js-executable-memory]
+			// está copiando a etiqueta para escapar da contagem. Num não-JIT, a
+			// região executável anônima ROTULADA vale tanto quanto a sem rótulo —
+			// o rótulo não vem de um runtime, vem do atacante.
+			var rotulados []string
+			if !confiavel {
+				rotulados = p.MapsExecNomes
+			}
+
+			if p.MapsExecAnonN == 0 && len(rotulados) == 0 {
+				continue
+			}
+			if confiavel && !autorrotula {
 				isentos = append(isentos, nz(p.Exe, p.Comm))
 				continue
 			}
 
+			total := p.MapsExecAnonN + len(rotulados)
 			ev := []string{
-				strconv.Itoa(p.MapsExecAnonN) + " região(ões) executáveis sem arquivo e sem rótulo: " +
+				strconv.Itoa(total) + " região(ões) executáveis anônimas sem arquivo: " +
 					firstN(p.MapsExecAnon, 3),
 				"exe=" + nz(p.Exe, "?") + " comm=" + p.Comm + " uid=" + strconv.Itoa(p.UID),
 			}
 			if p.MapsExecAnonN > len(p.MapsExecAnon) {
 				ev = append(ev, "a amostra acima tem "+strconv.Itoa(len(p.MapsExecAnon))+
-					" de "+strconv.Itoa(p.MapsExecAnonN)+" regiões")
+					" de "+strconv.Itoa(p.MapsExecAnonN)+" regiões sem rótulo")
 			}
-			if autorrotula {
+			if len(rotulados) > 0 {
+				ev = append(ev, strconv.Itoa(len(rotulados))+" região(ões) usam RÓTULO de JIT "+
+					"sem o processo ser um runtime confiável ("+firstN(rotulados, 2)+"): o "+
+					"rótulo é settável e não vale nada aqui — é a mesma etiqueta roubada "+
+					"do bypass do exe")
+			} else if autorrotula {
 				ev = append(ev, "e este processo ROTULA as próprias regiões de JIT ("+
 					firstN(p.MapsExecNomes, 2)+"): o que ele gera se identifica, e "+
 					"estas não se identificam")

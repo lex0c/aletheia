@@ -37,7 +37,7 @@ declare -A ESPERA=(
 	[revshell-direct]="FIRE correlate.revshell :: fd 0/1/2 no mesmo socket de saída público"
 	[revshell-bridge]="FIRE correlate.revshell_bridge :: shell lê de pipe, ponte tem o socket de saída"
 	[jit-inject]="FIRE proc.maps_exec_anon :: bypass FECHADO — a isenção de JIT passou a exigir dono de pacote"
-	[rx-anon-rotulada]="BLIND proc.maps_exec_anon :: DECLARADO — rótulo de VMA é spoofável, o check só conta sem rótulo"
+	[rx-anon-rotulada]="FIRE proc.maps_exec_anon :: bypass FECHADO — rótulo de JIT em não-runtime não é confiado"
 	[deleted-data]="BLIND proc.deleted_mapping :: DECLARADO — o check exige segmento executável"
 )
 TECHS="rwx-anon rx-anon deleted-exec memfd revshell-direct revshell-bridge rx-anon-rotulada deleted-data jit-inject"

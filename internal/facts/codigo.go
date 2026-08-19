@@ -410,6 +410,15 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	// tier 1 (confinado), enquanto system/eval sobre ela seguem críticos.
 	if def.guardaCaminho != nil {
 		for _, m := range def.guardaCaminho.FindAllStringSubmatchIndex(masc, -1) {
+			// FAIL-CLOSED: só vale como validação se estiver num `if` cujo corpo
+			// SAI (die/exit/return/throw/wp_die/wp_redirect). `validate_file($p);`
+			// com retorno ignorado, ou num if sem saída, NÃO prova que a entrada
+			// inválida barra o sink — e supor que sim seria FN. Sem a prova, o
+			// include segue crítico.
+			bi, bf := corpoDaCondicao(masc, m[0])
+			if bi < 0 || !reExitBody.MatchString(masc[bi:bf]) {
+				continue
+			}
 			evs = append(evs, evento{off: m[0], guardaCam: true, nome: masc[m[2]:m[3]]})
 		}
 	}
@@ -718,6 +727,14 @@ func coletarGuardas(masc string, def *defsCodigo, listas map[string]bool) []guar
 			if negado(masc, m[0]) || !listaFixa(masc, m[1], listas) {
 				continue
 			}
+			// A allowlist só rebaixa se for condição NECESSÁRIA para o corpo. Um
+			// `||`/`or`/`xor` em QUALQUER lugar da condição (antes ou depois do
+			// in_array) deixa o corpo alcançável sem ela — não é guard. Examina a
+			// condição inteira do if, não só o trecho após o in_array.
+			ci, cf := condicaoEnvolvente(masc, m[0])
+			if ci < 0 || temDisjuncaoTopo(masc[ci:cf]) {
+				continue
+			}
 			ini, fim := corpoDaCondicao(masc, m[0])
 			if ini < 0 {
 				continue
@@ -726,6 +743,74 @@ func coletarGuardas(masc string, def *defsCodigo, listas map[string]bool) []guar
 		}
 	}
 	return gs
+}
+
+var (
+	// if/elseif/while que ABRE uma condição — para achar a condição que envolve
+	// um in_array/validate_file.
+	reIfCond = regexp.MustCompile(`\b(?:else\s+if|elseif|if|while)\s*\(`)
+	// corpo de gate que SAI: só isto prova que a condição barra o que vem depois.
+	reExitBody = regexp.MustCompile(`\b(?:die|exit|return|throw|continue|break|wp_die|wp_redirect|wp_safe_redirect|wp_send_json|wp_send_json_error)\b`)
+	// disjunção de TOPO: || ou os operadores textuais or/xor do PHP. `&&`/`and`
+	// não quebram (a allowlist continua necessária); só a disjunção quebra.
+	reDisjuncao = regexp.MustCompile(`\|\||\bor\b|\bxor\b`)
+)
+
+// condicaoEnvolvente devolve o span do CONTEÚDO da condição `(...)` do if/while
+// mais interno que envolve `pos`, ou (-1,-1). Varre para a FRENTE a partir de
+// uma janela antes de pos (fimBalanceado pula strings), então acha o `if (` cujo
+// `)` fica depois de pos.
+func condicaoEnvolvente(s string, pos int) (int, int) {
+	ini := pos - maxSpanCond
+	if ini < 0 {
+		ini = 0
+	}
+	melhorAbre, melhorFim := -1, -1
+	for _, m := range reIfCond.FindAllStringIndex(s[ini:pos], -1) {
+		abre := ini + m[1] - 1 // o `(`
+		fim := fimBalanceado(s, abre, maxSpanCond)
+		if fim > pos { // envolve pos; o último assim é o mais interno
+			melhorAbre, melhorFim = abre, fim
+		}
+	}
+	if melhorAbre < 0 {
+		return -1, -1
+	}
+	return melhorAbre + 1, melhorFim
+}
+
+// temDisjuncaoTopo diz se a condição tem `||`/`or`/`xor` no nível de topo (fora
+// de parênteses aninhados) — o que torna a allowlist NÃO necessária. Pula string.
+func temDisjuncaoTopo(cond string) bool {
+	prof := 0
+	var str byte
+	for _, loc := range reDisjuncao.FindAllStringIndex(cond, -1) {
+		// recalcula a profundidade até o match (barato; condições são curtas).
+		prof, str = 0, 0
+		for i := 0; i < loc[0]; i++ {
+			c := cond[i]
+			if str != 0 {
+				if c == '\\' {
+					i++
+				} else if c == str {
+					str = 0
+				}
+				continue
+			}
+			switch c {
+			case '\'', '"', '`':
+				str = c
+			case '(', '[':
+				prof++
+			case ')', ']':
+				prof--
+			}
+		}
+		if prof == 0 && str == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // dentroDeGuarda diz se o sink em `off` está sob um guard daquela variável.

@@ -957,3 +957,51 @@ func TestCallableArrayMethodDispatch(t *testing.T) {
 		}
 	}
 }
+
+// FAIL-CLOSED do validate_file (P0 do review): só rebaixa o include se o
+// validador estiver num gate que SAI. Resultado ignorado, ou if sem saída, NÃO
+// prova que a entrada inválida barra o sink — segue crítico.
+func TestValidateFileExigeGateComSaida(t *testing.T) {
+	crit := map[string]string{
+		"resultado ignorado": "<?php\n$p=$_GET['page'];\nvalidate_file($p);\ninclude($p);",
+		"if sem saída":       "<?php\n$p=$_GET['page'];\nif(validate_file($p)){ error_log('x'); }\ninclude($p);",
+	}
+	for n, src := range crit {
+		if !tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("%s: sem gate provado, o include segue crítico: %+v", n, analisarConteudo(src, "php"))
+		}
+	}
+	naoCrit := map[string]string{
+		"gate com exit":   "<?php\n$p=$_GET['page'];\nif(validate_file($p)){exit;}\ninclude($p);",
+		"gate com return": "<?php\nfunction f($p){ if(validate_file($p)){return;} include($p); }",
+	}
+	for n, src := range naoCrit {
+		if tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("%s: gate que sai confina o include: %+v", n, analisarConteudo(src, "php"))
+		}
+	}
+}
+
+// in_array só rebaixa se for condição NECESSÁRIA: qualquer ||/or/xor na condição
+// inteira (antes OU depois do in_array) deixa o corpo alcançável sem a allowlist.
+func TestInArrayCondicaoInteiraSemDisjuncao(t *testing.T) {
+	crit := map[string]string{
+		"OR antes":   "<?php\n$fn=$_GET['fn'];\nif($_GET['b'] || in_array($fn,['a'])){ $fn(); }",
+		"or textual": "<?php\n$fn=$_GET['fn'];\nif($_GET['x'] or in_array($fn,['a'])){ $fn(); }",
+		"xor":        "<?php\n$fn=$_GET['fn'];\nif(in_array($fn,['a']) xor $_GET['x']){ $fn(); }",
+	}
+	for n, src := range crit {
+		if !tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("%s: disjunção quebra o guard, segue RCE: %+v", n, analisarConteudo(src, "php"))
+		}
+	}
+	naoCrit := map[string]string{
+		"sozinho": "<?php\n$fn=$_GET['fn'];\nif(in_array($fn,['a'],true)){ $fn(); }",
+		"com AND": "<?php\n$fn=$_GET['fn'];\nif(in_array($fn,['a']) && $y){ $fn(); }",
+	}
+	for n, src := range naoCrit {
+		if tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("%s: in_array necessário rebaixa: %+v", n, analisarConteudo(src, "php"))
+		}
+	}
+}

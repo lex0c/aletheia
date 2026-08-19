@@ -201,7 +201,16 @@ func lerGrubCfg(f *Facts, e *env.Env, add adicionaBoot) {
 	caminhos := []string{"/boot/grub/grub.cfg", "/boot/grub2/grub.cfg"}
 	// A partição EFI tem o seu, com o nome da distribuição no meio.
 	for _, dir := range []string{"/boot/efi/EFI", "/efi/EFI"} {
-		for _, nome := range e.ReadDirNames(dir) {
+		nomes, err := e.ReadDirNamesErr(dir)
+		if env.EhLacuna(err) {
+			// EACCES/EIO num diretório EFI é LACUNA, não ausência: o grub.cfg
+			// da partição do próximo boot NÃO foi procurado, e calar isso
+			// converteria "não olhei" em "nada aqui".
+			f.denyPersist("boot", dir+" não pôde ser listado ("+env.MotivoDoErro(err)+
+				"): o grub.cfg da partição EFI NÃO foi procurado")
+			continue
+		}
+		for _, nome := range nomes {
 			caminhos = append(caminhos, dir+"/"+nome+"/grub.cfg")
 		}
 	}
@@ -249,7 +258,13 @@ func lerEntradasDeLoader(f *Facts, e *env.Env, add adicionaBoot) {
 	for _, dir := range []string{
 		"/boot/loader/entries", "/efi/loader/entries", "/boot/efi/loader/entries",
 	} {
-		for _, nome := range e.ReadDirNames(dir) {
+		nomes, err := e.ReadDirNamesErr(dir)
+		if env.EhLacuna(err) {
+			f.denyPersist("boot", dir+" não pôde ser listado ("+env.MotivoDoErro(err)+
+				"): as entradas do systemd-boot NÃO foram lidas")
+			continue
+		}
+		for _, nome := range nomes {
 			if !strings.HasSuffix(nome, ".conf") {
 				continue
 			}
@@ -279,7 +294,12 @@ func lerCmdlineSolta(f *Facts, e *env.Env, add adicionaBoot) {
 			add(p, linhaUnica(string(b)), false)
 		}
 	}
-	for _, nome := range e.ReadDirNames("/etc/cmdline.d") {
+	nomes, err := e.ReadDirNamesErr("/etc/cmdline.d")
+	if env.EhLacuna(err) {
+		f.denyPersist("boot", "/etc/cmdline.d não pôde ser listado ("+env.MotivoDoErro(err)+
+			"): a linha de comando por dropin NÃO foi lida")
+	}
+	for _, nome := range nomes {
 		if !strings.HasSuffix(nome, ".conf") {
 			continue
 		}

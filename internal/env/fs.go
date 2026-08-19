@@ -190,6 +190,22 @@ func (e *Env) ReadDirNames(p string) []string {
 	return out
 }
 
+// ReadDirNamesErr é a versão que DEVOLVE o erro, para coletor de segurança que
+// precisa separar "diretório ausente" (resposta legítima) de "não consegui
+// listar" (lacuna). ReadDirNames engole o erro e serve só onde a diferença não
+// decide cobertura — nunca numa fonte que responde por integridade.
+func (e *Env) ReadDirNamesErr(p string) ([]string, error) {
+	ents, err := e.ReadDir(p)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(ents))
+	for _, ent := range ents {
+		out = append(out, ent.Name())
+	}
+	return out, nil
+}
+
 // Estado de um ponto de montagem de filesystem virtual.
 //
 // /sys/kernel/tracing e /sys/kernel/security são diretórios que o kernel cria

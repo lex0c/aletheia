@@ -1,8 +1,12 @@
 package facts
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/lex0c/aletheia/internal/env"
 )
 
 // O kernel separa por espaço mas honra ASPAS. Um Fields simples quebraria
@@ -152,4 +156,50 @@ func TestInitDaLinhaDeBootEntraNaPerguntaDePropriedade(t *testing.T) {
 		paths = append(paths, o.Path)
 	}
 	t.Errorf("/sbin/meu-init não virou candidato a propriedade: %v", paths)
+}
+
+// Diretório de configuração de boot ILEGÍVEL é LACUNA, não ausência. O antigo
+// ReadDirNames engolia o erro e devolvia nil — e "não consegui listar
+// /etc/cmdline.d" virava "não há nada em /etc/cmdline.d", que é a cegueira
+// silenciosa que a ferramenta existe para não cometer.
+func TestBootDiretorioIlegivelViraLacuna(t *testing.T) {
+	// Os três diretórios de configuração que decidem o próximo boot, cada um
+	// lido por uma função diferente. Todos passaram a usar ReadDirNamesErr, e
+	// nenhum pode transformar "não consegui listar" em "não há nada".
+	casos := []struct{ dir, marca string }{
+		{"etc/cmdline.d", "cmdline.d"},            // lerCmdlineSolta
+		{"boot/loader/entries", "loader/entries"}, // lerEntradasDeLoader
+		{"boot/efi/EFI", "EFI"},                   // lerGrubCfg
+	}
+	for _, c := range casos {
+		t.Run(c.marca, func(t *testing.T) {
+			raiz := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(raiz, filepath.Dir(c.dir)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(raiz, c.dir)
+			if err := os.Mkdir(dir, 0o000); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Chmod(dir, 0o755) })
+			if _, err := os.ReadDir(dir); err == nil {
+				t.Skip("este ambiente lista um diretório 0000 (root?): a lacuna não se forma")
+			}
+
+			e := env.Probe(env.Options{Root: raiz})
+			t.Cleanup(func() { e.Close() })
+			f := &Facts{}
+			collectBoot(f, e)
+
+			achou := false
+			for _, ln := range f.PersistDenied["boot"] {
+				if strings.Contains(ln, c.marca) {
+					achou = true
+				}
+			}
+			if !achou {
+				t.Errorf("um %s ilegível tem de virar lacuna de boot: %v", c.dir, f.PersistDenied["boot"])
+			}
+		})
+	}
 }

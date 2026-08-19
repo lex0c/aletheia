@@ -7,7 +7,7 @@ GOFLAGS := -trimpath
 # LD_PRELOAD e a binário de sistema trojanizado (SPEC 4).
 export CGO_ENABLED = 0
 
-.PHONY: all build helper vm-image test lint verify clean dist scenarios images fixtures vm-kernels vm-ftrace-proof vm-socket-proof arches
+.PHONY: all build helper vm-image test lint verify clean dist scenarios images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix arches
 
 all: verify
 
@@ -101,6 +101,12 @@ vm-ftrace-proof:
 # tocado. Controle negativo incluído: host limpo cala. Exige docker e qemu.
 vm-socket-proof:
 	./test/vm/socket-hidden-module.sh
+
+# matrix roda a matriz adversarial: monta técnicas de ataque de userspace num
+# contêiner descartável e mede quais checks disparam (regressão) e quais passam
+# sem sinal (ponto cego). Exige docker. Não toca o kernel do host.
+matrix:
+	./test/matrix/matrix.sh
 
 # Servidor legado de 32 bits ainda existe. Cross-compilar custa segundos e é a
 # única forma de provar que a ferramenta roda lá — tamanho de int e número de

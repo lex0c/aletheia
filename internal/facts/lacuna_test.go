@@ -133,6 +133,11 @@ func TestColetorIlegivelDeclaraLacuna(t *testing.T) {
 		{nome: "auditoria", dirs: []string{"etc/audit/rules.d"}, arquivos: []string{"etc/audit/auditd.conf", "etc/audit/audit.rules"}, rodar: collectAuditoria},
 		{nome: "interpretador", arquivos: []string{"etc/environment", "etc/security/pam_env.conf"}, rodar: collectInterpretador},
 		{nome: "suid", dirs: []string{"usr/bin", "usr/local/bin"}, rodar: collectSuid},
+		{nome: "mounts", arquivos: []string{"proc/self/mountinfo"}, rodar: collectMounts},
+		// limitesDeRede fica FORA: o que ele lê alimenta só o `info`, que exibe
+		// sem julgar — nenhum check consome ConntrackLido, então não existe
+		// achado que o silêncio possa esconder. O invariante vale onde a
+		// ausência de achado pode ser lida como ausência de problema.
 
 		// Os que varrem HOME precisam de um /etc/passwd legível apontando para
 		// um home travado: sem isso o teste mediria a lacuna do passwd, que é

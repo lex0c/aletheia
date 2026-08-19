@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"os"
 	"sort"
 	"strings"
 
@@ -85,8 +86,29 @@ func collectHelpers(f *Facts, e *env.Env) {
 		return
 	}
 
+	// ler declara a lacuna quando o arquivo EXISTE e não pôde ser lido.
+	//
+	// Os três caminhos abaixo são programas que o KERNEL invoca sozinho, como
+	// root, sem passar por unit, cron ou shell — é a superfície do
+	// persist.kernel_helper. Um readTrim que devolve ok=false não distinguia
+	// "este kernel não tem uevent_helper" de "não pude ler o valor", e o
+	// segundo saía como o primeiro: silêncio sobre o caminho que o kernel
+	// executa. Ausente é resposta; ilegível é lacuna.
+	ler := func(p string) (string, bool) {
+		v, err := readTrimErr(p)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				f.partial("helper", p+" existe e não pôde ser lido ("+
+					env.MotivoDoErro(err)+"): o programa que o KERNEL invoca por "+
+					"este mecanismo NÃO foi examinado")
+			}
+			return "", false
+		}
+		return v, true
+	}
+
 	// modprobe: o kernel executa este caminho ao autoloadar módulo.
-	if v, ok := readTrim("/proc/sys/kernel/modprobe"); ok && v != "" {
+	if v, ok := ler("/proc/sys/kernel/modprobe"); ok && v != "" {
 		f.Helpers = append(f.Helpers, HelperDoKernel{
 			Nome: "modprobe", Fonte: "/proc/sys/kernel/modprobe",
 			Valor: v, Alvo: v, Padrao: padroesDeModprobe[v],
@@ -95,7 +117,7 @@ func collectHelpers(f *Facts, e *env.Env) {
 
 	// core_pattern: com "|" na frente, o kernel PIPA o core para o programa.
 	// Sem "|", é um modelo de nome de arquivo e não executa nada.
-	if v, ok := readTrim("/proc/sys/kernel/core_pattern"); ok && v != "" {
+	if v, ok := ler("/proc/sys/kernel/core_pattern"); ok && v != "" {
 		h := HelperDoKernel{
 			Nome: "core_pattern", Fonte: "/proc/sys/kernel/core_pattern", Valor: v,
 		}
@@ -105,7 +127,7 @@ func collectHelpers(f *Facts, e *env.Env) {
 
 	// uevent_helper: em sistema moderno é VAZIO — o udev escuta por netlink, e
 	// o kernel não precisa executar nada. Valor preenchido é o caso raro.
-	if v, ok := readTrim("/sys/kernel/uevent_helper"); ok {
+	if v, ok := ler("/sys/kernel/uevent_helper"); ok {
 		if v == "" {
 			f.Helpers = append(f.Helpers, HelperDoKernel{
 				Nome: "uevent_helper", Fonte: "/sys/kernel/uevent_helper", Padrao: true,

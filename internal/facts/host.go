@@ -153,8 +153,20 @@ func readTrim(p string) (string, bool) {
 
 // readTrimErr devolve o ERRO. Quem precisa dele é quem distingue "não existe"
 // de "não pude ler" — e essa distinção decide se a cobertura degrada.
+// lerArquivoDoHost é o ponto ÚNICO de leitura de arquivo do host VIVO.
+//
+// Os coletores live-only leem /proc e /sys direto, fora do env.Env — e com
+// razão: não há raiz travada num host vivo, e o env existe para o modo image.
+// A consequência é que o harness de raiz ilegível (lacuna_test.go) não alcança
+// nenhum deles, e a pergunta que ele faz aos outros vinte — "você declara
+// quando não consegue ler?" — nunca chegou a estes.
+//
+// Ser uma variável é o que permite fazer a pergunta: o teste injeta a falha
+// aqui e roda o coletor. É a única razão de ela não ser uma função.
+var lerArquivoDoHost = os.ReadFile
+
 func readTrimErr(p string) (string, error) {
-	b, err := os.ReadFile(p)
+	b, err := lerArquivoDoHost(p)
 	if err != nil {
 		return "", err
 	}

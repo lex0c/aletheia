@@ -13,6 +13,7 @@ func init() {
 	check.Register(webPrepend)
 	check.Register(shellStartup)
 	check.Register(bashEnv)
+	check.Register(shellEnv)
 	check.Register(triggerExec)
 	check.Register(pamExec)
 	check.Register(udevRun)
@@ -236,6 +237,87 @@ var bashEnv = check.Check{
 					"leia o arquivo apontado: ele roda em toda execução não interativa",
 					"procure o mesmo padrão em /etc/environment e em drop-in de unit " +
 						"(runbook §7.8, §7.2)",
+				}
+				r.Findings = append(r.Findings, fd)
+			}
+		}
+		r.Partial = append(r.Partial, f.PersistDenied["startup"]...)
+		return r
+	},
+}
+
+// shellEnv — runbook §7.6.
+//
+// ENV é o BASH_ENV do mundo POSIX, e as duas variáveis são OPOSTAS no evento
+// que disparam:
+//
+//	BASH_ENV   bash NÃO interativo: script, cron, scp, comando remoto de ssh
+//	ENV        shell POSIX INTERATIVO: dash, ksh, e bash invocado como `sh`
+//
+// A diferença decide a severidade. BASH_ENV quase não tem uso legítimo, e é
+// essa raridade que faz dele um sinal forte. ENV é o contrário: é o mecanismo
+// documentado de arquivo de inicialização do shell POSIX, `ENV=$HOME/.shrc` em
+// /etc/profile é configuração de fábrica em vários sistemas, e ele roda numa
+// sessão INTERATIVA — onde alguém está olhando, e onde o .bashrc já é auditado.
+//
+// Aqui o achado é AVISO e diz por quê: o valor aponta para um arquivo que roda
+// a cada shell interativo, e a pergunta é quem o entregou.
+var shellEnv = check.Check{
+	ID:       "persist.shell_env",
+	Ref:      "7.6",
+	Title:    "ENV definido: arquivo lido a cada shell POSIX interativo",
+	Group:    "persist",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Wtf:      true,
+	FalsePositives: []string{
+		"ENV é o mecanismo DOCUMENTADO de arquivo de inicialização do shell " +
+			"POSIX: `ENV=$HOME/.shrc` em /etc/profile é configuração de fábrica " +
+			"em vários sistemas, e sozinho não é sinal de nada. O que vale é o " +
+			"ALVO — quem entregou o arquivo que ele aponta",
+		"não confunda com BASH_ENV (persist.bash_env), que é o oposto: aquele " +
+			"roda em shell NÃO interativo, não tem uso legítimo comum, e por isso " +
+			"sai como crítico",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		var r check.Result
+		semDono := caminhosSemDono(f)
+		for i := range f.Triggers {
+			t := &f.Triggers[i]
+			for _, ln := range t.Lines {
+				if !defineShellEnv(ln.Text) {
+					continue
+				}
+				// semExport primeiro: com o `export ` na frente, o lado esquerdo do
+				// `=` vira "export ENV", que não está em varExecutada — e o alvo sairia
+				// sendo a linha inteira em vez do caminho.
+				alvo := linhaExecutavel(semExport(ln.Text))
+				sev := check.SevWarn
+				ev := []string{
+					ln.Text,
+					"ENV é lido por shell POSIX INTERATIVO (dash, ksh, bash como `sh`): " +
+						"o arquivo apontado roda a cada sessão daquela conta",
+					"arquivo: " + t.File + ":" + strconv.Itoa(ln.N),
+					"QUANDO roda: " + t.When,
+				}
+				// O que decide não é a variável, é o ALVO dela.
+				if why, ok := suspectDir(alvo); ok {
+					sev = check.SevCritical
+					ev = append(ev, "e o arquivo apontado está "+why)
+				} else if semDono[alvo] {
+					ev = append(ev, "e nenhum pacote reivindica "+alvo)
+				}
+				if ln.Added {
+					ev = append(ev, "esta linha NÃO existe em /etc/skel: foi acrescentada depois")
+				}
+				ev = append(ev, contextoDoTrigger(t)...)
+
+				fd := self.F(sev, alvoDoTrigger(t), "", ev...)
+				fd.Quando, fd.QuandoFonte = t.ModUTC, "mtime do arquivo de gatilho"
+				fd.NextSteps = []string{
+					"leia o arquivo que ele aponta: é ele que roda, não esta linha",
+					"pergunte quem o entregou — `dpkg -S` / `rpm -qf` no alvo",
 				}
 				r.Findings = append(r.Findings, fd)
 			}
@@ -531,9 +613,29 @@ var varExecutada = map[string]bool{
 	"PROMPT_COMMAND": true,
 }
 
+// defineBashEnv casa SÓ BASH_ENV.
+//
+// BASH_ENV e ENV são variáveis OPOSTAS, e por muito tempo esta função tratou as
+// duas como a mesma coisa: o achado saía com o título "BASH_ENV definido:
+// executa em shell NÃO interativo" e severidade CRÍTICA para uma linha
+// `ENV=$HOME/.shrc`, que é configuração documentada e faz o contrário.
+//
+//	BASH_ENV   bash NÃO interativo — script, cron, scp, comando remoto de ssh.
+//	           Nenhum deles passa pelo .bashrc, e é isso que dá valor ao sinal.
+//	ENV        shell POSIX INTERATIVO (dash, ksh, e bash invocado como sh ou em
+//	           modo POSIX). É o .bashrc do mundo POSIX, e existe em host de
+//	           fábrica.
 func defineBashEnv(s string) bool {
-	t := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), "export "))
-	return strings.HasPrefix(t, "BASH_ENV=") || strings.HasPrefix(t, "ENV=")
+	return strings.HasPrefix(semExport(s), "BASH_ENV=")
+}
+
+// defineShellEnv casa ENV, a variável de startup do shell POSIX.
+func defineShellEnv(s string) bool {
+	return strings.HasPrefix(semExport(s), "ENV=")
+}
+
+func semExport(s string) string {
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), "export "))
 }
 
 // moduloPAM devolve o módulo e os argumentos de uma linha do pam.d.

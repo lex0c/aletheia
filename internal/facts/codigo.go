@@ -132,6 +132,11 @@ type defsCodigo struct {
 	// bloqueia `../`. Grupo 1 = a var validada. Rebaixa um include DELA de LFI
 	// arbitrário para confinado (tier 1). Só PHP.
 	guardaCaminho *regexp.Regexp
+	// dinamicaReq casa uma superglobal chamada DIRETO — `$_GET['f']()`. Roda
+	// sobre mascDyn, e não sobre a visão visível: dentro de string aquilo é
+	// texto. O caso indireto (`$f = $_GET['f']; $f()`) é do motor de taint com
+	// dynAbre, que já roda sobre mascVar.
+	dinamicaReq *regexp.Regexp
 	// especiais são construções fechadas casadas direto (crase, /e, include…);
 	// suspeito é tier 1.
 	especiais []regraDeCodigo
@@ -155,12 +160,21 @@ var defsPHP = defsCodigo{
 	switchAbre:    regexp.MustCompile(`\bswitch\s*\(\s*(\$\w+)\s*\)\s*\{`),
 	listaAbre:     regexp.MustCompile(`\bin_array\s*\(\s*(\$\w+)\s*,\s*`),
 	guardaCaminho: regexp.MustCompile(`\b(?:validate_file|validate_plugin)\s*\(\s*(\$\w+)`),
-	fonteLit:      regexp.MustCompile(phpFonteLit),
+	// Casa na visão da CHAMADA (mascDyn), nunca na visível.
+	//
+	// Enquanto esta regra morava em `especiais`, ela era aplicada sobre `masc`
+	// — a visão em que o interior das strings continua legível, porque é ali
+	// que o blob base64 e o /e moram. O resultado era que uma string literal
+	// como 'requestInitStartTime - $_SERVER[\'REQUEST_TIME_FLOAT\'] (seconds)'
+	// virava CRÍTICO "chamada dinâmica" num agente de APM perfeitamente
+	// legítimo. Chamada de função não acontece dentro de string, em nenhuma das
+	// duas aspas — e é exatamente essa a visão que mascDyn oferece.
+	dinamicaReq: regexp.MustCompile(`\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\b(?:\s*\[[^\]]{0,40}\])?\s*\(`),
+	fonteLit:    regexp.MustCompile(phpFonteLit),
 	// `[^{;]` não atravessa o `{` do corpo nem o `;` de um método abstrato:
 	// o `{` casado é sempre o que ABRE a função.
 	escopoAbre: regexp.MustCompile(`\bfunction\b[^{;]{0,300}\{`),
 	especiais: []regraDeCodigo{
-		mustDup(2, "função nomeada pelo request (chamada dinâmica)", `\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\b(?:\s*\[[^\]]{0,40}\])?\s*\(`),
 		// `[^;{}\n]`, e não `[^;]`: sem isso o span pulava o fim do statement
 		// e casava a linha SEGUINTE. Medido: `<?php include('menu.php') ?>` com
 		// `$_SERVER['PHP_SELF']` no <form> de baixo saía CRÍTICO — a forma mais
@@ -288,7 +302,7 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	// masc: VISÍVEL — guards (labels/listas), assinaturas, crase, fonte literal.
 	// mascVar: aspa simples apagada — detecção de FONTE-variável e chamada
 	// dinâmica, para `$_GET`/`$s(` em aspa simples não virar fonte/chamada falsa.
-	masc, mascVar, crases := mascararComentarios(conteudo, lang)
+	masc, mascVar, mascDyn, crases := mascararComentarios(conteudo, lang)
 
 	// Um achado por linha, o de maior tier: sink+entrada crítico ganha do eval
 	// solto na mesma linha.
@@ -608,6 +622,13 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	for _, r := range def.especiais {
 		for _, loc := range r.re.FindAllStringIndex(masc, -1) {
 			registrar(loc[0], r.tier, r.rotulo)
+		}
+	}
+	// Superglobal chamada direto. Visão da CHAMADA, pelo motivo escrito no
+	// campo: em `masc` isto casava texto dentro de string.
+	if def.dinamicaReq != nil {
+		for _, loc := range def.dinamicaReq.FindAllStringIndex(mascDyn, -1) {
+			registrar(loc[0], 2, "função nomeada pelo request (chamada dinâmica)")
 		}
 	}
 	for _, r := range def.suspeito {
@@ -1359,19 +1380,31 @@ func semSubscritos(s string) string {
 //	         fonte nem chamada — apagá-lo mata o FP `system('$_GET')` e o `$s(`
 //	         de `sprintf('%1$s (...')`. Guards, assinaturas e fonte LITERAL
 //	         (php://input) leem `masc` (visível).
-func mascararComentarios(s, lang string) (masc, mascVar string, crases []int) {
+func mascararComentarios(s, lang string) (masc, mascVar, mascDyn string, crases []int) {
 	b := []byte(s)
 	bc := append([]byte(nil), b...) // a visão do taint: aspa simples apagada
+	bd := append([]byte(nil), b...) // a visão da CHAMADA: as duas aspas apagadas
 	n := len(b)
 	branco := func(i int) {
 		if i < n && b[i] != '\n' {
 			b[i] = ' '
 			bc[i] = ' '
+			bd[i] = ' '
 		}
 	}
 	brancoCod := func(i int) {
 		if i < n && bc[i] != '\n' {
-			bc[i] = ' ' // só na visão do taint
+			bc[i] = ' ' // visão do taint (e, por consequência, a da chamada)
+			bd[i] = ' '
+		}
+	}
+	// brancoDyn apaga SÓ na visão da chamada. É o que separa as duas: em PHP a
+	// aspa dupla interpola, então `system("ls $_GET[x]")` é fonte de verdade e
+	// precisa ficar visível para o taint — mas texto dentro de aspa NUNCA é uma
+	// chamada de função, em nenhuma das duas aspas.
+	brancoDyn := func(i int) {
+		if i < n && bd[i] != '\n' {
+			bd[i] = ' '
 		}
 	}
 	const (
@@ -1476,11 +1509,16 @@ func mascararComentarios(s, lang string) (masc, mascVar string, crases []int) {
 		case aspaD:
 			// A aspa DUPLA fica VISÍVEL em mascVar: em PHP ela interpola, então
 			// `system("ls $_GET[x]")` é fonte de verdade. Só a aspa SIMPLES é
-			// apagada (não interpola — `$_GET` ali é texto).
+			// apagada (não interpola — `$_GET` ali é texto). Em mascDyn as duas
+			// somem: chamada de função não acontece dentro de string.
 			if c == '\\' {
+				brancoDyn(i)
+				brancoDyn(i + 1)
 				i++
 			} else if c == '"' {
 				st = norm
+			} else {
+				brancoDyn(i)
 			}
 		case crase:
 			if c == '\\' {
@@ -1490,8 +1528,8 @@ func mascararComentarios(s, lang string) (masc, mascVar string, crases []int) {
 			}
 		}
 	}
-	masc, mascVar = string(b), string(bc)
-	return masc, mascVar, crases
+	masc, mascVar, mascDyn = string(b), string(bc), string(bd)
+	return masc, mascVar, mascDyn, crases
 }
 
 // pulaHeredoc devolve o offset do FIM de um heredoc/nowdoc que começa no `<<<`

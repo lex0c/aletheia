@@ -367,9 +367,17 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	adicionarSink := func(loc []int, argCb int, rotulo string) {
 		nome := masc[loc[0]:loc[1]]
 		args := argBalanceado(masc, loc[1]-1)
-		// subprocess só é sink com shell=True; sem isso a lista é execução segura.
-		if strings.Contains(nome, "subprocess") && !reShellTrue.MatchString(args) {
-			return
+		// SHELL-sink vs ARGV-sink. Com shell, o comando inteiro é interpretado —
+		// qualquer parte tainted é RCE. Sem shell (subprocess argv, spawn,
+		// execFile), o que o atacante pode escolher é o PROGRAMA (argv[0]); um
+		// argumento de programa FIXO não é RCE (`spawn("ffmpeg",[req])` é seguro).
+		// Mas `subprocess.run([req])` e `spawn(req)` SÃO — o request é o binário.
+		if strings.Contains(nome, "subprocess") {
+			if !reShellTrue.MatchString(args) {
+				args = argv0(argNoTopo(args, 1)) // 1º arg é a lista; argv[0] é o programa
+			}
+		} else if ehArgvSink(nome) {
+			args = argNoTopo(args, 1) // spawn/execFile: o programa é o 1º argumento
 		}
 		if argCb > 0 {
 			args = argNoTopo(args, argCb)
@@ -1886,6 +1894,27 @@ var fsDeRede = map[string]bool{
 var pularNoCodigo = map[string]bool{
 	"node_modules": true, "vendor": true, ".git": true, ".cache": true,
 	".svn": true, "bower_components": true, ".npm": true,
+}
+
+// ehArgvSink diz se o sink executa um PROGRAMA por argv (spawn/spawnSync/
+// execFile do Node), onde só o 1º argumento (o programa) importa — argumento de
+// um programa fixo não é injeção. Distinto de exec/execSync, que passam pelo
+// shell e interpretam o comando inteiro.
+func ehArgvSink(nome string) bool {
+	return strings.Contains(nome, "spawn") || strings.Contains(nome, "execFile")
+}
+
+// argv0 devolve o PROGRAMA de uma lista de argumentos: o 1º elemento de `[...]`
+// ou `(...)`, ou o próprio valor se não for lista. `['ping', $h]` -> `'ping'`;
+// `[$prog]` -> `$prog`; `$cmd` -> `$cmd`.
+func argv0(s string) string {
+	t := strings.TrimSpace(s)
+	if strings.HasPrefix(t, "[") || strings.HasPrefix(t, "(") {
+		if fim := fimBalanceado(t, 0, maxSpanArg); fim > 0 {
+			return argNoTopo(t[1:fim], 1)
+		}
+	}
+	return t
 }
 
 // ehSinkInclude diz se o nome do sink casado é include/require — o único sink em

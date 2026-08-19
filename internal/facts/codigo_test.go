@@ -1005,3 +1005,29 @@ func TestInArrayCondicaoInteiraSemDisjuncao(t *testing.T) {
 		}
 	}
 }
+
+// Shell-sink vs argv-sink (item #5 do review). Sem shell, o atacante escolhe o
+// PROGRAMA (argv[0]) — argumento de programa FIXO não é RCE.
+func TestArgvSinkVsShellSink(t *testing.T) {
+	crit := map[string]struct{ src, lang string }{
+		"subprocess.run([req]) — programa do request": {"import subprocess\nsubprocess.run([request.args['program']])", "python"},
+		"subprocess.run(req) bare":                    {"import subprocess\nsubprocess.run(request.args['cmd'])", "python"},
+		"spawn(req) — programa do request":            {"const r = spawn(req.body.cmd);", "js"},
+		"execFile(req)":                               {"execFile(req.body.p, []);", "js"},
+		"subprocess shell=True + req":                 {"subprocess.run(request.args['cmd'], shell=True)", "python"},
+	}
+	for n, c := range crit {
+		if !tem(analisarConteudo(c.src, c.lang), 2, "") {
+			t.Errorf("%s: programa/comando do request é RCE: %+v", n, analisarConteudo(c.src, c.lang))
+		}
+	}
+	naoCrit := map[string]struct{ src, lang string }{
+		"subprocess.run(['ping',req]) — programa fixo": {"import subprocess\nsubprocess.run(['ping',request.args['host']])", "python"},
+		"spawn('ffmpeg',[req]) — programa fixo":        {"const r = spawn('ffmpeg', ['-i', req.body.file]);", "js"},
+	}
+	for n, c := range naoCrit {
+		if tem(analisarConteudo(c.src, c.lang), 2, "") {
+			t.Errorf("%s: argumento de programa fixo NÃO é RCE: %+v", n, analisarConteudo(c.src, c.lang))
+		}
+	}
+}

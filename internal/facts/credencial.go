@@ -58,7 +58,14 @@ func collectCredenciais(f *Facts, e *env.Env) {
 	}
 
 	for _, d := range dirs {
-		for _, n := range e.ReadDirNames(d) {
+		nomes, err := e.ReadDirNamesErr(d)
+		if env.EhLacuna(err) {
+			f.denyPersist("credencial", d+" não pôde ser listado ("+
+				env.MotivoDoErro(err)+"): as chaves e o known_hosts dali NÃO "+
+				"entraram no raio de alcance")
+			continue
+		}
+		for _, n := range nomes {
 			p := d + "/" + n
 			switch {
 			case n == "known_hosts" || strings.HasPrefix(n, "known_hosts"):

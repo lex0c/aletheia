@@ -68,6 +68,14 @@ func collectHistorico(f *Facts, e *env.Env) {
 			p := home + "/" + n
 			fi, err := e.Lstat(p)
 			if err != nil {
+				// antiforense.shell_history pergunta se alguém APAGOU o
+				// histórico. Home ilegível produzia a mesma observação —
+				// "não há histórico ali" — que apagar tudo.
+				if env.EhLacuna(err) {
+					f.denyPersist("historico", p+" não pôde ser examinado ("+
+						env.MotivoDoErro(err)+"): ausência de histórico NÃO pode "+
+						"ser afirmada para esta conta")
+				}
 				continue
 			}
 			h := HistoricoShell{Path: p, User: user, Tamanho: fi.Size()}

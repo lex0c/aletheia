@@ -24,18 +24,35 @@ import (
 // que volta com os dois mapas vazios está afirmando ausência sobre um disco que
 // não conseguiu ler.
 type coletorIlegivel struct {
-	nome string
+	nome string //nolint
 	// dirs e arquivos são criados e tornados ilegíveis. Precisam EXISTIR: um
 	// caminho ausente é resposta legítima ("este host não tem systemd"), e não
 	// é isso que está sendo testado.
 	dirs     []string
 	arquivos []string
+	// legiveis são criados e ficam LEGÍVEIS. Existem para montar a cadeia de
+	// que o coletor depende antes de chegar ao que está travado: quem varre
+	// home precisa de um /etc/passwd que possa ler, senão o teste mede a
+	// lacuna do passwd e não a do home.
+	legiveis map[string]string
 	rodar    func(*Facts, *env.Env)
 }
+
+// passwdDeTeste dá UM home real para os coletores que varrem home.
+const passwdDeTeste = "root:x:0:0::/root:/bin/sh\nana:x:1000:1000::/home/ana:/bin/sh\n"
 
 func raizIlegivel(t *testing.T, c coletorIlegivel) *Facts {
 	t.Helper()
 	raiz := t.TempDir()
+	for rel, conteudo := range c.legiveis {
+		full := filepath.Join(raiz, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(conteudo), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	var travar []string
 	for _, d := range c.dirs {
 		full := filepath.Join(raiz, d)
@@ -99,40 +116,45 @@ func TestColetorIlegivelDeclaraLacuna(t *testing.T) {
 		t.Skip("como root o modo 000 não impede leitura: este teste precisa rodar sem privilégio")
 	}
 	casos := []coletorIlegivel{
-		{"loader", nil, []string{"etc/ld.so.preload", "etc/ld.so.conf"}, collectLoader},
-		{"units", []string{"etc/systemd/system", "usr/lib/systemd/system"}, nil, collectUnits},
-		{"cron", []string{"etc/cron.d", "var/spool/cron"}, []string{"etc/crontab"}, collectCron},
-		{"ssh", nil, []string{"etc/ssh/sshd_config"}, collectSSH},
-		{"triggers", nil, []string{"etc/profile", "etc/rc.local", "etc/bash.bashrc"}, collectTriggers},
-		{"modprobe", []string{"etc/modprobe.d", "lib/modules"}, nil, collectModprobe},
-		{"binfmt", []string{"etc/binfmt.d"}, nil, collectBinfmtConfig},
-		{"initramfs", []string{"usr/lib/dracut/modules.d", "etc/dracut.conf.d", "etc/mkinitcpio.conf.d"},
-			[]string{"etc/mkinitcpio.conf"}, collectInitramfs},
-		{"users", nil, []string{"etc/passwd", "etc/group", "etc/sudoers"}, collectUsers},
-		{"logins", nil, []string{"var/log/wtmp", "var/log/btmp", "run/utmp"}, collectLogins},
-		{"boot", []string{"boot"}, []string{"etc/default/grub"}, collectBoot},
-		{"mac", []string{"etc/selinux"}, []string{"etc/apparmor.d/x"}, collectMAC},
-		{"trust", []string{"usr/local/share/ca-certificates", "etc/pki"},
-			[]string{"etc/hosts", "etc/resolv.conf"}, collectTrust},
-		{"logs", []string{"var/log"}, nil, collectLogs},
-		{"auditoria", []string{"etc/audit/rules.d"},
-			[]string{"etc/audit/auditd.conf", "etc/audit/audit.rules"}, collectAuditoria},
-		{"interpretador", nil,
-			[]string{"etc/environment", "etc/security/pam_env.conf"}, collectInterpretador},
-		{"suid", []string{"usr/bin", "usr/local/bin"}, nil, collectSuid},
+		{nome: "loader", arquivos: []string{"etc/ld.so.preload", "etc/ld.so.conf"}, rodar: collectLoader},
+		{nome: "units", dirs: []string{"etc/systemd/system", "usr/lib/systemd/system"}, rodar: collectUnits},
+		{nome: "cron", dirs: []string{"etc/cron.d", "var/spool/cron"}, arquivos: []string{"etc/crontab"}, rodar: collectCron},
+		{nome: "ssh", arquivos: []string{"etc/ssh/sshd_config"}, rodar: collectSSH},
+		{nome: "triggers", arquivos: []string{"etc/profile", "etc/rc.local", "etc/bash.bashrc"}, rodar: collectTriggers},
+		{nome: "modprobe", dirs: []string{"etc/modprobe.d", "lib/modules"}, rodar: collectModprobe},
+		{nome: "binfmt", dirs: []string{"etc/binfmt.d"}, rodar: collectBinfmtConfig},
+		{nome: "initramfs", dirs: []string{"usr/lib/dracut/modules.d", "etc/dracut.conf.d", "etc/mkinitcpio.conf.d"}, arquivos: []string{"etc/mkinitcpio.conf"}, rodar: collectInitramfs},
+		{nome: "users", arquivos: []string{"etc/passwd", "etc/group", "etc/sudoers"}, rodar: collectUsers},
+		{nome: "logins", arquivos: []string{"var/log/wtmp", "var/log/btmp", "run/utmp"}, rodar: collectLogins},
+		{nome: "boot", dirs: []string{"boot"}, arquivos: []string{"etc/default/grub"}, rodar: collectBoot},
+		{nome: "mac", dirs: []string{"etc/selinux"}, arquivos: []string{"etc/apparmor.d/x"}, rodar: collectMAC},
+		{nome: "trust", dirs: []string{"usr/local/share/ca-certificates", "etc/pki"}, arquivos: []string{"etc/hosts", "etc/resolv.conf"}, rodar: collectTrust},
+		{nome: "logs", dirs: []string{"var/log"}, rodar: collectLogs},
+		{nome: "auditoria", dirs: []string{"etc/audit/rules.d"}, arquivos: []string{"etc/audit/auditd.conf", "etc/audit/audit.rules"}, rodar: collectAuditoria},
+		{nome: "interpretador", arquivos: []string{"etc/environment", "etc/security/pam_env.conf"}, rodar: collectInterpretador},
+		{nome: "suid", dirs: []string{"usr/bin", "usr/local/bin"}, rodar: collectSuid},
+
+		// Os que varrem HOME precisam de um /etc/passwd legível apontando para
+		// um home travado: sem isso o teste mediria a lacuna do passwd, que é
+		// de outro coletor.
+		{nome: "credenciais", dirs: []string{"home/ana/.ssh"},
+			legiveis: map[string]string{"etc/passwd": passwdDeTeste}, rodar: collectCredenciais},
+		// O home INTEIRO travado, não só o arquivo: lstat de um arquivo modo 000
+		// funciona (a permissão vem do diretório), então travar o arquivo não
+		// reproduz o EACCES que interessa.
+		{nome: "historico", dirs: []string{"home/ana"},
+			legiveis: map[string]string{"etc/passwd": passwdDeTeste}, rodar: collectHistorico},
+		{nome: "segredos", dirs: []string{"home/ana/.aws", "srv", "opt"},
+			legiveis: map[string]string{"etc/passwd": passwdDeTeste}, rodar: collectSegredos},
 	}
 	// AINDA FORA da tabela, e a razão importa mais que a ausência:
 	//
-	//	credenciais, historico   varrem os HOMES, que saem de /etc/passwd. Com o
-	//	                         passwd ilegível não há home para varrer, e a
-	//	                         lacuna certa é a do passwd — que collectUsers já
-	//	                         declara. Cobri-los exige uma fixture com passwd
-	//	                         legível apontando para um home ilegível.
-	//	segredos, gitHooks       varrem árvore a partir de raízes derivadas de
-	//	                         outros coletores; a fixture precisa montar essa
-	//	                         cadeia antes.
-	//	helpers                  lê /proc, que não existe sob --root: o coletor é
-	//	                         live-only e este harness roda em modo image.
+	//	gitHooks   parte de raízes que outros coletores derivam (repositórios
+	//	           achados na varredura de aplicação); a fixture precisa montar
+	//	           essa cadeia antes.
+	//	helpers    lê /proc, que não existe sob --root: o coletor é live-only e
+	//	           este harness roda em modo image. Cobri-lo exige injeção de
+	//	           falha na camada de leitura, não uma raiz travada.
 	//
 	// Dívida declarada, não esquecimento — é a mesma regra que o código aplica
 	// a si mesmo.

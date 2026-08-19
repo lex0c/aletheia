@@ -80,7 +80,14 @@ func collectSegredos(f *Facts, e *env.Env) {
 	// Um nível só nas raízes de serviço: `.env` fica na raiz do projeto, e
 	// descer mais transformaria isto numa varredura de filesystem.
 	for _, raiz := range raizesDeServico {
-		for _, n := range e.ReadDirNames(raiz) {
+		nomes, err := e.ReadDirNamesErr(raiz)
+		if env.EhLacuna(err) {
+			f.denyPersist("segredo", raiz+" não pôde ser listado ("+
+				env.MotivoDoErro(err)+"): os .env de aplicação sob ele NÃO foram "+
+				"procurados")
+			continue
+		}
+		for _, n := range nomes {
 			for _, env := range arquivosDeAmbiente {
 				registraSegredo(f, e, raiz+"/"+n+"/"+env, "segredo de aplicação")
 			}
@@ -93,7 +100,17 @@ func collectSegredos(f *Facts, e *env.Env) {
 
 func registraSegredo(f *Facts, e *env.Env, p, tipo string) {
 	fi, err := e.Lstat(p)
-	if err != nil || !fi.Mode().IsRegular() {
+	if err != nil {
+		// O inventário de segredo mede o RAIO DE ALCANCE de quem invadiu: o
+		// que ele leva junto. Caminho que não pôde ser examinado sai da conta
+		// sem aparecer, e o raio sai menor do que é.
+		if env.EhLacuna(err) {
+			f.denyPersist("segredo", p+" não pôde ser examinado ("+
+				env.MotivoDoErro(err)+"): não entrou no raio de alcance")
+		}
+		return
+	}
+	if !fi.Mode().IsRegular() {
 		return
 	}
 	modo := fi.Mode().Perm()

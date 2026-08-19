@@ -25,7 +25,10 @@ import (
 type regiao struct {
 	ini, fim uint64
 	perms    string
-	rotuloFS string // [heap], [stack] ou vazio
+	rotuloFS string // [heap], [stack], o caminho apagado, ou vazio
+	// apagado marca o mapeamento de ARQUIVO cujo arquivo foi removido do disco:
+	// a única cópia do código está nesta faixa, e o `Arquivo` não a alcança.
+	apagado bool
 }
 
 func (r regiao) rotulo() string {
@@ -81,6 +84,43 @@ func regioesAnonimas(maps string) []regiao {
 			continue
 		}
 		out = append(out, regiao{ini: ini, fim: fim, perms: perms, rotuloFS: nome})
+	}
+	return out
+}
+
+// regioesApagadas seleciona os mapeamentos de ARQUIVO EXECUTÁVEL cujo arquivo
+// foi apagado do disco — a biblioteca aberta com dlopen e removida em seguida.
+// É o caso que o `Arquivo` não cobre (o arquivo não existe mais) e o
+// `regioesAnonimas` também não (o mapeamento TEM nome): a única cópia do código
+// está nesta faixa de memória, e é por isso que ela entra no dump.
+//
+// Executável e legível: é o SEGMENTO DE CÓDIGO do arquivo apagado, o que
+// importa. Segmento de dado apagado é outra pergunta, e capturá-lo aumentaria o
+// volume sem trazer o que se procura — o código que roda.
+func regioesApagadas(maps string) []regiao {
+	var out []regiao
+	for _, ln := range strings.Split(maps, "\n") {
+		campos := strings.Fields(ln)
+		// precisa do nome E do sufixo "(deleted)", que é sempre o último token.
+		if len(campos) < 6 || campos[len(campos)-1] != "(deleted)" {
+			continue
+		}
+		perms := campos[1]
+		// legível e executável: sem 'r' não há dump, sem 'x' não é código.
+		if len(perms) < 3 || perms[0] != 'r' || perms[2] != 'x' {
+			continue
+		}
+		ini, fim, ok := faixa(campos[0])
+		if !ok || fim <= ini {
+			continue
+		}
+		// o caminho vai do campo 6 até ANTES do "(deleted)" — e pode conter
+		// espaço, que o kernel não escapa.
+		caminho := strings.Join(campos[5:len(campos)-1], " ")
+		if !strings.HasPrefix(caminho, "/") {
+			continue // só arquivo de verdade (inclui /memfd:); [anon:...] não
+		}
+		out = append(out, regiao{ini: ini, fim: fim, perms: perms, rotuloFS: caminho, apagado: true})
 	}
 	return out
 }

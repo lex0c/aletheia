@@ -331,9 +331,10 @@ func notaDaCaptura(i pcap.Interface, o pcap.Opcoes, st pcap.Estatisticas) string
 // ferramenta recomendava, faz as duas coisas — e um processo parado no meio de
 // uma coleta muda o que se está medindo.
 //
-// Só as regiões ANÔNIMAS: o que tem arquivo por trás está no disco e se copia
-// com `Arquivo`. O que não tem arquivo é o código injetado, e é a única coisa
-// ali que não existe em outro lugar.
+// Captura o que só existe NESTA memória: as regiões anônimas (código injetado
+// sem arquivo por trás) E os mapeamentos de arquivo cujo arquivo foi APAGADO do
+// disco (a biblioteca aberta com dlopen e removida em seguida). O que tem
+// arquivo VIVO por trás fica de fora — está no disco e se copia com `Arquivo`.
 func (c *Coletor) Memoria(pid int) error {
 	alvo := "pid=" + strconv.Itoa(pid)
 	mapas, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/maps")
@@ -353,7 +354,10 @@ func (c *Coletor) Memoria(pid int) error {
 	}
 	defer mem.Close()
 
-	regioes := porInteresse(regioesAnonimas(string(mapas)))
+	// Anônimas E apagadas: as duas são "só existe nesta memória". O mapeamento
+	// de arquivo apagado é o mais irrecuperável dos dois — o arquivo não existe
+	// mais para ninguém —, e por isso entra com a prioridade mais alta no corte.
+	regioes := porInteresse(append(regioesApagadas(string(mapas)), regioesAnonimas(string(mapas))...))
 
 	// O orçamento não corta pelo fim da lista, corta pelo que sobrou: uma arena
 	// de alocador de 400 MB no meio do caminho não pode consumir a coleta
@@ -382,12 +386,18 @@ func (c *Coletor) Memoria(pid int) error {
 			continue
 		}
 		item.PID = pid
-		item.Nota = "região anônima " + r.perms + " — sem arquivo por trás: o que " +
-			"estiver aqui não existe em disco em lugar nenhum"
-		if r.rwx() {
+		switch {
+		case r.apagado:
+			item.Nota = "código do arquivo APAGADO " + r.rotuloFS + " (" + r.perms +
+				"): o arquivo foi removido do disco, e esta faixa é a ÚNICA cópia " +
+				"que resta dele — nem o find nem o hash o alcançam"
+		case r.rwx():
 			item.Nota = "região anônima GRAVÁVEL E EXECUTÁVEL (" + r.perms + ") — " +
 				"a assinatura clássica de código injetado, e não há arquivo " +
 				"por trás dela em lugar nenhum"
+		default:
+			item.Nota = "região anônima " + r.perms + " — sem arquivo por trás: o que " +
+				"estiver aqui não existe em disco em lugar nenhum"
 		}
 		if item.Bytes < tam {
 			item.Nota += " · dump PARCIAL: a leitura parou em " +
@@ -422,6 +432,9 @@ func porInteresse(rs []regiao) []regiao {
 
 func classe(r regiao) int {
 	switch {
+	case r.apagado:
+		// O mais irrecuperável: o arquivo não existe mais em lugar nenhum.
+		return -1
 	case r.rwx():
 		return 0
 	case r.rotuloFS != "":

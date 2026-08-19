@@ -429,8 +429,13 @@ var mapeamentoApagado = check.Check{
 // tempo: é a mesma pergunta — que código é este, e onde está a cópia dele.
 func achadoDeMapaApagado(self check.Check, e *env.Env, p *facts.Process,
 	m facts.MapaApagado, sev check.Severity, nota string) check.Finding {
+	faixa := m.Caminho + " (deleted)"
+	if m.Ini != 0 && m.Fim != 0 {
+		faixa = strconv.FormatUint(m.Ini, 16) + "-" + strconv.FormatUint(m.Fim, 16) +
+			" " + faixa
+	}
 	ev := []string{
-		m.Perms + " " + m.Caminho + " (deleted)",
+		m.Perms + " " + faixa,
 		nota,
 		"exe=" + nz(p.Exe, "?") + " comm=" + p.Comm + " uid=" + strconv.Itoa(p.UID),
 	}
@@ -444,9 +449,10 @@ func achadoDeMapaApagado(self check.Check, e *env.Env, p *facts.Process,
 	fd.NextSteps = []string{
 		"o arquivo não existe mais: a cópia está na memória do processo, e " +
 			"matá-lo a destrói (runbook §6)",
-		preservarPID(e, p.PID),
-		"a região é MAPEADA DE ARQUIVO, e o `--mem` só copia as anônimas: para " +
-			"esta, o caminho é o dump de memória da §29",
+		// `--mem` passou a capturar o SEGMENTO DE CÓDIGO do arquivo apagado
+		// direto de /proc/<pid>/mem, além das regiões anônimas: a aquisição do
+		// payload deixou de ser manual.
+		preservarPID(e, p.PID, "--mem"),
 	}
 	return fd
 }

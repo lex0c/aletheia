@@ -163,3 +163,55 @@ func TestDonoEDatasTrazCtime(t *testing.T) {
 		t.Errorf("ctime = %q, queria UTC — a ferramenta inteira é UTC", ctime)
 	}
 }
+
+// O mapeamento de arquivo APAGADO e executável é o mais irrecuperável: o arquivo
+// sumiu do disco, e esta faixa é a única cópia. O regioesAnonimas o ignora (tem
+// nome); o regioesApagadas o pega.
+func TestRegioesApagadasPegaCodigoDeArquivoRemovido(t *testing.T) {
+	const maps = `7f00a0000000-7f00a0002000 r-xp 00000000 08:01 123 /tmp/.x.so (deleted)
+7f00a0002000-7f00a0003000 rw-p 00002000 08:01 123 /tmp/.x.so (deleted)
+7f00b0000000-7f00b0002000 r-xp 00000000 08:01 456 /usr/lib/libc.so.6 (deleted)
+7f00c0000000-7f00c0002000 r-xp 00000000 fd:00 999 /usr/bin/sshd
+7f00d0000000-7f00d0002000 r-xp 00000000 00:05 7 /memfd:payload (deleted)
+7f00e0000000-7f00e0002000 r-xp 00000000 08:01 789 /tmp/my lib.so
+7f00f0000000-7f00f0002000 r-xp 00000000 00:00 0 [vdso] (deleted)
+`
+	rs := regioesApagadas(maps)
+	var got []string
+	for _, r := range rs {
+		if !r.apagado {
+			t.Errorf("%s devia estar marcado apagado", r.rotulo())
+		}
+		got = append(got, r.rotuloFS)
+	}
+	// só os EXECUTÁVEIS apagados: o rw-p apagado NÃO entra (é dado), nem o sshd
+	// (arquivo VIVO), nem o "/tmp/my lib.so" VIVO com espaço no path — que só o
+	// requisito de "(deleted)" filtra —, nem o [vdso] com sufixo apagado, que só
+	// o requisito de caminho absoluto de verdade filtra. memfd apagado é código
+	// só em memória: entra.
+	quer := map[string]bool{
+		"/tmp/.x.so":         true,
+		"/usr/lib/libc.so.6": true,
+		"/memfd:payload":     true,
+	}
+	if len(got) != len(quer) {
+		t.Fatalf("regiões = %v, quer as 3 executáveis apagadas", got)
+	}
+	for _, g := range got {
+		if !quer[g] {
+			t.Errorf("região inesperada: %s", g)
+		}
+	}
+}
+
+// No corte por orçamento, o apagado tem de vir ANTES de tudo: é o único cuja
+// perda é definitiva. Se o orçamento acabar, a última coisa a cair é ele.
+func TestApagadoTemPrioridadeMaximaNoCorte(t *testing.T) {
+	const maps = `7f00a0000000-7f00a0002000 rwxp 00000000 00:00 0
+7f00b0000000-7f00b0002000 r-xp 00000000 08:01 123 /tmp/.x.so (deleted)
+`
+	ord := porInteresse(append(regioesApagadas(maps), regioesAnonimas(maps)...))
+	if len(ord) < 2 || !ord[0].apagado {
+		t.Fatalf("o apagado tem de ser o primeiro: %+v", ord)
+	}
+}

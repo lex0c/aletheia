@@ -162,9 +162,10 @@ FLAGS DE preserve
   --file PATH   preserva um arquivo comum. Repetível
   --bpf ID      preserva o bytecode do programa eBPF: não existe arquivo para
                 copiar, e ele some no próximo boot (§8). Repetível
-  --mem         dump das regiões ANÔNIMAS dos --pid — onde mora código injetado.
-                Sem ptrace: não para o processo nem seta TracerPid, ao contrário
-                do gcore. Só as anônimas; o que tem arquivo por trás use --file
+  --mem         dump do que só existe na MEMÓRIA dos --pid: regiões anônimas
+                (código injetado) E o código de arquivo APAGADO ainda mapeado
+                (dlopen+unlink), que o disco não tem mais. Sem ptrace: não para o
+                processo nem seta TracerPid. Arquivo VIVO por trás use --file
   --mem-max S   teto do dump (padrão 512M). O que não couber é DECLARADO
   --json FILE   manifesto em JSONL ("-" = stdout)
 

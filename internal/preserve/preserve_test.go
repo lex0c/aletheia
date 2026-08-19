@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -244,5 +245,51 @@ func TestDestinoNaoEscapaDoDiretorio(t *testing.T) {
 	}
 	if filepath.Dir(p) != dir {
 		t.Errorf("destino = %q, queria dentro de %q", p, dir)
+	}
+}
+
+// A prova de que o --mem captura o mapeamento APAGADO de ponta a ponta, sem
+// root: o teste mapeia uma lib e a apaga NO PRÓPRIO PROCESSO — /proc/self/mem é
+// legível sem ptrace —, e confere que Memoria escreveu a faixa e a rotulou como
+// o código do arquivo removido.
+func TestMemoriaCapturaMapeamentoApagado(t *testing.T) {
+	arq := filepath.Join(t.TempDir(), "payload.so")
+	if err := os.WriteFile(arq, make([]byte, 8192), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fh, err := os.Open(arq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fh.Close()
+	m, err := syscall.Mmap(int(fh.Fd()), 0, 8192,
+		syscall.PROT_READ|syscall.PROT_EXEC, syscall.MAP_PRIVATE)
+	if err != nil {
+		t.Fatalf("mmap: %v", err)
+	}
+	defer syscall.Munmap(m)
+	os.Remove(arq) // agora o mapeamento é "<arq> (deleted)" e o arquivo sumiu
+
+	c, dir := coletor(t)
+	if err := c.Memoria(os.Getpid()); err != nil {
+		t.Fatalf("Memoria: %v", err)
+	}
+	var achou *Item
+	for i := range c.Itens {
+		if strings.Contains(c.Itens[i].Nota, "payload.so") {
+			achou = &c.Itens[i]
+		}
+	}
+	if achou == nil {
+		t.Fatalf("o mapeamento apagado não foi capturado; itens=%d", len(c.Itens))
+	}
+	if !strings.Contains(achou.Nota, "APAGADO") || !strings.Contains(achou.Nota, "ÚNICA cópia") {
+		t.Errorf("a nota tem de dizer que é a única cópia do arquivo removido: %q", achou.Nota)
+	}
+	if achou.Bytes == 0 {
+		t.Error("a faixa foi rotulada mas nada foi lido de /proc/self/mem")
+	}
+	if fi, err := os.Stat(filepath.Join(dir, filepath.Base(achou.Destino))); err != nil || fi.Size() == 0 {
+		t.Errorf("o arquivo do dump não foi escrito: %v", err)
 	}
 }

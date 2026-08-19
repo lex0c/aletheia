@@ -186,6 +186,11 @@ type FD struct {
 type MapaApagado struct {
 	Caminho string `json:"path"`
 	Perms   string `json:"perms,omitempty"`
+	// Ini e Fim são a FAIXA do mapeamento. Guardá-la é o que permite ao
+	// preserve capturar o payload direto de /proc/<pid>/mem: o arquivo sumiu,
+	// e este intervalo é o único lugar onde a cópia ainda existe.
+	Ini uint64 `json:"start,omitempty"`
+	Fim uint64 `json:"end,omitempty"`
 	// Memfd marca o que NUNCA esteve em disco: o kernel escreve
 	// "/memfd:<nome> (deleted)" para memória anônima nomeada. Tratá-lo como
 	// arquivo apagado inventaria um arquivo que nunca existiu — e manda o
@@ -980,8 +985,9 @@ func lerMaps(p *Process, r io.Reader) {
 					}
 					break
 				}
+				ini, fim := faixaDeMaps(addr)
 				p.MapsApagados = append(p.MapsApagados, MapaApagado{
-					Caminho: c, Perms: string(perms),
+					Caminho: c, Perms: string(perms), Ini: ini, Fim: fim,
 					Memfd: strings.HasPrefix(c, "/memfd:"),
 				})
 			}
@@ -1079,6 +1085,22 @@ func resolverMapasApagados(f *Facts, e *env.Env) {
 			m.Recriado, m.Verificado = r.recriado, r.verificado
 		}
 	}
+}
+
+// faixaDeMaps decodifica "7f3c1a000000-7f3c1a021000" nos dois endereços. Vazio
+// ou malformado devolve 0,0 — e o preserve trata faixa zero como "não sei
+// onde", caindo para a leitura direta do maps.
+func faixaDeMaps(addr []byte) (uint64, uint64) {
+	i := bytes.IndexByte(addr, '-')
+	if i <= 0 {
+		return 0, 0
+	}
+	ini, err1 := strconv.ParseUint(string(addr[:i]), 16, 64)
+	fim, err2 := strconv.ParseUint(string(addr[i+1:]), 16, 64)
+	if err1 != nil || err2 != nil {
+		return 0, 0
+	}
+	return ini, fim
 }
 
 // looksLikeSO reconhece biblioteca compartilhada sem alocar: ".so" no fim, ou

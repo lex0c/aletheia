@@ -131,6 +131,22 @@ kernel e de arquivos de sistema.
 Isso **não torna o binário imune a um kernel comprometido**. Apenas reduz a
 quantidade de userland do alvo em que a análise precisa confiar.
 
+### Operação não intrusiva e sem egress
+
+Aletheia é projetado para operar **offline e de forma não intrusiva no host
+investigado**: não inicia conexões de rede, consultas DNS, requisições externas,
+telemetria ou uploads, e também não executa remediação automática nem modifica
+intencionalmente arquivos, processos, serviços, regras de firewall,
+configurações, permissões, módulos ou persistências encontradas. A ferramenta
+observa o estado local e coleta evidências; arquivos só são criados quando o
+operador solicita explicitamente uma saída, como `--out`, `--json`, `baseline`
+ou `preserve`. `preserve --pcap` captura passivamente o tráfego já presente na
+interface, sem gerar pacotes ou habilitar modo promíscuo. Ainda assim, como
+qualquer ferramenta executada em um sistema vivo, sua própria execução pode
+deixar efeitos mínimos de observação, como presença temporária em `/proc`,
+page cache, eventos de auditoria e, sem privilégios suficientes para
+`O_NOATIME`, eventual atualização de `atime`.
+
 ---
 
 ## Instalação

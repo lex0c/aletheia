@@ -165,6 +165,28 @@ echo "nsl_err=$(tr -d '\n' </tmp/nsl.err)"
 /aletheia collect --out /tmp/dnl.json --no-progress >/dev/null 2>&1
 echo "netns_lacuna=$(grep -c 'network namespace' /tmp/dnl.json 2>/dev/null)"
 
+# --- BPFDoor: socket_filter órfão de fd, preso por um socket que o processo
+# segura, compartilhando um mapa com ele. Na VM não há confusão de namespace de
+# PID (ao contrário do contêiner), então a pergunta é limpa.
+#
+# MEDIDO: bpf_unowned dispara CRÍTICO — o programa órfão NÃO passa em silêncio,
+# não é falso negativo. Mas a evidência diz "o socket segura, e ele pertence a
+# algum processo… e NÃO há socket de captura visível: ou o detentor é um socket
+# comum, ou está fora do alcance". Ou seja: o FixSocket resolve socket de CAPTURA
+# (AF_PACKET), não socket comum com SO_ATTACH_BPF, então o dono NÃO é nomeado —
+# embora o processo tenha o socket aberto. É exatamente a lacuna P11/P12:
+# correlacionar prog->map->PID (o processo segura o mapa que o programa usa)
+# nomearia o detentor. Este cenário é a catraca: se um dia o dono passar a ser
+# nomeado, a linha continua PASS (bpf_unowned pode até parar de disparar, e aí
+# esta asserção precisa virar "atribuído"); enquanto isso, o gap está reproduzido
+# e medido, não afirmado.
+/plant bpfdoor >/tmp/bd.out 2>&1 &
+sleep 1
+BDPID=$(sed -n 's/PLANT pid=\([0-9]*\).*/\1/p' /tmp/bd.out)
+scan
+# quantos socket_filter SEM dono visível o bpf_unowned aponta (0 = todos atribuídos)
+echo "bpfdoor_pid=$BDPID bpfdoor_unowned=$(tem kernel.bpf_unowned)"
+
 echo "===END==="
 poweroff -f 2>/dev/null || echo o > /proc/sysrq-trigger
 sleep 3
@@ -202,6 +224,7 @@ linha "XDP em lo"       "atribuído (RTM_GETLINK)"    "$(get net_base)"    "$(ge
 linha "cls_bpf (tc)"    "atribuído (RTM_GETTFILTER)" "$(get net_base)"    "$(get tc_attributed)"
 linha "act_bpf"         "atribuído (RTM_GETACTION)"  "$(get net_base)"    "$(get act_attributed)"
 linha "tc em outro netns" "lacuna netns DECLARADA"   "$(get netns_base)"  "$(get netns_lacuna)"
+linha "bpfdoor socket_filter" "kernel.bpf_unowned (órfão)" "0"           "$(get bpfdoor_unowned)"
 
 # O duplo-hide tem dois lados: cross.socket_view CALA (as fontes concordam) e o
 # kernel.ftrace_hook DISPARA (o hook em tcp4_seq_show é sinal independente).

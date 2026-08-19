@@ -436,6 +436,13 @@ func main() {
 		anexarTC(prog, loIndice()) // lo do netns NOVO (ifindex 1)
 		syscall.Close(prog)
 
+	case "bpfdoor": // BPFDoor: socket_filter órfão de fd/pin/link, preso por um
+		// socket que o processo segura, e compartilhando um MAP com ele. É o
+		// caso P11/P12: sem correlacionar prog->map->PID, o programa aparece
+		// sem dono. Mede-se o comportamento ATUAL; a expectativa vem do
+		// resultado, não de suposição.
+		plantarBPFDoor()
+
 	default:
 		fmt.Fprintln(os.Stderr, "técnica desconhecida:", os.Args[1])
 		os.Exit(2)
@@ -446,4 +453,86 @@ func main() {
 		os.Stdout.Sync()
 	}
 	time.Sleep(120 * time.Second)
+}
+
+// criarMapa cria um BPF_MAP (array de 1 elemento) e devolve o fd. É o que um
+// implante compartilha com o processo que o hospeda — e o único fio que
+// ligaria o programa órfão de volta ao PID, se a ferramenta seguisse
+// prog->map->PID.
+func criarMapa() int {
+	var a struct {
+		mapType, keySize, valueSize, maxEntries uint32
+		mapFlags, innerMapFD, numaNode          uint32
+		mapName                                 [16]byte
+	}
+	a.mapType = 2 // BPF_MAP_TYPE_ARRAY
+	a.keySize, a.valueSize, a.maxEntries = 4, 8, 1
+	fd, _, e := syscall.Syscall(sysBPF, 0 /*BPF_MAP_CREATE*/, uintptr(unsafe.Pointer(&a)), unsafe.Sizeof(a))
+	if e != 0 {
+		must(fmt.Errorf("%v", e), "BPF_MAP_CREATE")
+	}
+	return int(fd)
+}
+
+// carregarSocketFilterComMapa carrega um socket_filter que REFERENCIA o mapa
+// (uma instrução LD_MAP_FD), para que exista o vínculo prog->map. O programa é
+// trivial no resto: devolve 0. Devolve o fd do programa.
+func carregarSocketFilterComMapa(mapFD int) int {
+	// LD64 R1, map_fd (pseudo BPF_PSEUDO_MAP_FD=1); r0=0; exit.
+	insns := []byte{
+		0x18, 0x01, 0, 0, byte(mapFD), byte(mapFD >> 8), byte(mapFD >> 16), byte(mapFD >> 24),
+		0x00, 0x00, 0, 0, 0x01, 0, 0, 0, // parte alta do LD64: src_reg=1 (MAP_FD)
+		0xb7, 0, 0, 0, 0, 0, 0, 0, // MOV64 R0, 0
+		0x95, 0, 0, 0, 0, 0, 0, 0, // EXIT
+	}
+	lic := []byte("GPL\x00")
+	log := make([]byte, 4096)
+	var a struct {
+		progType, insnCnt  uint32
+		insns, license     uint64
+		logLevel, logSize  uint32
+		logBuf             uint64
+		kernVer, progFlags uint32
+	}
+	a.progType = 1 // BPF_PROG_TYPE_SOCKET_FILTER
+	a.insnCnt = 4
+	a.insns = uint64(uintptr(unsafe.Pointer(&insns[0])))
+	a.license = uint64(uintptr(unsafe.Pointer(&lic[0])))
+	a.logLevel, a.logSize = 1, uint32(len(log))
+	a.logBuf = uint64(uintptr(unsafe.Pointer(&log[0])))
+	fd, _, e := syscall.Syscall(sysBPF, 5 /*BPF_PROG_LOAD*/, uintptr(unsafe.Pointer(&a)), unsafe.Sizeof(a))
+	runtime.KeepAlive(insns)
+	runtime.KeepAlive(lic)
+	runtime.KeepAlive(log)
+	if e != 0 {
+		must(fmt.Errorf("%v — %s", e, log), "BPF_PROG_LOAD socket_filter")
+	}
+	return int(fd)
+}
+
+func plantarBPFDoor() {
+	mapFD := criarMapa() // o processo SEGURA o mapa
+	prog := carregarSocketFilterComMapa(mapFD)
+
+	// SO_ATTACH_BPF funciona em QUALQUER socket, não só no raw de pacote — e o
+	// AF_PACKET nem sempre está no kernel (o LTS mínimo da VM não tem). Um UDP
+	// serve: o socket passa a segurar o programa igual, e é o socket que fica
+	// sendo o detentor órfão de fd. A mecânica de atribuição testada é a mesma.
+	sk, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
+	must(err, "socket UDP")
+	const soAttachBPF = 50
+	_, _, e := syscall.Syscall6(syscall.SYS_SETSOCKOPT, uintptr(sk), syscall.SOL_SOCKET,
+		soAttachBPF, uintptr(unsafe.Pointer(&prog)), 4, 0)
+	if e != 0 {
+		must(fmt.Errorf("%v", e), "SO_ATTACH_BPF")
+	}
+	// Fecha o fd do PROGRAMA: agora ele é órfão de descritor. Quem o segura é o
+	// socket; e o único fio de volta ao PID, além do socket, é o mapa que este
+	// processo ainda tem aberto.
+	syscall.Close(prog)
+	fmt.Printf("PLANT pid=%d bpfdoor: socket_filter órfão de fd, preso pelo socket, mapa compartilhado\n", os.Getpid())
+	// segura socket e mapa abertos e dorme
+	for {
+		time.Sleep(time.Hour)
+	}
 }

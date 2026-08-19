@@ -1936,26 +1936,77 @@ func ehArgvSink(nome string) bool {
 	return strings.Contains(nome, "exec") || strings.Contains(nome, "spawn")
 }
 
-var reFuncAnon = regexp.MustCompile(`^(?:static\s+|async\s+)*function\b`)
+var (
+	rePrefixoClosure = regexp.MustCompile(`^(?:static|async)\s+`)
+	reFuncStart      = regexp.MustCompile(`^function\b`)
+	reIdentUnico     = regexp.MustCompile(`^\w+$`)
+)
 
-// ehClosureLiteral diz se um argumento de callback é uma FUNÇÃO ANÔNIMA escrita
-// no lugar — `function(...){...}` (PHP/JS), `fn(...)=>...` (PHP), `(...)=>...` ou
-// `x=>...` (JS) — e não um nome ou variável. Uma closure literal é um callback
-// FIXO: o atacante não a escolhe, logo var de request no corpo é dado que flui
-// pela função, não função escolhida pelo request. `array_map(function($p){…}, $a)`
-// e `array_filter($a, function($v)use($id){…})` são idioma, não backdoor.
+// ehClosureLiteral diz se o argumento de callback é, POR INTEIRO, uma função
+// anônima literal — `function(...){...}` (PHP/JS), `fn(...)=>...` (PHP),
+// `(...)=>...`/`x=>...` (JS) — com prefixo `static`/`async` e parênteses externos
+// opcionais. Uma closure literal é um callback FIXO: o atacante não a escolhe,
+// logo var de request no corpo é dado que flui pela função, não a identidade da
+// função. `array_map(function($p){…}, $a)` e `array_filter($a, function($v)use($id){…})`
+// são idioma, não backdoor.
+//
+// A exigência é a expressão TODA ser a closure. Numa expressão MISTA em que ela
+// é só UM ramo — `$_GET['f'] ?: fn($x)=>$x`, `req.body.cb || (x=>x)`,
+// `function(){} && $_GET['f']` — o OUTRO ramo pode ser a função escolhida pelo
+// atacante; aqui retorna false e o sink segue avaliado. (Um sink DENTRO do corpo
+// da closure é casado à parte pela varredura, então não se perde por isto.)
 func ehClosureLiteral(s string) bool {
 	t := strings.TrimSpace(s)
-	if reFuncAnon.MatchString(t) {
-		return true
+	// Parênteses que envolvem a expressão inteira não mudam nada: `(fn()=>…)`.
+	for len(t) >= 2 && t[0] == '(' && fimBalanceado(t, 0, maxSpanBloco) == len(t)-1 {
+		t = strings.TrimSpace(t[1 : len(t)-1])
 	}
-	return temSetaTopo(t)
+	// Prefixos que não alteram a natureza literal (`static fn`, `async () =>`).
+	for {
+		p := rePrefixoClosure.FindString(t)
+		if p == "" {
+			break
+		}
+		t = strings.TrimSpace(t[len(p):])
+	}
+	// Função anônima: o corpo é `{...}`, então operador dentro dele fica em
+	// profundidade > 0. Se NÃO há operador seletor em profundidade ZERO, a
+	// expressão é só a closure. Um `&&`/`||`/`?:`/`and` solto a torna mista
+	// (`function(){} && $_GET['f']` executa o $_GET) e desqualifica. Robusto a
+	// truncamento: closure cortada no meio nunca reabre a profundidade 0.
+	if reFuncStart.MatchString(t) {
+		return !temSeletorTopo(t)
+	}
+	// Arrow: `HEADER => corpo`. O corpo é aberto (sem chaves), então operador
+	// nele também fica em profundidade 0 — por isso a regra acima não serve. O
+	// que decide é o HEADER: tudo antes da 1ª seta de topo tem de ser SÓ a lista
+	// de parâmetros. `$_GET['f'] ?: fn($x)` não é, e cai fora.
+	if i := indiceSetaTopo(t); i >= 0 {
+		return ehCabecalhoDeArrow(strings.TrimSpace(t[:i]))
+	}
+	return false
 }
 
-// temSetaTopo diz se há uma seta `=>` em profundidade ZERO — a assinatura de uma
-// arrow function. Um `=>` dentro de `(...)`/`[...]`/`{...}` ou de string (par
-// chave-valor de array, corpo de closure) não conta.
-func temSetaTopo(s string) bool {
+// ehCabecalhoDeArrow diz se `h` é SÓ a lista de parâmetros de uma arrow: `fn(...)`
+// (PHP), `(...)` (JS) ou um identificador único (`x =>`). Qualquer operador ou
+// termo a mais — o `$_GET[...]` de um `?:` à esquerda — reprova.
+func ehCabecalhoDeArrow(h string) bool {
+	if h == "" {
+		return false
+	}
+	if strings.HasPrefix(h, "fn") {
+		r := strings.TrimSpace(h[2:])
+		return strings.HasPrefix(r, "(") && fimBalanceado(r, 0, maxSpanArg) == len(r)-1
+	}
+	if strings.HasPrefix(h, "(") {
+		return fimBalanceado(h, 0, maxSpanArg) == len(h)-1
+	}
+	return reIdentUnico.MatchString(h)
+}
+
+// indiceSetaTopo devolve o índice da 1ª seta `=>` em profundidade ZERO, ou -1.
+// Uma seta dentro de `(...)`/`[...]`/`{...}` ou de string não conta.
+func indiceSetaTopo(s string) int {
 	prof := 0
 	var str byte
 	for i := 0; i+1 < len(s); i++ {
@@ -1977,11 +2028,71 @@ func temSetaTopo(s string) bool {
 			prof--
 		case '=':
 			if prof == 0 && s[i+1] == '>' {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// temSeletorTopo diz se há um operador que ESCOLHE um ramo em profundidade ZERO:
+// `&&`, `||`, `??`, `?:` (Elvis) ou as palavras `and`/`or`/`xor` do PHP. Só as
+// formas dobradas/pareadas: o `|`/`&`/`?`/`:` simples aparece em type hint de
+// retorno PHP (`function(): ?int`, `int|string`, `Foo&Bar`) e NÃO conta.
+func temSeletorTopo(s string) bool {
+	prof := 0
+	var str byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if str != 0 {
+			if c == '\\' {
+				i++
+			} else if c == str {
+				str = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			str = c
+		case '(', '[', '{':
+			prof++
+		case ')', ']', '}':
+			prof--
+		default:
+			if prof != 0 {
+				continue
+			}
+			switch {
+			case c == '&' && i+1 < len(s) && s[i+1] == '&':
+				return true
+			case c == '|' && i+1 < len(s) && s[i+1] == '|':
+				return true
+			case c == '?' && i+1 < len(s) && (s[i+1] == '?' || s[i+1] == ':'):
+				return true
+			case (c == 'a' || c == 'o' || c == 'x') && ehOpPalavra(s, i):
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// ehOpPalavra diz se em `s[i:]` começa `and`/`or`/`xor` isolado por fronteira de
+// palavra dos dois lados — para não casar dentro de `$android` ou `factor`.
+func ehOpPalavra(s string, i int) bool {
+	for _, op := range [...]string{"and", "or", "xor"} {
+		if strings.HasPrefix(s[i:], op) &&
+			(i == 0 || !ehCharPalavra(s[i-1])) &&
+			(i+len(op) >= len(s) || !ehCharPalavra(s[i+len(op)])) {
+			return true
+		}
+	}
+	return false
+}
+
+func ehCharPalavra(b byte) bool {
+	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 // argv0 devolve o PROGRAMA de uma lista de argumentos: o 1º elemento de `[...]`

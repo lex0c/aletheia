@@ -1090,10 +1090,60 @@ func TestClosureLiteralNaoEhCallbackDoRequest(t *testing.T) {
 		"<?php call_user_func($_GET['f']);",     // função por nome do request
 		"<?php array_map($_GET['f'], $arr);",    // callback por nome do request
 		"<?php array_filter($a, $_POST['cb']);", // callback (2º arg) por nome do request
+		// EXPRESSÃO MISTA: a closure é só um ramo, e o OUTRO é o request. Em PHP
+		// só `?:` e `??` (e o ternário) devolvem o operando — `||`/`and` devolvem
+		// bool, então não são vetor de callable. Uma supressão que casasse "tem
+		// uma seta em qualquer lugar" deixava estes passarem (o FN do review).
+		"<?php array_map($_GET['f'] ?: fn($x)=>$x, $items);",     // Elvis: usa $_GET se truthy
+		"<?php array_map($_POST['cb'] ?? fn()=>1, $items);",      // coalesce: usa $_POST se setado
+		"<?php $cb=$_GET['cb']; array_map($cb ?: fn()=>1, $it);", // idem via var contaminada
+		"<?php array_map($ok ? fn($x)=>$x : $_GET['f'], $it);",   // ternário com request no ramo
 	}
 	for _, src := range rce {
 		if !tem(analisarConteudo(src, "php"), 2, "") {
 			t.Errorf("callback nomeado pelo request continua RCE: %q -> %+v", src, analisarConteudo(src, "php"))
+		}
+	}
+}
+
+// ehClosureLiteral tem de exigir a expressão INTEIRA ser a closure/arrow, não só
+// conter uma seta em algum ponto: senão `$_GET['f'] ?: fn($x)=>$x` seria lido
+// como literal e o ramo do request escaparia (FN do review). Cobre também a
+// sintaxe JS de lógica/condicional, embora o motor hoje não avalie callback de
+// array em JS — a função precisa estar correta se isso mudar.
+func TestEhClosureLiteralExigeExpressaoInteira(t *testing.T) {
+	literais := []string{
+		"function($p){ return $p; }",
+		"function ($v) use ($id) { return $v==$id; }",
+		"static function($x){ return $x; }",
+		"fn($x) => $x",
+		"static fn($x) => $x",
+		"x => x*2",
+		"(a, b) => a+b",
+		"async (x) => x",
+		"(fn($x) => $x)",           // parênteses externos
+		"fn($x) => $x || $default", // operador no CORPO da arrow é ok
+		"function(){ return $a && $b; }",
+		"function(): ?int { return 1; }", // type hint de retorno não é seletor
+		"function(): int|string { return 1; }",
+	}
+	for _, s := range literais {
+		if !ehClosureLiteral(s) {
+			t.Errorf("closure/arrow literal pura devia contar como literal: %q", s)
+		}
+	}
+	mistas := []string{
+		"$_GET['f'] ?: fn($x) => $x",        // php Elvis
+		"$_POST['cb'] ?? fn() => 1",         // php coalesce
+		"$_GET['f'] ?: function(){}",        // request primeiro, closure fallback
+		"function(){} && $_GET['f']",        // closure primeiro, request via &&
+		"function(){} and $_GET['f']",       // idem, operador-palavra
+		"req.body.cb || (x => x)",           // js logical-or
+		"req.body.cb ? (x=>x) : $_GET['f']", // js/php ternário, request no ramo
+	}
+	for _, s := range mistas {
+		if ehClosureLiteral(s) {
+			t.Errorf("expressão MISTA (closure é só um ramo) não é literal: %q", s)
 		}
 	}
 }

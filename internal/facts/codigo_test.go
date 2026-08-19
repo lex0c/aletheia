@@ -938,3 +938,22 @@ func TestFonteLiteralEmStringVisivel(t *testing.T) {
 		t.Errorf("$s dentro de '%%1$s (' não é chamada dinâmica: %+v", analisarConteudo(fp, "php"))
 	}
 }
+
+// call_user_func(array($obj, $req['metodo'])) é dispatch de MÉTODO num objeto
+// FIXO — o request escolhe só o nome do método (como $obj->$m()), não a função.
+// Foi o FP do spellchecker do TinyMCE. Mas se o OBJETO também vem do request,
+// é execução arbitrária e segue crítico.
+func TestCallableArrayMethodDispatch(t *testing.T) {
+	if tem(analisarConteudo("<?php\n$in=$_POST;\ncall_user_func_array(array($spellchecker,$in['method']),$in['params']);", "php"), 2, "") {
+		t.Error("array($obj_fixo, $req[metodo]) é dispatch de método, não RCE")
+	}
+	crit := []string{
+		"<?php call_user_func_array(array($_GET['c'],$_GET['m']),array());", // objeto do request
+		"<?php call_user_func($_GET['f']);",                                 // função do request
+	}
+	for _, src := range crit {
+		if !tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("objeto/função DO request continua RCE: %q -> %+v", src, analisarConteudo(src, "php"))
+		}
+	}
+}

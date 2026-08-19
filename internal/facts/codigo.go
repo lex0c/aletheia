@@ -384,6 +384,13 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 			e.idxVars = def.varTok.FindAllString(args, -1)
 			e.idxRem = def.inputRem.MatchString(args)
 			ident = semSubscritos(args)
+			// Callable-array `array($obj, $metodo)`/`[$obj, $metodo]`: é chamada
+			// de MÉTODO num objeto FIXO — o request escolhe o NOME do método,
+			// não a função. A identidade é o 1º elemento (o objeto); o método é
+			// índice, como `$obj->$m()`. Foi o FP do spellchecker do TinyMCE.
+			if base, ok := primeiroElemCallable(args); ok {
+				ident = base
+			}
 		}
 		e.vars = def.varTok.FindAllString(ident, -1)
 		if def.inputRem.MatchString(ident) {
@@ -1124,6 +1131,43 @@ func argNoTopo(args string, n int) string {
 		return args[ini:]
 	}
 	return ""
+}
+
+// primeiroElemCallable, para um callback que é `array($obj, $metodo)` ou
+// `[$obj, $metodo]`, devolve o 1º elemento (o objeto/classe) — a IDENTIDADE do
+// callable. O 2º é o NOME do método: request ali é dispatch de método no objeto
+// fixo, não execução arbitrária. Devolve ("", false) se não for um array-callable.
+func primeiroElemCallable(s string) (string, bool) {
+	t := strings.TrimSpace(s)
+	var corpo string
+	switch {
+	case strings.HasPrefix(t, "array"):
+		r := strings.TrimSpace(strings.TrimPrefix(t, "array"))
+		if !strings.HasPrefix(r, "(") {
+			return "", false
+		}
+		fim := fimBalanceado(r, 0, maxSpanArg)
+		if fim < 0 {
+			return "", false
+		}
+		corpo = r[1:fim]
+	case strings.HasPrefix(t, "["):
+		fim := fimBalanceado(t, 0, maxSpanArg)
+		if fim < 0 {
+			return "", false
+		}
+		corpo = t[1:fim]
+	default:
+		return "", false
+	}
+	// só o 1º elemento (argNoTopo devolve o 1º arg até a vírgula de topo);
+	// precisa haver um 2º (o método) para ser callable de método, senão é array
+	// normal — se o 1º elemento é o corpo inteiro, não havia vírgula.
+	prim := argNoTopo(corpo, 1)
+	if strings.TrimSpace(prim) == "" || len(strings.TrimSpace(prim)) == len(strings.TrimSpace(corpo)) {
+		return "", false
+	}
+	return prim, true
 }
 
 // semSubscritos apaga o conteúdo dos colchetes `[...]` de uma expressão, deixando

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/lex0c/aletheia/internal/check"
+	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
 )
 
@@ -389,5 +390,61 @@ func TestMemfdMapeadoIsentaJITEAcusaOResto(t *testing.T) {
 	}
 	if len(r.Partial) == 0 {
 		t.Error("a isenção do JIT precisa chegar à cobertura")
+	}
+}
+
+// O aperto que a matriz adversarial pediu: com a base de pacotes disponível, a
+// isenção de JIT exige DONO DE PACOTE. Um payload copiado para /usr/bin/node
+// casa nome e diretório mas não o dono, e deixa de sumir do check.
+func TestJITExigeDonoDePacoteComBaseDisponivel(t *testing.T) {
+	e := testEnv()
+	e.Caps |= env.CapPkgDB
+
+	// node de PACOTE: continua isento — sem isso, todo host com node vira parede.
+	owned := &facts.Facts{
+		Processes: []facts.Process{{PID: 10, Comm: "node", Exe: "/usr/bin/node",
+			MapsRWX: []string{"rwxp (anônimo)"}}},
+		Ownership: []facts.Ownership{{Path: "/usr/bin/node", Owned: true}},
+	}
+	if r := mapsRWXAnon.Run(mapsRWXAnon, owned, e); len(r.Findings) != 0 {
+		t.Errorf("node de pacote tem de continuar isento: %v", r.Findings)
+	}
+
+	// payload rodando como /usr/bin/node, SEM dono: o bypass, agora fechado.
+	fake := &facts.Facts{
+		Processes: []facts.Process{{PID: 11, Comm: "node", Exe: "/usr/bin/node",
+			MapsRWX: []string{"rwxp (anônimo)"}}},
+		Ownership: []facts.Ownership{{Path: "/usr/bin/node", Owned: false}},
+	}
+	if r := mapsRWXAnon.Run(mapsRWXAnon, fake, e); len(r.Findings) != 1 {
+		t.Fatalf("payload como /usr/bin/node SEM dono tem de disparar: %d achados", len(r.Findings))
+	}
+}
+
+// O mesmo para o maps_exec_anon — foi ele que a matriz pegou.
+func TestExecAnonJITFakeSemDonoDispara(t *testing.T) {
+	e := testEnv()
+	e.Caps |= env.CapPkgDB
+	fake := &facts.Facts{
+		Processes: []facts.Process{{PID: 11, Comm: "node", Exe: "/usr/bin/node",
+			MapsExecAnon: []string{"7f00-7f01 r-xp"}, MapsExecAnonN: 1}},
+		Ownership: []facts.Ownership{{Path: "/usr/bin/node", Owned: false}},
+	}
+	if r := mapsExecAnon.Run(mapsExecAnon, fake, e); len(r.Findings) != 1 {
+		t.Fatalf("payload como /usr/bin/node sem dono tem de disparar: %d", len(r.Findings))
+	}
+}
+
+// Sem a base de pacotes NÃO dá para distinguir node de payload, e a isenção
+// continua — errar para "isenta" evita FP em JIT onde não se pode saber.
+func TestJITSemBaseDePacotesMantemIsencao(t *testing.T) {
+	e := testEnv() // sem CapPkgDB
+	f := &facts.Facts{
+		Processes: []facts.Process{{PID: 11, Comm: "node", Exe: "/usr/bin/node",
+			MapsRWX: []string{"rwxp (anônimo)"}}},
+		Ownership: []facts.Ownership{{Path: "/usr/bin/node", Owned: false}},
+	}
+	if r := mapsRWXAnon.Run(mapsRWXAnon, f, e); len(r.Findings) != 0 {
+		t.Errorf("sem base de pacotes, a isenção continua: %v", r.Findings)
 	}
 }

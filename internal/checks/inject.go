@@ -35,11 +35,13 @@ var mapsRWXAnon = check.Check{
 	Mode:     check.ModeAuto,
 	Sources:  env.SourceLive,
 	Requires: env.CapProcfs,
-	Optional: env.CapRoot,
+	Optional: env.CapRoot | env.CapPkgDB,
 	Wtf:      true,
 	FalsePositives: []string{
 		"runtime com JIT (Java, Node, .NET, navegador, QEMU) usa rwx anônimo por " +
-			"projeto — os conhecidos, rodando de diretório de sistema, são pulados",
+			"projeto — os conhecidos, de diretório de sistema E COM DONO DE PACOTE, " +
+			"são pulados. Payload copiado para /usr/bin/node não escapa: casa o nome, " +
+			"não o dono (a matriz adversarial provou o bypass)",
 		"empacotador (UPX e afins) descomprime para memória rwx: binário legítimo " +
 			"empacotado cai aqui",
 		"BLIND SPOT do descarte acima: código injetado DENTRO de uma JVM ou de um " +
@@ -49,6 +51,8 @@ var mapsRWXAnon = check.Check{
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
 		var denied int
+		semDono := caminhosSemDono(f)
+		temPkgDB := e.Has(env.CapPkgDB)
 		// isentos são os processos que a regra de runtime com JIT tirou da
 		// pergunta. Eles NÃO foram avaliados, e o número precisa chegar à
 		// cobertura.
@@ -72,7 +76,7 @@ var mapsRWXAnon = check.Check{
 			if len(anon) == 0 {
 				continue
 			}
-			if isJITRuntime(p) {
+			if ehJITConfiavel(p, semDono, temPkgDB) {
 				// A isenção existe e é necessária — sem ela, todo host com
 				// navegador ou JVM vira uma parede de achados. Mas ela é uma
 				// decisão de NÃO OLHAR, e decisão de não olhar se DECLARA.
@@ -126,7 +130,7 @@ var mapsRWXAnon = check.Check{
 			// afogariam a seção que existe para ser lida.
 			r.Partial = append(r.Partial, strconv.Itoa(n)+
 				" processo(s) com região rwx anônima NÃO foram avaliados por serem "+
-				"runtime com JIT em diretório de sistema ("+firstN(dedupOrdenado(isentos), 3)+
+				"runtime com JIT em diretório de sistema e com dono de pacote ("+firstN(dedupOrdenado(isentos), 3)+
 				"): código injetado DENTRO de um deles não é distinguível daqui do "+
 				"código que o próprio runtime gera")
 		}
@@ -180,10 +184,10 @@ var mapsExecAnon = check.Check{
 	Optional: env.CapRoot | env.CapPkgDB,
 	Wtf:      true,
 	FalsePositives: []string{
-		"runtime com JIT em kernel ANTIGO cai aqui e é pulado pelo nome do " +
-			"binário: até o 5.17 não havia rótulo de região, e o JIT do node " +
-			"aparece como anônimo sem nome como qualquer injeção — medido, um " +
-			"node ocioso tem 1 região r-x anônima",
+		"runtime com JIT em kernel ANTIGO é pulado — até o 5.17 não havia rótulo " +
+			"de região e o JIT aparece como anônimo sem nome —, mas SÓ se o binário " +
+			"tiver dono de pacote: um payload rodando como /usr/bin/node sem dono " +
+			"NÃO é isento (o bypass que a matriz adversarial demonstrou)",
 		"empacotador (UPX e afins) que descomprime para memória e protege a " +
 			"região depois: binário legítimo empacotado cai aqui",
 		"o rótulo é escrito pelo PROCESSO (prctl), não pelo kernel: quem injeta " +
@@ -196,6 +200,7 @@ var mapsExecAnon = check.Check{
 		var denied int
 		var isentos []string
 		semDono := caminhosSemDono(f)
+		temPkgDB := e.Has(env.CapPkgDB)
 		for i := range f.Processes {
 			p := &f.Processes[i]
 			if p.Self || p.Vanished {
@@ -214,7 +219,7 @@ var mapsExecAnon = check.Check{
 			// sem rótulo não é explicada pelo que ele gera — e é justamente o
 			// BLIND SPOT que o check irmão declara e não consegue cobrir.
 			autorrotula := len(p.MapsExecNomes) > 0
-			if isJITRuntime(p) && !autorrotula {
+			if ehJITConfiavel(p, semDono, temPkgDB) && !autorrotula {
 				isentos = append(isentos, nz(p.Exe, p.Comm))
 				continue
 			}
@@ -326,7 +331,7 @@ var mapeamentoApagado = check.Check{
 	Mode:     check.ModeAuto,
 	Sources:  env.SourceLive,
 	Requires: env.CapProcfs,
-	Optional: env.CapRoot,
+	Optional: env.CapRoot | env.CapPkgDB,
 	Wtf:      true,
 	FalsePositives: []string{
 		"ATUALIZAÇÃO DE PACOTE é a causa comum, e não vira aviso: o caminho volta " +
@@ -342,6 +347,8 @@ var mapeamentoApagado = check.Check{
 		var r check.Result
 		var denied int
 		var isentos []string
+		semDono := caminhosSemDono(f)
+		temPkgDB := e.Has(env.CapPkgDB)
 		// Os recriados viram UMA linha agregada. Uma por processo seria uma
 		// parede de centenas num servidor com reinício pendente, e a parede
 		// enterraria os poucos que importam.
@@ -357,7 +364,7 @@ var mapeamentoApagado = check.Check{
 			}
 			for _, m := range p.MapsApagados {
 				if m.Memfd {
-					if isJITRuntime(p) {
+					if ehJITConfiavel(p, semDono, temPkgDB) {
 						isentos = append(isentos, nz(p.Exe, p.Comm))
 						continue
 					}
@@ -621,11 +628,27 @@ var jitRuntimes = map[string]bool{
 	"beam.smp": true, "erl": true, "qemu-system-x86_64": true,
 }
 
-func isJITRuntime(p *facts.Process) bool {
+// ehJITConfiavel decide se um processo pode ser ISENTO como runtime com JIT.
+//
+// Casar o NOME e o DIRETÓRIO não basta, e a matriz adversarial provou por quê:
+// copiar o payload para /usr/bin/node casa os dois e some do check de injeção.
+// O que fecha o bypass é a mesma pergunta do §24 — o binário veio de um PACOTE?
+// Um /usr/bin/node de verdade veio do nodejs; um payload copiado para lá, não.
+//
+// Sem a base de pacotes a pergunta não tem resposta, e aí a isenção CONTINUA:
+// distinguir é impossível, e errar para "isenta" evita encher de FP todo host
+// com navegador ou JVM. Com a base, só o que tem dono de pacote é isento.
+func ehJITConfiavel(p *facts.Process, semDono map[string]bool, temPkgDB bool) bool {
 	if p.Exe == "" || !diretorioDeSistema(p.Exe) {
 		return false
 	}
-	return jitRuntimes[baseDe(p.Exe)]
+	if !jitRuntimes[baseDe(p.Exe)] {
+		return false
+	}
+	if !temPkgDB {
+		return true // sem base de pacotes, não dá para distinguir: isenta
+	}
+	return !semDono[p.Exe]
 }
 
 // containerMarkers são os caminhos de cgroup que os runtimes escrevem. Um

@@ -36,7 +36,7 @@ declare -A ESPERA=(
 	[memfd]="FIRE proc.memfd_exec :: execução fileless: imagem vem de memfd, sem disco"
 	[revshell-direct]="FIRE correlate.revshell :: fd 0/1/2 no mesmo socket de saída público"
 	[revshell-bridge]="FIRE correlate.revshell_bridge :: shell lê de pipe, ponte tem o socket de saída"
-	[jit-inject]="BLIND proc.maps_exec_anon :: DECLARADO — payload rodando como /usr/bin/node cai na isenção de JIT"
+	[jit-inject]="FIRE proc.maps_exec_anon :: bypass FECHADO — a isenção de JIT passou a exigir dono de pacote"
 	[rx-anon-rotulada]="BLIND proc.maps_exec_anon :: DECLARADO — rótulo de VMA é spoofável, o check só conta sem rótulo"
 	[deleted-data]="BLIND proc.deleted_mapping :: DECLARADO — o check exige segmento executável"
 )

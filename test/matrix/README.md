@@ -44,16 +44,16 @@ sem sinal.
 | `revshell-bridge`  | `correlate.revshell_bridge` | regressão |
 | `rx-anon-rotulada` | (nenhum)               | ponto cego¹  |
 | `deleted-data`     | (nenhum)               | ponto cego²  |
-| `jit-inject`       | (nenhum)               | ponto cego³  |
+| `jit-inject`       | `proc.maps_exec_anon`  | regressão³   |
 
 1. rótulo de VMA (`PR_SET_VMA_ANON_NAME`) é spoofável, e o check só conta região
    SEM rótulo — o próprio check declara esse limite.
 2. o check exige segmento EXECUTÁVEL; um segmento de dado apagado passa.
-3. `maps_exec_anon` isenta runtime com JIT em diretório de sistema. Rodar o
-   payload como `/usr/bin/node` — com uma região executável sem rótulo — cai na
-   isenção e passa. Declarado, mas a matriz o demonstra como bypass real: um
-   candidato a apertar a isenção (exigir que o processo REALMENTE pareça node —
-   dono de pacote, biblioteca de runtime mapeada).
+3. era ponto cego: `maps_exec_anon` isentava runtime com JIT só pelo nome e
+   diretório, e rodar o payload como `/usr/bin/node` caía na isenção. A matriz
+   demonstrou o bypass, e a isenção FOI APERTADA — passou a exigir dono de
+   pacote. Um `/usr/bin/node` sem dono (payload copiado) já não escapa; um node
+   de pacote de verdade continua isento.
 
 Os cenários de rede usam TEST-NET-3 num alias de `lo` e um C2 falso local
 (`plant listen`); precisam de `--cap-add=NET_ADMIN`, que `matrix.sh` já passa.

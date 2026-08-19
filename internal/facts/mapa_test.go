@@ -1,6 +1,8 @@
 package facts
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -175,5 +177,46 @@ func TestSplitMapLineDevolveEndereco(t *testing.T) {
 	}
 	if string(path) != "/tmp/.x.so (deleted)" {
 		t.Errorf("path = %q", path)
+	}
+}
+
+// stat() tem TRÊS respostas, não duas. Um EACCES num /tmp/.x.so não pode virar
+// "o arquivo sumiu" — isso fabricaria a metade do caminho para um CRITICAL a
+// partir de uma falha de leitura da própria ferramenta.
+func TestResolverMapasApagadosNaoTrataErroComoSumico(t *testing.T) {
+	dir := t.TempDir()
+	// um diretório onde o próprio componente NÃO é atravessável: stat do filho
+	// devolve um erro que NÃO é ErrNotExist.
+	trancado := filepath.Join(dir, "trancado")
+	if err := os.MkdirAll(trancado, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(trancado, 0o755) })
+	alvo := filepath.Join(trancado, "x.so")
+
+	// se rodando como root, o 0000 não barra — então o teste só vale quando o
+	// stat de fato falha com algo diferente de "não existe".
+	if _, err := os.Stat(alvo); err == nil || errors.Is(err, fs.ErrNotExist) {
+		t.Skip("este ambiente não produz erro de permissão no stat (root?)")
+	}
+
+	f := &Facts{Processes: []Process{{PID: 1, MapsApagados: []MapaApagado{{Caminho: alvo}}}}}
+	resolverMapasApagados(f, &env.Env{})
+	m := f.Processes[0].MapsApagados[0]
+	if m.Verificado {
+		t.Errorf("%+v: stat que falhou por permissão NÃO pode marcar Verificado", m)
+	}
+	if m.Recriado {
+		t.Errorf("%+v: e muito menos afirmar que o arquivo voltou", m)
+	}
+	// e a lacuna precisa aparecer, não sumir em silêncio.
+	achou := false
+	for _, ps := range f.Partial["proc"] {
+		if strings.Contains(ps, "não pôde ser verificado") {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Errorf("a falha de verificação precisa virar cobertura parcial: %v", f.Partial["proc"])
 	}
 }

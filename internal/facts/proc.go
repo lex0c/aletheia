@@ -3,8 +3,10 @@ package facts
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"sort"
 	"strconv"
@@ -1032,7 +1034,15 @@ func lerMaps(p *Process, r io.Reader) {
 // existe", e as duas respostas são conclusões. O que não pode acontecer é a
 // ausência da resposta virar "não recriado" — por isso o Verificado.
 func resolverMapasApagados(f *Facts, e *env.Env) {
-	cache := map[string]bool{}
+	// tri-state por caminho: o stat tem TRÊS respostas, não duas.
+	//
+	//	nil               existe: o arquivo voltou (atualização de pacote)
+	//	fs.ErrNotExist    não existe: o arquivo sumiu de verdade
+	//	EACCES/EIO/ELOOP  não consegui olhar — e tratar isto como "sumiu" fabrica
+	//	                  a metade do caminho para um CRITICAL a partir de uma
+	//	                  falha NOSSA
+	type resposta struct{ recriado, verificado bool }
+	cache := map[string]resposta{}
 	for i := range f.Processes {
 		p := &f.Processes[i]
 		for j := range p.MapsApagados {
@@ -1040,13 +1050,23 @@ func resolverMapasApagados(f *Facts, e *env.Env) {
 			if m.Memfd {
 				continue // nunca houve arquivo: não há o que perguntar
 			}
-			existe, lido := cache[m.Caminho]
-			if !lido {
+			r, ok := cache[m.Caminho]
+			if !ok {
 				_, err := e.Stat(m.Caminho)
-				existe = err == nil
-				cache[m.Caminho] = existe
+				switch {
+				case err == nil:
+					r = resposta{recriado: true, verificado: true}
+				case errors.Is(err, fs.ErrNotExist):
+					r = resposta{recriado: false, verificado: true}
+				default:
+					r = resposta{verificado: false}
+					f.partial("proc", m.Caminho+" (mapeamento apagado) não pôde ser "+
+						"verificado ("+env.MotivoDoErro(err)+"): não se sabe se o arquivo "+
+						"voltou a existir, e isso NÃO conta como sumiço")
+				}
+				cache[m.Caminho] = r
 			}
-			m.Recriado, m.Verificado = existe, true
+			m.Recriado, m.Verificado = r.recriado, r.verificado
 		}
 	}
 }

@@ -29,10 +29,16 @@ func init() { check.Register(revshellBridge) }
 //
 // # A assinatura estrutural, e por que ela é precisa
 //
-// Um fd de pipe só se ganha por HERANÇA de quem criou o pipe — não há como dois
-// processos sem ancestral comum compartilharem um. Então "shell e ponte com o
-// mesmo inode de pipe" já prova o parentesco, sem depender de PPID (que a morte
-// do pai zeraria).
+// As DUAS pontas de um pipe anônimo carregam o mesmo inode, então dois
+// processos com o mesmo PipeInode detêm referência ao MESMO objeto pipe. Esse é
+// o fato, e ele não depende do PPID — que a morte do pai zeraria.
+//
+// O caminho NORMAL de chegar aí é herança de quem criou o pipe, e é por isso
+// que o achado vale. Mas "compartilham o pipe" não é a mesma afirmação que
+// "têm ancestral comum": um fd atravessa um socket unix por SCM_RIGHTS, e
+// supervisor e ativação por socket fazem isso de propósito. O achado é AVISO
+// justamente por essa distância — ele descreve o canal, e quem decide o
+// parentesco é quem investiga.
 //
 // O que separa isto de um pipeline comum (`ps | grep`) é a combinação: de um
 // lado um SHELL, com o STDIN vindo do pipe — ele recebe comando de fora —, e do

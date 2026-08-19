@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"io/fs"
 	"strings"
 
 	"github.com/lex0c/aletheia/internal/env"
@@ -71,8 +72,33 @@ func collectInitramfs(f *Facts, e *env.Env) {
 	coletaMkinitcpioConf(f, e)
 }
 
-// coletaHooksDe registra os arquivos EXECUTÁVEIS de um diretório de hook. Só o
-// executável importa: um README no diretório não roda no boot.
+// participaDaGeracao diz se um arquivo daquele mecanismo entra na geração do
+// initramfs — e o critério NÃO é o bit de execução para todos.
+//
+// O dracut SOURCEIA o module-setup.sh:
+//
+//	. "$_moddir"/module-setup.sh
+//
+// e o teste dele é de EXISTÊNCIA, não de `-x`. Arquivo sourceado não precisa de
+// bit de execução, então o filtro universal de +x descartava um
+// modules.d/99evil/module-setup.sh com modo 0644 ANTES de perguntar quem o
+// entregou — e o arquivo participa da geração igual.
+//
+// O detalhe que torna isso pior: a distribuição entrega todos os module-setup.sh
+// com 755. Num host de fábrica o filtro não remove nada; o ÚNICO que ele remove
+// é o que alguém plantou sem se dar ao trabalho de dar chmod. O critério estava
+// exatamente invertido contra o adversário.
+func participaDaGeracao(mecanismo, nome string, modo fs.FileMode) (string, bool) {
+	if mecanismo == "dracut" && nome == "module-setup.sh" {
+		return "módulo de dracut (sourceado, não executado)", true
+	}
+	if modo.Perm()&0o111 != 0 {
+		return "hook executável", true
+	}
+	return "", false
+}
+
+// coletaHooksDe registra os arquivos que participam da geração do initramfs.
 func coletaHooksDe(f *Facts, e *env.Env, dir, mecanismo string, recursivo bool) {
 	nomes, err := e.ReadDirNamesErr(dir)
 	if env.EhLacuna(err) {
@@ -84,6 +110,12 @@ func coletaHooksDe(f *Facts, e *env.Env, dir, mecanismo string, recursivo bool) 
 		p := dir + "/" + n
 		fi, err := e.Lstat(p)
 		if err != nil {
+			// "não existe" é corrida; "não consegui olhar" é lacuna, e um hook
+			// de initramfs roda como root antes do userland.
+			if env.EhLacuna(err) {
+				f.denyPersist("initramfs", p+" não pôde ser examinado ("+
+					env.MotivoDoErro(err)+"): não se sabe se ele participa da geração")
+			}
 			continue
 		}
 		if fi.IsDir() {
@@ -93,11 +125,12 @@ func coletaHooksDe(f *Facts, e *env.Env, dir, mecanismo string, recursivo bool) 
 			}
 			continue
 		}
-		if fi.Mode().Perm()&0o111 == 0 {
-			continue // não executável: não roda na geração nem no boot
+		como, ok := participaDaGeracao(mecanismo, n, fi.Mode())
+		if !ok {
+			continue
 		}
 		f.Initramfs = append(f.Initramfs, ArtefatoInitramfs{
-			Path: p, Mecanismo: mecanismo, Como: "hook executável",
+			Path: p, Mecanismo: mecanismo, Como: como,
 		})
 	}
 }
@@ -119,6 +152,10 @@ func coletaDracutConf(f *Facts, e *env.Env) {
 			p := dir + "/" + n
 			b, err := e.ReadFile(p)
 			if err != nil {
+				if env.EhLacuna(err) {
+					f.denyPersist("initramfs", p+" não pôde ser lido ("+env.MotivoDoErro(err)+
+						"): os arquivos que ele manda EMBUTIR na imagem não foram avaliados")
+				}
 				continue
 			}
 			for _, alvo := range caminhosDeAtribuicaoShell(string(b), "install_items") {
@@ -136,6 +173,10 @@ func coletaMkinitcpioConf(f *Facts, e *env.Env) {
 	for _, p := range []string{"/etc/mkinitcpio.conf"} {
 		b, err := e.ReadFile(p)
 		if err != nil {
+			if env.EhLacuna(err) {
+				f.denyPersist("initramfs", p+" não pôde ser lido ("+env.MotivoDoErro(err)+
+					"): os arquivos que ele manda EMBUTIR na imagem não foram avaliados")
+			}
 			continue
 		}
 		for _, alvo := range caminhosDeArrayShell(string(b), "FILES") {

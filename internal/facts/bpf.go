@@ -1,6 +1,8 @@
 package facts
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -354,7 +356,7 @@ func cgroupPrioritario(nome string) bool {
 // teto de quantidade corta a cauda; o de profundidade é fusível contra árvore
 // patológica. Devolve os caminhos, e se cada teto foi atingido — cada um é uma
 // lacuna diferente.
-func percorrerCgroups(raiz string, teto int) (paths []string, cortouTeto, cortouFundo bool) {
+func percorrerCgroups(raiz string, teto int, prazo time.Time) (paths []string, cortouTeto, cortouFundo, cortouPrazo bool, ilegiveis []string) {
 	type no struct {
 		path  string
 		depth int
@@ -363,6 +365,16 @@ func percorrerCgroups(raiz string, teto int) (paths []string, cortouTeto, cortou
 	for len(fila) > 0 {
 		if len(paths) >= teto {
 			cortouTeto = true
+			break
+		}
+		// O PRAZO cobre a travessia, não só as consultas.
+		//
+		// Ele começava depois daqui, e a árvore inteira — readdir por nível,
+		// sort dos filhos, montagem de paths[] — rodava sem orçamento nenhum.
+		// Num host com dezenas de milhares de cgroups isso significa que o teto
+		// de 5s valia para a parte barata e não para a cara.
+		if time.Now().After(prazo) {
+			cortouPrazo = true
 			break
 		}
 		cur := fila[0]
@@ -374,6 +386,15 @@ func percorrerCgroups(raiz string, teto int) (paths []string, cortouTeto, cortou
 		}
 		ents, err := os.ReadDir(cur.path)
 		if err != nil {
+			// ENOENT é corrida normal: cgroup morre o tempo todo, e um
+			// contêiner que sumiu entre o readdir do pai e este não é lacuna.
+			// EACCES/EIO são: existe subárvore que NÃO foi percorrida, e os
+			// programas anexados ali não entram no inventário. Engolir os dois
+			// juntos é a mesma classe de "não consegui olhar" virando "não
+			// havia" que o resto do coletor já não comete.
+			if !errors.Is(err, fs.ErrNotExist) {
+				ilegiveis = append(ilegiveis, cur.path+" ("+env.MotivoDoErro(err)+")")
+			}
 			continue
 		}
 		var filhos []string
@@ -409,8 +430,21 @@ func anexosDeCgroup(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]
 		return
 	}
 
-	paths, cortouTeto, cortouFundo := percorrerCgroups(base, maxCgroups)
 	prazo := time.Now().Add(prazoCgroup)
+	paths, cortouTeto, cortouFundo, cortouPrazo, ilegiveis := percorrerCgroups(base, maxCgroups, prazo)
+	if cortouPrazo {
+		f.partial("bpf", "a varredura da árvore de cgroups não terminou dentro de "+
+			strconv.Itoa(int(prazoCgroup/time.Second))+"s: os cgroups não visitados "+
+			"NÃO tiveram os anexos BPF enumerados")
+	}
+	if n := len(ilegiveis); n > 0 {
+		amostra := ilegiveis
+		if len(amostra) > 3 {
+			amostra = amostra[:3]
+		}
+		f.partial("bpf", strconv.Itoa(n)+" cgroup(s) não puderam ser listados, e a "+
+			"subárvore deles NÃO foi percorrida: "+strings.Join(amostra, ", "))
+	}
 	var consultados, semTempo int
 	for i, p := range paths {
 		if time.Now().After(prazo) {

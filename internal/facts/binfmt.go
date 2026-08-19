@@ -1,7 +1,10 @@
 package facts
 
 import (
+	"errors"
+	"io/fs"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/lex0c/aletheia/internal/env"
@@ -32,7 +35,21 @@ type BinfmtRegistro struct {
 	// pergunta que só ela responde: este registro casa com ELF NATIVO — e
 	// portanto sequestra TODA execução do host — ou só com um formato
 	// específico, como o QEMU faz.
-	Magic    string `json:"magic,omitempty"`
+	Magic string `json:"magic,omitempty"`
+	// Offset é onde o magic é comparado. O kernel publica `offset %i` junto do
+	// magic (bm_entry_show, fs/binfmt_misc.c), e sem ele a pergunta "este
+	// registro sequestra TODO binário ELF?" não tem resposta: o cabeçalho ELF
+	// mora no byte 0, e um magic 7f454c46 com offset 100 casa outra coisa
+	// inteira — um arquivo cujo byte 100 por acaso é 0x7f.
+	Offset int `json:"offset,omitempty"`
+	// OffsetLido separa "offset 0" de "não li offset nenhum". Sem isso, o zero
+	// do Go — que é o offset MAIS perigoso — seria indistinguível de ausência,
+	// e um parser que falhasse produziria o achado mais grave por omissão.
+	OffsetLido bool `json:"offset_read,omitempty"`
+	// Mask é a máscara aplicada ao magic antes da comparação, quando existe.
+	// Ela AFROUXA o casamento: com ff000000 só o primeiro byte importa, e o
+	// registro passa a casar muito mais que ELF.
+	Mask     string `json:"mask,omitempty"`
 	Extensao string `json:"extension,omitempty"`
 	// Habilitado distingue um registro ativo de um desativado. Desativado não
 	// roteia agora, mas continua registrado — e some do relatório sem este bit.
@@ -92,7 +109,16 @@ func collectBinfmt(f *Facts) {
 	const base = "/proc/sys/fs/binfmt_misc"
 	ents, err := os.ReadDir(base)
 	if err != nil {
-		return // não montado: normal em host sem emulação
+		// AUSENTE é resposta: binfmt_misc não montado é o normal num host sem
+		// emulação. ILEGÍVEL não é — e binfmt_misc é superfície de EXECUÇÃO no
+		// kernel, então tratar os dois igual esconde justamente o caso em que
+		// alguém restringiu a leitura.
+		if !errors.Is(err, fs.ErrNotExist) {
+			f.partial("binfmt", base+" existe e não pôde ser listado ("+
+				env.MotivoDoErro(err)+"): os interpretadores registrados NO KERNEL "+
+				"não foram examinados")
+		}
+		return
 	}
 	for _, ent := range ents {
 		nome := ent.Name()
@@ -100,8 +126,13 @@ func collectBinfmt(f *Facts) {
 		if nome == "register" || nome == "status" || ent.IsDir() {
 			continue
 		}
-		corpo, ok := readTrim(base + "/" + nome)
-		if !ok {
+		corpo, err := readTrimErr(base + "/" + nome)
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				f.partial("binfmt", "o registro "+nome+" não pôde ser lido ("+
+					env.MotivoDoErro(err)+"): para onde ele roteia a execução NÃO "+
+					"foi determinado")
+			}
 			continue
 		}
 		r := parseBinfmtRegistro(nome, base+"/"+nome, corpo)
@@ -111,6 +142,16 @@ func collectBinfmt(f *Facts) {
 		// ainda não conhece — foi o que aconteceu com o tipo 'B' (bpf), que
 		// escreve "bpf <ops>" e "bpf-interpreter <nome> <caminho>" e nunca
 		// escreve "interpreter ".
+		// Magic sem offset é formato que este parser não conhece. O kernel
+		// publica os dois juntos, então a ausência significa que ele mudou — e
+		// a decisão "sequestra TODO ELF" DEPENDE do offset. Declarar a lacuna
+		// impede que a mudança vire silêncio.
+		if r.Magic != "" && !r.OffsetLido {
+			f.partial("binfmt", "o registro "+nome+" tem magic e NÃO publicou offset: "+
+				"não foi possível determinar se ele casa o cabeçalho ELF no byte 0, "+
+				"que é a diferença entre sequestrar toda execução do host e casar "+
+				"um formato específico")
+		}
 		if !r.TemInterpretador() {
 			r.NaoEntendido = true
 			f.partial("binfmt", "o registro binfmt_misc "+nome+" está ATIVO e "+
@@ -154,6 +195,14 @@ func parseBinfmtRegistro(nome, fonte, corpo string) BinfmtRegistro {
 		}
 		if v, ok := strings.CutPrefix(ln, "magic "); ok {
 			r.Magic = strings.ToLower(strings.TrimSpace(v))
+		}
+		if v, ok := strings.CutPrefix(ln, "offset "); ok {
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+				r.Offset, r.OffsetLido = n, true
+			}
+		}
+		if v, ok := strings.CutPrefix(ln, "mask "); ok {
+			r.Mask = strings.ToLower(strings.TrimSpace(v))
 		}
 		if v, ok := strings.CutPrefix(ln, "extension "); ok {
 			r.Extensao = strings.TrimSpace(v)

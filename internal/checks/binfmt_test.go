@@ -45,7 +45,11 @@ func TestBinfmtMagicELFNativoECriticoMesmoComDono(t *testing.T) {
 	f := &facts.Facts{
 		Binfmt: []facts.BinfmtRegistro{{
 			Nome: "sequestro", Fonte: "/proc/sys/fs/binfmt_misc/sequestro",
-			Interpreter: "/usr/bin/interp", Habilitado: true, Magic: "7f454c46",
+			// O kernel SEMPRE publica `offset %i` num registro por magic
+			// (bm_entry_show, fs/binfmt_misc.c): uma fixture sem offset descreve
+			// um estado que /proc não produz.
+			Interpreter: "/usr/bin/interp", Habilitado: true,
+			Magic: "7f454c46", Offset: 0, OffsetLido: true,
 		}},
 		Ownership: []facts.Ownership{{Path: "/usr/bin/interp", Owned: true}},
 	}
@@ -58,17 +62,31 @@ func TestBinfmtMagicELFNativoECriticoMesmoComDono(t *testing.T) {
 	}
 }
 
-// sequestraELFNativo discrimina pelo comprimento: o cabeçalho de 4 bytes pega
-// tudo; o magic longo do QEMU restringe a arquitetura.
-func TestSequestraELFNativoPeloComprimento(t *testing.T) {
-	if !sequestraELFNativo("7f454c46") {
-		t.Error("magic de 4 bytes (só \\x7fELF) casa com ELF nativo")
+// sequestraELFNativo discrimina por magic, COMPRIMENTO e OFFSET. O cabeçalho de
+// 4 bytes no byte 0 pega tudo; o magic longo do QEMU restringe a arquitetura; e
+// o mesmo magic num offset diferente não é sequestro de coisa nenhuma.
+func TestSequestraELFNativoExigeOffsetZero(t *testing.T) {
+	reg := func(magic string, off int, lido bool) *facts.BinfmtRegistro {
+		return &facts.BinfmtRegistro{Magic: magic, Offset: off, OffsetLido: lido}
 	}
-	if sequestraELFNativo("7f454c460201010000000000000000000200b700") {
+	if !sequestraELFNativo(reg("7f454c46", 0, true)) {
+		t.Error("magic de 4 bytes no offset 0 casa com ELF nativo")
+	}
+	if sequestraELFNativo(reg("7f454c460201010000000000000000000200b700", 0, true)) {
 		t.Error("magic longo do QEMU NÃO casa com ELF nativo — restringe a arquitetura")
 	}
-	if sequestraELFNativo("cafebabe") {
+	if sequestraELFNativo(reg("cafebabe", 0, true)) {
 		t.Error("magic que não é ELF não conta")
+	}
+	// O byte 100 por acaso ser 0x7f não sequestra a execução do host.
+	if sequestraELFNativo(reg("7f454c46", 100, true)) {
+		t.Error("o cabeçalho ELF mora no byte 0: offset 100 não é sequestro")
+	}
+	// Offset não lido não vira offset 0: o zero do Go é o caso mais grave, e
+	// produzir o achado mais forte a partir de leitura que falhou é a inversão
+	// que a ferramenta não pode cometer.
+	if sequestraELFNativo(reg("7f454c46", 0, false)) {
+		t.Error("sem offset lido não se pode AFIRMAR sequestro")
 	}
 }
 

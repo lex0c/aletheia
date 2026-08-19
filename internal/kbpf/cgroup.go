@@ -58,6 +58,8 @@ var TiposDeCgroup = []uint32{
 	AtCgroupInet4GetPeername, AtCgroupInet6GetPeername,
 	AtCgroupInet4GetSockname, AtCgroupInet6GetSockname,
 	AtCgroupInetSockRelease,
+	AtCgroupUnixConnect, AtCgroupUnixSendmsg, AtCgroupUnixRecvmsg,
+	AtCgroupUnixGetPeername, AtCgroupUnixGetSockname,
 }
 
 // enum bpf_attach_type — DIFERENTE do tipo de programa. É o ponto onde o
@@ -86,6 +88,15 @@ const (
 	AtCgroupInet4GetSockname = 31
 	AtCgroupInet6GetSockname = 32
 	AtCgroupInetSockRelease  = 34
+	// Os cinco de UNIX SOCKET. Um programa cgroup/connect4 e um
+	// cgroup/connectunix são o mesmo tipo de programa em pontos diferentes, e
+	// sem perguntar por estes o programa continuava aparecendo — só que SEM o
+	// lugar onde está preso, que é metade do que a atribuição serve para dizer.
+	AtCgroupUnixConnect     = 49
+	AtCgroupUnixSendmsg     = 50
+	AtCgroupUnixRecvmsg     = 51
+	AtCgroupUnixGetPeername = 52
+	AtCgroupUnixGetSockname = 53
 )
 
 var nomesDeAnexo = map[uint32]string{
@@ -100,6 +111,9 @@ var nomesDeAnexo = map[uint32]string{
 	AtCgroupInet4GetPeername: "inet4_getpeername", AtCgroupInet6GetPeername: "inet6_getpeername",
 	AtCgroupInet4GetSockname: "inet4_getsockname", AtCgroupInet6GetSockname: "inet6_getsockname",
 	AtCgroupInetSockRelease: "inet_sock_release",
+	AtCgroupUnixConnect:     "unix_connect", AtCgroupUnixSendmsg: "unix_sendmsg",
+	AtCgroupUnixRecvmsg: "unix_recvmsg", AtCgroupUnixGetPeername: "unix_getpeername",
+	AtCgroupUnixGetSockname: "unix_getsockname",
 }
 
 // NomeDeAnexo nomeia o ponto de anexação. Desconhecido sai com o número — um

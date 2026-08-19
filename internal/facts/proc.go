@@ -174,8 +174,9 @@ type FD struct {
 	SocketInode uint64 `json:"socket_inode,omitempty"`
 	// Pipe e PipeInode são o outro fd que se herda: um pipe anônimo. As DUAS
 	// pontas de um pipe carregam o MESMO inode, então dois processos com o
-	// mesmo PipeInode compartilham o pipe — e isso prova ancestral comum, já
-	// que fd de pipe só se ganha por herança de quem o criou (runbook §17).
+	// mesmo PipeInode detêm o mesmo objeto pipe — o caminho comum de chegar aí
+	// é herança de quem o criou, mas um fd também atravessa socket unix por
+	// SCM_RIGHTS, então isso é o CANAL e não a prova do parentesco (§17).
 	Pipe      bool   `json:"pipe,omitempty"`
 	PipeInode uint64 `json:"pipe_inode,omitempty"`
 	PTY       bool   `json:"pty,omitempty"`

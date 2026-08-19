@@ -19,12 +19,31 @@ func init() {
 // (20 bytes) e inclui o e_machine, então só pega a arquitetura estrangeira.
 const magicELF = "7f454c46"
 
-// sequestraELFNativo diz se o magic casa com ELF nativo. O discriminador é o
-// COMPRIMENTO: só o cabeçalho de 4 bytes (ou menos) casa com qualquer ELF; o
-// magic do QEMU é longo e restringe a arquitetura.
-func sequestraELFNativo(magic string) bool {
-	magic = strings.ReplaceAll(magic, " ", "")
-	return strings.HasPrefix(magic, magicELF) && len(magic) <= 8
+// sequestraELFNativo diz se o registro casa com TODO ELF do host.
+//
+// São TRÊS condições, e antes só a primeira era conferida:
+//
+//	magic       o cabeçalho, e curto. Só 4 bytes (ou menos) casa qualquer ELF;
+//	            o magic do QEMU é longo e inclui o e_machine, então restringe a
+//	            arquitetura estrangeira
+//	offset 0    o cabeçalho ELF mora no byte 0. `offset 100 magic 7f454c46`
+//	            casa um arquivo cujo byte 100 por acaso é 0x7f — não é sequestro
+//	            de nada, e chamar isso de "sequestra TODA execução do host" é
+//	            afirmar o que o registro não diz
+//	mask        se existe, ela AFROUXA a comparação. Uma máscara que apague
+//	            parte do cabeçalho faz o registro casar MAIS que ELF, não menos
+//	            — então ela não derruba a conclusão, mas precisa ser dita
+//
+// Registro que não publicou offset (parser não entendeu, formato novo) NÃO é
+// tratado como offset 0: o zero do Go é justamente o caso mais grave, e
+// produzir o achado mais forte a partir de uma leitura que falhou é a inversão
+// que esta ferramenta existe para não cometer.
+func sequestraELFNativo(r *facts.BinfmtRegistro) bool {
+	magic := strings.ReplaceAll(r.Magic, " ", "")
+	if !strings.HasPrefix(magic, magicELF) || len(magic) > 8 {
+		return false
+	}
+	return r.OffsetLido && r.Offset == 0
 }
 
 // binfmtInterpreter — runbook §7.12.
@@ -86,7 +105,7 @@ var binfmtInterpreter = check.Check{
 					sev, nota, alvo, acusa = s, n, c, true
 				}
 			}
-			elf := sequestraELFNativo(b.Magic)
+			elf := sequestraELFNativo(b)
 			if elf {
 				// Sequestro de ELF nativo é crítico por si só, doa a quem doer o
 				// interpretador: nenhum uso legítimo casa com o binário nativo.
@@ -106,8 +125,13 @@ var binfmtInterpreter = check.Check{
 					"interpretadores ligados a ele pode crescer sem tocar neste arquivo")
 			}
 			if elf {
-				ev = append(ev, "e o magic casa com ELF NATIVO (7f454c46): este registro "+
-					"sequestra TODA execução de binário do host — nenhum QEMU/Wine faz isso")
+				ev = append(ev, "e o magic casa com ELF NATIVO (7f454c46) no offset 0: "+
+					"este registro sequestra TODA execução de binário do host — "+
+					"nenhum QEMU/Wine faz isso")
+				if b.Mask != "" {
+					ev = append(ev, "com máscara "+b.Mask+": ela AFROUXA a comparação, "+
+						"então o alcance é pelo menos este")
+				}
 			}
 			if nota != "" {
 				ev = append(ev, nota)
@@ -119,8 +143,16 @@ var binfmtInterpreter = check.Check{
 			}
 			if !b.Habilitado {
 				ev = append(ev, "registro DESABILITADO: não roteia agora, mas continua "+
-					"registrado e pode ser reativado")
-				if sev == check.SevWarn {
+					"registrado e um `echo 1 > "+b.Fonte+"` o reativa sem deixar outro rastro")
+				// O rebaixamento vale para TODA severidade, não só para o aviso.
+				// Um sequestro de ELF nativo desabilitado continuava saindo
+				// CRITICAL enquanto a evidência ao lado dizia "não roteia agora" —
+				// o achado contradizia a si mesmo, e um crítico que não é crítico
+				// gasta a atenção que o próximo vai precisar.
+				switch sev {
+				case check.SevCritical:
+					sev = check.SevWarn
+				case check.SevWarn:
 					sev = check.SevInfo
 				}
 			}

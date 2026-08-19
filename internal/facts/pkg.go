@@ -318,6 +318,17 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 			add(primeiroToken(ex.Cmd), "unit "+u.Name)
 		}
 	}
+	// O `init=` da linha de boot. É o PID 1: o kernel o executa antes de
+	// existir userland, e não há unit, cron nem perfil de shell que registre
+	// isso. Sem entrar aqui, a única pergunta que separa um init legítimo de um
+	// implante — quem entregou este arquivo — nunca é feita.
+	for i := range f.Boot {
+		for _, t := range TokensDeBoot(f.Boot[i].Valor) {
+			if t.Chave == "init" || t.Chave == "rdinit" {
+				add(t.Valor, "init= da linha de boot")
+			}
+		}
+	}
 	for i := range f.Cron {
 		c := &f.Cron[i]
 		add(primeiroToken(c.Cmd), "cron "+baseNome(c.File))

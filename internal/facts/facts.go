@@ -83,8 +83,16 @@ type Facts struct {
 	AlvosDeRoot []AlvoDeRoot `json:"root_targets,omitempty"`
 	// Helpers são os programas que o KERNEL invoca sozinho: modprobe,
 	// core_pattern, uevent_helper e binfmt_misc.
-	Helpers     []HelperDoKernel `json:"kernel_helpers,omitempty"`
-	ModuleFiles []string         `json:"module_files,omitempty"`
+	Helpers []HelperDoKernel `json:"kernel_helpers,omitempty"`
+	// Boot são as linhas de comando de kernel: a que está RODANDO e as que a
+	// configuração do bootloader entregaria no PRÓXIMO boot. As duas respondem
+	// perguntas diferentes, e é na diferença entre elas que mora o achado.
+	Boot []LinhaDeBoot `json:"boot_cmdline,omitempty"`
+	// BootConfigLido diz que ALGUMA configuração de bootloader foi encontrada e
+	// lida. Sem ele, "nada enfraquecido na configuração" e "não achei
+	// bootloader nenhum" têm o mesmo JSON — e são conclusões opostas.
+	BootConfigLido bool     `json:"boot_config_read,omitempty"`
+	ModuleFiles    []string `json:"module_files,omitempty"`
 	// Repos são os repositórios git encontrados sob as árvores de aplicação. O
 	// coletor de hooks já os visita; guardar o caminho é o que permite entregar
 	// a verificação de integridade da §16 com o `-C` preenchido.

@@ -150,6 +150,11 @@ func collectPersist(f *Facts, e *env.Env) {
 	// Antes do pkg: os alvos dos helpers do kernel precisam entrar na pergunta
 	// de propriedade, que é o discriminador inteiro deles.
 	collectHelpers(f, e)
+	// Junto deles, e pela MESMA razão: o `init=` da linha de boot é um programa
+	// que o kernel executa como PID 1, e quem responde por ele é o gerenciador
+	// de pacotes. Fica aqui, e não no ramo de /proc, porque a metade que
+	// importa em imagem montada — a configuração do bootloader — é filesystem.
+	collectBoot(f, e)
 	// ANTES do collectPkg: o ALVO de um hook de interpretador é candidato a
 	// propriedade, e é a resposta dessa pergunta que separa configuração de
 	// deploy de implante. Depois do collectPkg ele nunca era perguntado, e o

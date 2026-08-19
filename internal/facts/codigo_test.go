@@ -1031,3 +1031,39 @@ func TestArgvSinkVsShellSink(t *testing.T) {
 		}
 	}
 }
+
+// String literal não é fonte remota (item #3 do review). A detecção de FONTE-
+// variável roda na visão com aspa simples apagada; fonte LITERAL (php://input)
+// e guards (listas/labels) leem a visão visível. Assim `system('$_GET')` não é
+// FP, mas `system("ls $_GET")` (interpolação) e file_get_contents('php://input')
+// continuam fonte — e os guards não quebram.
+func TestStringLiteralNaoEhFonte(t *testing.T) {
+	naoCrit := map[string]string{
+		"$_GET em aspa simples":   "<?php system('$_GET[cmd]');",
+		"$x='php://input' string": "<?php $x='php://input'; echo $x;",
+	}
+	for n, src := range naoCrit {
+		if tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("%s: texto literal não é fonte: %+v", n, analisarConteudo(src, "php"))
+		}
+	}
+	crit := map[string]string{
+		"$_GET interpolado em aspa dupla": "<?php system(\"ls $_GET[x]\");",
+		"php://input lido (aspa simples)": "<?php $x=file_get_contents('php://input'); eval($x);",
+	}
+	for n, src := range crit {
+		if !tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("%s: fonte de verdade tem de sair: %+v", n, analisarConteudo(src, "php"))
+		}
+	}
+	// os guards NÃO podem quebrar (leem a visão visível):
+	guards := map[string]string{
+		"lista em var": "<?php $ok=['a','b']; $fn=$_GET['fn']; if(in_array($fn,$ok,true)){$fn();}",
+		"switch label": "<?php $do=$_GET['do']; switch($do){case 'lista': $do();}",
+	}
+	for n, src := range guards {
+		if tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("%s: guard não pode quebrar com a visão de fonte: %+v", n, analisarConteudo(src, "php"))
+		}
+	}
+}

@@ -42,8 +42,13 @@ type regraDeCodigo struct {
 // remoto controla o comando". Só a REMOTA — request HTTP, incluindo os
 // frameworks — sustenta CRÍTICO; a LOCAL (argv, env, stdin) sai como aviso.
 const (
-	phpRemota = `(?:\$_(?:GET|POST|REQUEST|COOKIE|SERVER|FILES)\b|php://input|\$\w*[Rr]equest->(?:input|get|query|post|all|json|cookie)\b|\$\w*[Rr]equest->(?:request|query|json)->get\b)`
-	phpLocal  = `(?:\bgetenv\s*\(|\$argv\b|\$_ENV\b)`
+	phpRemota = `(?:\$_(?:GET|POST|REQUEST|COOKIE|SERVER|FILES)\b|\$\w*[Rr]equest->(?:input|get|query|post|all|json|cookie)\b|\$\w*[Rr]equest->(?:request|query|json)->get\b)`
+	// Fonte LITERAL: `php://input` é o corpo do POST, e mora sempre numa string.
+	// Fica à parte de phpRemota porque a detecção de VARIÁVEL ($_GET) roda na
+	// visão com aspa simples apagada (senão `system('$_GET')` literal seria FP),
+	// e uma fonte literal precisa da visão VISÍVEL.
+	phpFonteLit = `php://(?:input|stdin)`
+	phpLocal    = `(?:\bgetenv\s*\(|\$argv\b|\$_ENV\b)`
 
 	// Express, Koa (ctx), Hapi (request.payload/query/params).
 	jsRemota = `(?:req\.(?:query|body|params|headers|cookies)|request\.(?:query|payload|params)|ctx\.(?:query|params|headers|request))`
@@ -107,6 +112,10 @@ type defsCodigo struct {
 	// instanciação (vulnerabilidade de object injection, não backdoor) e é
 	// excluída no motor.
 	dynAbre *regexp.Regexp
+	// fonteLit casa uma FONTE em string literal (`php://input`), detectada na
+	// visão VISÍVEL — a detecção de variável roda na visão com aspa simples
+	// apagada, que cegaria uma fonte literal.
+	fonteLit *regexp.Regexp
 	// switchAbre e listaAbre casam os dois GUARDS que prendem uma variável de
 	// request a um conjunto FINITO de literais antes do sink — `switch($do){
 	// case 'tmssql': $do(); }` e `in_array($fn, ['a','b'])`. Grupo 1 = a
@@ -146,6 +155,7 @@ var defsPHP = defsCodigo{
 	switchAbre:    regexp.MustCompile(`\bswitch\s*\(\s*(\$\w+)\s*\)\s*\{`),
 	listaAbre:     regexp.MustCompile(`\bin_array\s*\(\s*(\$\w+)\s*,\s*`),
 	guardaCaminho: regexp.MustCompile(`\b(?:validate_file|validate_plugin)\s*\(\s*(\$\w+)`),
+	fonteLit:      regexp.MustCompile(phpFonteLit),
 	// `[^{;]` não atravessa o `{` do corpo nem o `;` de um método abstrato:
 	// o `{` casado é sempre o que ABRE a função.
 	escopoAbre: regexp.MustCompile(`\bfunction\b[^{;]{0,300}\{`),
@@ -275,7 +285,10 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	// masc: strings VISÍVEIS — motor de taint, assinaturas e FONTES (php://input,
 	// $_GET interpolado). mascDyn: todas as strings apagadas, só para a chamada
 	// dinâmica `$var(`, que dentro de string nunca é chamada.
-	masc, mascDyn, crases := mascararComentarios(conteudo, lang)
+	// masc: VISÍVEL — guards (labels/listas), assinaturas, crase, fonte literal.
+	// mascVar: aspa simples apagada — detecção de FONTE-variável e chamada
+	// dinâmica, para `$_GET`/`$s(` em aspa simples não virar fonte/chamada falsa.
+	masc, mascVar, crases := mascararComentarios(conteudo, lang)
 
 	// Um achado por linha, o de maior tier: sink+entrada crítico ganha do eval
 	// solto na mesma linha.
@@ -337,36 +350,37 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	listas := map[string]bool{}
 	temLista := strings.Contains(masc, "in_array")
 	for _, m := range def.atribui.FindAllStringSubmatchIndex(masc, -1) {
-		rhs := masc[m[4]:m[5]]
-		if temLista && listaLiteral(rhs, 0) {
+		rhsVis := masc[m[4]:m[5]]    // lista literal e fonte literal: precisam visível
+		rhsVar := mascVar[m[4]:m[5]] // fonte-variável: aspa simples apagada
+		if temLista && listaLiteral(rhsVis, 0) {
 			listas[masc[m[2]:m[3]]] = true
 		}
 		// `$x == $_GET[a]` e `$k => $_GET[v]` casam o mesmo `var = rhs`, e não
 		// são atribuição: comparar e indexar não contaminam ninguém.
-		if strings.HasPrefix(rhs, "=") || strings.HasPrefix(rhs, ">") {
+		if strings.HasPrefix(rhsVis, "=") || strings.HasPrefix(rhsVis, ">") {
 			continue
 		}
 		// Coerção numérica limpa o taint mesmo sobre $_GET: `intval($_GET['id'])`
 		// é um número, não roda código nem atravessa caminho. Única sanitização
 		// reconhecida — e sem propagar var do RHS.
-		if def.sanNum != nil && def.sanNum.MatchString(rhs) {
+		if def.sanNum != nil && def.sanNum.MatchString(rhsVis) {
 			evs = append(evs, evento{off: m[0], atrib: true, nome: masc[m[2]:m[3]], classe: 0})
 			continue
 		}
 		classe := 0
-		if def.inputRem.MatchString(rhs) {
+		if def.inputRem.MatchString(rhsVar) || (def.fonteLit != nil && def.fonteLit.MatchString(rhsVis)) {
 			classe = 2
-		} else if def.inputLoc.MatchString(rhs) {
+		} else if def.inputLoc.MatchString(rhsVar) {
 			classe = 1
 		}
 		evs = append(evs, evento{off: m[0], atrib: true, nome: masc[m[2]:m[3]],
-			classe: classe, rhsVars: def.varTok.FindAllString(rhs, -1)})
+			classe: classe, rhsVars: def.varTok.FindAllString(rhsVar, -1)})
 	}
 	// argCb 0 = o sink executa os argumentos inteiros; 1 ou 2 = só aquele
 	// argumento é a função executada (o callback).
 	adicionarSink := func(loc []int, argCb int, rotulo string) {
 		nome := masc[loc[0]:loc[1]]
-		args := argBalanceado(masc, loc[1]-1)
+		args := argBalanceado(mascVar, loc[1]-1)
 		// SHELL-sink vs ARGV-sink. Com shell, o comando inteiro é interpretado —
 		// qualquer parte tainted é RCE. Sem shell (subprocess argv, spawn,
 		// execFile), o que o atacante pode escolher é o PROGRAMA (argv[0]); um
@@ -446,7 +460,7 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	// vulnerabilidade, não backdoor — e o padrão de um exemplo inseguro de
 	// biblioteca como o jpGraph) e método/estático (`.m()`, `->m()`, `::m()`).
 	if def.dynAbre != nil {
-		for _, m := range def.dynAbre.FindAllStringSubmatchIndex(mascDyn, -1) {
+		for _, m := range def.dynAbre.FindAllStringSubmatchIndex(mascVar, -1) {
 			if !chamadaDinamicaValida(masc, m[0]) {
 				continue
 			}
@@ -1331,11 +1345,13 @@ func semSubscritos(s string) string {
 //	         `$_GET` interpolado em "...") e sinks. Uma fonte literal em string
 //	         PRECISA ficar visível — apagá-la cega o webshell que lê o corpo do
 //	         POST com `file_get_contents('php://input')`.
-//	mascDyn  interior de TODA string apagado — usada SÓ pela chamada dinâmica
-//	         `$var(`. Um `$var(` dentro de uma string nunca é chamada; era o FP
-//	         do `$s(` em `sprintf('%1$s (...')` do wp-admin. Só o dynAbre precisa
-//	         dessa visão; o resto perderia fontes se a usasse.
-func mascararComentarios(s, lang string) (masc, mascDyn string, crases []int) {
+//	mascVar  interior de string ASPA-SIMPLES apagado (aspa dupla visível, que
+//	         interpola em PHP). É a visão da detecção de FONTE-variável e da
+//	         chamada dinâmica: `$_GET`/`$s(` dentro de aspa simples é texto, não
+//	         fonte nem chamada — apagá-lo mata o FP `system('$_GET')` e o `$s(`
+//	         de `sprintf('%1$s (...')`. Guards, assinaturas e fonte LITERAL
+//	         (php://input) leem `masc` (visível).
+func mascararComentarios(s, lang string) (masc, mascVar string, crases []int) {
 	b := []byte(s)
 	bc := append([]byte(nil), b...) // a visão do taint: aspa simples apagada
 	n := len(b)
@@ -1450,14 +1466,13 @@ func mascararComentarios(s, lang string) (masc, mascDyn string, crases []int) {
 				brancoCod(i)
 			}
 		case aspaD:
+			// A aspa DUPLA fica VISÍVEL em mascVar: em PHP ela interpola, então
+			// `system("ls $_GET[x]")` é fonte de verdade. Só a aspa SIMPLES é
+			// apagada (não interpola — `$_GET` ali é texto).
 			if c == '\\' {
-				brancoCod(i)
-				brancoCod(i + 1)
 				i++
 			} else if c == '"' {
 				st = norm
-			} else {
-				brancoCod(i)
 			}
 		case crase:
 			if c == '\\' {
@@ -1467,8 +1482,8 @@ func mascararComentarios(s, lang string) (masc, mascDyn string, crases []int) {
 			}
 		}
 	}
-	masc, mascDyn = string(b), string(bc)
-	return masc, mascDyn, crases
+	masc, mascVar = string(b), string(bc)
+	return masc, mascVar, crases
 }
 
 // pulaHeredoc devolve o offset do FIM de um heredoc/nowdoc que começa no `<<<`

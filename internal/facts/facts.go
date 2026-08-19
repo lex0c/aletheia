@@ -173,6 +173,10 @@ type idx struct {
 	socketsByPID  map[int][]Socket
 	socketByInode map[uint64]int // inode → posição em f.Sockets
 	procByPID     map[int]int    // pid → posição em f.Processes
+	// pidsPorPipe liga um inode de pipe aos PIDs que o seguram. É o join que
+	// acha os dois lados de uma ponte de reverse shell: shell de um lado, o
+	// processo com o socket do outro (runbook §17).
+	pidsPorPipe map[uint64][]int
 }
 
 // Index constrói as buscas. É idempotente e barato de chamar de novo; quem
@@ -187,6 +191,7 @@ func (f *Facts) Index() {
 		socketsByPID:  make(map[int][]Socket, len(f.Processes)),
 		socketByInode: make(map[uint64]int, len(f.Sockets)),
 		procByPID:     make(map[int]int, len(f.Processes)),
+		pidsPorPipe:   map[uint64][]int{},
 	}
 	for i := range f.Processes {
 		x.procByPID[f.Processes[i].PID] = i
@@ -204,7 +209,12 @@ func (f *Facts) Index() {
 	for i := range f.Processes {
 		p := &f.Processes[i]
 		visto := map[uint64]bool{}
+		vistoPipe := map[uint64]bool{}
 		for _, fd := range p.FDs {
+			if fd.Pipe && fd.PipeInode != 0 && !vistoPipe[fd.PipeInode] {
+				vistoPipe[fd.PipeInode] = true
+				x.pidsPorPipe[fd.PipeInode] = append(x.pidsPorPipe[fd.PipeInode], p.PID)
+			}
 			if !fd.Socket || visto[fd.SocketInode] {
 				continue // dup2 do mesmo socket não conta duas vezes
 			}
@@ -356,6 +366,13 @@ func CollectVolatile(e *env.Env) *Facts {
 func (f *Facts) SocketsOf(pid int) []Socket {
 	f.Index()
 	return f.idx.socketsByPID[pid]
+}
+
+// PidsComPipe devolve os PIDs que seguram um inode de pipe. Dois deles com o
+// mesmo inode compartilham o pipe — e, por herança, um ancestral comum.
+func (f *Facts) PidsComPipe(inode uint64) []int {
+	f.Index()
+	return f.idx.pidsPorPipe[inode]
 }
 
 // SocketByInode devolve o socket daquele inode, ou nil. É como se sai do fd

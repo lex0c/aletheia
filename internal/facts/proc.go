@@ -172,8 +172,14 @@ type FD struct {
 	Target      string `json:"target"`
 	Socket      bool   `json:"socket,omitempty"`
 	SocketInode uint64 `json:"socket_inode,omitempty"`
-	PTY         bool   `json:"pty,omitempty"`
-	Deleted     bool   `json:"deleted,omitempty"`
+	// Pipe e PipeInode são o outro fd que se herda: um pipe anônimo. As DUAS
+	// pontas de um pipe carregam o MESMO inode, então dois processos com o
+	// mesmo PipeInode compartilham o pipe — e isso prova ancestral comum, já
+	// que fd de pipe só se ganha por herança de quem o criou (runbook §17).
+	Pipe      bool   `json:"pipe,omitempty"`
+	PipeInode uint64 `json:"pipe_inode,omitempty"`
+	PTY       bool   `json:"pty,omitempty"`
+	Deleted   bool   `json:"deleted,omitempty"`
 }
 
 // MapaApagado é um mapeamento executável cujo arquivo não está no lugar.
@@ -842,6 +848,10 @@ func readFDs(p *Process) {
 		if s, ok := strings.CutPrefix(t, "socket:["); ok {
 			fd.Socket = true
 			fd.SocketInode, _ = strconv.ParseUint(strings.TrimSuffix(s, "]"), 10, 64)
+		}
+		if s, ok := strings.CutPrefix(t, "pipe:["); ok {
+			fd.Pipe = true
+			fd.PipeInode, _ = strconv.ParseUint(strings.TrimSuffix(s, "]"), 10, 64)
 		}
 		if t == "/dev/ptmx" || strings.HasPrefix(t, "/dev/pts/") {
 			fd.PTY = true

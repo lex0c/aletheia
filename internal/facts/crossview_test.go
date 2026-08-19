@@ -183,3 +183,17 @@ func TestReconfirmacaoEhIntersecao(t *testing.T) {
 		t.Errorf("segunda leitura concordou (sem divergência): tudo descartado, veio %v", got)
 	}
 }
+
+// Pipe de inode ZERO não pode entrar no índice: seria uma chave que junta todo
+// fd de pipe degenerado num balde só, e a ponte de reverse shell passaria a
+// casar processos que não compartilham nada.
+func TestPidsComPipeIgnoraInodeZero(t *testing.T) {
+	f := &Facts{Processes: []Process{
+		{PID: 1, FDs: []FD{{N: 0, Pipe: true, PipeInode: 0}}},
+		{PID: 2, FDs: []FD{{N: 0, Pipe: true, PipeInode: 0}}},
+	}}
+	f.Index()
+	if len(f.PidsComPipe(0)) != 0 {
+		t.Errorf("inode 0 não pode indexar ninguém: %v", f.PidsComPipe(0))
+	}
+}

@@ -66,8 +66,20 @@ var caDirs = []string{
 
 func collectTrust(f *Facts, e *env.Env) {
 	for _, dir := range caDirs {
-		for _, n := range e.ReadDirNames(dir) {
-			p := dir + "/" + n
+		// ReadDir e NÃO ReadDirNames: um diretório de âncoras que não LISTA
+		// (permissão) não é "nenhuma CA extra" — é evidência perdida. Vira
+		// lacuna declarada; não-existe (o host não usa esse layout) não é lacuna.
+		ents, err := e.ReadDir(dir)
+		if err != nil {
+			if env.EhLacuna(err) {
+				f.denyPersist("trust", "o diretório de âncoras de confiança "+dir+
+					" não pôde ser LISTADO (permissão): uma CA plantada ali NÃO foi "+
+					"vista — e uma CA raiz sozinha já dá MITM de todo o TLS")
+			}
+			continue
+		}
+		for _, ent := range ents {
+			p := dir + "/" + ent.Name()
 			if e.IsDir(p) {
 				continue
 			}
@@ -188,18 +200,24 @@ func collectGitHooks(f *Facts, e *env.Env) {
 
 	vistos := 0
 	truncado := false
+	ilegivel := 0
 	for _, raiz := range raizes {
-		procurarHooks(f, e, raiz, 0, &vistos, &truncado)
+		procurarHooks(f, e, raiz, 0, &vistos, &truncado, &ilegivel)
 	}
 	if truncado {
 		f.denyPersist("githook", "a busca por hooks de git parou (limite de "+
 			strconv.Itoa(maxGitDirs)+" diretórios ou orçamento de tempo do wtf): "+
 			"o excedente NÃO foi avaliado")
 	}
+	if ilegivel > 0 {
+		f.denyPersist("githook", strconv.Itoa(ilegivel)+" diretório(s) sob as "+
+			"árvores de repositório não puderam ser LISTADOS (permissão): um repo "+
+			"ou hook ali NÃO foi procurado")
+	}
 	declararIgnore(f, e, "githook")
 }
 
-func procurarHooks(f *Facts, e *env.Env, dir string, prof int, vistos *int, truncado *bool) {
+func procurarHooks(f *Facts, e *env.Env, dir string, prof int, vistos *int, truncado *bool, ilegivel *int) {
 	e.Detalhe(dir)
 	if prof > maxGitDepth || *truncado {
 		return
@@ -216,12 +234,23 @@ func procurarHooks(f *Facts, e *env.Env, dir string, prof int, vistos *int, trun
 	}
 	*vistos++
 
-	for _, n := range e.ReadDirNames(dir) {
+	// ReadDir e NÃO ReadDirNames: um diretório que não LISTA vira "nenhum
+	// repo/hook aqui" em silêncio. Ilegível é lacuna declarada; não-existe não é.
+	ents, err := e.ReadDir(dir)
+	if err != nil {
+		if env.EhLacuna(err) {
+			*ilegivel++
+		}
+		return
+	}
+	for _, ent := range ents {
+		n := ent.Name()
 		p := dir + "/" + n
-		if !e.IsDir(p) {
+		// --ignore ANTES de qualquer stat (IsDir), como no scanner de código.
+		if e.Ignorado(p) {
 			continue
 		}
-		if e.Ignorado(p) { // --ignore do operador
+		if !e.IsDir(p) {
 			continue
 		}
 		if n == ".git" {
@@ -233,7 +262,7 @@ func procurarHooks(f *Facts, e *env.Env, dir string, prof int, vistos *int, trun
 		if n == "node_modules" || n == "vendor" || n == ".cache" {
 			continue
 		}
-		procurarHooks(f, e, p, prof+1, vistos, truncado)
+		procurarHooks(f, e, p, prof+1, vistos, truncado, ilegivel)
 	}
 }
 

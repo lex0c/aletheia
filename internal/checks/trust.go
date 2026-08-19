@@ -72,6 +72,7 @@ var caPlantada = check.Check{
 			}
 			r.Findings = append(r.Findings, fd)
 		}
+		r.Partial = append(r.Partial, f.PersistDenied["trust"]...)
 		return r
 	},
 }

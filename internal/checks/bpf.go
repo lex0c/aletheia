@@ -224,15 +224,6 @@ var bpfSemDono = check.Check{
 			r.Partial = append(r.Partial, "a enumeração de eBPF bateu no teto: "+
 				"a lista não é o total")
 		}
-		// O netns é lacuna mesmo com o netlink completo, e ela precisa acompanhar
-		// o achado: um filtro preso a uma interface DENTRO do netns de um
-		// contêiner não é lido, então "sem anexo" vale para o namespace desta
-		// varredura, não para os de contêiner.
-		if f.BPF.CoberturaAnexo.NetnsGap {
-			r.Partial = append(r.Partial, "anexo de tc/XDP dentro de OUTRO namespace "+
-				"de rede não é lido: a ausência de anexo vale para o netns desta "+
-				"varredura, não para os de contêiner")
-		}
 		return r
 	},
 }
@@ -487,10 +478,20 @@ func cobreFixacao(f *facts.Facts, fix kbpf.Fixacao) bool {
 	case kbpf.FixVisivel, kbpf.FixSocket:
 		return true
 	case kbpf.FixNetlink:
-		return f.BPF.CoberturaAnexo.Netlink
+		// O netns PRECISA entrar aqui. A leitura por rtnetlink enxerga só o
+		// namespace de rede DESTA varredura; com outro netns presente — um
+		// contêiner —, um filtro de tc ou um XDP preso lá dentro não é lido, e
+		// "não achei anexo" deixa de significar "não há anexo". Sem esta
+		// condição, todo host com contêiner podia produzir bpf_unowned para um
+		// programa perfeitamente explicado do outro lado da fronteira.
+		return f.BPF.CoberturaAnexo.Netlink && !f.BPF.CoberturaAnexo.NetnsGap
 	case kbpf.FixCgroup:
 		return f.BPF.CoberturaAnexo.Cgroup
 	}
+	// FixMapa, FixLWT, FixFlowDissector, FixNetfilter e FixDesconhecida caem
+	// aqui: são mecanismos de anexo que esta ferramenta NÃO consulta, e a
+	// ausência de anexo neles nunca é afirmável. É o default certo — um tipo
+	// novo de programa entra como lacuna, não como acusação.
 	return false
 }
 

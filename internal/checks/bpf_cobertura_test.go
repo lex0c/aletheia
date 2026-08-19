@@ -65,3 +65,53 @@ func TestMapaContinuaSemCobertura(t *testing.T) {
 }
 
 var _ = check.SevWarn
+
+// A INVARIANTE: CoberturaAnexo.X = true tem de significar, literalmente, "não
+// deixei de consultar nenhum lugar relevante". Cada caso abaixo é um lugar que
+// ficou de fora e que mesmo assim autorizava afirmar ausência.
+func TestCoberturaNaoAfirmaOQueNaoFoiConsultado(t *testing.T) {
+	fx := func(c facts.CoberturaDeAnexo) *facts.Facts {
+		f := &facts.Facts{}
+		f.BPF.CoberturaAnexo = c
+		return f
+	}
+
+	// Netlink completo NO HOST, mas há outro netns: um filtro de tc preso lá
+	// dentro não foi lido, então a ausência de anexo não é afirmável.
+	if cobreFixacao(fx(facts.CoberturaDeAnexo{Netlink: true, NetnsGap: true}), kbpf.FixNetlink) {
+		t.Error("com outro netns presente, tc/XDP de lá NÃO foi lido: não se afirma ausência")
+	}
+	if !cobreFixacao(fx(facts.CoberturaDeAnexo{Netlink: true}), kbpf.FixNetlink) {
+		t.Error("netns único e netlink completo: aí sim a ausência é afirmável")
+	}
+
+	// Os mecanismos que a ferramenta NÃO consulta nunca herdam a cobertura de
+	// netlink, por mais completa que ela esteja.
+	completa := fx(facts.CoberturaDeAnexo{Netlink: true, Cgroup: true})
+	for _, fix := range []kbpf.Fixacao{
+		kbpf.FixLWT, kbpf.FixFlowDissector, kbpf.FixNetfilter,
+		kbpf.FixMapa, kbpf.FixDesconhecida,
+	} {
+		if cobreFixacao(completa, fix) {
+			t.Errorf("%v é anexado por mecanismo que não é lido: não pode ser dado como coberto", fix)
+		}
+	}
+}
+
+// Um tipo de programa cujo mecanismo de anexo a ferramenta não consulta não
+// pode virar achado, e precisa aparecer como lacuna com o motivo certo.
+func TestLWTNaoViraAchadoENaoSomeEmSilencio(t *testing.T) {
+	f := &facts.Facts{}
+	f.BPF.Enumerado = true
+	f.BPF.CoberturaAnexo = facts.CoberturaDeAnexo{Netlink: true, Cgroup: true}
+	f.BPF.Programas = []facts.ProgramaBPF{{
+		ID: 7, Tipo: "lwt_xmit", TipoNum: kbpf.ProgLwtXmit, Nome: "x",
+	}}
+	r := bpfSemDono.Run(bpfSemDono, f, testEnv())
+	if len(r.Findings) != 0 {
+		t.Errorf("LWT é preso a uma ROTA, e a rota não é lida: %+v", r.Findings)
+	}
+	if len(r.Partial) == 0 {
+		t.Error("e precisa virar lacuna DECLARADA, não silêncio")
+	}
+}

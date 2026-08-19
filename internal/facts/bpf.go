@@ -300,9 +300,6 @@ func anexosDeRede(f *Facts, e *env.Env, porID map[uint32]*ProgramaBPF, citados m
 	if semFiltro == 0 {
 		f.BPF.CoberturaAnexo.Netlink = true
 	}
-	// E o netns continua fora, com cobertura completa ou não: a ferramenta não
-	// entra em outro namespace de rede.
-	f.BPF.CoberturaAnexo.NetnsGap = true
 	for _, ac := range acoes {
 		onde := "act_bpf"
 		if ac.Nome != "" {
@@ -350,8 +347,13 @@ func lacunaDeNetns(f *Facts, e *env.Env) {
 		}
 	}
 	if len(outros) == 0 {
-		return
+		return // um netns só: não há nada fora do alcance do rtnetlink daqui
 	}
+	// A lacuna existe SÓ quando existe outro netns. Marcá-la incondicionalmente
+	// fazia todo host — inclusive um sem contêiner nenhum — carregar uma
+	// ressalva sobre namespace que não existe, e, pior, tornava impossível
+	// distinguir "não há onde procurar" de "há e não procurei".
+	f.BPF.CoberturaAnexo.NetnsGap = true
 	f.partial("bpf", strconv.Itoa(len(outros))+" outro(s) network namespace(s) presente(s) "+
 		"(contêiner): filtro de tc/XDP e ação act_bpf presos por rtnetlink DENTRO deles NÃO "+
 		"foram lidos — entrar em cada netns moveria o namespace de rede do processo, e não é "+
@@ -485,7 +487,7 @@ func anexosDeCgroup(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]
 
 	prazo := time.Now().Add(prazoCgroup)
 	var naoAbertos []string
-	var consultados int
+	var consultados, falhasDeQuery int
 	consultar := func(p string) {
 		// FD cru com O_DIRECTORY, no idioma de syscall do resto do kbpf: o
 		// BPF_PROG_QUERY só quer o descritor do diretório do cgroup. Evita o
@@ -516,6 +518,7 @@ func anexosDeCgroup(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]
 		// do inventário com o cgroup contado como consultado: ausência afirmada
 		// a partir de cegueira, que é a única classe de erro que esta
 		// ferramenta não pode cometer.
+		falhasDeQuery += len(errosPorTipo)
 		for at, err := range errosPorTipo {
 			f.partial("bpf", "cgroup "+rel+": a consulta de anexo "+
 				kbpf.NomeDeAnexo(at)+" falhou ("+err.Error()+"): os programas "+
@@ -569,8 +572,13 @@ func anexosDeCgroup(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]
 	// ilegível ou não aberto. Cada um desses é um lugar onde um anexo pode
 	// estar sem que ninguém tenha olhado, e basta um para a ausência deixar de
 	// ser afirmável.
+	// falhasDeQuery entra na conta, e é o caso mais fácil de esquecer: o cgroup
+	// foi aberto e percorrido, mas um attach type específico devolveu EPERM ou
+	// ENOSPC. O Partial já dizia isso; a cobertura não sabia, então um
+	// cgroup/connect4 que não pôde ser consultado deixava a árvore "completa" e
+	// autorizava afirmar que o programa não estava anexado em lugar nenhum.
 	f.BPF.CoberturaAnexo.Cgroup = !cortouTeto && !cortouFundo && !cortouPrazo &&
-		len(ilegiveis) == 0 && len(naoAbertos) == 0
+		len(ilegiveis) == 0 && len(naoAbertos) == 0 && falhasDeQuery == 0
 }
 
 // quandoCarregou traduz o relógio de boot para UTC.// quandoCarregou traduz o relógio de boot para UTC. Sem boot conhecido a

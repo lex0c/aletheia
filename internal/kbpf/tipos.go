@@ -143,6 +143,21 @@ const (
 	// FixDesconhecida: tipo que este binário não conhece — kernel mais novo que
 	// ele. Não se acusa o que não se sabe interpretar.
 	FixDesconhecida
+	// As três abaixo saíram de dentro de FixNetlink, e a separação não é
+	// cosmética: a cobertura de netlink MEDE tc (cls_bpf e act_bpf) e XDP, e
+	// era usada para afirmar ausência sobre seis tipos cujo mecanismo de anexo
+	// nunca é consultado. `CoberturaAnexo.Netlink = true` passava a significar
+	// "procurei em todo lugar" para programas que ninguém tinha procurado.
+	//
+	// FixLWT: preso ao estado de uma ROTA, não a uma interface. O kernel guarda
+	// o bpf_prog no lwtunnel_state e o solta quando a rota morre; ler isso
+	// exigiria percorrer as rotas, o que não é feito.
+	FixLWT
+	// FixFlowDissector: anexado por bpf_prog_attach(BPF_FLOW_DISSECTOR), por
+	// namespace de rede. Não é tc nem XDP, e a enumeração atual não o consulta.
+	FixFlowDissector
+	// FixNetfilter: preso a um hook de netfilter. Mecanismo próprio, não lido.
+	FixNetfilter
 )
 
 // Motivo explica por que a ferramenta não consegue nomear o detentor. Vazio
@@ -153,6 +168,17 @@ func (f Fixacao) Motivo() string {
 		return "programa deste tipo é preso a um SOCKET por setsockopt, e o " +
 			"descritor do programa pode ter sido fechado depois: o socket " +
 			"segura, e ele pertence a algum processo"
+	case FixLWT:
+		return "programa deste tipo é preso ao estado de uma ROTA (lwtunnel), e não " +
+			"a uma interface: o kernel guarda a referência no lwtunnel_state. Ler " +
+			"isso exigiria percorrer as rotas, o que esta ferramenta não faz"
+	case FixFlowDissector:
+		return "programa deste tipo é anexado por bpf_prog_attach(BPF_FLOW_DISSECTOR) " +
+			"ao namespace de rede: mecanismo próprio, que a enumeração de tc/XDP " +
+			"não alcança"
+	case FixNetfilter:
+		return "programa deste tipo é preso a um hook de NETFILTER: mecanismo " +
+			"próprio, que esta ferramenta não lê"
 	case FixNetlink:
 		return "programa deste tipo é anexado a uma INTERFACE (tc, xdp). O XDP de " +
 			"cada link, os FILTROS de tc (cls_bpf) e as AÇÕES de tc (act_bpf) são " +
@@ -191,12 +217,12 @@ var fixacaoPorTipo = map[uint32]Fixacao{
 	ProgSchedCls:      FixNetlink,
 	ProgSchedAct:      FixNetlink,
 	ProgXDP:           FixNetlink,
-	ProgLwtIn:         FixNetlink,
-	ProgLwtOut:        FixNetlink,
-	ProgLwtXmit:       FixNetlink,
-	ProgLwtSeg6Local:  FixNetlink,
-	ProgNetfilter:     FixNetlink,
-	ProgFlowDissector: FixNetlink,
+	ProgLwtIn:         FixLWT,
+	ProgLwtOut:        FixLWT,
+	ProgLwtXmit:       FixLWT,
+	ProgLwtSeg6Local:  FixLWT,
+	ProgNetfilter:     FixNetfilter,
+	ProgFlowDissector: FixFlowDissector,
 
 	ProgCgroupSkb:      FixCgroup,
 	ProgCgroupSock:     FixCgroup,

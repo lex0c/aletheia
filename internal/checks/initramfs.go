@@ -1,6 +1,7 @@
 package checks
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/lex0c/aletheia/internal/check"
@@ -60,8 +61,12 @@ var initramfsHook = check.Check{
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
 		semDono := caminhosSemDono(f)
+		var tiposDesconhecidos []string
 		for i := range f.Initramfs {
 			a := &f.Initramfs[i]
+			if a.Tipo != facts.InitramfsCodigo && a.Tipo != facts.InitramfsEmbutido {
+				tiposDesconhecidos = append(tiposDesconhecidos, a.Path)
+			}
 			sev, nota, acusa := pesoDoInitramfs(a, semDono)
 			if !acusa {
 				continue
@@ -82,6 +87,15 @@ var initramfsHook = check.Check{
 					"não o initramfs compactado (runbook §29)",
 			}
 			r.Findings = append(r.Findings, fd)
+		}
+		if n := len(tiposDesconhecidos); n > 0 {
+			amostra := tiposDesconhecidos
+			if len(amostra) > 3 {
+				amostra = amostra[:3]
+			}
+			r.Partial = append(r.Partial, strconv.Itoa(n)+" artefato(s) de initramfs "+
+				"com tipo que este binário não conhece NÃO foram avaliados: "+
+				strings.Join(amostra, ", "))
 		}
 		r.Partial = append(r.Partial, f.PersistDenied["initramfs"]...)
 		return r
@@ -111,6 +125,12 @@ func pesoDoInitramfs(a *facts.ArtefatoInitramfs, semDono map[string]bool) (check
 	// dracut o SOURCEIA — entrava no Facts e era descartado aqui em silêncio.
 	// A metade do bypass que a coleta fechou ficava aberta um andar acima, e o
 	// discriminador quebrou porque alguém acrescentou uma frase nova.
+	if a.Tipo != facts.InitramfsCodigo && a.Tipo != facts.InitramfsEmbutido {
+		// Tipo que este binário não conhece — artefato de um coletor mais novo,
+		// ou ponto de criação que esqueceu o campo. Tratá-lo como embutido o
+		// silenciaria; quem decide é o chamador, que o conta como lacuna.
+		return check.SevInfo, "", false
+	}
 	if a.Tipo != facts.InitramfsCodigo {
 		// Arquivo referenciado fora de diretório gravável: dado de admin
 		// (keyfile) é legítimo e comum, e propriedade não o distingue de payload.

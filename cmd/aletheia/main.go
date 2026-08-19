@@ -96,7 +96,7 @@ FLAGS DE scan
 FLAGS DE watch
   --interval D  entre AMOSTRAS de /proc e sockets (padrão 5s). Barato: é o que
                 pega beacon curto e processo efêmero
-  --full D      entre VARREDURAS completas dos 70 checks (padrão 60s)
+  --full D      entre VARREDURAS completas da varredura completa (padrão 60s)
   --for D       duração total (padrão: até Ctrl-C)
   --only G,G    igual ao scan
   --baseline F  o que a baseline já conhece não conta como novidade

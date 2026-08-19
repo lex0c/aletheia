@@ -12,6 +12,8 @@ import (
 
 func init() {
 	check.Register(mapsRWXAnon)
+	check.Register(mapsExecAnon)
+	check.Register(mapeamentoApagado)
 	check.Register(nsDivergent)
 }
 
@@ -130,6 +132,323 @@ var mapsRWXAnon = check.Check{
 		}
 		return r
 	},
+}
+
+// mapsExecAnon — runbook §3.10.
+//
+// # A metade que o mapsRWXAnon não alcança
+//
+// O check irmão procura gravável E executável ao mesmo tempo, que é a forma de
+// quem escreve o código e o executa sem cerimônia. A injeção que respeita W^X
+// nunca apresenta esse estado:
+//
+//	mmap(RW) → write(payload) → mprotect(RX)
+//
+// Depois do mprotect a região é r-xp anônima, e o 'w' que o outro check exige
+// não existe mais. Um retrato tirado um segundo depois não vê nada.
+//
+// # Por que "sem nome" faz parte do critério
+//
+// Desde o 5.17 o kernel guarda um rótulo por região anônima
+// (PR_SET_VMA_ANON_NAME), e o JIT moderno rotula o código que gera. Medido num
+// desktop com Firefox, Sublime e node vivos: 85 regiões
+// [anon:js-executable-memory], 1 [anon:JSJITCode] — e ZERO regiões executáveis
+// anônimas sem rótulo em 313 processos legíveis. O piso de ruído deste check,
+// naquele host, é nenhum achado.
+//
+// O rótulo não é prova: quem injeta também pode chamar prctl e escrever
+// "[anon:js-executable-memory]" na própria região. Ele é DISCRIMINADOR — e o
+// caso em que discrimina bem é o que está descrito abaixo, no runtime que
+// rotula as suas e deixa uma sem rótulo.
+//
+// # Severidade: WARN, e não CRITICAL
+//
+// Duas razões, e as duas são de coerência. O mapsRWXAnon, que é o sinal MAIS
+// forte, é WARN — um irmão mais fraco não pode acusar mais. E o motor já
+// resolve a correlação por conta própria: promover aqui por conjunção de sinais
+// seria a aritmética que engine.go recusa explicitamente, e que quebra o exit
+// code de toda frota que compila software fora do gerenciador de pacotes. As
+// correlações entram como EVIDÊNCIA, e quem as junta num alvo só é o motor.
+var mapsExecAnon = check.Check{
+	ID:       "proc.maps_exec_anon",
+	Ref:      "3.10",
+	Title:    "código executável em memória, sem arquivo e sem rótulo",
+	Group:    "proc",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive,
+	Requires: env.CapProcfs,
+	Optional: env.CapRoot | env.CapPkgDB,
+	Wtf:      true,
+	FalsePositives: []string{
+		"runtime com JIT em kernel ANTIGO cai aqui e é pulado pelo nome do " +
+			"binário: até o 5.17 não havia rótulo de região, e o JIT do node " +
+			"aparece como anônimo sem nome como qualquer injeção — medido, um " +
+			"node ocioso tem 1 região r-x anônima",
+		"empacotador (UPX e afins) que descomprime para memória e protege a " +
+			"região depois: binário legítimo empacotado cai aqui",
+		"o rótulo é escrito pelo PROCESSO (prctl), não pelo kernel: quem injeta " +
+			"pode copiar o nome que o runtime usa. Ele descarta ruído, não acusa",
+		"BLIND SPOT: em runtime com JIT de kernel antigo, injeção DENTRO dele " +
+			"não é distinguível daqui — o sinal para esses é o proc.tracer e a §29",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		var r check.Result
+		var denied int
+		var isentos []string
+		semDono := caminhosSemDono(f)
+		for i := range f.Processes {
+			p := &f.Processes[i]
+			if p.Self || p.Vanished {
+				continue
+			}
+			// Conta a lacuna e NÃO descarta: um maps lido pela metade pode já
+			// ter revelado a região, e achado é achado.
+			if p.MapsDenied {
+				denied++
+			}
+			if p.MapsExecAnonN == 0 {
+				continue
+			}
+			// O runtime que rotula as PRÓPRIAS regiões executáveis se
+			// autodenuncia como capaz de rotular. Nesse processo, uma região
+			// sem rótulo não é explicada pelo que ele gera — e é justamente o
+			// BLIND SPOT que o check irmão declara e não consegue cobrir.
+			autorrotula := len(p.MapsExecNomes) > 0
+			if isJITRuntime(p) && !autorrotula {
+				isentos = append(isentos, nz(p.Exe, p.Comm))
+				continue
+			}
+
+			ev := []string{
+				strconv.Itoa(p.MapsExecAnonN) + " região(ões) executáveis sem arquivo e sem rótulo: " +
+					firstN(p.MapsExecAnon, 3),
+				"exe=" + nz(p.Exe, "?") + " comm=" + p.Comm + " uid=" + strconv.Itoa(p.UID),
+			}
+			if p.MapsExecAnonN > len(p.MapsExecAnon) {
+				ev = append(ev, "a amostra acima tem "+strconv.Itoa(len(p.MapsExecAnon))+
+					" de "+strconv.Itoa(p.MapsExecAnonN)+" regiões")
+			}
+			if autorrotula {
+				ev = append(ev, "e este processo ROTULA as próprias regiões de JIT ("+
+					firstN(p.MapsExecNomes, 2)+"): o que ele gera se identifica, e "+
+					"estas não se identificam")
+			}
+			// As correlações NÃO promovem a severidade — ver o comentário do
+			// check. Elas dizem ao operador por onde continuar, e o motor as
+			// junta num alvo só quando o check de cada uma também dispara.
+			if p.TracerPID > 0 {
+				ev = append(ev, "e o processo está sob ptrace (TracerPid="+
+					strconv.Itoa(p.TracerPID)+"): alguém tem acesso de escrita a esta memória")
+			}
+			switch {
+			case p.ExeMemfd:
+				ev = append(ev, "e o executável nunca esteve em disco (memfd)")
+			case p.ExeDeleted:
+				ev = append(ev, "e o executável foi apagado do disco")
+			}
+			if p.Exe != "" && semDono[p.Exe] {
+				if d := destinosPublicos(f, p.PID); len(d) > 0 {
+					ev = append(ev, "e nenhum pacote reivindica o binário, que fala com "+
+						firstN(d, 3))
+				} else {
+					ev = append(ev, "e nenhum pacote reivindica o binário")
+				}
+			}
+			if len(p.MapsOdd) > 0 {
+				ev = append(ev, "e mapeia biblioteca fora dos diretórios de sistema: "+
+					firstN(p.MapsOdd, 3))
+			}
+			for _, t := range p.Truncated {
+				ev = append(ev, "atenção: "+t)
+			}
+
+			fd := self.F(check.SevWarn, "pid="+strconv.Itoa(p.PID), "", ev...)
+			fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
+			fd.Irreversible = true
+			fd.NextSteps = []string{
+				"o código só existe na memória deste processo: matá-lo destrói a " +
+					"única cópia (runbook §29)",
+				preservarPID(e, p.PID, "--mem"),
+				"compare a região com o que o binário em disco explica antes de " +
+					"concluir que o pacote está íntegro (runbook §24)",
+			}
+			r.Findings = append(r.Findings, fd)
+		}
+		if denied > 0 {
+			r.Partial = append(r.Partial, strconv.Itoa(denied)+
+				" processos com /proc/<pid>/maps ilegível não foram avaliados")
+		}
+		if n := len(isentos); n > 0 {
+			r.Partial = append(r.Partial, strconv.Itoa(n)+
+				" processo(s) com região executável anônima NÃO foram avaliados por "+
+				"serem runtime com JIT em diretório de sistema SEM rótulo de região ("+
+				firstN(dedupOrdenado(isentos), 3)+"): em kernel anterior ao 5.17 o "+
+				"código que o runtime gera é indistinguível daqui do código injetado nele")
+		}
+		return r
+	},
+}
+
+// mapeamentoApagado — runbook §3.14.
+//
+// # O que o proc.exe_deleted não vê
+//
+// O executável apagado já tem check. Uma BIBLIOTECA apagada, não:
+//
+//	dlopen("/tmp/.x.so")  →  unlink("/tmp/.x.so")
+//
+// O processo continua executando aquele código, e o /proc/<pid>/exe dele
+// continua apontando para um caminho perfeitamente legítimo. Nada no
+// executável principal registra o que aconteceu.
+//
+// # O filtro que decide tudo: EXECUTÁVEL
+//
+// Medido num desktop, em 313 processos legíveis: 713 mapeamentos apagados NÃO
+// executáveis — /memfd:mozilla-ipc, /etc/ld.so.cache, /SYSV…, dconf — e ZERO
+// executáveis. Sem o filtro, o check afoga na primeira execução; com ele, o
+// piso de ruído naquele host é nenhum achado.
+//
+// # A história legítima, e como ela é separada
+//
+// Atualização de pacote com o serviço no ar deixa exatamente esta linha no
+// maps: o arquivo foi substituído, e todo processo vivo segura o inode antigo.
+// É o estado que o needrestart detecta, e num servidor sem reinício ele vale
+// por centenas de processos.
+//
+// O discriminador é o caminho VOLTAR a existir. Quando volta, isto vira uma
+// linha informativa — que ainda é útil, porque reinício pendente explica outros
+// achados. Quando não volta, alguém apagou e ninguém repôs.
+var mapeamentoApagado = check.Check{
+	ID:       "proc.deleted_mapping",
+	Ref:      "3.14",
+	Title:    "biblioteca apagada do disco, ainda mapeada e executável",
+	Group:    "proc",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive,
+	Requires: env.CapProcfs,
+	Optional: env.CapRoot,
+	Wtf:      true,
+	FalsePositives: []string{
+		"ATUALIZAÇÃO DE PACOTE é a causa comum, e não vira aviso: o caminho volta " +
+			"a existir e o achado sai como uma linha informativa agregada — que " +
+			"é a mesma condição que o needrestart reporta",
+		"runtime que carrega código por memfd (JIT, empacotador) é pulado pelo " +
+			"nome do binário quando roda de diretório de sistema",
+		"desinstalação de pacote com o serviço ainda no ar deixa o caminho sem " +
+			"voltar a existir — é a forma de um aviso legítimo aqui",
+		"sem root, o maps de processo alheio é ilegível e não há o que avaliar",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		var r check.Result
+		var denied int
+		var isentos []string
+		// Os recriados viram UMA linha agregada. Uma por processo seria uma
+		// parede de centenas num servidor com reinício pendente, e a parede
+		// enterraria os poucos que importam.
+		var recriados int
+		var recriadosEx []string
+		for i := range f.Processes {
+			p := &f.Processes[i]
+			if p.Self || p.Vanished {
+				continue
+			}
+			if p.MapsDenied {
+				denied++
+			}
+			for _, m := range p.MapsApagados {
+				if m.Memfd {
+					if isJITRuntime(p) {
+						isentos = append(isentos, nz(p.Exe, p.Comm))
+						continue
+					}
+					r.Findings = append(r.Findings, achadoDeMapaApagado(self, e, p, m,
+						check.SevWarn,
+						"biblioteca carregada de memória anônima (memfd): este código "+
+							"NUNCA esteve em disco, e não há o que o find ache nem o "+
+							"que o pacote compare (runbook §3.16)"))
+					continue
+				}
+				if m.Verificado && m.Recriado {
+					recriados++
+					if len(recriadosEx) < 3 {
+						recriadosEx = append(recriadosEx, m.Caminho)
+					}
+					continue
+				}
+				sev := check.SevWarn
+				nota := "o arquivo não está mais neste caminho: a única cópia do " +
+					"código está na memória deste processo"
+				if motivo, gravavel := suspectDir(m.Caminho); gravavel {
+					// Não existe atualização de pacote que entregue biblioteca
+					// em /tmp: aqui a história legítima acabou.
+					sev = check.SevCritical
+					nota = "o arquivo foi apagado e estava " + motivo
+				}
+				if !m.Verificado {
+					nota = "não foi possível verificar se o caminho voltou a existir: " +
+						nota
+				}
+				r.Findings = append(r.Findings, achadoDeMapaApagado(self, e, p, m, sev, nota))
+			}
+		}
+		if recriados > 0 {
+			// INFO de propósito: não mexe no exit code nem no veredito, e o
+			// motor não o correlaciona. É contexto, e contexto que explica
+			// outros achados — um host com reinício pendente tem binário em
+			// disco que não é o que está rodando.
+			fd := self.F(check.SevInfo, "(agregado)",
+				"biblioteca substituída ainda mapeada: reinício pendente",
+				strconv.Itoa(recriados)+" mapeamento(s) executáveis apagados cujo "+
+					"caminho VOLTOU a existir: "+firstN(recriadosEx, 3),
+				"é a forma de uma atualização de pacote com o serviço no ar — o "+
+					"processo executa o código ANTIGO, e o arquivo em disco já é o novo",
+			)
+			fd.NextSteps = []string{
+				"o que está em disco NÃO é o que está rodando: hash de arquivo não " +
+					"responde por estes processos (runbook §24)",
+			}
+			r.Findings = append(r.Findings, fd)
+		}
+		if denied > 0 {
+			r.Partial = append(r.Partial, strconv.Itoa(denied)+
+				" processos com /proc/<pid>/maps ilegível não foram avaliados")
+		}
+		if n := len(isentos); n > 0 {
+			r.Partial = append(r.Partial, strconv.Itoa(n)+
+				" processo(s) com mapeamento executável por memfd NÃO foram avaliados "+
+				"por serem runtime com JIT em diretório de sistema ("+
+				firstN(dedupOrdenado(isentos), 3)+"): carregar código de memfd é "+
+				"operação normal neles")
+		}
+		return r
+	},
+}
+
+// achadoDeMapaApagado monta o achado dos dois caminhos que chegam nele. Existe
+// para que a evidência do memfd e a do arquivo apagado não divirjam com o
+// tempo: é a mesma pergunta — que código é este, e onde está a cópia dele.
+func achadoDeMapaApagado(self check.Check, e *env.Env, p *facts.Process,
+	m facts.MapaApagado, sev check.Severity, nota string) check.Finding {
+	ev := []string{
+		m.Perms + " " + m.Caminho + " (deleted)",
+		nota,
+		"exe=" + nz(p.Exe, "?") + " comm=" + p.Comm + " uid=" + strconv.Itoa(p.UID),
+	}
+	if p.TracerPID > 0 {
+		ev = append(ev, "e o processo está sob ptrace (TracerPid="+
+			strconv.Itoa(p.TracerPID)+")")
+	}
+	fd := self.F(sev, "pid="+strconv.Itoa(p.PID), "", ev...)
+	fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
+	fd.Irreversible = true
+	fd.NextSteps = []string{
+		"o arquivo não existe mais: a cópia está na memória do processo, e " +
+			"matá-lo a destrói (runbook §6)",
+		preservarPID(e, p.PID),
+		"a região é MAPEADA DE ARQUIVO, e o `--mem` só copia as anônimas: para " +
+			"esta, o caminho é o dump de memória da §29",
+	}
+	return fd
 }
 
 // dedupOrdenado tira as repetições e ordena. Um navegador tem trinta processos

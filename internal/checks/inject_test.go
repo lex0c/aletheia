@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/facts"
 )
 
@@ -194,5 +195,199 @@ func TestNSNaoConfundeExeIlegivelComThreadDeKernel(t *testing.T) {
 	}}
 	if r := nsDivergent.Run(nsDivergent, f, testEnv()); len(r.Findings) != 1 {
 		t.Error("exe ilegível por permissão não é thread de kernel")
+	}
+}
+
+// --- proc.maps_exec_anon ---
+
+// A razão de o check existir: a região que passou pelo mprotect não é mais
+// gravável, e o check irmão exige o 'w'. Se este também exigisse, os dois
+// olhariam para a mesma metade.
+func TestExecAnonDisparaSemGravavel(t *testing.T) {
+	f := &facts.Facts{Processes: []facts.Process{
+		{PID: 10, Comm: "app", Exe: "/usr/bin/app",
+			MapsExecAnon: []string{"7f00-7f01 r-xp"}, MapsExecAnonN: 1},
+		{PID: 11, Comm: "limpo", Exe: "/usr/bin/limpo"},
+	}}
+	r := mapsExecAnon.Run(mapsExecAnon, f, testEnv())
+	if len(r.Findings) != 1 || r.Findings[0].Subject != "pid=10" {
+		t.Fatalf("achados = %+v, quer só pid=10", r.Findings)
+	}
+	if !r.Findings[0].Irreversible {
+		t.Error("o código só existe nessa memória: matar destrói a única cópia")
+	}
+}
+
+// O runtime com JIT de kernel antigo não rotula região nenhuma, e o que ele
+// gera é indistinguível de injeção. Sem a isenção, todo host com node vira
+// parede de avisos — medido: um node ocioso tem 1 região r-x anônima.
+func TestExecAnonPulaJITSemRotulo(t *testing.T) {
+	f := &facts.Facts{Processes: []facts.Process{
+		{PID: 10, Comm: "node", Exe: "/usr/bin/node",
+			MapsExecAnon: []string{"7f00-7f01 r-xp"}, MapsExecAnonN: 1},
+	}}
+	r := mapsExecAnon.Run(mapsExecAnon, f, testEnv())
+	if len(r.Findings) != 0 {
+		t.Fatalf("achados = %+v, quer 0", r.Findings)
+	}
+	// Decisão de NÃO OLHAR se declara: supressão silenciosa é a cobertura
+	// completa que esconde um ponto cego.
+	if len(r.Partial) == 0 {
+		t.Error("a isenção precisa chegar à cobertura")
+	}
+}
+
+// O ganho sobre o check irmão, e o BLIND SPOT que ele declara e não cobre: o
+// runtime que ROTULA as próprias regiões se autodenuncia como capaz de rotular.
+// Nele, uma região sem rótulo não é explicada pelo que ele gera — e injeção
+// DENTRO de um Firefox deixa de ser invisível.
+func TestExecAnonNaoPulaJITQueRotulaAsProprias(t *testing.T) {
+	f := &facts.Facts{Processes: []facts.Process{
+		{PID: 10, Comm: "firefox", Exe: "/usr/lib/firefox/firefox",
+			MapsExecAnon:  []string{"7f00-7f01 r-xp"},
+			MapsExecAnonN: 1,
+			MapsExecNomes: []string{"[anon:js-executable-memory]"}},
+	}}
+	r := mapsExecAnon.Run(mapsExecAnon, f, testEnv())
+	if len(r.Findings) != 1 {
+		t.Fatalf("achados = %d, quer 1: este processo rotula o que gera, e esta "+
+			"região não tem rótulo", len(r.Findings))
+	}
+	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "ROTULA") {
+		t.Errorf("a evidência precisa dizer POR QUE o runtime não explica a região: %v",
+			r.Findings[0].Evidence)
+	}
+}
+
+// A isenção é do binário do PACOTE, não do nome. Um "node" em /tmp não herda a
+// reputação do node.
+func TestExecAnonNaoIsentaJITForaDeDiretorioDeSistema(t *testing.T) {
+	f := &facts.Facts{Processes: []facts.Process{
+		{PID: 10, Comm: "node", Exe: "/tmp/node",
+			MapsExecAnon: []string{"7f00-7f01 r-xp"}, MapsExecAnonN: 1},
+	}}
+	if r := mapsExecAnon.Run(mapsExecAnon, f, testEnv()); len(r.Findings) != 1 {
+		t.Fatalf("achados = %d, quer 1", len(r.Findings))
+	}
+}
+
+// A correlação melhora a LEITURA, não a acusação (engine.go). Promover por
+// conjunção aqui quebraria o exit code de toda frota que roda depurador — e
+// tornaria este check mais grave que o irmão, que vê um sinal MAIS forte.
+func TestExecAnonNaoPromovePorCorrelacao(t *testing.T) {
+	f := &facts.Facts{Processes: []facts.Process{
+		{PID: 10, Comm: "app", Exe: "/usr/bin/app", TracerPID: 999, ExeMemfd: true,
+			MapsExecAnon: []string{"7f00-7f01 r-xp"}, MapsExecAnonN: 1},
+	}}
+	r := mapsExecAnon.Run(mapsExecAnon, f, testEnv())
+	if len(r.Findings) != 1 {
+		t.Fatalf("achados = %d, quer 1", len(r.Findings))
+	}
+	if r.Findings[0].Sev != check.SevWarn {
+		t.Errorf("severidade = %v, quer WARN", r.Findings[0].Sev)
+	}
+	ev := strings.Join(r.Findings[0].Evidence, " ")
+	if !strings.Contains(ev, "ptrace") || !strings.Contains(ev, "memfd") {
+		t.Errorf("as correlações são EVIDÊNCIA e precisam aparecer: %v", r.Findings[0].Evidence)
+	}
+}
+
+// O teto da amostra não pode virar mentira de contagem.
+func TestExecAnonRelataTotalQuandoAAmostraFoiCortada(t *testing.T) {
+	f := &facts.Facts{Processes: []facts.Process{
+		{PID: 10, Comm: "app", Exe: "/usr/bin/app",
+			MapsExecAnon: []string{"7f00-7f01 r-xp"}, MapsExecAnonN: 900},
+	}}
+	r := mapsExecAnon.Run(mapsExecAnon, f, testEnv())
+	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "900") {
+		t.Errorf("o total precisa aparecer: %v", r.Findings[0].Evidence)
+	}
+}
+
+// --- proc.deleted_mapping ---
+
+// Não existe atualização de pacote que entregue biblioteca em /tmp: ali a
+// história legítima acabou.
+func TestApagadoEmDiretorioGravavelECritico(t *testing.T) {
+	f := &facts.Facts{Processes: []facts.Process{
+		{PID: 10, Comm: "app", Exe: "/usr/bin/app", MapsApagados: []facts.MapaApagado{
+			{Caminho: "/tmp/.x.so", Perms: "r-xp", Verificado: true},
+		}},
+	}}
+	r := mapeamentoApagado.Run(mapeamentoApagado, f, testEnv())
+	if len(r.Findings) != 1 || r.Findings[0].Sev != check.SevCritical {
+		t.Fatalf("achados = %+v, quer 1 CRITICAL", r.Findings)
+	}
+}
+
+// Fora de diretório gravável, o mesmo fato tem uma história legítima —
+// desinstalação com o serviço no ar — e vale um aviso, não uma acusação.
+func TestApagadoForaDeDiretorioGravavelEAviso(t *testing.T) {
+	f := &facts.Facts{Processes: []facts.Process{
+		{PID: 10, Comm: "app", Exe: "/usr/bin/app", MapsApagados: []facts.MapaApagado{
+			{Caminho: "/usr/lib/libfoo.so", Perms: "r-xp", Verificado: true},
+		}},
+	}}
+	r := mapeamentoApagado.Run(mapeamentoApagado, f, testEnv())
+	if len(r.Findings) != 1 || r.Findings[0].Sev != check.SevWarn {
+		t.Fatalf("achados = %+v, quer 1 WARN", r.Findings)
+	}
+}
+
+// O caso comum de servidor: o caminho VOLTOU a existir porque o pacote foi
+// atualizado. Um aviso por processo seria uma parede de centenas — e a parede
+// enterraria os poucos que importam.
+func TestApagadoRecriadoViraUmaLinhaInformativa(t *testing.T) {
+	var ps []facts.Process
+	for i := 0; i < 3; i++ {
+		ps = append(ps, facts.Process{PID: 10 + i, Comm: "app", Exe: "/usr/bin/app",
+			MapsApagados: []facts.MapaApagado{
+				{Caminho: "/usr/lib/libc.so.6", Perms: "r-xp", Verificado: true, Recriado: true},
+			}})
+	}
+	r := mapeamentoApagado.Run(mapeamentoApagado, &facts.Facts{Processes: ps}, testEnv())
+	if len(r.Findings) != 1 {
+		t.Fatalf("achados = %d, quer 1 agregado para os 3 processos", len(r.Findings))
+	}
+	if r.Findings[0].Sev != check.SevInfo {
+		t.Errorf("severidade = %v, quer INFO: reinício pendente não é incidente, e "+
+			"não pode mexer no exit code de uma frota inteira", r.Findings[0].Sev)
+	}
+	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "3 mapeamento") {
+		t.Errorf("a contagem precisa aparecer: %v", r.Findings[0].Evidence)
+	}
+}
+
+// Sem o Verificado, "não perguntei" viraria "o arquivo sumiu" — e o achado
+// afirmaria o que ninguém checou.
+func TestApagadoSemVerificacaoDizQueNaoVerificou(t *testing.T) {
+	f := &facts.Facts{Processes: []facts.Process{
+		{PID: 10, Comm: "app", Exe: "/usr/bin/app", MapsApagados: []facts.MapaApagado{
+			{Caminho: "/usr/lib/libfoo.so", Perms: "r-xp"},
+		}},
+	}}
+	r := mapeamentoApagado.Run(mapeamentoApagado, f, testEnv())
+	if len(r.Findings) != 1 {
+		t.Fatalf("achados = %d, quer 1", len(r.Findings))
+	}
+	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "não foi possível verificar") {
+		t.Errorf("a evidência precisa declarar a dúvida: %v", r.Findings[0].Evidence)
+	}
+}
+
+// Carregar código de memfd é operação normal de runtime com JIT; num processo
+// que não é um, é código que nunca esteve em disco.
+func TestMemfdMapeadoIsentaJITEAcusaOResto(t *testing.T) {
+	m := []facts.MapaApagado{{Caminho: "/memfd:payload", Perms: "r-xp", Memfd: true}}
+	f := &facts.Facts{Processes: []facts.Process{
+		{PID: 10, Comm: "node", Exe: "/usr/bin/node", MapsApagados: m},
+		{PID: 11, Comm: "sshd", Exe: "/usr/sbin/sshd", MapsApagados: m},
+	}}
+	r := mapeamentoApagado.Run(mapeamentoApagado, f, testEnv())
+	if len(r.Findings) != 1 || r.Findings[0].Subject != "pid=11" {
+		t.Fatalf("achados = %+v, quer só pid=11", r.Findings)
+	}
+	if len(r.Partial) == 0 {
+		t.Error("a isenção do JIT precisa chegar à cobertura")
 	}
 }

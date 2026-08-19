@@ -113,7 +113,40 @@ type Process struct {
 	// MapsLibs é TODA biblioteca carregada, inclusive as de diretório normal.
 	// É a única fonte que torna uma biblioteca candidata à pergunta de
 	// propriedade — ela não executa, então nada mais a traria.
-	MapsLibs  []string `json:"maps_libs,omitempty"`
+	MapsLibs []string `json:"maps_libs,omitempty"`
+
+	// MapsExecAnon são as regiões EXECUTÁVEIS sem arquivo por trás e SEM nome.
+	//
+	// É a metade que o MapsRWX não alcança, e ela é a mais limpa das duas. A
+	// injeção que respeita W^X nunca deixa gravável e executável ligados ao
+	// mesmo tempo:
+	//
+	//	mmap(RW) → write(payload) → mprotect(RX)
+	//
+	// No instante do retrato o que existe é r-xp anônimo, e o MapsRWX não o vê
+	// por definição — ele exige o 'w'.
+	//
+	// SEM NOME faz parte do critério, e não é detalhe. Desde o 5.17 o kernel
+	// guarda um rótulo por região (PR_SET_VMA_ANON_NAME) e o JIT moderno rotula
+	// o código que gera: medido num desktop, o Firefox tem 85 regiões
+	// [anon:js-executable-memory] e NENHUMA anônima sem nome. O que não tem
+	// rótulo não foi declarado por ninguém.
+	MapsExecAnon []string `json:"maps_exec_anon,omitempty"`
+	// MapsExecAnonN é o TOTAL, porque a lista acima tem teto. Amostra e
+	// contagem são coisas diferentes, e o check precisa das duas para não dizer
+	// "16 regiões" onde há mil.
+	MapsExecAnonN int `json:"maps_exec_anon_total,omitempty"`
+	// MapsExecNomes são os rótulos das regiões executáveis anônimas que TÊM
+	// nome. Não é achado: é o contexto que permite dizer "este processo rotula o
+	// próprio JIT" — e portanto que uma região sem rótulo, no mesmo processo,
+	// não é explicada por ele.
+	MapsExecNomes []string `json:"maps_exec_named,omitempty"`
+	// MapsApagados são os mapeamentos EXECUTÁVEIS sem arquivo vivo por trás. O
+	// ExeDeleted responde pelo executável PRINCIPAL; uma biblioteca aberta com
+	// dlopen e apagada em seguida não passa por ele, e o /proc/<pid>/exe do
+	// processo continua apontando para um caminho perfeitamente legítimo.
+	MapsApagados []MapaApagado `json:"maps_deleted_exec,omitempty"`
+
 	Truncated []string `json:"truncated,omitempty"` // o que não coube no orçamento
 
 	// Self marca a própria ferramenta e seus ancestrais: um scanner que se
@@ -139,6 +172,32 @@ type FD struct {
 	SocketInode uint64 `json:"socket_inode,omitempty"`
 	PTY         bool   `json:"pty,omitempty"`
 	Deleted     bool   `json:"deleted,omitempty"`
+}
+
+// MapaApagado é um mapeamento executável cujo arquivo não está no lugar.
+type MapaApagado struct {
+	Caminho string `json:"path"`
+	Perms   string `json:"perms,omitempty"`
+	// Memfd marca o que NUNCA esteve em disco: o kernel escreve
+	// "/memfd:<nome> (deleted)" para memória anônima nomeada. Tratá-lo como
+	// arquivo apagado inventaria um arquivo que nunca existiu — e manda o
+	// operador procurar em disco o que só existe naquela memória.
+	Memfd bool `json:"memfd,omitempty"`
+	// Recriado diz que existe um arquivo NESTE caminho AGORA. É o discriminador
+	// entre as duas histórias que produzem a mesma linha no maps:
+	//
+	//	atualização de pacote   o arquivo foi SUBSTITUÍDO. O caminho volta a
+	//	                        existir e dezenas de processos seguram o inode
+	//	                        antigo — é o estado que o needrestart detecta,
+	//	                        e é rotina em qualquer servidor sem reinício
+	//	payload apagado         dlopen seguido de unlink. O caminho não existe
+	//	                        mais para ninguém, e a única cópia do código
+	//	                        está na memória do processo
+	Recriado bool `json:"path_recreated,omitempty"`
+	// Verificado diz se a pergunta acima chegou a ser feita. Sem ele, "não
+	// recriado" e "não perguntei" teriam o mesmo JSON — e são conclusões
+	// opostas.
+	Verificado bool `json:"path_checked,omitempty"`
 }
 
 // envAllow são as variáveis cujo VALOR é gravado. Todas as demais têm só a
@@ -285,6 +344,7 @@ func collectProcesses(f *Facts, e *env.Env) {
 	sort.Slice(f.Processes, func(i, j int) bool { return f.Processes[i].PID < f.Processes[j].PID })
 
 	reconfirmCmdline(f)
+	resolverMapasApagados(f, e)
 
 	if denied > 0 {
 		f.partial("proc", strconv.Itoa(denied)+" processos com fds ilegíveis (sem permissão): "+
@@ -292,8 +352,9 @@ func collectProcesses(f *Facts, e *env.Env) {
 	}
 	if deniedMaps > 0 {
 		f.partial("proc", strconv.Itoa(deniedMaps)+" processos com /proc/<pid>/maps ilegível "+
-			"(sem permissão): região rwx anônima — a assinatura de injeção — não pôde "+
-			"ser avaliada neles")
+			"(sem permissão): região rwx anônima, região executável anônima e "+
+			"biblioteca apagada ainda mapeada — as assinaturas de injeção — não "+
+			"puderam ser avaliadas neles")
 	}
 	if deniedNS > 0 {
 		f.partial("proc", strconv.Itoa(deniedNS)+" processos com /proc/<pid>/ns/* ilegível "+
@@ -810,6 +871,15 @@ func readFDs(p *Process) {
 // de plugins), e a lista global é deduplicada depois.
 const maxMapsLibs = 128
 
+// Tetos das outras listas do maps. Mesma razão do maxMapsLibs — o caso
+// patológico é o runtime com milhares de regiões de JIT —, com a diferença de
+// que aqui a CONTAGEM total continua guardada à parte, e o corte é declarado.
+const (
+	maxMapsExecAnon = 16
+	maxMapsNomes    = 8
+	maxMapsApagados = 16
+)
+
 func readMaps(p *Process) {
 	fh, err := os.Open(procPath(p.PID, "maps"))
 	if err != nil {
@@ -831,7 +901,9 @@ func lerMaps(p *Process, r io.Reader) {
 	sc.Buffer(make([]byte, 0, 8192), 64*1024)
 
 	oddSeen := map[string]bool{}
-	libsTruncadas := false
+	apagadosVistos := map[string]bool{}
+	nomesVistos := map[string]bool{}
+	libsTruncadas, apagadosTruncados := false, false
 	n := 0
 	for sc.Scan() {
 		if n >= maxMapLines {
@@ -843,16 +915,64 @@ func lerMaps(p *Process, r io.Reader) {
 		// sc.Bytes() não aloca; sc.Text() alocaria UMA string por linha, e são
 		// milhares por processo. A conversão para string acontece só quando há
 		// achado — que é o caso raro.
-		perms, path, ok := splitMapLineBytes(sc.Bytes())
+		addr, perms, path, ok := splitMapLineBytes(sc.Bytes())
 		if !ok {
 			continue
 		}
-		if bytes.IndexByte(perms, 'w') >= 0 && bytes.IndexByte(perms, 'x') >= 0 {
+		executavel := bytes.IndexByte(perms, 'x') >= 0
+		gravavel := bytes.IndexByte(perms, 'w') >= 0
+		if gravavel && executavel {
 			d := string(path)
 			if d == "" {
 				d = "(anônimo)"
 			}
 			p.MapsRWX = append(p.MapsRWX, string(perms)+" "+d)
+		}
+		// As três formas de código executável que um retrato distingue e que o
+		// MapsRWX não cobre. Só região EXECUTÁVEL chega aqui — a minoria das
+		// linhas do maps —, então o custo não entra no laço quente de verdade.
+		if executavel {
+			switch {
+			case len(path) == 0:
+				// Sem arquivo e sem rótulo. A gravável já é do MapsRWX; a que
+				// interessa aqui é a que passou pelo mprotect e deixou de ser.
+				if gravavel {
+					break
+				}
+				p.MapsExecAnonN++
+				if len(p.MapsExecAnon) < maxMapsExecAnon {
+					// O ENDEREÇO entra, e não só as permissões. Sem ele, N
+					// regiões viram N cópias da string "r-xp": o operador não
+					// sabe onde olhar com o gdb, e duas varreduras seguidas
+					// ficam indistinguíveis para a baseline.
+					p.MapsExecAnon = append(p.MapsExecAnon, string(addr)+" "+string(perms))
+				}
+			case bytes.HasPrefix(path, []byte("[anon:")):
+				nome := string(path)
+				if !nomesVistos[nome] && len(p.MapsExecNomes) < maxMapsNomes {
+					nomesVistos[nome] = true
+					p.MapsExecNomes = append(p.MapsExecNomes, nome)
+				}
+			case bytes.HasSuffix(path, []byte(" (deleted)")):
+				c := string(bytes.TrimSuffix(path, []byte(" (deleted)")))
+				if apagadosVistos[c] {
+					break
+				}
+				apagadosVistos[c] = true
+				if len(p.MapsApagados) >= maxMapsApagados {
+					if !apagadosTruncados {
+						apagadosTruncados = true
+						p.Truncated = append(p.Truncated, "mais de "+
+							strconv.Itoa(maxMapsApagados)+" mapeamentos executáveis "+
+							"apagados: os demais NÃO entraram no retrato")
+					}
+					break
+				}
+				p.MapsApagados = append(p.MapsApagados, MapaApagado{
+					Caminho: c, Perms: string(perms),
+					Memfd: strings.HasPrefix(c, "/memfd:"),
+				})
+			}
 		}
 		if len(path) == 0 || path[0] != '/' || !looksLikeSO(path) {
 			continue
@@ -899,6 +1019,38 @@ func lerMaps(p *Process, r io.Reader) {
 	}
 }
 
+// resolverMapasApagados pergunta, UMA vez por caminho, se o arquivo apagado
+// voltou a existir — e é essa pergunta que separa as duas histórias que
+// produzem exatamente a mesma linha no maps.
+//
+// Roda AQUI, e não dentro do lerMaps, por dois motivos que se somam: a leitura
+// dos processos é paralela e um cache compartilhado precisaria de trava, e a
+// mesma biblioteca substituída aparece em dezenas de processos — perguntar por
+// processo faria dezenas de stat para responder uma coisa só.
+//
+// Falhar não é lacuna de cobertura: `stat` só responde "existe" ou "não
+// existe", e as duas respostas são conclusões. O que não pode acontecer é a
+// ausência da resposta virar "não recriado" — por isso o Verificado.
+func resolverMapasApagados(f *Facts, e *env.Env) {
+	cache := map[string]bool{}
+	for i := range f.Processes {
+		p := &f.Processes[i]
+		for j := range p.MapsApagados {
+			m := &p.MapsApagados[j]
+			if m.Memfd {
+				continue // nunca houve arquivo: não há o que perguntar
+			}
+			existe, lido := cache[m.Caminho]
+			if !lido {
+				_, err := e.Stat(m.Caminho)
+				existe = err == nil
+				cache[m.Caminho] = existe
+			}
+			m.Recriado, m.Verificado = existe, true
+		}
+	}
+}
+
 // looksLikeSO reconhece biblioteca compartilhada sem alocar: ".so" no fim, ou
 // ".so." no meio (libfoo.so.1.2).
 func looksLikeSO(path []byte) bool {
@@ -908,15 +1060,15 @@ func looksLikeSO(path []byte) bool {
 // splitMapLine separa "addr perms offset dev inode [path]". O kernel NÃO escapa
 // espaço no path, então strings.Fields quebra em qualquer diretório com espaço
 // no nome — e um rename derrotaria o MapsOdd em silêncio.
-func splitMapLine(ln string) (perms, path string, ok bool) {
-	pb, pa, ok := splitMapLineBytes([]byte(ln))
-	return string(pb), string(pa), ok
+func splitMapLine(ln string) (addr, perms, path string, ok bool) {
+	ab, pb, pa, ok := splitMapLineBytes([]byte(ln))
+	return string(ab), string(pb), string(pa), ok
 }
 
 // splitMapLineBytes é a versão sem alocação, usada no laço quente. Os cinco
 // primeiros campos são fixos; o RESTO da linha é o caminho — que pode conter
 // espaço, e por isso não pode sair de um Fields().
-func splitMapLineBytes(ln []byte) (perms, path []byte, ok bool) {
+func splitMapLineBytes(ln []byte) (addr, perms, path []byte, ok bool) {
 	var f [5][]byte
 	i := 0
 	for n := 0; n < 5; n++ {
@@ -928,14 +1080,14 @@ func splitMapLineBytes(ln []byte) (perms, path []byte, ok bool) {
 			i++
 		}
 		if start == i {
-			return nil, nil, false
+			return nil, nil, nil, false
 		}
 		f[n] = ln[start:i]
 	}
 	for i < len(ln) && ln[i] == ' ' {
 		i++
 	}
-	return f[1], ln[i:], true
+	return f[0], f[1], ln[i:], true
 }
 
 func isLibDir(path string) bool {

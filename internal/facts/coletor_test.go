@@ -121,7 +121,7 @@ func TestMapsRWXExigeAsDuasPermissoes(t *testing.T) {
 		{"7f0000000000-7f0000001000 r-xp 00000000 00:00 0 /usr/bin/x", false},
 	}
 	for _, c := range casos {
-		perms, _, ok := splitMapLineBytes([]byte(c.linha))
+		_, perms, _, ok := splitMapLineBytes([]byte(c.linha))
 		if !ok {
 			t.Fatalf("linha não foi entendida: %q", c.linha)
 		}

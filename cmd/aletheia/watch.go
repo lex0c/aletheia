@@ -180,7 +180,7 @@ func runWatch(args []string) int {
 	//
 	//	amostra   /proc e sockets, 164ms — pega o beacon de 2s e o processo
 	//	          efêmero, que é o que nenhum retrato alcança
-	//	completa  os 70 checks, 1,5s — pega tudo o mais, no ritmo que ela cabe
+	//	completa  a varredura completa, 1,5s — pega tudo o mais, no ritmo que ela cabe
 	tickAmostra := time.NewTicker(*intervalo)
 	defer tickAmostra.Stop()
 	tickCompleto := time.NewTicker(*completo)

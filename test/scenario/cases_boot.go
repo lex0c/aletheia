@@ -61,4 +61,23 @@ func init() {
 		},
 		Exit: 1,
 	})
+
+	Register(Scenario{
+		ID:   "GB4-binfmt-registro-vivo",
+		Desc: "interpretador de binfmt REGISTRADO no kernel vivo, apontando para /tmp gravável",
+		// O irmão VIVO do GB1: não a configuração em disco, mas o registro que já
+		// está no kernel — /proc/sys/fs/binfmt_misc. É o que roteia execução AGORA
+		// para um interpretador em diretório gravável, sem casar ELF nativo: o
+		// kernel passa a invocá-lo, e isso é CRITICAL. Precisa de VM porque exige
+		// montar binfmt_misc e escrever no register do kernel de verdade.
+		Mode: VM,
+		Setup: `mount -t binfmt_misc none /proc/sys/fs/binfmt_misc 2>/dev/null || true
+			printf '#!/bin/sh\n' > /tmp/.evilbin
+			chmod +x /tmp/.evilbin
+			echo ':evilm:E::evx::/tmp/.evilbin:' > /proc/sys/fs/binfmt_misc/register`,
+		Expect: []Expect{
+			{ID: "kernel.binfmt_interpreter", Sev: "CRITICAL"},
+		},
+		Exit: 2,
+	})
 }

@@ -414,6 +414,12 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 	}
 	// O programa que o KERNEL invoca sozinho é o candidato mais forte desta
 	// lista: ele executa como root, sem processo pai suspeito e sem unit.
+	for i := range f.Binfmt {
+		addDoDisco(f.Binfmt[i].Interpreter, "interpretador binfmt vivo ("+f.Binfmt[i].Nome+")")
+	}
+	for i := range f.BinfmtConfig {
+		addDoDisco(f.BinfmtConfig[i].Interpreter, "interpretador binfmt em "+baseNome(f.BinfmtConfig[i].Fonte))
+	}
 	for i := range f.Helpers {
 		add(f.Helpers[i].Alvo, "helper do kernel ("+f.Helpers[i].Nome+")")
 	}

@@ -1,8 +1,6 @@
 package checks
 
 import (
-	"strings"
-
 	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
@@ -29,8 +27,6 @@ func init() { check.Register(helperDoKernel) }
 //	               provocar, e o programa roda como root, no namespace inicial
 //	uevent_helper  invocado a cada evento de dispositivo. Legado: em sistema
 //	               moderno está vazio porque o udev escuta por netlink
-//	binfmt_misc    interpretador registrado por assinatura de arquivo: executar
-//	               um arquivo com aquele magic invoca o interpretador
 //
 // Não há unit para achar, não há processo pai suspeito, não há entrada de cron.
 // Há uma linha num arquivo de uma linha.
@@ -39,8 +35,11 @@ func init() { check.Register(helperDoKernel) }
 //
 // Os quatro têm valor legítimo, e três vêm preenchidos de fábrica: num host com
 // systemd o core_pattern aponta para o `systemd-coredump`, no Ubuntu para o
-// `apport`, e um host com docker buildx tem meia dúzia de registros de binfmt
-// para qemu. Acusar o mecanismo acusaria todos eles.
+// `apport`, e o modprobe é /sbin/modprobe. Acusar o mecanismo acusaria todos eles.
+//
+// O binfmt_misc é da mesma família e saiu para checks próprios
+// (kernel.binfmt_interpreter e persist.binfmt_config): são duas perguntas
+// distintas — roteia agora, e volta no boot.
 //
 // O que a ferramenta pergunta é de onde vem o PROGRAMA. O que o kernel invoca
 // como root deveria vir de um pacote — e quando não vem, ou quando está em
@@ -58,17 +57,13 @@ var helperDoKernel = check.Check{
 	FalsePositives: []string{
 		"OS VALORES DE FÁBRICA NÃO DISPARAM: `core_pattern` apontando para o " +
 			"systemd-coredump ou para o apport, `modprobe` em /sbin/modprobe e " +
-			"binfmt de qemu vindo do qemu-user-static são o normal, e todos têm " +
-			"dono de pacote",
+			"são o normal, e todos têm dono de pacote",
 		"KERNEL ANTIGO tem valor de fábrica onde o moderno tem vazio: até a série " +
 			"4.x o uevent_helper vinha com /sbin/hotplug, e um guest de 3.18 " +
 			"produziu exatamente esse aviso antes desta ressalva existir",
 		"ferramenta INTERNA em /usr/local ou /opt cai aqui com severidade menor: " +
 			"empresa que escreve o próprio coletor de core dump existe, e ali " +
 			"não ter dono de pacote é a norma",
-		"binfmt registrado por um contêiner (docker buildx instala qemu por " +
-			"binfmt) aparece no host inteiro, porque o registro é global — e o " +
-			"interpretador pode estar num caminho que o host não reconhece",
 		"sem a base de pacotes legível a pergunta de propriedade não tem " +
 			"resposta, e o que degrada é a cobertura",
 	},
@@ -161,8 +156,6 @@ func gatilhoDe(nome string) string {
 			"é trivial para quem já tem uma conta"
 	case nome == "uevent_helper":
 		return "qualquer evento de dispositivo dispara"
-	case strings.HasPrefix(nome, "binfmt:"):
-		return "executar um arquivo com a assinatura registrada dispara"
 	}
 	return "o gatilho é um evento comum do sistema"
 }

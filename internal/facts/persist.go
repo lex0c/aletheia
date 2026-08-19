@@ -155,6 +155,10 @@ func collectPersist(f *Facts, e *env.Env) {
 	// de pacotes. Fica aqui, e não no ramo de /proc, porque a metade que
 	// importa em imagem montada — a configuração do bootloader — é filesystem.
 	collectBoot(f, e)
+	// binfmt em DISCO: a configuração que o systemd-binfmt reaplica no boot.
+	// Vale em modo image, e o interpretador dela entra na pergunta de
+	// propriedade como qualquer outro alvo executado por conta do sistema.
+	collectBinfmtConfig(f, e)
 	// ANTES do collectPkg: o ALVO de um hook de interpretador é candidato a
 	// propriedade, e é a resposta dessa pergunta que separa configuração de
 	// deploy de implante. Depois do collectPkg ele nunca era perguntado, e o

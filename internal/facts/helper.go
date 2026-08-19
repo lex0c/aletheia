@@ -1,7 +1,6 @@
 package facts
 
 import (
-	"os"
 	"sort"
 	"strings"
 
@@ -25,22 +24,23 @@ import (
 //	core_pattern   com "|" na frente, o kernel PIPA o core dump para o programa,
 //	               como root — e qualquer processo que morra com SIGSEGV dispara
 //	uevent_helper  invocado a cada evento de dispositivo (legado; hoje vazio)
-//	binfmt_misc    interpretador registrado por assinatura de arquivo
+//
+// O binfmt_misc é da mesma família, mas tem fatos e checks próprios
+// (BinfmtRegistro e binfmt.go): são DUAS perguntas — o kernel roteia execução
+// AGORA, e a configuração em disco a recria no boot —, e cada uma merece a sua.
 //
 // # O que decide o falso positivo
 //
-// Todos os quatro TÊM valor legítimo, e três deles vêm preenchidos de fábrica:
-// num host com systemd o core_pattern aponta para o `systemd-coredump`, no
-// Ubuntu para o `apport`, e um host com docker buildx tem meia dúzia de
-// entradas de binfmt para qemu.
+// Os três TÊM valor legítimo, e vêm preenchidos de fábrica: num host com
+// systemd o core_pattern aponta para o `systemd-coredump`, no Ubuntu para o
+// `apport`, e o modprobe é /sbin/modprobe.
 //
-// O discriminador é o mesmo da §24, e ele resolve os quatro de uma vez: o
+// O discriminador é o mesmo da §24, e ele resolve os três de uma vez: o
 // programa que o kernel invoca deveria vir de um PACOTE. Quando não vem — ou
 // quando está em diretório gravável —, é a forma mais silenciosa de persistência
 // com execução como root que existe neste sistema.
 type HelperDoKernel struct {
-	// Nome é o mecanismo: modprobe, core_pattern, uevent_helper ou
-	// binfmt:<registro>.
+	// Nome é o mecanismo: modprobe, core_pattern ou uevent_helper.
 	Nome  string `json:"name"`
 	Fonte string `json:"source"`
 	Valor string `json:"value"`
@@ -119,44 +119,9 @@ func collectHelpers(f *Facts, e *env.Env) {
 		}
 	}
 
-	collectBinfmt(f)
+	collectBinfmt(f) // preenche f.Binfmt (registros vivos)
 
 	sort.Slice(f.Helpers, func(i, j int) bool { return f.Helpers[i].Nome < f.Helpers[j].Nome })
-}
-
-// collectBinfmt lê os interpretadores registrados por assinatura.
-//
-// O formato de cada registro é uma linha por campo:
-//
-//	enabled
-//	interpreter /usr/bin/qemu-aarch64-static
-//	flags: OCF
-//	offset 0
-//	magic 7f454c46...
-//
-// O `register` e o `status` são controles do próprio mecanismo, não registros.
-func collectBinfmt(f *Facts) {
-	const base = "/proc/sys/fs/binfmt_misc"
-	ents, err := os.ReadDir(base)
-	if err != nil {
-		return // não montado: é o normal em host sem emulação
-	}
-	for _, ent := range ents {
-		nome := ent.Name()
-		if nome == "register" || nome == "status" || ent.IsDir() {
-			continue
-		}
-		corpo, ok := readTrim(base + "/" + nome)
-		if !ok {
-			continue
-		}
-		h := HelperDoKernel{Nome: "binfmt:" + nome, Fonte: base + "/" + nome}
-		h.Alvo = interpretadorDeBinfmt(corpo)
-		h.Valor = h.Alvo
-		if h.Alvo != "" {
-			f.Helpers = append(f.Helpers, h)
-		}
-	}
 }
 
 // alvoDeCorePattern separa as duas formas do core_pattern, que fazem coisas
@@ -173,17 +138,6 @@ func alvoDeCorePattern(v string) (alvo string, padrao bool) {
 		return "", true
 	}
 	return primeiroCampo(cano), false
-}
-
-// interpretadorDeBinfmt extrai o programa de um registro. O formato é uma linha
-// por campo, e só a do interpretador aponta para um executável.
-func interpretadorDeBinfmt(corpo string) string {
-	for _, ln := range strings.Split(corpo, "\n") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(ln), "interpreter "); ok {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
 }
 
 func primeiroCampo(s string) string {

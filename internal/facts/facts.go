@@ -84,6 +84,12 @@ type Facts struct {
 	// Helpers são os programas que o KERNEL invoca sozinho: modprobe,
 	// core_pattern, uevent_helper e binfmt_misc.
 	Helpers []HelperDoKernel `json:"kernel_helpers,omitempty"`
+	// Binfmt são os interpretadores registrados e VIVOS no kernel
+	// (/proc/sys/fs/binfmt_misc); BinfmtConfig é a mesma coisa em ARQUIVO, que o
+	// boot reaplica. Duas perguntas: o kernel roteia execução AGORA, e isso
+	// volta depois do reboot.
+	Binfmt       []BinfmtRegistro `json:"binfmt,omitempty"`
+	BinfmtConfig []BinfmtConfig   `json:"binfmt_config,omitempty"`
 	// Boot são as linhas de comando de kernel: a que está RODANDO e as que a
 	// configuração do bootloader entregaria no PRÓXIMO boot. As duas respondem
 	// perguntas diferentes, e é na diferença entre elas que mora o achado.

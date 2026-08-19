@@ -28,13 +28,9 @@ func TestHelperDeFabricaNaoDispara(t *testing.T) {
 			Valor: "/sbin/modprobe", Alvo: "/sbin/modprobe", Padrao: true},
 		// uevent_helper vazio é o normal em sistema moderno: sem alvo, sem achado.
 		{Nome: "uevent_helper", Fonte: "/sys/kernel/uevent_helper", Padrao: true},
-		// binfmt de qemu vindo do pacote: é o que docker buildx instala.
-		{Nome: "binfmt:qemu-aarch64", Fonte: "/proc/sys/fs/binfmt_misc/qemu-aarch64",
-			Valor: "/usr/bin/qemu-aarch64-static", Alvo: "/usr/bin/qemu-aarch64-static"},
 	}, map[string]bool{
 		"/usr/lib/systemd/systemd-coredump": true,
 		"/sbin/modprobe":                    true,
-		"/usr/bin/qemu-aarch64-static":      true,
 	})
 	if r := helperDoKernel.Run(helperDoKernel, f, testEnv()); len(r.Findings) != 0 {
 		t.Errorf("valor de fábrica não pode disparar: %v", r.Findings)

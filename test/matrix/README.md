@@ -39,6 +39,7 @@ sem sinal.
 | `rwx-anon`         | `proc.maps_rwx_anon`   | regressão    |
 | `rx-anon`          | `proc.maps_exec_anon`  | regressão    |
 | `deleted-exec`     | `proc.deleted_mapping` | regressão    |
+| `memfd`            | `proc.memfd_exec`      | regressão    |
 | `rx-anon-rotulada` | (nenhum)               | ponto cego¹  |
 | `deleted-data`     | (nenhum)               | ponto cego²  |
 

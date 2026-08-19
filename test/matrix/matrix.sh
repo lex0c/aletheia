@@ -33,10 +33,11 @@ declare -A ESPERA=(
 	[rwx-anon]="FIRE proc.maps_rwx_anon :: injeção clássica gravável+executável"
 	[rx-anon]="FIRE proc.maps_exec_anon :: injeção W^X (mmap RW -> mprotect RX)"
 	[deleted-exec]="FIRE proc.deleted_mapping :: lib apagada de /tmp, ainda executável"
+	[memfd]="FIRE proc.memfd_exec :: execução fileless: imagem vem de memfd, sem disco"
 	[rx-anon-rotulada]="BLIND proc.maps_exec_anon :: DECLARADO — rótulo de VMA é spoofável, o check só conta sem rótulo"
 	[deleted-data]="BLIND proc.deleted_mapping :: DECLARADO — o check exige segmento executável"
 )
-TECHS="rwx-anon rx-anon deleted-exec rx-anon-rotulada deleted-data"
+TECHS="rwx-anon rx-anon deleted-exec memfd rx-anon-rotulada deleted-data"
 
 echo "[2/3] rodando as técnicas no contêiner…"
 docker run --rm -v "$work":/m -w /m alpine:3.20 sh /m/runner.sh $TECHS >"$work/out.txt" 2>/dev/null
@@ -46,7 +47,7 @@ echo
 printf '%-18s %-24s %-14s %s\n' "TÉCNICA" "CHECK ESPERADO" "RESULTADO" "NOTA"
 printf '%-18s %-24s %-14s %s\n' "-------" "--------------" "---------" "----"
 falhou=0
-for tech in rwx-anon rx-anon deleted-exec rx-anon-rotulada deleted-data; do
+for tech in rwx-anon rx-anon deleted-exec memfd rx-anon-rotulada deleted-data; do
 	spec="${ESPERA[$tech]}"
 	modo="$(echo "$spec" | awk '{print $1}')"
 	chk="$(echo "$spec" | awk '{print $2}')"
@@ -63,7 +64,7 @@ for tech in rwx-anon rx-anon deleted-exec rx-anon-rotulada deleted-data; do
 done
 echo
 echo "(dispararam além do esperado — contexto, não erro:)"
-for tech in rwx-anon rx-anon deleted-exec rx-anon-rotulada deleted-data; do
+for tech in rwx-anon rx-anon deleted-exec memfd rx-anon-rotulada deleted-data; do
 	fired="$(sed -n "s/^FIRED tech=$tech ids=//p" "$work/out.txt")"
 	[ -n "$fired" ] && echo "  $tech: $fired"
 done

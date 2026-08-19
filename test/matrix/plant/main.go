@@ -16,6 +16,14 @@ import (
 	"unsafe"
 )
 
+// Números de syscall que o pacote syscall da stdlib não exporta (só o
+// x/sys/unix, e este projeto não tem dependência externa). São de amd64, onde a
+// matriz roda.
+const (
+	sysMemfdCreate = 319
+	sysExecveat    = 322
+)
+
 func must(err error, o string) {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, o+":", err)
@@ -32,6 +40,12 @@ func nomearVMA(b []byte, nome string) {
 	n := append([]byte(nome), 0)
 	syscall.Syscall6(syscall.SYS_PRCTL, prSetVMA, 0,
 		uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), uintptr(unsafe.Pointer(&n[0])), 0)
+}
+
+func bptr(sarg string) *byte {
+	b, err := syscall.BytePtrFromString(sarg)
+	must(err, "byteptr")
+	return b
 }
 
 func mmapAnon(prot int) []byte {
@@ -71,6 +85,27 @@ func main() {
 		manter = append(manter, b)
 	case "deleted-exec": // proc.deleted_mapping (CRITICAL, /tmp)
 		manter = append(manter, mapDeArquivo("/tmp/.plant.so", syscall.PROT_READ|syscall.PROT_EXEC, true))
+	case "memfd": // proc.memfd_exec: executa a partir de memória anônima, sem disco
+		self, err := os.ReadFile("/proc/self/exe")
+		must(err, "ler self")
+		fd, _, e1 := syscall.Syscall(sysMemfdCreate, uintptr(unsafe.Pointer(bptr("plant"))), 0, 0)
+		if e1 != 0 {
+			must(e1, "memfd_create")
+		}
+		_, err = syscall.Write(int(fd), self)
+		must(err, "escrever no memfd")
+		// execveat(fd, "", [plant, memfd-child], {}, AT_EMPTY_PATH): substitui a
+		// imagem por uma que veio de memória. O exe do processo vira /memfd:...
+		argv := []*byte{bptr("plant"), bptr("memfd-child"), nil}
+		envp := []*byte{nil}
+		syscall.Syscall6(sysExecveat, fd, uintptr(unsafe.Pointer(bptr(""))),
+			uintptr(unsafe.Pointer(&argv[0])), uintptr(unsafe.Pointer(&envp[0])), 0x1000, 0)
+		must(fmt.Errorf("execveat não substituiu a imagem"), "execveat")
+	case "memfd-child": // a imagem que veio do memfd: só se anuncia e dorme
+		fmt.Printf("PLANT pid=%d tech=memfd\n", os.Getpid())
+		os.Stdout.Sync()
+		time.Sleep(120 * time.Second)
+		return
 
 	// --- PONTO CEGO: técnicas que se quer medir se passam sem sinal ---
 	case "rx-anon-rotulada": // maps_exec_anon só conta SEM rótulo: rótulo spoofado esconde

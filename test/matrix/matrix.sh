@@ -39,8 +39,9 @@ declare -A ESPERA=(
 	[jit-inject]="FIRE proc.maps_exec_anon :: bypass FECHADO — a isenção de JIT passou a exigir dono de pacote"
 	[rx-anon-rotulada]="FIRE proc.maps_exec_anon :: bypass FECHADO — rótulo de JIT em não-runtime não é confiado"
 	[deleted-data]="BLIND proc.deleted_mapping :: DECLARADO — o check exige segmento executável"
+	[revshell-pty]="BLIND correlate.revshell_bridge :: DECLARADO — a ponte por PTY não compartilha inode de pipe; o check só cobre pipe"
 )
-TECHS="rwx-anon rx-anon deleted-exec memfd revshell-direct revshell-bridge rx-anon-rotulada deleted-data jit-inject"
+TECHS="rwx-anon rx-anon deleted-exec memfd revshell-direct revshell-bridge rx-anon-rotulada deleted-data jit-inject revshell-pty"
 
 echo "[2/3] rodando as técnicas no contêiner…"
 docker run --rm --cap-add=NET_ADMIN -v "$work":/m -w /m alpine:3.20 sh /m/runner.sh $TECHS >"$work/out.txt" 2>/dev/null
@@ -50,7 +51,7 @@ echo
 printf '%-18s %-24s %-14s %s\n' "TÉCNICA" "CHECK ESPERADO" "RESULTADO" "NOTA"
 printf '%-18s %-24s %-14s %s\n' "-------" "--------------" "---------" "----"
 falhou=0
-for tech in rwx-anon rx-anon deleted-exec memfd revshell-direct revshell-bridge rx-anon-rotulada deleted-data jit-inject; do
+for tech in rwx-anon rx-anon deleted-exec memfd revshell-direct revshell-bridge rx-anon-rotulada deleted-data jit-inject revshell-pty; do
 	spec="${ESPERA[$tech]}"
 	modo="$(echo "$spec" | awk '{print $1}')"
 	chk="$(echo "$spec" | awk '{print $2}')"

@@ -49,6 +49,7 @@ sem sinal.
 | `rx-anon-rotulada` | `proc.maps_exec_anon`  | regressão¹   |
 | `deleted-data`     | (nenhum)               | ponto cego²  |
 | `jit-inject`       | `proc.maps_exec_anon`  | regressão³   |
+| `revshell-pty`     | (nenhum)               | ponto cego⁴  |
 
 1. era ponto cego: o rótulo de VMA (`PR_SET_VMA_ANON_NAME`) é spoofável, e o
    check só contava região SEM rótulo — bastava nomear a região de injeção
@@ -61,6 +62,11 @@ sem sinal.
    demonstrou o bypass, e a isenção FOI APERTADA — passou a exigir dono de
    pacote. Um `/usr/bin/node` sem dono (payload copiado) já não escapa; um node
    de pacote de verdade continua isento.
+
+4. `correlate.revshell_bridge` só cobre a ponte por PIPE. A ponte por PTY não
+   compartilha inode de pipe, e correlacionar `/dev/ptmx` com `/dev/pts/N`
+   passivamente é mais difícil; além disso o FP seria severo (SSM, Teleport e
+   ssh com PTY têm essa forma). Fica medido e declarado, sem check por ora.
 
 Os cenários de rede usam TEST-NET-3 num alias de `lo` e um C2 falso local
 (`plant listen`); precisam de `--cap-add=NET_ADMIN`, que `matrix.sh` já passa.

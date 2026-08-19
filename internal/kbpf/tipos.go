@@ -151,9 +151,11 @@ func (f Fixacao) Motivo() string {
 			"descritor do programa pode ter sido fechado depois: o socket " +
 			"segura, e ele pertence a algum processo"
 	case FixNetlink:
-		return "programa deste tipo é anexado a uma INTERFACE por netlink (tc, " +
-			"xdp), e esta ferramenta ainda não lê netlink: quem o segura não " +
-			"foi verificado"
+		return "programa deste tipo é anexado a uma INTERFACE (tc, xdp). O XDP " +
+			"de cada link e os FILTROS de tc são lidos por netlink quando a " +
+			"capacidade existe, e nenhum deles casou com este programa; o que " +
+			"continua sem leitura é a AÇÃO de tc (act_bpf), que pendura " +
+			"programa dentro do filtro"
 	case FixCgroup:
 		return "programa deste tipo é anexado a um CGROUP, e resolver isso " +
 			"exigiria BPF_PROG_QUERY em cada cgroup da árvore: quem o segura " +

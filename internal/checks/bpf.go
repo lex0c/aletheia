@@ -41,11 +41,15 @@ func init() {
 //
 // # O tipo decide se a pergunta é respondível
 //
-// Programa de tc, de xdp e de cgroup é segurado por interface e por cgroup —
-// coisas que se leem por netlink e por BPF_PROG_QUERY, e esta ferramenta não
-// faz nem uma nem outra. Ali a ausência de dono não significa nada, e acusar
-// produziria achado em todo host com cilium. Esses viram LACUNA declarada, não
-// achado (ver kbpf.FixacaoDe).
+// Programa de tc, de xdp e de cgroup é segurado por INTERFACE e por CGROUP, e
+// nenhum dos dois aparece na bpf(2). O XDP de cada link e os FILTROS de tc
+// passaram a ser lidos por rtnetlink — um programa preso ali deixa de ser órfão
+// e ganha o nome do ponto de anexação. O que continua sem leitura é o cgroup
+// (exigiria BPF_PROG_QUERY em cada nó da árvore) e a AÇÃO de tc.
+//
+// Onde a atribuição não é possível, a ausência de dono não significa nada, e
+// acusar produziria achado em todo host com cilium. Esses viram LACUNA
+// declarada, não achado (ver kbpf.FixacaoDe).
 var bpfSemDono = check.Check{
 	ID:       "kernel.bpf_unowned",
 	Ref:      "35",
@@ -65,9 +69,11 @@ var bpfSemDono = check.Check{
 			"de sk_reuseport preso por setsockopt fica sem dono aparente, e " +
 			"servidor que usa reuseport com eBPF (dnsdist, haproxy) produz " +
 			"exatamente esta forma — legitimamente",
-		"tc, xdp, cgroup e struct_ops NÃO entram aqui: quem os segura exigiria " +
-			"netlink e BPF_PROG_QUERY, e o que a ferramenta faz com eles é " +
-			"declarar a lacuna em vez de acusar",
+		"tc e xdp são RESOLVIDOS por rtnetlink quando a capacidade de netlink " +
+			"existe: o programa preso a uma interface aparece com o ponto de " +
+			"anexação em vez de órfão. Cgroup, struct_ops e a AÇÃO de tc " +
+			"(act_bpf) continuam sem leitura, e o que a ferramenta faz com eles " +
+			"é declarar a lacuna em vez de acusar",
 		"varredura de DENTRO de contêiner não produz achado nenhum aqui, mesmo " +
 			"quando a enumeração funciona: o espaço de ids do eBPF é global e os " +
 			"donos estão fora do namespace de PID, então TODO programa do host " +

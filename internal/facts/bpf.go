@@ -6,10 +6,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/kbpf"
+	"github.com/lex0c/aletheia/internal/netlink"
 )
 
 // Programas eBPF carregados (runbook §35, SPEC fase 8).
@@ -166,6 +168,11 @@ func collectBPF(f *Facts, e *env.Env) {
 	linksBPF(f, porID, citados)
 	donosPorDescritor(f, porID, citados)
 	pinsDoBpffs(f, porID, citados)
+	// O QUINTO detentor: tc e XDP prendem o programa a uma INTERFACE, e quem
+	// sabe disso é o rtnetlink — não a bpf(2). Sem ele, todo programa de rede
+	// aparecia como "sem dono visível" e virava lacuna; num nó com cilium isso
+	// é a maioria deles, e lacuna desse tamanho é indistinguível de não olhar.
+	anexosDeRede(f, e, porID, citados)
 	tailCalls(f)
 
 	f.BPF.Ocultos = confirmarOcultosBPF(citados, porID)
@@ -173,6 +180,69 @@ func collectBPF(f *Facts, e *env.Env) {
 	sort.Slice(f.BPF.Programas, func(i, j int) bool {
 		return f.BPF.Programas[i].ID < f.BPF.Programas[j].ID
 	})
+}
+
+// anexosDeRede resolve os anexos que vivem numa INTERFACE: o XDP da placa e o
+// filtro de tc.
+//
+// O que ele acrescenta não é só o nome do detentor. Um programa CITADO por um
+// anexo e ausente da enumeração da bpf(2) é a mesma forma do PID oculto — uma
+// interface do kernel entrega um objeto que a outra nega —, e por isso os ids
+// vistos aqui entram na lista de citados.
+func anexosDeRede(f *Facts, e *env.Env, porID map[uint32]*ProgramaBPF, citados map[uint32]bool) {
+	if !e.Has(env.CapNetlink) {
+		f.partial("bpf", "anexo de tc e de XDP NÃO foi lido ("+e.Reason(env.CapNetlink)+
+			"): programa de rede sem dono visível continua sem atribuição")
+		return
+	}
+	c, err := netlink.Abrir(syscall.NETLINK_ROUTE)
+	if err != nil {
+		f.partial("bpf", "rtnetlink indisponível ("+err.Error()+"): anexo de tc e "+
+			"de XDP não foi lido")
+		return
+	}
+	defer c.Fechar()
+
+	ifaces, err := netlink.Interfaces(c)
+	if err != nil {
+		f.partial("bpf", "enumeração de interfaces por netlink falhou ("+err.Error()+
+			"): anexo de tc e de XDP não foi lido")
+		return
+	}
+	anotar := func(id uint32, onde string) {
+		if id == 0 {
+			return
+		}
+		citados[id] = true
+		if p := porID[id]; p != nil {
+			p.Anexos = append(p.Anexos, onde)
+		}
+	}
+	var semFiltro int
+	for _, i := range ifaces {
+		anotar(i.XDPProgID, "xdp em "+i.Nome)
+		filtros, err := netlink.FiltrosBPF(c, i)
+		if err != nil {
+			semFiltro++
+			continue
+		}
+		for _, ft := range filtros {
+			onde := "tc " + ft.Direcao + " em " + ft.Interface
+			if ft.Nome != "" {
+				onde += " (" + ft.Nome + ")"
+			}
+			anotar(ft.ProgID, onde)
+		}
+	}
+	if semFiltro > 0 {
+		f.partial("bpf", strconv.Itoa(semFiltro)+" interface(s) com filtro de tc "+
+			"ilegível: programa preso nelas não pôde ser atribuído")
+	}
+	// A AÇÃO de tc (act_bpf) pendura programa DENTRO do filtro e não é lida
+	// aqui. A ressalva não vira lacuna incondicional — isso degradaria a
+	// cobertura de todo host, inclusive os que não têm tc nenhum. Ela mora no
+	// motivo da fixação (kbpf.FixNetlink), que só é impresso para o programa
+	// que de fato ficou sem atribuição.
 }
 
 // quandoCarregou traduz o relógio de boot para UTC. Sem boot conhecido a

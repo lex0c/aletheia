@@ -138,3 +138,84 @@ func TestModuloEscondidoNaoViraPidOculto(t *testing.T) {
 		t.Errorf("moduloDivergente é o ÚNICO que reporta o módulo escondido: %v", r.Findings)
 	}
 }
+
+// --- cross.socket_view ---
+
+func socketOcultoF(ocultos ...facts.SocketOculto) *facts.Facts {
+	f := &facts.Facts{}
+	f.Cross.SocketDiagLido = true
+	f.Cross.SocketDiag, f.Cross.SocketProc = 40+len(ocultos), 40
+	f.Cross.SocketOcultos = ocultos
+	return f
+}
+
+// O achado não é "vi algo estranho": é a demonstração de que duas interfaces do
+// mesmo kernel deram respostas incompatíveis. Por isso CRITICAL — e por isso
+// ele invalida as ausências desta execução (ver kernelBreakers).
+func TestSocketViewAcusaOQueSoONetlinkMostra(t *testing.T) {
+	r := socketDivergente.Run(socketDivergente, socketOcultoF(facts.SocketOculto{
+		Proto: "tcp", Local: "10.0.0.9:4444", Peer: "203.0.113.7:443",
+		Estado: "ESTAB", Inode: 98765, UID: 0,
+	}), testEnv())
+	if len(r.Findings) != 1 {
+		t.Fatalf("achados = %d, quer 1", len(r.Findings))
+	}
+	fd := r.Findings[0]
+	if fd.Sev != check.SevCritical {
+		t.Errorf("severidade = %v, quer CRITICAL", fd.Sev)
+	}
+	passos := strings.Join(fd.NextSteps, " ")
+	if !strings.Contains(passos, "socket:[98765]") {
+		t.Errorf("o inode é como se acha o dono nos fds: %v", fd.NextSteps)
+	}
+	if !strings.Contains(passos, "203.0.113.7") {
+		t.Errorf("a captura precisa vir filtrada pelo par: %v", fd.NextSteps)
+	}
+}
+
+// Em TIME-WAIT e SYN-RECV o inode é zero: não há descritor para procurar.
+// Mandar o operador atrás de socket:[0] o faria perder tempo com uma busca que
+// casa com tudo e não significa nada.
+func TestSocketViewNaoMandaProcurarInodeZero(t *testing.T) {
+	r := socketDivergente.Run(socketDivergente, socketOcultoF(facts.SocketOculto{
+		Proto: "tcp", Local: "10.0.0.9:80", Peer: "203.0.113.7:5555", Estado: "TIME-WAIT",
+	}), testEnv())
+	fd := r.Findings[0]
+	if strings.Contains(strings.Join(fd.NextSteps, " "), "socket:[") {
+		t.Errorf("sem inode não há fd a procurar: %v", fd.NextSteps)
+	}
+	if !strings.Contains(strings.Join(fd.Evidence, " "), "sem inode") {
+		t.Errorf("a ausência do inode precisa ser dita: %v", fd.Evidence)
+	}
+}
+
+// Sem a segunda visão não há comparação — e "nenhum socket oculto" seria a
+// afirmação de que as duas visões concordam quando uma delas não foi olhada.
+func TestSocketViewSemNetlinkDeclaraLacuna(t *testing.T) {
+	f := &facts.Facts{}
+	f.Cross.SocketDiagMotivo = "consulta por netlink NÃO foi feita: o helper de módulo não é o de fábrica"
+	r := socketDivergente.Run(socketDivergente, f, testEnv())
+	if len(r.Findings) != 0 {
+		t.Fatalf("achados = %+v, quer 0", r.Findings)
+	}
+	if len(r.Partial) == 0 || !strings.Contains(r.Partial[0], "helper de módulo") {
+		t.Errorf("o motivo precisa chegar ao rodapé: %v", r.Partial)
+	}
+}
+
+// Concordância entre as duas visões é o caso normal e não produz nada.
+func TestSocketViewCaladoQuandoAsVisoesConcordam(t *testing.T) {
+	if r := socketDivergente.Run(socketDivergente, socketOcultoF(), testEnv()); len(r.Findings) != 0 {
+		t.Errorf("achados = %+v, quer 0", r.Findings)
+	}
+}
+
+// Dump cortado no teto: o que veio vale, e a comparação NÃO foi completa.
+func TestSocketViewDeclaraCorte(t *testing.T) {
+	f := socketOcultoF()
+	f.Cross.SocketDiagCortado = true
+	r := socketDivergente.Run(socketDivergente, f, testEnv())
+	if len(r.Partial) == 0 || !strings.Contains(strings.Join(r.Partial, " "), "teto") {
+		t.Errorf("o corte precisa ser declarado: %v", r.Partial)
+	}
+}

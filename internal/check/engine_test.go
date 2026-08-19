@@ -431,8 +431,10 @@ func TestThreadCountNaoEstaEmKernelBreakers(t *testing.T) {
 		t.Error("cross.thread_count é SevWarn e não pode estar em kernelBreakers — " +
 			"nunca chegaria a >= SevCritical para disparar a invalidação")
 	}
-	// e os três que FICAM têm de continuar lá: são a espinha da invalidação.
-	for _, id := range []string{"cross.bpf_hidden", "cross.hidden_pid", "cross.module_view"} {
+	// e os que FICAM têm de continuar lá: são a espinha da invalidação.
+	for _, id := range []string{
+		"cross.bpf_hidden", "cross.hidden_pid", "cross.module_view", "cross.socket_view",
+	} {
 		if _, ok := kernelBreakers[id]; !ok {
 			t.Errorf("%s emite SevCritical e é quebra-confiança: não pode sair do mapa", id)
 		}

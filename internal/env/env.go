@@ -20,7 +20,33 @@ import (
 
 	"github.com/lex0c/aletheia/internal/ioc"
 	"github.com/lex0c/aletheia/internal/kbpf"
+	"github.com/lex0c/aletheia/internal/netlink"
 )
+
+// modprobeDeFabrica diz se o programa que o kernel executa para carregar módulo
+// é o que a distribuição entrega. O usrmerge move um para o outro, e as quatro
+// formas abaixo são o que as distribuições usam.
+//
+// ILEGÍVEL conta como não-seguro: o arquivo é legível por qualquer um em
+// qualquer host normal, e não poder verificar a precondição de uma ação com
+// efeito colateral é motivo para não tomar a ação.
+func modprobeDeFabrica(e *Env) (string, bool) {
+	b, err := e.ReadFile("/proc/sys/kernel/modprobe")
+	if err != nil {
+		return "ilegível (" + err.Error() + ")", false
+	}
+	v := strings.TrimSpace(string(b))
+	switch v {
+	case "/sbin/modprobe", "/usr/sbin/modprobe", "/bin/modprobe", "/usr/bin/modprobe":
+		return v, true
+	}
+	if v == "" {
+		// Vazio significa que o kernel não executa nada para carregar módulo:
+		// não há gatilho, e a consulta é segura.
+		return "", true
+	}
+	return v, false
+}
 
 // Cap é uma capacidade do ambiente. O check declara o que precisa (Requires) e
 // o que gostaria (Optional); o motor confere aqui antes de rodar.
@@ -408,8 +434,33 @@ func (e *Env) probeCaps() {
 		e.grant(CapBPF, true, "")
 	}
 
-	// Ainda não implementado. Declarar ausência é melhor que fingir cobertura.
-	e.grant(CapNetlink, false, "netlink ainda não implementado (fase 3): sem a divergência do runbook §35.5")
+	// netlink — a segunda visão da tabela de conexões (runbook §35.5).
+	//
+	// A recusa do meio não é sobre permissão: é sobre o EFEITO da própria
+	// pergunta. Consultar o sock_diag faz o kernel carregar sozinho o módulo de
+	// diagnóstico quando ele não está carregado — e o kernel carrega módulo
+	// EXECUTANDO /proc/sys/kernel/modprobe, como root. Num host onde esse
+	// caminho foi trocado, a consulta desta ferramenta seria o gatilho do
+	// implante que ela mesma denuncia (persist.kernel_helper).
+	//
+	// Diante disso ela não pergunta, e diz que não perguntou. Perder uma visão
+	// cruzada é um preço menor que executar o implante do investigado.
+	switch {
+	case e.Source == SourceImage:
+		e.grant(CapNetlink, false, "modo image: não há kernel vivo para consultar por netlink")
+	default:
+		if alvo, seguro := modprobeDeFabrica(e); !seguro {
+			e.grant(CapNetlink, false, "consulta por netlink NÃO foi feita: ela pode "+
+				"fazer o kernel carregar o módulo de diagnóstico, e para carregar módulo "+
+				"o kernel executa /proc/sys/kernel/modprobe COMO ROOT — que aqui é "+
+				alvo+", fora do padrão da distribuição. A ferramenta se recusa a ser o "+
+				"gatilho: sem a divergência /proc/net × netlink do runbook §35.5")
+		} else if err := netlink.Sonda(); err != nil {
+			e.grant(CapNetlink, false, "enumeração de socket por netlink indisponível: "+err.Error())
+		} else {
+			e.grant(CapNetlink, true, "")
+		}
+	}
 }
 
 func (e *Env) probeClock() {

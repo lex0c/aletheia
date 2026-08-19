@@ -36,6 +36,22 @@ func preservarPID(e *env.Env, pid int, flags ...string) string {
 	return s
 }
 
+// preservarPcap é o passo para a evidência que NÃO está em disco nem em
+// memória de processo: o tráfego. É o que sobra quando a própria tabela de
+// conexões mente — o pacote no fio não passa pelo /proc.
+//
+// A interface fica como lacuna a preencher de propósito. Ela é obrigatória no
+// comando pela razão que o próprio `preserve` documenta: capturar em "qualquer
+// interface" mistura enlaces no mesmo arquivo, e um pcap rotulado errado é
+// decodificado com confiança total a partir do byte errado.
+func preservarPcap(e *env.Env, host string) string {
+	s := "sudo " + check.Arg(ferramenta(e)) + " preserve --out \"$IR\" --pcap --iface <interface>"
+	if host != "" {
+		s += " --host " + check.Arg(host)
+	}
+	return s
+}
+
 func ferramenta(e *env.Env) string {
 	if e != nil && e.ToolPath != "" {
 		return e.ToolPath

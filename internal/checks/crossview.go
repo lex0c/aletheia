@@ -13,6 +13,115 @@ func init() {
 	check.Register(pidOculto)
 	check.Register(threadOculta)
 	check.Register(moduloDivergente)
+	check.Register(socketDivergente)
+}
+
+// socketDivergente — runbook §35.5.
+//
+// # As duas visões, e por que elas são independentes
+//
+// Tudo que esta ferramenta sabe de conexão vem de /proc/net/tcp e das três
+// tabelas irmãs. É UMA fonte, servida por uma função do kernel — `tcp4_seq_show`
+// — que um rootkit intercepta para sumir com a própria conexão. Não é hipótese:
+// é o hook que o catálogo de ftrace desta ferramenta procura pelo nome, porque
+// é o que os implantes conhecidos usam.
+//
+// O NETLINK_INET_DIAG responde a mesma pergunta por outro caminho de código: o
+// kernel percorre as tabelas de hash de socket e devolve mensagem, sem passar
+// pelo `seq_show`. Esconder das duas exige interceptar duas coisas diferentes,
+// de forma consistente — que é justamente o que é difícil.
+//
+// # Só uma direção é achado
+//
+//	no netlink e NÃO em /proc   a tabela que o `ss` e o `netstat` leem omitiu
+//	                            uma conexão que o kernel entrega quando
+//	                            perguntado de outro jeito
+//	em /proc e NÃO no netlink   o socket fechou entre as duas leituras. É
+//	                            rotina, e não é reportado
+//
+// # CRITICAL, e por que ele invalida as ausências desta execução
+//
+// O achado aqui não é "vi algo estranho": é a demonstração de que a interface
+// que responde por conexão deu duas respostas incompatíveis sobre si mesma.
+// Depois disso, "não encontrei nada" em qualquer outro check deixa de valer —
+// quem responderia já mostrou que responde o que quer (ver engine.go).
+var socketDivergente = check.Check{
+	ID:       "cross.socket_view",
+	Ref:      "35.5",
+	Title:    "socket que o netlink mostra e /proc/net não",
+	Group:    "kernel",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive,
+	Requires: env.CapProcfs | env.CapNetlink,
+	Optional: env.CapRoot,
+	Wtf:      true,
+	FalsePositives: []string{
+		"CORRIDA de socket recém-nascido NÃO produz este achado: o candidato é " +
+			"reconfirmado contra uma SEGUNDA leitura de /proc/net e um SEGUNDO " +
+			"dump por netlink, e só sobrevive quem aparece nos dois dumps e em " +
+			"nenhuma das duas leituras",
+		"protocolo cujo dump por netlink FALHOU não é comparado com /proc — " +
+			"udp_diag é módulo separado do tcp_diag em várias distribuições, e " +
+			"compará-lo contra o vazio inverteria a divergência",
+		"a comparação é por TUPLA (protocolo, local, remoto) e não por inode: " +
+			"em TIME-WAIT e SYN-RECV o inode é zero nas duas visões, e comparar " +
+			"por ele juntaria todos num socket só",
+		"LIMITE que vale mais que o check: se o kernel estiver comprometido no " +
+			"nível certo, as duas visões mentem juntas. Ausência de divergência " +
+			"não prova nada; presença prova muito",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		var r check.Result
+		if !f.Cross.SocketDiagLido {
+			motivo := f.Cross.SocketDiagMotivo
+			if motivo == "" {
+				motivo = "a enumeração por netlink não foi feita"
+			}
+			r.Partial = append(r.Partial, "a tabela de conexões NÃO foi confrontada "+
+				"com uma segunda visão: "+motivo)
+			return r
+		}
+		for _, s := range f.Cross.SocketOcultos {
+			ev := []string{
+				s.Proto + " " + s.Local + " → " + nz(s.Peer, "(sem par)") +
+					" estado=" + s.Estado,
+				"o netlink entrega este socket e /proc/net não o lista: as duas " +
+					"visões vêm do MESMO kernel e discordam",
+				"uid=" + strconv.FormatUint(uint64(s.UID), 10),
+			}
+			if s.Inode != 0 {
+				ev = append(ev, "socket:["+strconv.FormatUint(uint64(s.Inode), 10)+
+					"] — é por este inode que o dono é encontrado nos fds")
+			} else {
+				ev = append(ev, "sem inode: o socket não pertence mais a processo "+
+					"nenhum (TIME-WAIT ou SYN-RECV), e não há fd para procurar")
+			}
+			ev = append(ev, "as duas visões enxergaram "+
+				strconv.Itoa(f.Cross.SocketDiag)+" (netlink) e "+
+				strconv.Itoa(f.Cross.SocketProc)+" (/proc/net) sockets comparáveis")
+
+			fd := self.F(check.SevCritical, s.Proto+" "+s.Local, "", ev...)
+			fd.NextSteps = []string{
+				"o `ss`, o `netstat` e esta ferramenta leem a tabela que OMITIU " +
+					"isto: trate toda ausência desta execução como não-resposta (§35.8)",
+			}
+			if s.Inode != 0 {
+				fd.NextSteps = append(fd.NextSteps,
+					"ache o dono pelo inode: sudo ls -l /proc/*/fd 2>/dev/null | grep "+
+						check.Arg("socket:["+strconv.FormatUint(uint64(s.Inode), 10)+"]"))
+			}
+			fd.NextSteps = append(fd.NextSteps,
+				"confira se há hook nas funções que servem /proc/net: o achado de "+
+					"kernel.ftrace_hook em tcp4_seq_show explica exatamente esta divergência",
+				"capture o tráfego antes de mexer: "+preservarPcap(e, s.PeerIP()))
+			r.Findings = append(r.Findings, fd)
+		}
+		if f.Cross.SocketDiagCortado {
+			r.Partial = append(r.Partial, "o dump por netlink bateu no teto de "+
+				"mensagens: a comparação NÃO cobriu todas as conexões")
+		}
+		return r
+	},
 }
 
 // pidOculto — runbook §32, §35.

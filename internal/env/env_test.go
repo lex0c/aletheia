@@ -128,13 +128,23 @@ func TestProbeSondaCaminhoNaoDistro(t *testing.T) {
 	}
 }
 
-// Capacidade não implementada é declarada como ausente, com motivo. Fingir
-// cobertura seria o oposto do propósito da ferramenta.
-func TestCapacidadeNaoImplementadaEhDeclarada(t *testing.T) {
+// Capacidade AUSENTE é declarada com motivo ESPECÍFICO. Fingir cobertura seria
+// o oposto do propósito da ferramenta, e um motivo genérico não diz ao operador
+// o que fazer: falta root, falta o mecanismo neste kernel, ou a ferramenta se
+// recusou a perguntar?
+//
+// A versão anterior deste teste afirmava que CapBPF e CapNetlink nunca podiam
+// ser concedidas, porque nenhuma das duas estava implementada quando ele foi
+// escrito. As duas estão. O que sobrevive — e era o que importava — é a
+// exigência do motivo, agora cobrando de TODAS.
+func TestCapacidadeAusenteTemMotivoEspecifico(t *testing.T) {
 	e := Probe(Options{})
-	for _, c := range []Cap{CapBPF, CapNetlink} {
+	for _, c := range []Cap{
+		CapRoot, CapProcfs, CapDebugfs, CapBPF,
+		CapSystemd, CapPkgDB, CapNetlink, CapFilesystem,
+	} {
 		if e.Has(c) {
-			t.Errorf("%v não está implementada e não pode ser concedida", c.Names())
+			continue
 		}
 		if r := e.Reason(c); r == "" || r == "indisponível" {
 			t.Errorf("%v precisa de motivo específico, veio %q", c.Names(), r)
@@ -172,5 +182,59 @@ func TestClockStateString(t *testing.T) {
 	}
 	if ClockSynced.String() == ClockUnsynced.String() {
 		t.Error("sincronizado e não sincronizado não podem imprimir igual")
+	}
+}
+
+// A recusa que protege o host de nós mesmos.
+//
+// Consultar o sock_diag por netlink pode fazer o kernel carregar sozinho o
+// módulo de diagnóstico — e para carregar módulo o kernel EXECUTA
+// /proc/sys/kernel/modprobe, como root. Num host onde esse caminho foi trocado,
+// a consulta desta ferramenta seria o gatilho do implante que ela mesma
+// denuncia. Perder uma visão cruzada é preço menor.
+func TestModprobeDeFabricaDecideSeAConsultaPodeSerFeita(t *testing.T) {
+	casos := []struct {
+		nome, valor string
+		seguro      bool
+	}{
+		{"caminho da distribuição", "/sbin/modprobe", true},
+		{"usrmerge", "/usr/sbin/modprobe", true},
+		// Vazio significa que o kernel não executa NADA para carregar módulo:
+		// não existe gatilho, e a consulta é segura.
+		{"vazio", "", true},
+		{"trocado por implante", "/tmp/.x", false},
+		{"trocado por caminho de aparência boa", "/usr/local/sbin/modprobe", false},
+	}
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			raiz := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(raiz, "proc/sys/kernel"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(raiz, "proc/sys/kernel/modprobe"),
+				[]byte(c.valor+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			e := Probe(Options{Root: raiz})
+			t.Cleanup(func() { e.Close() })
+			if _, seguro := modprobeDeFabrica(e); seguro != c.seguro {
+				t.Errorf("%q: seguro=%v, quer %v", c.valor, seguro, c.seguro)
+			}
+		})
+	}
+}
+
+// Não poder VERIFICAR a precondição de uma ação com efeito colateral é motivo
+// para não tomar a ação. O arquivo é legível por qualquer um em host normal;
+// não estar lá é sinal por si só.
+func TestModprobeIlegivelContaComoInseguro(t *testing.T) {
+	e := Probe(Options{Root: t.TempDir()})
+	t.Cleanup(func() { e.Close() })
+	alvo, seguro := modprobeDeFabrica(e)
+	if seguro {
+		t.Error("sem poder ler o helper, a consulta não pode ser feita")
+	}
+	if !strings.Contains(alvo, "ilegível") {
+		t.Errorf("o motivo precisa dizer que não deu para ler: %q", alvo)
 	}
 }

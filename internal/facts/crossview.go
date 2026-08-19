@@ -66,6 +66,23 @@ type CrossView struct {
 	ModSys  []string `json:"modules_sys,omitempty"`
 	ModDiff []string `json:"modules_only_in_one,omitempty"`
 
+	// A SEGUNDA visão da tabela de conexões: NETLINK_INET_DIAG, que o kernel
+	// serve por outro caminho de código que não o `tcp4_seq_show` do /proc.
+	//
+	// As contagens ficam aqui porque "nenhum socket oculto" sem elas não
+	// significa nada: pode ser que as duas visões concordem, e pode ser que a
+	// segunda não tenha sido consultada.
+	SocketDiag     int  `json:"sockets_netlink,omitempty"`
+	SocketProc     int  `json:"sockets_proc,omitempty"`
+	SocketDiagLido bool `json:"socket_netlink_read,omitempty"`
+	// SocketDiagMotivo é por que a segunda visão não existiu, quando não
+	// existiu. É a frase que vai para o rodapé.
+	SocketDiagMotivo  string `json:"socket_netlink_reason,omitempty"`
+	SocketDiagCortado bool   `json:"socket_netlink_truncated,omitempty"`
+	// SocketOcultos são os que o netlink entrega e /proc/net não — já
+	// reconfirmados contra a corrida de socket recém-nascido.
+	SocketOcultos []SocketOculto `json:"sockets_hidden,omitempty"`
+
 	// A TERCEIRA interface: os módulos que o ftrace conhece por terem função
 	// rastreável. Independente das outras duas — o registro do ftrace só é
 	// limpo no descarregamento REAL, não quando um módulo se desencadeia da

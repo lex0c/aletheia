@@ -255,6 +255,9 @@ func Collect(e *env.Env) *Facts {
 		// E os que leem PACOTE, que não aparecem em tabela de conexão nenhuma:
 		// é por eles que um filtro de socket eBPF órfão continua vivo.
 		collectSocketsBrutos(f, e)
+		// DEPOIS dos sockets: a segunda visão da mesma tabela, pelo netlink.
+		// Ela precisa da primeira para ter com o que divergir.
+		collectCrossSockets(f, e)
 		// Depois dos processos e ANTES de qualquer pergunta de propriedade: é
 		// a classificação que decide se "que pacote entregou este binário?" faz
 		// sentido para aquele processo.

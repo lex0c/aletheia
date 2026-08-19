@@ -104,6 +104,13 @@ var kernelBreakers = map[string]string{
 		"a interface que responde por eBPF omitiu um objeto que ela mesma entrega quando perguntada direto",
 	"cross.hidden_pid": "um PID responde a /proc/<pid> e não apareceu na listagem de /proc: " +
 		"a mesma interface deu duas respostas incompatíveis",
+	// A tabela de conexões é servida por `tcp4_seq_show`; o netlink responde a
+	// mesma pergunta por outro caminho de código. Um socket que só aparece no
+	// segundo é a demonstração de que a fonte que o `ss` e o `netstat` leem
+	// omitiu o que o kernel entrega quando perguntado de outro jeito.
+	"cross.socket_view": "um socket existe pelo netlink e não aparece em /proc/net: " +
+		"duas interfaces do mesmo kernel deram respostas incompatíveis sobre a " +
+		"tabela de conexões",
 	// Genérico DE PROPÓSITO: cross.module_view carrega DUAS evidências — a
 	// divergência /proc/modules × /sys/module, e a divergência ftrace × proc (o
 	// módulo escondido das duas primeiras que o ftrace ainda delata). A mensagem

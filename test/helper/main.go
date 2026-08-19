@@ -48,6 +48,10 @@ const usage = `helper — monta situações para a suíte de cenários
       conecta em cada endereço e MANTÉM tudo aberto. Duas saídas — uma externa e
       uma interna — são a forma de pivô (runbook §12.2).
 
+  helper revshell-bridge <ip:porta>
+      a forma INDIRETA: um shell lê de um pipe, e a ponte (este processo) segura
+      o outro lado do pipe e o socket de saída. É o socat/python no meio.
+
   helper revshell <ip:porta>
       conecta e duplica o socket sobre fd 0, 1 e 2. É a assinatura ESTRUTURAL de
       shell reverso (runbook §17) — sem executar shell nenhum: só a forma.
@@ -177,6 +181,15 @@ func main() {
 		need(3)
 		c := mustDial(os.Args[2])
 		die(dupOntoStdio(c))
+		hold()
+
+	case "revshell-bridge":
+		// A forma INDIRETA da §17: o shell não toca a rede. Ele lê de um PIPE, e
+		// a PONTE (este processo) segura a outra ponta do pipe E o socket de
+		// saída. É o socat/python no meio, e é WARN porque agente de acesso
+		// remoto legítimo tem a mesma estrutura — a proveniência da ponte decide.
+		need(3)
+		die(revshellBridge(os.Args[2]))
 		hold()
 
 	case "accept-fecha":
@@ -487,6 +500,37 @@ func dupOntoStdio(c net.Conn) error {
 	// descritores duplicados apontariam para nada.
 	keep(c)
 	return dupErr
+}
+
+// revshellBridge monta a ponte da §17: um shell REAL lê de um pipe, e este
+// processo (a ponte) segura o outro lado do pipe E o socket de saída. É a forma
+// que o socat/python-no-meio tem, e a que o correlate.revshell_bridge casa.
+//
+// O shell recebe a ponta de LEITURA como stdin e /dev/null como stdout/stderr —
+// comm vira "sh". A ponte guarda o socket e a ponta de ESCRITA, e fecha a de
+// leitura: só o shell a tem. Sem dar entrada nenhuma ao shell, ele fica lendo o
+// pipe para sempre, que é exatamente o retrato que a varredura precisa ver.
+func revshellBridge(addr string) error {
+	c := mustDial(addr) // a ponte segura o socket de saída
+	keep(c)
+	r, w, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	keep(w) // a ponte segura a ponta de ESCRITA
+	nul, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	keep(nul)
+	_, err = syscall.ForkExec("/bin/sh", []string{"sh", "-i"}, &syscall.ProcAttr{
+		Files: []uintptr{r.Fd(), nul.Fd(), nul.Fd()},
+	})
+	if err != nil {
+		return fmt.Errorf("forkexec sh: %w", err)
+	}
+	r.Close() // só o shell precisa da ponta de leitura
+	return nil
 }
 
 // keepCapsAsUser reproduz o caminho da §3.7: PR_SET_KEEPCAPS preserva o

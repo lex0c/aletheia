@@ -1,0 +1,19 @@
+# Mantém as actions atualizadas.
+#
+# Anda junto com o pinning por SHA nos workflows: SHA fixo é o que impede uma
+# tag movida de executar código arbitrário no job que publica os binários — e
+# sem alguém propondo a atualização, esse mesmo SHA congela a action numa versão
+# com CVE. Uma coisa não funciona sem a outra.
+#
+# O ecossistema `gomod` fica de fora porque não há o que atualizar: o módulo não
+# tem uma única dependência externa, e é essa a propriedade que faz o binário
+# ser estático e auditável (SPEC 4).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"

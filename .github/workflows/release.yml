@@ -29,16 +29,29 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# O topo fica no MÍNIMO. A escrita e as duas permissões de atestação são
+# declaradas no job que precisa delas — assim, um segundo job acrescentado
+# depois não herda poder de publicar sem que alguém tenha decidido isso.
 permissions:
-  contents: write
+  contents: read
+
+# Publicação não se cancela pela metade: um release interrompido entre o upload
+# do binário e o do SHA256SUMS deixa a tag com meia entrega.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write     # criar o release e subir os artefatos
+      id-token: write     # OIDC para a proveniência (Sigstore)
+      attestations: write # gravar a atestação no repositório
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           # A versão vem do go.mod: uma cópia do número aqui envelheceria sem
           # ninguém perceber, e a build de release usaria outro compilador.
@@ -111,7 +124,7 @@ jobs:
             echo
             echo 'curl -fsSLO "$BASE/aletheia-linux-$ARCH"'
             echo 'curl -fsSLO "$BASE/SHA256SUMS"'
-            echo 'sha256sum --ignore-missing -c SHA256SUMS   # confira ANTES de executar'
+            echo 'sha256sum --ignore-missing -c SHA256SUMS'
             echo
             echo 'chmod +x "aletheia-linux-$ARCH"'
             echo 'sudo ./aletheia-linux-$ARCH version'
@@ -119,6 +132,23 @@ jobs:
             echo
             echo 'O sha256 impresso por `aletheia version` tem que ser o mesmo do'
             echo '`SHA256SUMS`. Se não for, pare.'
+            echo
+            echo '### O que o SHA256SUMS prova, e o que ele NÃO prova'
+            echo
+            echo 'Ele viaja no MESMO release que os binários. Quem consegue reescrever'
+            echo 'um reescreve o outro: a conferência acima pega download corrompido e'
+            echo 'troca no caminho, **não** release adulterado.'
+            echo
+            echo 'Quem quer a garantia forte verifica a PROVENIÊNCIA, que é assinada'
+            echo 'pela identidade do workflow e guardada fora dos assets:'
+            echo
+            echo '```sh'
+            echo 'gh attestation verify "aletheia-linux-$ARCH" --owner ${{ github.repository_owner }}'
+            echo '```'
+            echo
+            echo 'Isso responde de onde o binário veio — qual repositório, qual commit,'
+            echo 'qual workflow o construiu. Falsificar exige comprometer o GitHub'
+            echo 'Actions, não só este release.'
             echo
             echo 'Binários estáticos, sem dependência: rodam em imagem mínima, sem libc.'
             echo 'Baixe numa máquina limpa e copie para o alvo quando puder — este'
@@ -130,6 +160,28 @@ jobs:
             cat dist/SHA256SUMS
             echo '```'
           } > dist/NOTAS.md
+
+      # PROVENIÊNCIA: a âncora de confiança que o SHA256SUMS não é.
+      #
+      # O arquivo de somas viaja no MESMO release que os binários — quem
+      # consegue reescrever um reescreve o outro, e a conferência pega corrupção
+      # de transporte, não release adulterado. É a mesma distinção que o
+      # `conferirSoma` do analyze declara sobre o .sha256 do dump ("o que isto
+      # NÃO é: autenticação"), e ela precisa valer também para a porta de
+      # entrada da ferramenta.
+      #
+      # A atestação é assinada pela identidade OIDC deste workflow e guardada
+      # FORA dos assets, então falsificá-la exige comprometer o próprio GitHub
+      # Actions, não só o release. Quem baixa verifica com
+      # `gh attestation verify --owner`.
+      - name: atestar a proveniência dos binários
+        if: steps.ver.outputs.publicar == 'tag'
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: |
+            dist/aletheia-linux-amd64
+            dist/aletheia-linux-386
+            dist/aletheia-linux-arm64
 
       - name: publicar
         if: steps.ver.outputs.publicar == 'tag'
@@ -150,7 +202,7 @@ jobs:
       # na própria execução, e é isso que se inspeciona antes de criar a tag.
       - name: guardar artefatos do ensaio
         if: steps.ver.outputs.publicar != 'tag'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: aletheia-ensaio
           path: |

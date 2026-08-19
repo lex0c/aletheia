@@ -918,3 +918,23 @@ func TestProfundidadeViraLacunaDeclarada(t *testing.T) {
 		t.Errorf("a profundidade-teto tinha de virar lacuna declarada, veio: %q", msgs)
 	}
 }
+
+// Regressão: uma FONTE literal em string (php://input, o corpo do POST que
+// webshell lê) tem de ser vista mesmo em ASPA SIMPLES. A visão de taint apaga
+// string SÓ para a chamada dinâmica `$var(`; fonte fica visível.
+func TestFonteLiteralEmStringVisivel(t *testing.T) {
+	crit := []string{
+		"<?php\n$x=file_get_contents('php://input');\neval($x);",
+		"<?php\n$x=file_get_contents(\"php://input\");\nsystem($x);",
+	}
+	for _, src := range crit {
+		if !tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("php://input é fonte remota, tem de sair mesmo em string: %q -> %+v", src, analisarConteudo(src, "php"))
+		}
+	}
+	// e o FP que a visão-de-dyn resolve continua resolvido:
+	fp := "<?php\n$s=$_REQUEST['s'];\necho sprintf('%1$s by %2$s (x)',$a,$b);"
+	if tem(analisarConteudo(fp, "php"), 2, "") {
+		t.Errorf("$s dentro de '%%1$s (' não é chamada dinâmica: %+v", analisarConteudo(fp, "php"))
+	}
+}

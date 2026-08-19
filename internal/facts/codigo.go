@@ -272,10 +272,10 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	// Comentário vira espaço (mesmo tamanho em bytes, quebras preservadas): os
 	// offsets continuam apontando para a linha certa no ORIGINAL, e um padrão
 	// dentro de `// exemplo: eval($_GET)` deixa de casar.
-	// mascSig vê o interior das strings (blob base64, /e, crase); masc apaga o
-	// interior das aspas SIMPLES — é a visão que o motor de taint usa, para não
-	// casar `$var(` nem `$_GET` escritos dentro de uma string literal.
-	mascSig, masc, crases := mascararComentarios(conteudo, lang)
+	// masc: strings VISÍVEIS — motor de taint, assinaturas e FONTES (php://input,
+	// $_GET interpolado). mascDyn: todas as strings apagadas, só para a chamada
+	// dinâmica `$var(`, que dentro de string nunca é chamada.
+	masc, mascDyn, crases := mascararComentarios(conteudo, lang)
 
 	// Um achado por linha, o de maior tier: sink+entrada crítico ganha do eval
 	// solto na mesma linha.
@@ -422,7 +422,7 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	// vulnerabilidade, não backdoor — e o padrão de um exemplo inseguro de
 	// biblioteca como o jpGraph) e método/estático (`.m()`, `->m()`, `::m()`).
 	if def.dynAbre != nil {
-		for _, m := range def.dynAbre.FindAllStringSubmatchIndex(masc, -1) {
+		for _, m := range def.dynAbre.FindAllStringSubmatchIndex(mascDyn, -1) {
 			if !chamadaDinamicaValida(masc, m[0]) {
 				continue
 			}
@@ -552,7 +552,7 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 		if crases[i+1]-crases[i] > maxSpanCrase {
 			continue // par improvável: comando de shell não tem esse tamanho
 		}
-		if def.inputRem.MatchString(mascSig[crases[i]+1 : crases[i+1]]) {
+		if def.inputRem.MatchString(masc[crases[i]+1 : crases[i+1]]) {
 			registrar(crases[i], 2, "shell via crase sobre entrada de request")
 		}
 	}
@@ -560,12 +560,12 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	// Construções fechadas (/e, include, ofuscação) — ordem-independentes. Leem
 	// a visão de ASSINATURA: o /e e o blob base64 moram DENTRO da string.
 	for _, r := range def.especiais {
-		for _, loc := range r.re.FindAllStringIndex(mascSig, -1) {
+		for _, loc := range r.re.FindAllStringIndex(masc, -1) {
 			registrar(loc[0], r.tier, r.rotulo)
 		}
 	}
 	for _, r := range def.suspeito {
-		for _, loc := range r.re.FindAllStringIndex(mascSig, -1) {
+		for _, loc := range r.re.FindAllStringIndex(masc, -1) {
 			registrar(loc[0], 1, r.rotulo)
 		}
 	}
@@ -1189,16 +1189,16 @@ func semSubscritos(s string) string {
 //
 // Devolve DUAS visões, do mesmo tamanho em bytes:
 //
-//	masc     comentário apagado, interior de STRING visível — para os padrões de
-//	         ASSINATURA (blob base64, preg_replace /e), que leem dentro da string.
-//	mascCod  também apaga o interior de string ASPA-SIMPLES — para o motor de
-//	         TAINT. Aspa simples NÃO interpola em PHP/JS/Python, então `$s` lá
-//	         dentro é texto literal, não variável: apagá-lo mata o falso positivo
-//	         de `$s(` casado dentro de `'%1$s (...'` (medido no wp-admin do
-//	         WordPress) e o `$_GET` escrito dentro de uma string de log. A aspa
-//	         DUPLA fica visível nas duas, porque em PHP ela INTERPOLA — `system("ls
-//	         $_GET[x]")` é sink sobre request de verdade.
-func mascararComentarios(s, lang string) (masc, mascCod string, crases []int) {
+//	masc     comentário apagado, interior de STRING VISÍVEL. É a visão de quase
+//	         tudo: assinaturas (blob base64, /e), FONTES (`php://input`,
+//	         `$_GET` interpolado em "...") e sinks. Uma fonte literal em string
+//	         PRECISA ficar visível — apagá-la cega o webshell que lê o corpo do
+//	         POST com `file_get_contents('php://input')`.
+//	mascDyn  interior de TODA string apagado — usada SÓ pela chamada dinâmica
+//	         `$var(`. Um `$var(` dentro de uma string nunca é chamada; era o FP
+//	         do `$s(` em `sprintf('%1$s (...')` do wp-admin. Só o dynAbre precisa
+//	         dessa visão; o resto perderia fontes se a usasse.
+func mascararComentarios(s, lang string) (masc, mascDyn string, crases []int) {
 	b := []byte(s)
 	bc := append([]byte(nil), b...) // a visão do taint: aspa simples apagada
 	n := len(b)
@@ -1314,9 +1314,13 @@ func mascararComentarios(s, lang string) (masc, mascCod string, crases []int) {
 			}
 		case aspaD:
 			if c == '\\' {
+				brancoCod(i)
+				brancoCod(i + 1)
 				i++
 			} else if c == '"' {
 				st = norm
+			} else {
+				brancoCod(i)
 			}
 		case crase:
 			if c == '\\' {
@@ -1326,8 +1330,8 @@ func mascararComentarios(s, lang string) (masc, mascCod string, crases []int) {
 			}
 		}
 	}
-	masc, mascCod = string(b), string(bc)
-	return masc, mascCod, crases
+	masc, mascDyn = string(b), string(bc)
+	return masc, mascDyn, crases
 }
 
 // pulaHeredoc devolve o offset do FIM de um heredoc/nowdoc que começa no `<<<`

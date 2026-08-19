@@ -7,7 +7,7 @@ GOFLAGS := -trimpath
 # LD_PRELOAD e a binário de sistema trojanizado (SPEC 4).
 export CGO_ENABLED = 0
 
-.PHONY: all build helper vm-image test lint verify clean dist scenarios images fixtures vm-kernels vm-ftrace-proof arches
+.PHONY: all build helper vm-image test lint verify clean dist scenarios images fixtures vm-kernels vm-ftrace-proof vm-socket-proof arches
 
 all: verify
 
@@ -93,6 +93,14 @@ vm-kernels:
 # do QEMU descartável; o kernel do host nunca é tocado. Exige docker e qemu.
 vm-ftrace-proof:
 	./test/vm/ftrace-hidden-module.sh
+
+# vm-socket-proof prova, bootando um kernel de verdade, que uma conexão
+# escondida de /proc/net/tcp por um hook em tcp4_seq_show continua visível pelo
+# NETLINK_INET_DIAG — e que a aletheia a pega: cross.socket_view CRITICAL. O
+# hook é carregado SÓ dentro do QEMU descartável; o kernel do host nunca é
+# tocado. Controle negativo incluído: host limpo cala. Exige docker e qemu.
+vm-socket-proof:
+	./test/vm/socket-hidden-module.sh
 
 # Servidor legado de 32 bits ainda existe. Cross-compilar custa segundos e é a
 # única forma de provar que a ferramenta roda lá — tamanho de int e número de

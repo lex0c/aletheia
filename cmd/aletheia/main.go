@@ -367,12 +367,13 @@ func runWtf(args []string) int {
 	fs := flag.NewFlagSet("wtf", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var (
-		root    = fs.String("root", "", "analisar imagem montada em PATH")
-		oneline = fs.Bool("oneline", false, "uma linha por host, para triagem de frota")
-		budget  = fs.Duration("budget", wtfBudget, "teto de tempo")
-		jsonOut = fs.String("json", "", "escrever JSONL em FILE ('-' = stdout)")
-		base    = fs.String("baseline", "", "comparar com a baseline em FILE")
-		noProg  = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
+		root     = fs.String("root", "", "analisar imagem montada em PATH")
+		oneline  = fs.Bool("oneline", false, "uma linha por host, para triagem de frota")
+		budget   = fs.Duration("budget", wtfBudget, "teto de tempo")
+		jsonOut  = fs.String("json", "", "escrever JSONL em FILE ('-' = stdout)")
+		base     = fs.String("baseline", "", "comparar com a baseline em FILE")
+		noProg   = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
+		autoload = fs.Bool("allow-kernel-autoload", false, "permitir consulta por netlink que pode AUTOCARREGAR o módulo de diagnóstico (altera o host)")
 	)
 	var ignore listaCaminhos
 	fs.Var(&ignore, "ignore", "excluir caminho da varredura de FS (repetível): --ignore /data/xmls")
@@ -395,7 +396,7 @@ func runWtf(args []string) int {
 	start := time.Now()
 	aoInterromper()
 
-	e := env.Probe(env.Options{Root: *root, Version: version})
+	e := env.Probe(env.Options{Root: *root, Version: version, PermitirAutoload: *autoload})
 	defer e.Close()
 	e.Ignorar(ignore)
 	// Mesma recusa do scan: --root que não abre é ERRO de invocação, não host
@@ -470,6 +471,7 @@ func runScan(args []string, wtf bool) int {
 		noProg   = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
 		fsBudget = fs.Duration("fs-budget", 0, "teto de tempo da varredura de filesystem (0 = sem teto)")
 		allFS    = fs.Bool("all-fs", false, "varrer código na FS montada INTEIRA (a partir de /), não só os web roots")
+		autoload = fs.Bool("allow-kernel-autoload", false, "permitir consulta por netlink que pode AUTOCARREGAR o módulo de diagnóstico (altera o host)")
 	)
 	var ignore listaCaminhos
 	fs.Var(&ignore, "ignore", "excluir caminho da varredura de FS (repetível): --ignore /data/xmls")
@@ -505,7 +507,7 @@ func runScan(args []string, wtf bool) int {
 		return 3
 	}
 
-	e := env.Probe(env.Options{Root: *root, Version: version, IOC: lista})
+	e := env.Probe(env.Options{Root: *root, Version: version, IOC: lista, PermitirAutoload: *autoload})
 	defer e.Close()
 	if e.Source == env.SourceImage && !e.Has(env.CapFilesystem) {
 		fmt.Fprintf(os.Stderr, "não foi possível abrir --root com raiz travada: %v\n", e.RootErr)

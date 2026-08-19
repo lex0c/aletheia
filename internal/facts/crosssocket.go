@@ -1,6 +1,8 @@
 package facts
 
 import (
+	"errors"
+	"io/fs"
 	"net"
 	"strconv"
 	"syscall"
@@ -91,15 +93,33 @@ func nomeDeEstado(e uint8) string {
 	return "?" + strconv.Itoa(int(e))
 }
 
-// chaveDeSocket é a identidade usada na comparação.
+// chaveDeSocket é a identidade usada na comparação, e ela tem DOIS regimes.
 //
-// É a TUPLA, e não o inode, por um motivo que o inode não resolve: sockets em
-// TIME-WAIT e em SYN-RECV têm inode zero nas duas visões, e comparar por inode
-// juntaria todos eles num único socket — a divergência sumiria dentro da
-// colisão.
-func chaveDeSocket(proto, lip string, lport int, pip string, pport int) string {
+// Com inode, a chave é o inode: é a identidade EXATA do socket, e casa entre
+// /proc e netlink. Isso fecha o falso NEGATIVO de multiplicidade — vários
+// sockets na MESMA tupla por SO_REUSEPORT deixam de colapsar numa entrada só,
+// então esconder UM de /proc enquanto o outro aparece continua divergindo.
+//
+// Sem inode — TIME-WAIT e SYN-RECV têm inode zero nas duas visões — a tupla
+// mais o ESTADO é o melhor que existe. O resíduo de multiplicidade sobra só
+// nesses estados efêmeros, onde implante não mora.
+func chaveDeSocket(proto string, inode uint64, lip string, lport int, pip string, pport int, estado string) string {
+	if inode != 0 {
+		return proto + "#" + strconv.FormatUint(inode, 10)
+	}
 	return proto + "|" + net.JoinHostPort(lip, strconv.Itoa(lport)) +
-		"|" + net.JoinHostPort(pip, strconv.Itoa(pport))
+		"|" + net.JoinHostPort(pip, strconv.Itoa(pport)) + "|" + estado
+}
+
+// chaveProc e chaveDiag montam a chave a partir de cada uma das duas visões,
+// para que a grafia do estado (que decide a chave sem inode) saia da MESMA
+// tabela dos dois lados.
+func chaveProc(s *Socket) string {
+	return chaveDeSocket(s.Proto, s.Inode, s.LocalIP, s.LocalPort, s.PeerIP, s.PeerPort, s.State)
+}
+
+func chaveDiag(s netlink.SocketInet) string {
+	return chaveDeSocket(s.Proto, uint64(s.Inode), s.LocalIP, s.LocalPorta, s.PeerIP, s.PeerPorta, nomeDeEstado(s.Estado))
 }
 
 func collectCrossSockets(f *Facts, e *env.Env) {
@@ -116,84 +136,159 @@ func collectCrossSockets(f *Facts, e *env.Env) {
 	}
 	defer c.Fechar()
 
-	diag, familias, cortado := dumpDiag(f, c)
-	if len(familias) == 0 {
-		return // dumpDiag já declarou o porquê
+	seguros := e.DiagSeguros
+
+	diag1, diagOK1, cortado := dumpDiag(f, c, seguros)
+	if len(diagOK1) == 0 {
+		return // dumpDiag já declarou o porquê (nenhum protocolo consultável)
 	}
 	f.Cross.SocketDiagLido = true
-	f.Cross.SocketDiag = len(diag)
+	f.Cross.SocketDiag = len(diag1)
 	f.Cross.SocketDiagCortado = cortado
 
-	// O que /proc entregou, restrito aos protocolos cujo dump FUNCIONOU.
-	// Comparar com um protocolo que o netlink não respondeu produziria
-	// divergência em toda conexão dele — invertida, e por culpa nossa.
-	proc := map[string]bool{}
-	for i := range f.Sockets {
-		s := &f.Sockets[i]
-		if familias[s.Proto] {
-			proc[chaveDeSocket(s.Proto, s.LocalIP, s.LocalPort, s.PeerIP, s.PeerPort)] = true
+	// 1ª leitura de /proc, restrita aos protocolos que o netlink respondeu, com
+	// o SUCESSO por protocolo — não só as chaves. Sem esse sucesso, "o socket
+	// não está em /proc" não se distingue de "não consegui ler /proc", e essa
+	// distinção é a tese inteira da ferramenta.
+	proc1, procOK1 := lerProcNet(diagOK1)
+	f.Cross.SocketProc = len(proc1)
+
+	// Protocolo que o netlink respondeu mas /proc não pôde ser LIDO: não é
+	// comparável, e a ausência de um socket nele NÃO pode virar achado.
+	for proto := range diagOK1 {
+		if !procOK1[proto] {
+			f.partial("net", "/proc/net/"+proto+" não pôde ser lido: as conexões de "+
+				proto+" NÃO foram confrontadas com o netlink")
 		}
 	}
-	f.Cross.SocketProc = len(proc)
 
-	candidatos := somenteNoDiag(diag, proc)
+	// Candidatos: no diag, ausentes do /proc — SÓ para protocolos em que a 1ª
+	// leitura de /proc foi de fato OBSERVADA.
+	candidatos := map[string]netlink.SocketInet{}
+	for chave, sk := range diag1 {
+		if !procOK1[sk.Proto] {
+			continue
+		}
+		if !proc1[chave] {
+			candidatos[chave] = sk
+		}
+	}
 	if len(candidatos) == 0 {
 		return
 	}
 
-	// Reconfirmação, dois passos, e só quando há candidato: as duas releituras
-	// custam, e num host onde as visões concordam — que é o normal — elas nunca
-	// acontecem.
-	segundo, _, _ := dumpDiag(nil, c)
-	candidatos = reconfirmar(candidatos, chavesDeProcNet(familias), segundo)
+	// Reconfirmação, e só quando há candidato: as releituras custam, e num host
+	// onde as visões concordam — o normal — elas nunca acontecem.
+	//
+	// As QUATRO testemunhas têm de ser observadas: /proc e netlink, 1ª e 2ª
+	// passada. Se qualquer uma falhar, o candidato é INCONCLUSIVO, nunca
+	// CRITICAL — este check é kernelBreaker, e formar um a partir de "não
+	// consegui reler" seria a ferramenta quebrando a própria confiança do
+	// kernel por uma falha de leitura dela mesma.
+	proc2, procOK2 := lerProcNet(diagOK1)
+	diag2, diagOK2, _ := dumpDiag(nil, c, seguros)
 
-	for _, s := range candidatos {
-		f.Cross.SocketOcultos = append(f.Cross.SocketOcultos, SocketOculto{
-			Proto: s.Proto, Local: s.Local(), Peer: s.Peer(),
-			Estado: nomeDeEstado(s.Estado), Inode: s.Inode, UID: s.UID,
-		})
+	var inconclusivos int
+	for chave, sk := range candidatos {
+		_, emDiag2 := diag2[chave]
+		switch classificarOculto(observacao{
+			procOK1: procOK1[sk.Proto], procOK2: procOK2[sk.Proto],
+			diagOK1: diagOK1[sk.Proto], diagOK2: diagOK2[sk.Proto],
+			emProc2: proc2[chave], emDiag2: emDiag2,
+		}) {
+		case ocultoInconclusivo:
+			inconclusivos++
+		case ocultoConfirmado:
+			f.Cross.SocketOcultos = append(f.Cross.SocketOcultos, SocketOculto{
+				Proto: sk.Proto, Local: sk.Local(), Peer: sk.Peer(),
+				Estado: nomeDeEstado(sk.Estado), Inode: sk.Inode, UID: sk.UID,
+			})
+		}
+	}
+	if inconclusivos > 0 {
+		f.partial("net", strconv.Itoa(inconclusivos)+" socket(s) candidatos a oculto NÃO "+
+			"puderam ser reconfirmados: uma das quatro leituras (/proc ou netlink, 1ª ou 2ª "+
+			"passada) falhou, e sem as quatro observadas a divergência fica INCONCLUSIVA — "+
+			"não vira CRITICAL")
 	}
 }
 
-// somenteNoDiag é a diferença entre as duas visões, e a direção importa.
-//
-// Só "está no netlink e não em /proc" é achado. O contrário — em /proc e não no
-// netlink — é o socket que fechou entre uma leitura e a outra, e reportá-lo
-// encheria todo host movimentado de divergência inventada.
-func somenteNoDiag(diag map[string]netlink.SocketInet, proc map[string]bool) map[string]netlink.SocketInet {
-	out := map[string]netlink.SocketInet{}
-	for chave, s := range diag {
-		if !proc[chave] {
-			out[chave] = s
-		}
-	}
-	return out
+// observacao são as seis testemunhas de UM candidato a socket oculto.
+type observacao struct {
+	procOK1, procOK2 bool // a leitura de /proc foi observada em cada passada?
+	diagOK1, diagOK2 bool // o dump de netlink foi observado em cada passada?
+	emProc2          bool // o socket REapareceu em /proc na 2ª passada?
+	emDiag2          bool // o socket CONTINUA no netlink na 2ª passada?
 }
 
-// reconfirmar elimina a corrida, e é o que separa este check de um gerador de
-// ruído.
+type resultadoOculto int
+
+const (
+	ocultoConfirmado   resultadoOculto = iota // oculto de verdade
+	ocultoCorrida                             // socket nasceu ou morreu: descartar
+	ocultoInconclusivo                        // uma leitura falhou: nem confirma nem descarta
+)
+
+// classificarOculto decide, e a regra é deliberadamente severa por causa do
+// peso do achado.
 //
-// Um socket nascido ENTRE a leitura de /proc e o dump aparece só no dump — a
-// forma exata de um socket escondido. Sobrevive quem cumpre as duas condições:
-//
-//	continua AUSENTE numa segunda leitura de /proc  (não é socket novo)
-//	continua PRESENTE num segundo dump por netlink  (não é socket que morreu)
-//
-// É a mesma resposta que a sondagem de PID oculto dá para o mesmo problema:
-// relistar depois, e descartar quem apareceu.
-func reconfirmar(cands map[string]netlink.SocketInet, procDeNovo map[string]bool,
-	diagDeNovo map[string]netlink.SocketInet) map[string]netlink.SocketInet {
-	out := map[string]netlink.SocketInet{}
-	for chave, s := range cands {
-		if procDeNovo[chave] {
-			continue
-		}
-		if _, aindaEsta := diagDeNovo[chave]; !aindaEsta {
-			continue
-		}
-		out[chave] = s
+// Sem as quatro fontes observadas, INCONCLUSIVO — porque a alternativa é
+// converter "não reli" em "reli e continuava ausente", que é exatamente a
+// confusão que a ferramenta existe para não cometer, agravada aqui por o
+// resultado ser um kernelBreaker.
+func classificarOculto(o observacao) resultadoOculto {
+	if !(o.procOK1 && o.procOK2 && o.diagOK1 && o.diagOK2) {
+		return ocultoInconclusivo
 	}
-	return out
+	if o.emProc2 { // reapareceu em /proc: socket recém-nascido, não oculto
+		return ocultoCorrida
+	}
+	if !o.emDiag2 { // sumiu do netlink: socket que fechou, não oculto
+		return ocultoCorrida
+	}
+	return ocultoConfirmado
+}
+
+// lerProcNet lê as tabelas de /proc/net dos protocolos pedidos, devolvendo as
+// chaves e o SUCESSO por protocolo — a distinção que separa ausência de lacuna.
+//
+// ENOENT conta como leitura BEM-SUCEDIDA e vazia: a tabela não existir (IPv6
+// desligado) é ausência de protocolo, consistente com o dump vazio do diag, e
+// não uma falha. EACCES/EIO deixam o protocolo como NÃO lido, e ele não é
+// comparado.
+func lerProcNet(protos map[string]bool) (map[string]bool, map[string]bool) {
+	chaves := map[string]bool{}
+	lidos := map[string]bool{}
+	for _, src := range []struct{ path, proto string }{
+		{"/proc/net/tcp", "tcp"}, {"/proc/net/tcp6", "tcp6"},
+		{"/proc/net/udp", "udp"}, {"/proc/net/udp6", "udp6"},
+	} {
+		if !protos[src.proto] {
+			continue
+		}
+		body, err := readTrimErr(src.path)
+		if !procNetLido(err) {
+			continue // EACCES/EIO: LACUNA. O protocolo fica NÃO lido.
+		}
+		lidos[src.proto] = true
+		if err == nil {
+			for _, sk := range parseTCPTable(body, src.proto) {
+				chaves[chaveProc(&sk)] = true
+			}
+		}
+	}
+	return chaves, lidos
+}
+
+// procNetLido diz, a partir do erro de leitura de /proc/net/<proto>, se o
+// protocolo conta como LIDO.
+//
+// ENOENT — a tabela não existe, ex. IPv6 desligado — conta como lido e VAZIO:
+// é ausência de protocolo, consistente com o dump vazio do diag, e transformá-la
+// em lacuna criaria um buraco de cobertura em todo host sem IPv6. EACCES e EIO
+// são lacuna de verdade, e deixam o protocolo fora da comparação.
+func procNetLido(err error) bool {
+	return err == nil || errors.Is(err, fs.ErrNotExist)
 }
 
 // dumpDiag enumera as quatro combinações de família e protocolo. Devolve o que
@@ -202,38 +297,43 @@ func reconfirmar(cands map[string]netlink.SocketInet, procDeNovo map[string]bool
 // O conjunto de protocolos que responderam não é detalhe: udp_diag é um módulo
 // separado do tcp_diag em boa parte das distribuições, e um host onde só o
 // segundo existe compararia UDP contra o vazio.
-func dumpDiag(f *Facts, c *netlink.Conexao) (map[string]netlink.SocketInet, map[string]bool, bool) {
+func dumpDiag(f *Facts, c *netlink.Conexao, seguros map[string]bool) (map[string]netlink.SocketInet, map[string]bool, bool) {
 	out := map[string]netlink.SocketInet{}
-	familias := map[string]bool{}
+	lidos := map[string]bool{}
 	cortado := false
 	for _, fam := range []uint8{netlink.FamiliaIPv4, netlink.FamiliaIPv6} {
 		for _, proto := range []uint8{netlink.ProtoTCP, netlink.ProtoUDP} {
-			var nome string
+			nomeP := nomeDeFamilia(fam, proto)
+			// Protocolo cujo handler NÃO está carregado é PULADO — consultá-lo
+			// autocarregaria o módulo, e a política é não alterar o host. É
+			// lacuna declarada, não falha.
+			if !seguros[nomeP] {
+				if f != nil {
+					f.partial("net", "netlink NÃO consultou "+nomeP+": o módulo de "+
+						"diagnóstico não está carregado, e consultar autocarregaria "+
+						"(request_module). Use --allow-kernel-autoload para incluí-lo")
+				}
+				continue
+			}
 			err := netlink.SocketsInet(c, fam, proto, func(s netlink.SocketInet) error {
-				nome = s.Proto
-				out[chaveDeSocket(s.Proto, s.LocalIP, s.LocalPorta, s.PeerIP, s.PeerPorta)] = s
+				out[chaveDiag(s)] = s
 				return nil
 			})
 			if err == netlink.ErrCortado {
 				cortado = true
 			} else if err != nil {
 				if f != nil {
-					f.partial("net", "netlink não enumerou "+nomeDeFamilia(fam, proto)+
-						" ("+err.Error()+"): esse protocolo NÃO foi confrontado com /proc/net")
+					f.partial("net", "netlink não enumerou "+nomeP+" ("+err.Error()+
+						"): esse protocolo NÃO foi confrontado com /proc/net")
 				}
 				continue
 			}
-			// Um dump legítimo pode não devolver socket nenhum, e nesse caso o
-			// nome não foi preenchido pelo callback. Ele responde à pergunta
-			// "este protocolo foi comparado?", que é diferente de "havia
-			// socket nele".
-			if nome == "" {
-				nome = nomeDeFamilia(fam, proto)
-			}
-			familias[nome] = true
+			// Sucesso, com ou sem socket: o protocolo FOI comparado. A pergunta
+			// é "consegui olhar?", diferente de "havia socket?".
+			lidos[nomeP] = true
 		}
 	}
-	return out, familias, cortado
+	return out, lidos, cortado
 }
 
 func nomeDeFamilia(fam, proto uint8) string {
@@ -245,26 +345,4 @@ func nomeDeFamilia(fam, proto uint8) string {
 		nome += "6"
 	}
 	return nome
-}
-
-// chavesDeProcNet relê as tabelas de /proc/net. É a SEGUNDA leitura da
-// reconfirmação: entre ela e a primeira o socket recém-nascido já apareceu.
-func chavesDeProcNet(familias map[string]bool) map[string]bool {
-	out := map[string]bool{}
-	for _, src := range []struct{ path, proto string }{
-		{"/proc/net/tcp", "tcp"}, {"/proc/net/tcp6", "tcp6"},
-		{"/proc/net/udp", "udp"}, {"/proc/net/udp6", "udp6"},
-	} {
-		if !familias[src.proto] {
-			continue
-		}
-		body, ok := readTrim(src.path)
-		if !ok {
-			continue
-		}
-		for _, s := range parseTCPTable(body, src.proto) {
-			out[chaveDeSocket(s.Proto, s.LocalIP, s.LocalPort, s.PeerIP, s.PeerPort)] = true
-		}
-	}
-	return out
 }

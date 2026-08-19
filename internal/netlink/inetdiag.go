@@ -179,18 +179,19 @@ func nomeDeProto(familia, protocolo uint8) string {
 // Sonda responde se a enumeração de socket por netlink é POSSÍVEL neste host, e
 // quando não é diz por quê — é essa frase que vai para o rodapé de cobertura.
 //
-// A consulta é a de verdade com o filtro de estado ZERADO: ela percorre o
-// caminho inteiro do kernel e não devolve socket nenhum. É o que separa "a
-// interface responde" de "a interface existe".
-func Sonda() error {
+// Recebe a família e o protocolo porque o CHAMADOR é quem sabe qual handler de
+// diagnóstico já está carregado: sondar TCP num host onde só o udp_diag existe
+// dispararia o autoload que a política de não-intrusão evita. Ver
+// env.diagProtocolosSeguros.
+//
+// A consulta é a de verdade com o filtro de estado ZERADO: percorre o caminho
+// inteiro do kernel e não devolve socket nenhum. É o que separa "a interface
+// responde" de "a interface existe", sem pagar por um dump completo.
+func Sonda(familia, protocolo uint8) error {
 	c, err := Abrir(syscall.NETLINK_INET_DIAG)
 	if err != nil {
 		return err
 	}
 	defer c.Fechar()
-
-	// Estado ZERO: a consulta percorre o caminho inteiro do kernel e não casa
-	// com socket nenhum. É o que separa "a interface responde" de "a interface
-	// existe", sem pagar por um dump completo.
-	return c.Dump(sockDiagByFamily, reqInet(FamiliaIPv4, ProtoTCP, 0), func([]byte) error { return nil })
+	return c.Dump(sockDiagByFamily, reqInet(familia, protocolo, 0), func([]byte) error { return nil })
 }

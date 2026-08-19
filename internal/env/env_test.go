@@ -238,3 +238,71 @@ func TestModprobeIlegivelContaComoInseguro(t *testing.T) {
 		t.Errorf("o motivo precisa dizer que não deu para ler: %q", alvo)
 	}
 }
+
+// A consulta por netlink pode fazer o kernel AUTOCARREGAR o módulo de
+// diagnóstico (request_module), e isso altera o estado do host. Consultar é
+// seguro só quando o handler já está CARREGADO ou é BUILTIN — os dois casos em
+// que não há o que carregar.
+func TestDiagProtocolosSegurosExigeHandlerDisponivel(t *testing.T) {
+	fixture := func(procModules, builtin string) *Env {
+		raiz := t.TempDir()
+		mk := func(rel, corpo string) {
+			full := filepath.Join(raiz, rel)
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, []byte(corpo), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		mk("proc/modules", procModules)
+		mk("proc/sys/kernel/osrelease", "6.6.0-test\n")
+		if builtin != "" {
+			mk("lib/modules/6.6.0-test/modules.builtin", builtin)
+		}
+		e := Probe(Options{Root: raiz})
+		t.Cleanup(func() { e.Close() })
+		return e
+	}
+
+	// carregados: inet_diag + tcp_diag presentes em /proc/modules → tcp seguro.
+	e := fixture("inet_diag 16384 1 tcp_diag, Live 0x0\ntcp_diag 16384 0 - Live 0x0\n", "")
+	seg := diagProtocolosSeguros(e)
+	if !seg["tcp"] {
+		t.Error("inet_diag+tcp_diag carregados: tcp devia ser seguro")
+	}
+	if seg["udp"] {
+		t.Error("udp_diag NÃO está carregado: udp não pode ser seguro")
+	}
+
+	// builtin: modules.builtin lista inet_diag e udp_diag → udp seguro sem
+	// autoload (não há o que carregar).
+	e2 := fixture("", "kernel/net/ipv4/inet_diag.ko\nkernel/net/ipv4/udp_diag.ko\n")
+	seg2 := diagProtocolosSeguros(e2)
+	if !seg2["udp"] {
+		t.Error("inet_diag+udp_diag builtin: udp devia ser seguro")
+	}
+
+	// nada disponível: nenhum protocolo é seguro por padrão — consultar
+	// autocarregaria.
+	e3 := fixture("outracoisa 1 0 - Live 0x0\n", "")
+	seg3 := diagProtocolosSeguros(e3)
+	if seg3["tcp"] || seg3["udp"] {
+		t.Errorf("sem handler, nada é seguro: %v", seg3)
+	}
+
+	// tcp_diag presente MAS inet_diag ausente: inet_diag é a precondição, e sem
+	// ela consultar TCP ainda autocarregaria. Não pode ser seguro.
+	e5 := fixture("tcp_diag 16384 0 - Live 0x0\n", "")
+	if diagProtocolosSeguros(e5)["tcp"] {
+		t.Error("tcp_diag sem inet_diag NÃO é suficiente: a precondição é inet_diag")
+	}
+
+	// opt-in: --allow-kernel-autoload libera tudo, mesmo sem handler.
+	e4 := fixture("", "")
+	e4.PermitirAutoload = true
+	seg4 := diagProtocolosSeguros(e4)
+	if !seg4["tcp"] || !seg4["udp"] {
+		t.Errorf("com autoload liberado, tudo é consultável: %v", seg4)
+	}
+}

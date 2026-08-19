@@ -23,6 +23,88 @@ import (
 	"github.com/lex0c/aletheia/internal/netlink"
 )
 
+// diagProtocolosSeguros diz, por protocolo, se a consulta de socket por netlink
+// pode ser feita SEM disparar autoload de módulo.
+//
+// A consulta ao sock_diag faz o kernel chamar request_module para o handler da
+// família/protocolo quando ele não está registrado — e request_module executa
+// modprobe como root. Consultar é seguro só quando o handler JÁ está carregado
+// (aparece em /proc/modules) ou é BUILTIN (aparece em modules.builtin): nos dois
+// casos não há o que carregar.
+//
+// Com --allow-kernel-autoload o operador aceita o autoload, e todos os
+// protocolos passam a ser consultáveis.
+func diagProtocolosSeguros(e *Env) map[string]bool {
+	if e.PermitirAutoload {
+		return map[string]bool{"tcp": true, "tcp6": true, "udp": true, "udp6": true}
+	}
+	disp := modulosDisponiveis(e)
+	inet := disp["inet_diag"]
+	tcp := inet && disp["tcp_diag"]
+	udp := inet && disp["udp_diag"]
+	return map[string]bool{"tcp": tcp, "tcp6": tcp, "udp": udp, "udp6": udp}
+}
+
+// modulosDisponiveis é o conjunto de módulos que consultar NÃO autocarrega:
+// os CARREGADOS (/proc/modules) e os BUILTIN (modules.builtin). Um módulo =m
+// não carregado não está em nenhum dos dois — e é justamente ele que dispararia
+// o request_module.
+func modulosDisponiveis(e *Env) map[string]bool {
+	out := map[string]bool{}
+	if b, err := e.ReadFile("/proc/modules"); err == nil {
+		for _, ln := range strings.Split(string(b), "\n") {
+			if i := strings.IndexByte(ln, ' '); i > 0 {
+				out[ln[:i]] = true
+			}
+		}
+	}
+	if rel := releaseDoKernel(e); rel != "" {
+		if b, err := e.ReadFile("/lib/modules/" + rel + "/modules.builtin"); err == nil {
+			for _, ln := range strings.Split(string(b), "\n") {
+				base := ln[strings.LastIndexByte(ln, '/')+1:]
+				base = strings.TrimSuffix(base, ".ko")
+				if base != "" {
+					out[base] = true
+				}
+			}
+		}
+	}
+	return out
+}
+
+func releaseDoKernel(e *Env) string {
+	b, err := e.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// primeiroProtoSeguro escolhe um protocolo consultável para a sonda de
+// capacidade, na ordem em que eles importam.
+func primeiroProtoSeguro(seg map[string]bool) (string, bool) {
+	for _, p := range []string{"tcp", "tcp6", "udp", "udp6"} {
+		if seg[p] {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+func famDe(proto string) uint8 {
+	if strings.HasSuffix(proto, "6") {
+		return netlink.FamiliaIPv6
+	}
+	return netlink.FamiliaIPv4
+}
+
+func protoDe(proto string) uint8 {
+	if strings.HasPrefix(proto, "udp") {
+		return netlink.ProtoUDP
+	}
+	return netlink.ProtoTCP
+}
+
 // modprobeDeFabrica diz se o programa que o kernel executa para carregar módulo
 // é o que a distribuição entrega. O usrmerge move um para o outro, e as quatro
 // formas abaixo são o que as distribuições usam.
@@ -195,6 +277,16 @@ type Env struct {
 	// ausência degrada a cobertura ou não.
 	BPFSemMecanismo bool
 
+	// PermitirAutoload libera a consulta por netlink mesmo quando o handler de
+	// diagnóstico ainda não está carregado — o que pode fazer o kernel
+	// AUTOCARREGAR o módulo (request_module). É opt-in (--allow-kernel-autoload)
+	// porque altera o estado do host, e o padrão desta ferramenta é NÃO alterar.
+	PermitirAutoload bool
+	// DiagSeguros diz, por protocolo, se consultá-lo por netlink NÃO dispara
+	// autoload — porque o handler já está carregado ou é builtin. É o que o
+	// coletor de socket usa para decidir quais famílias enumerar.
+	DiagSeguros map[string]bool
+
 	// root é a raiz travada em modo image. Ver fs.go: prefixar string não
 	// impede symlink absoluto de escapar da imagem.
 	root *os.Root
@@ -248,6 +340,9 @@ type Options struct {
 	Root    string
 	Version string
 	IOC     *ioc.Lista
+	// PermitirAutoload é o --allow-kernel-autoload: libera a consulta por
+	// netlink quando ela poderia autocarregar o módulo de diagnóstico.
+	PermitirAutoload bool
 }
 
 // Probe inspeciona o ambiente uma única vez.
@@ -261,6 +356,7 @@ func Probe(o Options) *Env {
 		NumCPU:      runtime.NumCPU(),
 		CPUQuota:    probeCPUQuota(),
 	}
+	e.PermitirAutoload = o.PermitirAutoload
 
 	if o.Root != "" {
 		e.Source = SourceImage
@@ -449,16 +545,42 @@ func (e *Env) probeCaps() {
 	case e.Source == SourceImage:
 		e.grant(CapNetlink, false, "modo image: não há kernel vivo para consultar por netlink")
 	default:
-		if alvo, seguro := modprobeDeFabrica(e); !seguro {
-			e.grant(CapNetlink, false, "consulta por netlink NÃO foi feita: ela pode "+
-				"fazer o kernel carregar o módulo de diagnóstico, e para carregar módulo "+
-				"o kernel executa /proc/sys/kernel/modprobe COMO ROOT — que aqui é "+
-				alvo+", fora do padrão da distribuição. A ferramenta se recusa a ser o "+
-				"gatilho: sem a divergência /proc/net × netlink do runbook §35.5")
-		} else if err := netlink.Sonda(); err != nil {
-			e.grant(CapNetlink, false, "enumeração de socket por netlink indisponível: "+err.Error())
-		} else {
-			e.grant(CapNetlink, true, "")
+		e.DiagSeguros = diagProtocolosSeguros(e)
+		protoSonda, temSeguro := primeiroProtoSeguro(e.DiagSeguros)
+		switch {
+		case !temSeguro:
+			// O ponto central da não-intrusão: consultar o sock_diag pode fazer
+			// o kernel AUTOCARREGAR tcp_diag/udp_diag (request_module), e isso
+			// ALTERA o estado do host. Sem prova de que o handler já está
+			// disponível, a ferramenta não pergunta — e diz que não perguntou.
+			e.grant(CapNetlink, false, "consulta por netlink NÃO feita: os módulos de "+
+				"diagnóstico (inet_diag + tcp_diag/udp_diag) não estão carregados nem são "+
+				"builtin, e consultá-los faria o kernel AUTOCARREGAR módulo (request_module) "+
+				"— alteração de estado do host, que esta ferramenta evita. Use "+
+				"--allow-kernel-autoload para permitir; sem isso, a divergência /proc/net × "+
+				"netlink do §35.5 NÃO foi verificada")
+		case e.PermitirAutoload:
+			// Com o autoload LIBERADO, o programa que o kernel executa para
+			// carregar o módulo volta a importar: um /proc/sys/kernel/modprobe
+			// sequestrado seria disparado por esta consulta.
+			if alvo, seguroMp := modprobeDeFabrica(e); !seguroMp {
+				e.grant(CapNetlink, false, "consulta por netlink liberada com "+
+					"--allow-kernel-autoload, MAS /proc/sys/kernel/modprobe é "+alvo+
+					", fora do padrão da distribuição: a ferramenta se recusa a ser o "+
+					"gatilho de um helper sequestrado")
+			} else if err := netlink.Sonda(famDe(protoSonda), protoDe(protoSonda)); err != nil {
+				e.grant(CapNetlink, false, "enumeração de socket por netlink indisponível: "+err.Error())
+			} else {
+				e.grant(CapNetlink, true, "")
+			}
+		default:
+			// Handler já disponível: consultar NÃO autocarrega nada. A sonda usa
+			// um protocolo comprovadamente seguro, nunca um que dispararia o load.
+			if err := netlink.Sonda(famDe(protoSonda), protoDe(protoSonda)); err != nil {
+				e.grant(CapNetlink, false, "enumeração de socket por netlink indisponível: "+err.Error())
+			} else {
+				e.grant(CapNetlink, true, "")
+			}
 		}
 	}
 }

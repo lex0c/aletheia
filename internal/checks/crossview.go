@@ -60,12 +60,17 @@ var socketDivergente = check.Check{
 			"reconfirmado contra uma SEGUNDA leitura de /proc/net e um SEGUNDO " +
 			"dump por netlink, e só sobrevive quem aparece nos dois dumps e em " +
 			"nenhuma das duas leituras",
-		"protocolo cujo dump por netlink FALHOU não é comparado com /proc — " +
-			"udp_diag é módulo separado do tcp_diag em várias distribuições, e " +
-			"compará-lo contra o vazio inverteria a divergência",
-		"a comparação é por TUPLA (protocolo, local, remoto) e não por inode: " +
-			"em TIME-WAIT e SYN-RECV o inode é zero nas duas visões, e comparar " +
-			"por ele juntaria todos num socket só",
+		"FALHA DE LEITURA nunca vira CRITICAL: as quatro testemunhas (/proc e " +
+			"netlink, 1ª e 2ª passada) têm de ser OBSERVADAS. Qualquer uma que " +
+			"não leia torna o candidato INCONCLUSIVO e vira cobertura parcial — " +
+			"um kernelBreaker não pode nascer de uma cegueira da própria ferramenta",
+		"protocolo cujo dump por netlink FALHOU ou foi PULADO não é comparado " +
+			"com /proc — udp_diag é módulo separado do tcp_diag, e a consulta só " +
+			"acontece onde o handler já está carregado (senão autocarregaria)",
+		"a comparação é por INODE quando ele existe (ESTAB, LISTEN) — o que " +
+			"impede SO_REUSEPORT de colapsar vários sockets da mesma tupla numa " +
+			"entrada só — e cai para tupla+estado só em TIME-WAIT/SYN-RECV, onde " +
+			"o inode é zero nas duas visões",
 		"LIMITE que vale mais que o check: se o kernel estiver comprometido no " +
 			"nível certo, as duas visões mentem juntas. Ausência de divergência " +
 			"não prova nada; presença prova muito",

@@ -1067,3 +1067,53 @@ func TestStringLiteralNaoEhFonte(t *testing.T) {
 		}
 	}
 }
+
+// Uma closure/arrow escrita no lugar do callback é a FUNÇÃO FIXA — o atacante
+// não a escolhe. `array_map(function($p){…$_REQUEST…}, $a)` (montar chave de
+// cache) e `array_filter($a, function($v)use($id){…})` (filtrar por id do
+// request) são idioma de framework, não backdoor: o request no corpo é dado que
+// flui pela função, não a identidade da função. Mas `array_map($_GET['f'], $a)`
+// e `call_user_func($_GET['f'])` — callback por NOME do request — seguem RCE.
+func TestClosureLiteralNaoEhCallbackDoRequest(t *testing.T) {
+	fp := map[string]string{
+		"array_map(closure) lê $_REQUEST no corpo": "<?php $r = array_map(function($param) {\n  return isset($_REQUEST[$param]) ? $_REQUEST[$param] : null;\n}, $paramsToCache);",
+		"array_filter($a, closure use $req)":       "<?php $id=$_GET['id'];\n$o=array_filter($orders, function ($val) use ($id) {\n  return $val->id == $id;\n});",
+		"array_map(fn arrow) corpo tainted":        "<?php $q=$_GET['x']; $r=array_map(fn($p) => $p.$q, $arr);",
+		"usort(closure) corpo lê $_POST":           "<?php usort($rows, function($a,$b) use ($_POST) { return $a[$_POST['k']] <=> $b[$_POST['k']]; });",
+	}
+	for n, src := range fp {
+		if tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("%s: closure literal é callback FIXO, não RCE: %+v", n, analisarConteudo(src, "php"))
+		}
+	}
+	rce := []string{
+		"<?php call_user_func($_GET['f']);",     // função por nome do request
+		"<?php array_map($_GET['f'], $arr);",    // callback por nome do request
+		"<?php array_filter($a, $_POST['cb']);", // callback (2º arg) por nome do request
+	}
+	for _, src := range rce {
+		if !tem(analisarConteudo(src, "php"), 2, "") {
+			t.Errorf("callback nomeado pelo request continua RCE: %q -> %+v", src, analisarConteudo(src, "php"))
+		}
+	}
+}
+
+// `phantomjs.exec(script, arg)`, `regex.exec`, `cp.exec` casam o mesmo `exec`.
+// O que roda é o 1º argumento (comando/programa); os seguintes são opções, refs
+// de saída ou dados. `phantomjs.exec('./x.js', url)` tem o script FIXO no 1º arg
+// e a url do request no 2º — não é RCE. Mas `exec("ls "+req)`, cujo comando JÁ é
+// o 1º arg, e `execSync(req)` seguem críticos.
+func TestExecDeBibliotecaChecaSoOArg0(t *testing.T) {
+	if tem(analisarConteudo("let s='./x.js';\nvar url=req.query.url;\nvar p = phantomjs.exec(s, url, out, 'png');", "js"), 2, "") {
+		t.Error("exec de biblioteca com script FIXO no 1º arg e dado do request no 2º NÃO é RCE")
+	}
+	crit := []string{
+		"const cp=require('child_process'); cp.exec('ls '+req.body.cmd);", // comando é o 1º arg
+		"const {execSync}=require('child_process'); execSync(req.query.cmd);",
+	}
+	for _, src := range crit {
+		if !tem(analisarConteudo(src, "js"), 2, "") {
+			t.Errorf("comando do request no 1º arg continua RCE: %q -> %+v", src, analisarConteudo(src, "js"))
+		}
+	}
+}

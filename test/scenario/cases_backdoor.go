@@ -153,3 +153,41 @@ func init() {
 		Exit:         2,
 	})
 }
+
+// B6 — duas classes de falso positivo medidas num monorepo de produção
+// (Climatempo), que a peneira alarmava por não ler a ESTRUTURA do callback:
+//
+//   - closure literal passada a array_map/array_filter: `array_map(function($p){
+//     … $_REQUEST[$p] … }, $params)` monta chave de cache lendo o request DENTRO
+//     de uma função fixa. A closure É o callback; o atacante não a escolhe, então
+//     o request no corpo é dado que flui pela função, não a identidade dela.
+//   - exec de biblioteca com programa fixo: `phantomjs.exec('./render.js', url)`
+//     roda o binário do phantomjs com um script FIXO no 1º arg — a url do request
+//     é argv pro script, não comando de shell.
+//
+// Ao lado, um webshell `call_user_func($_GET['f'])` — callback nomeado pelo
+// request — que TEM de continuar CRÍTICO: calar a closure não pode ter cegado o
+// callback que o atacante de fato escolhe.
+func init() {
+	Register(Scenario{
+		ID:     "B6-closure-e-exec-de-biblioteca",
+		Desc:   "closure literal (array_map/array_filter) e exec de biblioteca com script fixo não alarmam — callback nomeado pelo request continua crítico",
+		Images: matriz,
+		Args:   []string{"--only", "app"},
+		Plant: "mkdir -p /var/www/app\n" +
+			// (a) closure literal montando chave de cache a partir do request
+			"printf '<?php\\n$r = array_map(function($p) {\\n  return isset($_REQUEST[$p]) ? $_REQUEST[$p] : null;\\n}, $params);\\n' > /var/www/app/cachekey.php\n" +
+			// (b) exec de biblioteca: script FIXO no 1º arg, url do request no 2º
+			"printf 'var url = req.query.url;\\nvar p = phantomjs.exec(\"./render.js\", url, out, \"png\");\\n' > /var/www/app/render.js\n" +
+			// e o webshell ao lado: callback nomeado pelo request
+			"printf '<?php\\ncall_user_func($_GET[\"f\"]);\\n' > /var/www/app/rce.php",
+		Expect: []Expect{
+			{ID: "app.code_backdoor", Sev: "CRITICAL", Subject: "/var/www/app/rce.php"},
+			{ID: "app.code_backdoor", Evidence: "callback nomeado pelo request"},
+		},
+		// a closure e o exec de biblioteca não geram achado (0 matches); nenhum
+		// dos dois pode aparecer no relatório
+		ForbidOutput: []string{"cachekey.php", "render.js"},
+		Exit:         2,
+	})
+}

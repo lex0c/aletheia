@@ -391,10 +391,18 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 				args = argv0(argNoTopo(args, 1)) // 1º arg é a lista; argv[0] é o programa
 			}
 		} else if ehArgvSink(nome) {
-			args = argNoTopo(args, 1) // spawn/execFile: o programa é o 1º argumento
+			args = argNoTopo(args, 1) // spawn/execFile/exec: o programa (ou o comando) é o 1º arg
 		}
 		if argCb > 0 {
 			args = argNoTopo(args, argCb)
+			// Closure/arrow escrita ali (`function(){…}`, `fn()=>…`, `x=>…`) é um
+			// callback FIXO: o atacante não escolhe a função, então uma var de
+			// request no CORPO dela é dado que passa pela função, não execução
+			// arbitrária. `array_map(function($p){…$_REQUEST…}, $a)` e
+			// `array_filter($a, function($v)use($id){…})` são idioma, não backdoor.
+			if ehClosureLiteral(args) {
+				return
+			}
 		}
 		e := evento{off: loc[0], rotulo: rotulo, ehInclude: ehSinkInclude(nome)}
 		ident := args
@@ -1911,12 +1919,69 @@ var pularNoCodigo = map[string]bool{
 	".svn": true, "bower_components": true, ".npm": true,
 }
 
-// ehArgvSink diz se o sink executa um PROGRAMA por argv (spawn/spawnSync/
-// execFile do Node), onde só o 1º argumento (o programa) importa — argumento de
-// um programa fixo não é injeção. Distinto de exec/execSync, que passam pelo
-// shell e interpretam o comando inteiro.
+// ehArgvSink diz se, para este sink, só o 1º argumento importa. Duas famílias
+// caem aqui, por razões diferentes com a mesma consequência:
+//   - spawn/spawnSync/execFile: o 1º arg é o PROGRAMA e os seguintes são argv —
+//     dados passados ao programa, não interpretados por shell. `spawn("ffmpeg",
+//     [req])` é seguro; só `spawn(req)` é RCE.
+//   - exec/execSync (e o exec de bibliotecas, `phantomjs.exec(script, arg)`): o
+//     1º arg é o COMANDO que o shell interpreta; os seguintes são opções, refs de
+//     saída (PHP &$output) ou callback — nunca parte do comando. Checar só o 1º
+//     conserta `phantomjs.exec(scriptFixo, url)` sem perder `exec("ls "+req)`,
+//     cujo comando JÁ é o 1º arg.
+//
+// Não separa `regex.exec(req)` de `cp.exec(req)`: o `.exec` de RegExp casa o
+// mesmo nome e teria o 1º arg tainted — colisão de nome, limite conhecido.
 func ehArgvSink(nome string) bool {
-	return strings.Contains(nome, "spawn") || strings.Contains(nome, "execFile")
+	return strings.Contains(nome, "exec") || strings.Contains(nome, "spawn")
+}
+
+var reFuncAnon = regexp.MustCompile(`^(?:static\s+|async\s+)*function\b`)
+
+// ehClosureLiteral diz se um argumento de callback é uma FUNÇÃO ANÔNIMA escrita
+// no lugar — `function(...){...}` (PHP/JS), `fn(...)=>...` (PHP), `(...)=>...` ou
+// `x=>...` (JS) — e não um nome ou variável. Uma closure literal é um callback
+// FIXO: o atacante não a escolhe, logo var de request no corpo é dado que flui
+// pela função, não função escolhida pelo request. `array_map(function($p){…}, $a)`
+// e `array_filter($a, function($v)use($id){…})` são idioma, não backdoor.
+func ehClosureLiteral(s string) bool {
+	t := strings.TrimSpace(s)
+	if reFuncAnon.MatchString(t) {
+		return true
+	}
+	return temSetaTopo(t)
+}
+
+// temSetaTopo diz se há uma seta `=>` em profundidade ZERO — a assinatura de uma
+// arrow function. Um `=>` dentro de `(...)`/`[...]`/`{...}` ou de string (par
+// chave-valor de array, corpo de closure) não conta.
+func temSetaTopo(s string) bool {
+	prof := 0
+	var str byte
+	for i := 0; i+1 < len(s); i++ {
+		c := s[i]
+		if str != 0 {
+			if c == '\\' {
+				i++
+			} else if c == str {
+				str = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			str = c
+		case '(', '[', '{':
+			prof++
+		case ')', ']', '}':
+			prof--
+		case '=':
+			if prof == 0 && s[i+1] == '>' {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // argv0 devolve o PROGRAMA de uma lista de argumentos: o 1º elemento de `[...]`

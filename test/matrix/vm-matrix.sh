@@ -36,7 +36,7 @@ docker run --rm -v "$work":/m -w /m alpine:3.20 sh -c "
 	KREL=\$(ls /lib/modules | grep lts | head -1)
 	make -C /lib/modules/\$KREL/build M=/m modules >/tmp/mk.log 2>&1 || { cat /tmp/mk.log; exit 1; }
 	cp /boot/vmlinuz-lts /m/vmlinuz
-	for mod in inet_diag tcp_diag cls_bpf act_bpf sch_ingress; do
+	for mod in inet_diag tcp_diag cls_bpf act_bpf sch_ingress binfmt_misc; do
 		f=\$(find /lib/modules/\$KREL -name \$mod.ko.gz -o -name \$mod.ko | head -1)
 		[ -n \"\$f\" ] || continue
 		case \"\$f\" in *.gz) gunzip -c \"\$f\" > /m/\$mod.ko;; *) cp \"\$f\" /m/\$mod.ko;; esac
@@ -59,6 +59,12 @@ mount -t sysfs sysfs /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mount -t tmpfs tmpfs /tmp 2>/dev/null
 mkdir -p /sys/kernel/tracing; mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null
+# binfmt_misc é MÓDULO no kernel LTS do Alpine (CONFIG_BINFMT_MISC=m): sem o
+# insmod o diretório não existe, o mount falha calado e o `register` escreve no
+# vazio. A linha da tabela passava mesmo assim, porque o `tem` antigo contava a
+# menção de cobertura — dois defeitos que se cancelavam e escondiam que a
+# técnica nunca foi reproduzida.
+insmod /binfmt_misc.ko 2>/dev/null
 mount -t binfmt_misc none /proc/sys/fs/binfmt_misc 2>/dev/null
 mkdir -p /sys/fs/cgroup; mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null
 exec > /dev/console 2>&1
@@ -67,7 +73,15 @@ insmod /inet_diag.ko 2>/dev/null; insmod /tcp_diag.ko 2>/dev/null
 
 # fired ID,ID,... para o pid/scan atual (achados com subject)
 scan() { rm -f /tmp/o.jsonl; /aletheia scan --only kernel --json /tmp/o.jsonl --no-progress >/dev/null 2>&1; }
-tem() { grep -c "\"id\":\"$1\"" /tmp/o.jsonl 2>/dev/null; }
+# tem conta ACHADO, não menção.
+#
+# A linha `coverage` do JSONL carrega os `partial` ANINHADOS, cada um com o id
+# do check que declarou a lacuna — e `grep -c` conta a LINHA inteira. Contar só
+# pelo id fazia todo check que declarasse cobertura parcial ser lido como se
+# tivesse disparado, e o controle NEGATIVO desta matriz saía sujo por um check
+# que estava se comportando exatamente como deveria: dizendo o que não pôde
+# verificar. Achado tem "sev"; entrada de cobertura não.
+tem() { grep "\"id\":\"$1\"" /tmp/o.jsonl 2>/dev/null | grep -c "\"sev\"" ; }
 
 echo "===BEGIN==="
 

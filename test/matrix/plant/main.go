@@ -9,6 +9,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -74,9 +75,14 @@ func mapDeArquivo(path string, prot int, apagar bool) []byte {
 
 // carregarCgroupSkb carrega um programa cgroup_skb mínimo (r0=1; exit) e
 // devolve o descritor. É o que um implante de cgroup BPF faz — sem o payload.
-func carregarCgroupSkb() int {
+func carregarCgroupSkb() int { return carregarBPF(8 /*CGROUP_SKB*/, 1) }
+
+// carregarBPF carrega um eBPF trivial (MOV64 R0, ret; EXIT) de um tipo dado e
+// devolve o fd. Serve para plantar DETENTORES: cgroup, tc, XDP, ação. O valor de
+// retorno só precisa passar o verificador de cada tipo (XDP_PASS, TC_ACT_*, etc.).
+func carregarBPF(progType, ret uint32) int {
 	insns := []byte{
-		0xb7, 0, 0, 0, 1, 0, 0, 0, // BPF_MOV64_IMM(R0, 1)
+		0xb7, 0, 0, 0, byte(ret), byte(ret >> 8), byte(ret >> 16), byte(ret >> 24), // MOV64 R0, ret
 		0x95, 0, 0, 0, 0, 0, 0, 0, // BPF_EXIT
 	}
 	lic := []byte("GPL\x00")
@@ -88,7 +94,7 @@ func carregarCgroupSkb() int {
 		logBuf             uint64
 		kernVer, progFlags uint32
 	}
-	a.progType = 8 // BPF_PROG_TYPE_CGROUP_SKB
+	a.progType = progType
 	a.insnCnt = 2
 	a.insns = uint64(uintptr(unsafe.Pointer(&insns[0])))
 	a.license = uint64(uintptr(unsafe.Pointer(&lic[0])))
@@ -113,6 +119,139 @@ func anexarCgroup(cgFD, progFD int) {
 	if e != 0 {
 		must(fmt.Errorf("%v", e), "BPF_PROG_ATTACH")
 	}
+}
+
+// --- netlink cru: prender programa a INTERFACE (tc/XDP) ou a uma AÇÃO ---
+//
+// A aletheia LÊ esses anexos por rtnetlink (RTM_GETLINK/GETTFILTER/GETACTION);
+// aqui a matriz os MONTA, para provar que a leitura casa com a escrita real do
+// kernel — o mesmo TLV, do lado de construir. Números de if_link.h, pkt_cls.h,
+// tc_act/tc_bpf.h; amd64.
+const (
+	rtmSetLink    = 19
+	rtmNewQdisc   = 36
+	rtmNewTFilter = 44
+	rtmNewAction  = 48
+
+	iflaXDP      = 43 // IFLA_XDP (aninhado)
+	iflaXDPFD    = 1  // IFLA_XDP_FD
+	iflaXDPFlags = 3  // IFLA_XDP_FLAGS
+	xdpSKBMode   = 2  // XDP_FLAGS_SKB_MODE (lo só aceita XDP genérico)
+
+	tcaKind    = 1 // TCA_KIND
+	tcaOptions = 2 // TCA_OPTIONS
+	tcaBPFFD   = 6 // TCA_BPF_FD (cls_bpf)
+	tcaBPFName = 7 // TCA_BPF_NAME
+	tcaBPFFlag = 8 // TCA_BPF_FLAGS
+	bpfActDir  = 1 // TCA_BPF_FLAG_ACT_DIRECT
+
+	tcaActTab      = 1 // TCA_ACT_TAB / TCA_ROOT_TAB
+	tcaActKind     = 1 // TCA_ACT_KIND
+	tcaActOptions  = 2 // TCA_ACT_OPTIONS
+	tcaActBPFParms = 2 // TCA_ACT_BPF_PARMS (struct tc_act_bpf, obrigatório)
+	tcaActBPFFD    = 5 // TCA_ACT_BPF_FD
+	tcaActBPFName  = 6 // TCA_ACT_BPF_NAME
+
+	clsactHandle = 0xFFFF0000 // TC_H_MAKE(TC_H_CLSACT, 0)
+	clsactParent = 0xFFFFFFF1 // TC_H_CLSACT
+	ingressPar   = 0xFFFFFFF2 // TC_H_MAKE(TC_H_CLSACT, TC_H_MIN_INGRESS)
+)
+
+func nlattr(tipo uint16, payload []byte) []byte {
+	tam := 4 + len(payload)
+	b := make([]byte, (tam+3)&^3)
+	binary.LittleEndian.PutUint16(b[0:2], uint16(tam))
+	binary.LittleEndian.PutUint16(b[2:4], tipo)
+	copy(b[4:], payload)
+	return b
+}
+
+func nlattrU32(tipo uint16, v uint32) []byte {
+	var p [4]byte
+	binary.LittleEndian.PutUint32(p[:], v)
+	return nlattr(tipo, p[:])
+}
+
+// netlinkReq envia UMA mensagem rtnetlink com ACK e aborta se o kernel recusar.
+func netlinkReq(tipo, flags uint16, corpo []byte) {
+	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW, syscall.NETLINK_ROUTE)
+	must(err, "socket netlink")
+	defer syscall.Close(fd)
+	must(syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}), "bind netlink")
+
+	tam := 16 + len(corpo)
+	msg := make([]byte, tam)
+	binary.LittleEndian.PutUint32(msg[0:4], uint32(tam))
+	binary.LittleEndian.PutUint16(msg[4:6], tipo)
+	binary.LittleEndian.PutUint16(msg[6:8], flags|syscall.NLM_F_REQUEST|syscall.NLM_F_ACK)
+	binary.LittleEndian.PutUint32(msg[8:12], 1) // seq
+	copy(msg[16:], corpo)
+	must(syscall.Sendto(fd, msg, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}), "sendto netlink")
+
+	resp := make([]byte, 8192)
+	n, _, err := syscall.Recvfrom(fd, resp, 0)
+	must(err, "recvfrom netlink")
+	// NLMSG_ERROR (2): o corpo começa com int32 errno (0 = ACK de sucesso).
+	if n >= 20 && binary.LittleEndian.Uint16(resp[4:6]) == syscall.NLMSG_ERROR {
+		if errno := int32(binary.LittleEndian.Uint32(resp[16:20])); errno != 0 {
+			must(syscall.Errno(-errno), "netlink recusou")
+		}
+	}
+}
+
+func loIndice() int {
+	i, err := net.InterfaceByName("lo")
+	must(err, "achar lo")
+	return i.Index
+}
+
+// anexarXDP prende um programa XDP (modo genérico) ao caminho de recepção de lo.
+func anexarXDP(progFD, ifindex int) {
+	xdp := append(nlattrU32(iflaXDPFD, uint32(progFD)), nlattrU32(iflaXDPFlags, xdpSKBMode)...)
+	corpo := make([]byte, 16) // ifinfomsg
+	corpo[0] = syscall.AF_UNSPEC
+	binary.LittleEndian.PutUint32(corpo[4:8], uint32(ifindex))
+	corpo = append(corpo, nlattr(iflaXDP, xdp)...)
+	netlinkReq(rtmSetLink, 0, corpo)
+}
+
+// anexarTC cria o qdisc clsact e prende um cls_bpf no ingress de lo.
+func anexarTC(progFD, ifindex int) {
+	q := make([]byte, 20) // tcmsg
+	q[0] = syscall.AF_UNSPEC
+	binary.LittleEndian.PutUint32(q[4:8], uint32(ifindex))
+	binary.LittleEndian.PutUint32(q[8:12], clsactHandle)
+	binary.LittleEndian.PutUint32(q[12:16], clsactParent)
+	q = append(q, nlattr(tcaKind, []byte("clsact\x00"))...)
+	netlinkReq(rtmNewQdisc, syscall.NLM_F_CREATE|syscall.NLM_F_EXCL, q)
+
+	opts := nlattrU32(tcaBPFFD, uint32(progFD))
+	opts = append(opts, nlattr(tcaBPFName, []byte("plant_cls\x00"))...)
+	opts = append(opts, nlattrU32(tcaBPFFlag, bpfActDir)...)
+	f := make([]byte, 20) // tcmsg
+	f[0] = syscall.AF_UNSPEC
+	binary.LittleEndian.PutUint32(f[4:8], uint32(ifindex))
+	binary.LittleEndian.PutUint32(f[12:16], ingressPar)
+	binary.LittleEndian.PutUint32(f[16:20], 0x00010300) // info: prio 1, ETH_P_ALL
+	f = append(f, nlattr(tcaKind, []byte("bpf\x00"))...)
+	f = append(f, nlattr(tcaOptions, opts)...)
+	netlinkReq(rtmNewTFilter, syscall.NLM_F_CREATE|syscall.NLM_F_EXCL, f)
+}
+
+// anexarActBPF cria uma AÇÃO de tc standalone (act_bpf), que nenhum filtro
+// referencia — a que só RTM_GETACTION alcança.
+func anexarActBPF(progFD int) {
+	parms := make([]byte, 20)                     // struct tc_act_bpf (tc_gen): index=0 -> kernel atribui
+	binary.LittleEndian.PutUint32(parms[8:12], 3) // action = TC_ACT_PIPE
+	opts := nlattr(tcaActBPFParms, parms)
+	opts = append(opts, nlattrU32(tcaActBPFFD, uint32(progFD))...)
+	opts = append(opts, nlattr(tcaActBPFName, []byte("plant_act\x00"))...)
+	acao := nlattr(tcaActKind, []byte("bpf\x00"))
+	acao = append(acao, nlattr(tcaActOptions, opts)...)
+	entrada := nlattr(1, acao)               // ação no índice 1 da tabela
+	tab := nlattr(tcaActTab, entrada)        // TCA_ACT_TAB
+	corpo := append(make([]byte, 4), tab...) // tcamsg (family + pad) + tabela
+	netlinkReq(rtmNewAction, syscall.NLM_F_CREATE|syscall.NLM_F_EXCL, corpo)
 }
 
 // vivos impede o GC de fechar sockets e pipes que a técnica precisa manter
@@ -272,6 +411,21 @@ func main() {
 		// que estaria sendo provado.
 		syscall.Close(prog)
 		syscall.Close(cgfd)
+
+	case "xdp": // rede.bpf: programa XDP preso a lo, atribuído por RTM_GETLINK
+		prog := carregarBPF(6 /*XDP*/, 2 /*XDP_PASS*/)
+		anexarXDP(prog, loIndice())
+		syscall.Close(prog) // só o anexo em lo segura o programa
+
+	case "tc-filter": // rede.bpf: cls_bpf no ingress de lo, atribuído por RTM_GETTFILTER
+		prog := carregarBPF(3 /*SCHED_CLS*/, 0)
+		anexarTC(prog, loIndice())
+		syscall.Close(prog)
+
+	case "act-bpf": // rede.bpf: ação act_bpf standalone, atribuída por RTM_GETACTION
+		prog := carregarBPF(4 /*SCHED_ACT*/, 3 /*TC_ACT_PIPE*/)
+		anexarActBPF(prog)
+		syscall.Close(prog)
 
 	default:
 		fmt.Fprintln(os.Stderr, "técnica desconhecida:", os.Args[1])

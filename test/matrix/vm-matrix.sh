@@ -36,8 +36,9 @@ docker run --rm -v "$work":/m -w /m alpine:3.20 sh -c "
 	KREL=\$(ls /lib/modules | grep lts | head -1)
 	make -C /lib/modules/\$KREL/build M=/m modules >/tmp/mk.log 2>&1 || { cat /tmp/mk.log; exit 1; }
 	cp /boot/vmlinuz-lts /m/vmlinuz
-	for mod in inet_diag tcp_diag; do
+	for mod in inet_diag tcp_diag cls_bpf act_bpf sch_ingress; do
 		f=\$(find /lib/modules/\$KREL -name \$mod.ko.gz -o -name \$mod.ko | head -1)
+		[ -n \"\$f\" ] || continue
 		case \"\$f\" in *.gz) gunzip -c \"\$f\" > /m/\$mod.ko;; *) cp \"\$f\" /m/\$mod.ko;; esac
 	done
 	chown -R $(id -u):$(id -g) /m
@@ -46,7 +47,7 @@ docker run --rm -v "$work":/m -w /m alpine:3.20 sh -c "
 echo "[2/3] montando o initramfs (com a aletheia dentro)…"
 rootfs="$work/rootfs"; mkdir -p "$rootfs"
 cid="$(docker create alpine:3.20 true)"; docker export "$cid" | tar -x -C "$rootfs"; docker rm -f "$cid" >/dev/null
-cp "$work"/socknd.ko "$work"/modhide.ko "$work"/inet_diag.ko "$work"/tcp_diag.ko "$rootfs/"
+cp "$work"/*.ko "$rootfs/" # socknd/modhide/inet_diag/tcp_diag + cls_bpf/act_bpf/sch_ingress se existirem
 install -m 0755 "$alet" "$rootfs/aletheia"
 CGO_ENABLED=0 go build -trimpath -o "$work/plant" "$root/test/matrix/plant"
 install -m 0755 "$work/plant" "$rootfs/plant"
@@ -102,6 +103,32 @@ echo "cg_err=$(tr -d '\n' </tmp/cg.err)"
 /aletheia collect --out /tmp/dc1.json --no-progress >/dev/null 2>&1
 echo "cgroup_attributed=$(grep -c 'cgroup inet_ingress' /tmp/dc1.json 2>/dev/null)"
 
+# --- tc/XDP/act_bpf: programa preso a INTERFACE ou a uma AÇÃO, atribuído por
+# rtnetlink (RTM_GETLINK / GETTFILTER / GETACTION). mesma prova: NOMEADO no dump.
+# marcador = o NOME do filtro/ação (plant_cls/plant_act), porque a mensagem de
+# lacuna "ações de tc (act_bpf)..." também contém a string act_bpf. ---
+ip link set lo up 2>/dev/null || ifconfig lo up 2>/dev/null || true
+insmod /sch_ingress.ko 2>/dev/null; insmod /cls_bpf.ko 2>/dev/null; insmod /act_bpf.ko 2>/dev/null
+/aletheia collect --out /tmp/dn0.json --no-progress >/dev/null 2>&1
+echo "net_base=$(grep -cE 'xdp em |plant_cls|plant_act' /tmp/dn0.json 2>/dev/null)"
+
+/plant xdp >/tmp/xdp.out 2>/tmp/xdp.err &
+sleep 1
+echo "xdp_err=$(tr -d '\n' </tmp/xdp.err)"
+/aletheia collect --out /tmp/dnx.json --no-progress >/dev/null 2>&1
+echo "xdp_attributed=$(grep -c 'xdp em ' /tmp/dnx.json 2>/dev/null)"
+
+/plant tc-filter >/tmp/tc.out 2>/tmp/tc.err &
+sleep 1
+echo "tc_err=$(tr -d '\n' </tmp/tc.err)"
+/aletheia collect --out /tmp/dnt.json --no-progress >/dev/null 2>&1
+echo "tc_attributed=$(grep -c 'plant_cls' /tmp/dnt.json 2>/dev/null)"
+
+/plant act-bpf >/tmp/act.out 2>/tmp/act.err &
+sleep 1
+echo "act_err=$(tr -d '\n' </tmp/act.err)"
+/aletheia collect --out /tmp/dna.json --no-progress >/dev/null 2>&1
+echo "act_attributed=$(grep -c 'plant_act' /tmp/dna.json 2>/dev/null)"
 
 echo "===END==="
 poweroff -f 2>/dev/null || echo o > /proc/sysrq-trigger
@@ -136,7 +163,10 @@ linha "hook seq_show"   "cross.socket_view"        "$(get base_socket)"  "$(get 
 linha "LKM escondido"   "cross.module_view"        "$(get base_module)"  "$(get module_fired)"
 linha "binfmt live"     "kernel.binfmt_interpreter" "$(get base_binfmt)" "$(get binfmt_fired)"
 linha "cgroup BPF"      "atribuído (BPF_PROG_QUERY)" "$(get cgroup_base)" "$(get cgroup_attributed)"
+linha "XDP em lo"       "atribuído (RTM_GETLINK)"    "$(get net_base)"    "$(get xdp_attributed)"
+linha "cls_bpf (tc)"    "atribuído (RTM_GETTFILTER)" "$(get net_base)"    "$(get tc_attributed)"
+linha "act_bpf"         "atribuído (RTM_GETACTION)"  "$(get net_base)"    "$(get act_attributed)"
 
 echo
-[ "$falhou" = 0 ] && { echo "OK — os três dispararam, e o baseline limpo calou."; exit 0; }
+[ "$falhou" = 0 ] && { echo "OK — todas as técnicas dispararam, e o baseline limpo calou."; exit 0; }
 echo "FALHOU — veja a medição acima."; exit 1

@@ -157,12 +157,22 @@ func TestDirecaoDeParentDesconhecidoSaiCru(t *testing.T) {
 	}
 }
 
-// A ação de tc (act_bpf) vem aninhada: TCA_ACT_KIND="bpf" + TCA_ACT_OPTIONS que
-// contém o TCA_ACT_BPF_ID. Extrair o id do atributo errado o faria virar o
-// nome, ou zero.
+// A ação de tc (act_bpf) vem aninhada: TCA_ACT_KIND="bpf" + TCA_ACT_OPTIONS.
+//
+// As opções são montadas na ordem REAL do kernel, com números LITERAIS (não o
+// símbolo tcaActBPFID), pondo ISCAS nos vizinhos do id: FLAGS(7) e o TAG(8) de 8
+// bytes ladeiam o ID(9). Ler o id do atributo errado devolve o flags, ou os 4
+// primeiros bytes do tag — e o teste falha. É de propósito: o teste antigo
+// montava o id no MESMO símbolo que decodificava, então passava com a constante
+// certa OU errada. Foi esse ponto cego que deixou o id escorregar (lido no 7,
+// TCA_ACT_BPF_FLAGS; depois no 8, o TAG) até a matriz pegar contra o kernel real.
 func TestDecodificarAcaoBPF(t *testing.T) {
-	opts := attr(tcaActBPFID, u32(88))
-	opts = append(opts, attr(tcaActBPFName, []byte("cil_xdp\x00"))...)
+	// TCA_ACT_BPF_*: PARMS=2, NAME=6, FLAGS=7, TAG=8, ID=9.
+	opts := attr(2, make([]byte, 20))                               // PARMS (struct tc_act_bpf)
+	opts = append(opts, attr(6, []byte("cil_xdp\x00"))...)          // NAME
+	opts = append(opts, attr(7, u32(1))...)                         // FLAGS (isca)
+	opts = append(opts, attr(8, []byte{9, 8, 7, 6, 5, 4, 3, 2})...) // TAG de 8 bytes (isca)
+	opts = append(opts, attr(9, u32(88))...)                        // ID (o certo)
 	acao := append(attr(tcaActKind, []byte("bpf\x00")), attr(tcaActOptions, opts)...)
 
 	ac, ok := decodificarAcaoBPF(acao)
@@ -170,7 +180,7 @@ func TestDecodificarAcaoBPF(t *testing.T) {
 		t.Fatal("ação bpf válida não foi reconhecida")
 	}
 	if ac.ProgID != 88 {
-		t.Errorf("prog id = %d, quer 88", ac.ProgID)
+		t.Errorf("prog id = %d, quer 88 (id lido do atributo errado?)", ac.ProgID)
 	}
 	if ac.Nome != "cil_xdp" {
 		t.Errorf("nome = %q", ac.Nome)

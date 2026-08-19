@@ -19,14 +19,30 @@ Monta técnicas de ataque e mede **quais a aletheia pega**. Dois eixos:
   com baseline limpo como controle negativo: hook em `tcp4_seq_show`
   (`cross.socket_view`), LKM que se esconde de `/proc/modules` e `/sys/module`
   (`cross.module_view`), registro de `binfmt` live (`kernel.binfmt_interpreter`)
-  e programa `cgroup_skb` preso em `/sys/fs/cgroup`, atribuído por
-  `BPF_PROG_QUERY`. Contêiner NÃO serve para kernel: ele compartilha o do host,
-  e um hook ali esconderia conexão do host inteiro.
+  programa `cgroup_skb` preso em `/sys/fs/cgroup` (`BPF_PROG_QUERY`), e três
+  anexos de rede — XDP em `lo` (`RTM_GETLINK`), `cls_bpf` no ingress via clsact
+  (`RTM_GETTFILTER`) e `act_bpf` standalone (`RTM_GETACTION`). Contêiner NÃO
+  serve para kernel: ele compartilha o do host, e um hook ali esconderia conexão
+  do host inteiro; carregar programa BPF de rede também exige privilégio que o
+  contêiner isolado não tem.
 
-  O passo de cgroup BPF é o que pegou o bug real do `cmdProgQuery` (era 20,
-  `BPF_TASK_FD_QUERY`; o correto é 16): planta um `cgroup_skb` mínimo, fecha o
-  fd do programa para que só o anexo o segure, e exige atribuição. Sem programa
-  real anexado, os unit tests da travessia passavam com a query morta.
+  Cada anexo é plantado carregando um eBPF trivial, prendendo-o (ao cgroup, à
+  interface, ou como ação), fechando o fd do programa para que só o anexo o
+  segure, e exigindo a ATRIBUIÇÃO no dump (o programa é NOMEADO, não acusado).
+
+  Este tier de rede pagou-se pegando **três** bugs reais em código já shippado,
+  todos da mesma classe — atribuição por número de ABI errado, invisível aos
+  unit tests, que passavam porque montavam a mensagem no MESMO símbolo que
+  decodificavam (tautológicos):
+  - **cgroup BPF**: `cmdProgQuery` era 20 (`BPF_TASK_FD_QUERY`); o correto é 16.
+    A query devolvia `EBADF` em silêncio — a feature shippou morta.
+  - **act_bpf**: o id do programa era lido no atributo 7 (`TCA_ACT_BPF_FLAGS`) e
+    depois no 8 (o `TAG` de 8 bytes); o real é 9 (`TCA_ACT_BPF_ID`). A árvore
+    CRUA do `RTM_GETACTION`, cruzada com `tc action show action bpf`, deu o
+    número certo — a memória confundira com o enum primo do `cls_bpf` (id em 11).
+  - **cls_bpf (tc)**: o dump usava `parent=0`, que NÃO percorre os blocos do
+    clsact — o próprio `tc filter show dev X` (sem pai) volta vazio. Agora varre
+    os pais (ingress/egress do clsact, ingress legado, root).
 
 Nenhum cenário conecta na internet. Os de rede usam TEST-NET-3
 (`203.0.113.0/24`), que nunca é roteada. Nada escreve fora de `/tmp` do contêiner.

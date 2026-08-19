@@ -1,6 +1,7 @@
 package netlink
 
 import (
+	"errors"
 	"strconv"
 	"syscall"
 )
@@ -174,24 +175,59 @@ type FiltroTC struct {
 	Nome    string
 }
 
-// FiltrosBPF lê os filtros de UMA interface e devolve os que são cls_bpf.
+// Os pais onde um filtro de tc pode estar preso. Pai ZERO NÃO percorre os
+// blocos do clsact: o próprio `tc filter show dev X` (sem pai) volta VAZIO
+// quando o filtro está no clsact — a forma MODERNA e padrão de prender cls_bpf.
+// É preciso pedir cada pai. Um implante de rede mora no ingress (onde vê o
+// pacote CHEGAR, gatilho de C2) ou no egress; o root cobre o qdisc classful
+// comum, e o ingress legado é o pai do qdisc `ingress` antigo.
+var paisDeFiltro = []uint32{
+	pariIngress, // 0xFFFFFFF2  clsact ingress
+	pariEgress,  // 0xFFFFFFF3  clsact egress
+	0xFFFFFFF1,  // TC_H_INGRESS: qdisc ingress legado
+	0xFFFFFFFF,  // TC_H_ROOT: filtros presos no qdisc raiz
+}
+
+// FiltrosBPF lê os filtros cls_bpf de UMA interface, varrendo os pais possíveis.
 //
 // Por interface, e não de uma vez: o dump de filtro é por dispositivo, e o
-// kernel não oferece "todos os filtros da máquina" — é o mesmo laço que o `tc`
-// faz quando alguém escreve `tc filter show dev X`.
+// kernel não oferece "todos os filtros da máquina". Por pai, e não com pai zero,
+// porque o dump com pai zero não alcança os blocos do clsact (ver paisDeFiltro).
 func FiltrosBPF(c *Conexao, iface Interface) ([]FiltroTC, error) {
-	req := make([]byte, tamTcmsg)
-	ordemNativa.PutUint32(req[4:8], uint32(iface.Indice))
-	// Pai ZERADO: o kernel percorre todos os qdiscs do dispositivo. Fixar o
-	// clsact aqui perderia o ingress legado, que é outro pai.
 	var out []FiltroTC
-	err := c.Dump(syscall.RTM_GETTFILTER, req, func(dados []byte) error {
-		if f, ok := decodificarFiltro(dados, iface.Nome); ok {
-			out = append(out, f)
+	visto := map[uint64]bool{}
+	var erro error
+	for _, pai := range paisDeFiltro {
+		req := make([]byte, tamTcmsg)
+		ordemNativa.PutUint32(req[4:8], uint32(iface.Indice))
+		ordemNativa.PutUint32(req[12:16], pai)
+		err := c.Dump(syscall.RTM_GETTFILTER, req, func(dados []byte) error {
+			if f, ok := decodificarFiltro(dados, iface.Nome); ok {
+				chave := uint64(pai)<<32 | uint64(f.ProgID)
+				if !visto[chave] {
+					visto[chave] = true
+					out = append(out, f)
+				}
+			}
+			return nil
+		})
+		// Pai sem qdisc/bloco responde ENOENT ou EINVAL: é "não há filtro aqui",
+		// não falha de leitura. Só um erro de verdade (permissão, prazo, corte)
+		// vira lacuna declarada lá em cima.
+		if err != nil && !paiInexistente(err) {
+			erro = err
 		}
-		return nil
-	})
-	return out, err
+	}
+	return out, erro
+}
+
+// paiInexistente distingue "este pai não tem qdisc" do erro que importa.
+func paiInexistente(err error) bool {
+	var e *Erro
+	if errors.As(err, &e) {
+		return e.Errno == syscall.ENOENT || e.Errno == syscall.EINVAL
+	}
+	return false
 }
 
 // decodificarFiltro lê a resposta de RTM_GETTFILTER. O cabeçalho é o tcmsg:
@@ -262,9 +298,19 @@ const (
 	tcaActKind    = 1 // TCA_ACT_KIND
 	tcaActOptions = 2 // TCA_ACT_OPTIONS
 
-	// enum de tc_act/tc_bpf.h
-	tcaActBPFName = 6 // TCA_ACT_BPF_NAME
-	tcaActBPFID   = 7 // TCA_ACT_BPF_ID
+	// enum de tc_act/tc_bpf.h: …NAME=6, FLAGS=7, TAG=8, ID=9. O ID é 9, e é fácil
+	// errar por dois motivos: (1) o cls_bpf, primo, põe o ID em 11 e o NAME em 7,
+	// então a memória mistura os dois enums; (2) o TCA_ACT_BPF_FLAGS (7) foi
+	// acrescentado depois, empurrando TAG e ID. Ler o ID no 7 pega o FLAGS; no 8,
+	// pega os 4 primeiros bytes do TAG — nos dois casos casa com nada, e a ação
+	// some da atribuição SEM erro. O unit test não pega porque monta o id no
+	// MESMO símbolo que decodifica (tautológico). Quem pegou foi a árvore CRUA do
+	// RTM_GETACTION na matriz (o id real apareceu no atributo 9, ao lado do TAG
+	// de 8 bytes no 8), cruzada com `tc action show action bpf` (`id N`).
+	tcaActBPFName  = 6 // TCA_ACT_BPF_NAME
+	tcaActBPFFlags = 7 // TCA_ACT_BPF_FLAGS (não é o ID)
+	tcaActBPFTag   = 8 // TCA_ACT_BPF_TAG   (não é o ID: hash de 8 bytes)
+	tcaActBPFID    = 9 // TCA_ACT_BPF_ID
 
 	tamTcamsg = 4 // struct tcamsg (family + pad)
 )

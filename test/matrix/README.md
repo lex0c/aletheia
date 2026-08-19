@@ -18,10 +18,15 @@ Monta técnicas de ataque e mede **quais a aletheia pega**. Dois eixos:
 - **VM descartável** (`vm-matrix.sh`) — técnicas de **kernel**, numa tabela só,
   com baseline limpo como controle negativo: hook em `tcp4_seq_show`
   (`cross.socket_view`), LKM que se esconde de `/proc/modules` e `/sys/module`
-  (`cross.module_view`), e registro de `binfmt` live (`kernel.binfmt_interpreter`).
-  Contêiner NÃO serve para kernel: ele compartilha o do host, e um hook ali
-  esconderia conexão do host inteiro. A fazer (precisa de um carregador de BPF na
-  VM): cgroup BPF por `BPF_PROG_QUERY` — declarado, não silenciado.
+  (`cross.module_view`), registro de `binfmt` live (`kernel.binfmt_interpreter`)
+  e programa `cgroup_skb` preso em `/sys/fs/cgroup`, atribuído por
+  `BPF_PROG_QUERY`. Contêiner NÃO serve para kernel: ele compartilha o do host,
+  e um hook ali esconderia conexão do host inteiro.
+
+  O passo de cgroup BPF é o que pegou o bug real do `cmdProgQuery` (era 20,
+  `BPF_TASK_FD_QUERY`; o correto é 16): planta um `cgroup_skb` mínimo, fecha o
+  fd do programa para que só o anexo o segure, e exige atribuição. Sem programa
+  real anexado, os unit tests da travessia passavam com a query morta.
 
 Nenhum cenário conecta na internet. Os de rede usam TEST-NET-3
 (`203.0.113.0/24`), que nunca é roteada. Nada escreve fora de `/tmp` do contêiner.

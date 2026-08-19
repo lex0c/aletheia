@@ -383,7 +383,8 @@ var triggerExec = check.Check{
 			t := &f.Triggers[i]
 			switch t.Kind {
 			case "rc", "initd", "motd", "ssh_rc", "pkg_hook", "generator",
-				"git_hook", "mail", "supervisor", "cron_script":
+				"git_hook", "mail", "supervisor", "cron_script",
+				"inetd", "xinetd", "inittab":
 			default:
 				continue
 			}

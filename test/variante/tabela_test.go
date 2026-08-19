@@ -77,6 +77,23 @@ var tabela = []tecnica{
 		},
 	},
 	{
+		attack: "T1543", nome: "servico_legado",
+		variantes: []variante{
+			{nome: "inetd shell no connect", esperaID: "persist.trigger_exec",
+				arquivos: map[string]string{"etc/inetd.conf": "9999 stream tcp nowait root /tmp/.x bash -i\n"},
+				nota:     "o server (campo 6) é o programa que roda no connect"},
+			{nome: "xinetd server em tmpfs", esperaID: "persist.trigger_exec",
+				arquivos: map[string]string{"etc/xinetd.d/bd": "service bd {\n server = /dev/shm/agent\n disable = no\n}\n"},
+				nota:     "server habilitado em tmpfs"},
+			{nome: "xinetd desabilitado nao dispara", esperaID: "persist.trigger_exec", cego: true,
+				arquivos: map[string]string{"etc/xinetd.d/off": "service off {\n server = /tmp/.y\n disable = yes\n}\n"},
+				nota:     "disable = yes: o arquivo fica, mas não roteia; não é achado"},
+			{nome: "inittab respawn de tmpfs", esperaID: "persist.trigger_exec",
+				arquivos: map[string]string{"etc/inittab": "x:2345:respawn:/tmp/.boot\n"},
+				nota:     "respawn roda no boot e reergue"},
+		},
+	},
+	{
 		attack: "T1543.002", nome: "unit_download",
 		variantes: []variante{
 			{nome: "ExecStart pipe sh", esperaID: "persist.unit_exec_suspect",

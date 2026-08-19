@@ -325,3 +325,162 @@ func ehBinario(b []byte) bool {
 }
 
 func normaliza(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// collectServicosLegados lê inetd.conf, xinetd.d e inittab — três formas de
+// persistência que EXECUTAM um programa (no connect ou no boot) e que a maioria
+// dos times nunca abre, porque "ninguém usa mais isso" (runbook §7.7, ATT&CK
+// T1543).
+//
+// Cada uma vira um Trigger com o PROGRAMA extraído como linha, então flui pelo
+// mesmo persist.trigger_exec dos outros gatilhos: a pergunta é a de sempre —
+// o binário é suspeito, ou nenhum pacote o reivindica?
+func collectServicosLegados(f *Facts, e *env.Env) {
+	collectInetd(f, e)
+	collectXinetd(f, e)
+	collectInittab(f, e)
+}
+
+// registrarServicoLegado monta o Trigger de um programa extraído de config
+// legada, declarando ilegível como lacuna.
+func registrarServicoLegado(f *Facts, e *env.Env, arquivo, kind, when string, linhas []TriggerLine) {
+	fi, err := e.Lstat(arquivo)
+	if err != nil {
+		return
+	}
+	t := Trigger{
+		File: arquivo, Kind: kind, When: when,
+		Modo:   fi.Mode().String(),
+		ModUTC: fi.ModTime().UTC().Format("2006-01-02T15:04:05Z"),
+		Lines:  linhas,
+	}
+	f.Triggers = append(f.Triggers, t)
+}
+
+// collectInetd lê /etc/inetd.conf. Cada linha é
+//
+//	service socket_type proto flags user server args...
+//
+// e o campo 6 (server, índice 5) é o programa que roda quando alguém conecta na
+// porta do serviço. Um backdoor aqui é `9999 stream tcp nowait root /bin/bash -i`.
+func collectInetd(f *Facts, e *env.Env) {
+	b, err := e.ReadFile("/etc/inetd.conf")
+	if err != nil {
+		if env.EhLacuna(err) {
+			f.denyPersist("startup", "/etc/inetd.conf existe e não pôde ser lido: "+
+				"o servidor que roda no connect NÃO foi avaliado")
+		}
+		return
+	}
+	var linhas []TriggerLine
+	for i, raw := range strings.Split(string(b), "\n") {
+		ln := strings.TrimSpace(raw)
+		if ln == "" || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		campos := strings.Fields(ln)
+		if len(campos) < 6 {
+			continue
+		}
+		// service(0) socket_type(1) proto(2) flags(3) user(4) server(5) args...
+		// O programa é o campo 6 (índice 5); `internal` é serviço embutido no
+		// inetd, sem programa externo. O `user` pode vir como `user.group`, mas
+		// isso não desloca o server — continua no 5.
+		prog := campos[5]
+		if prog == "internal" {
+			continue
+		}
+		linhas = append(linhas, TriggerLine{N: i + 1, Text: prog})
+	}
+	if len(linhas) > 0 {
+		registrarServicoLegado(f, e, "/etc/inetd.conf", "inetd",
+			"quando alguém conecta na porta do serviço", linhas)
+	}
+}
+
+// collectXinetd lê /etc/xinetd.d/*. Cada arquivo é um bloco chave = valor; o
+// `server =` é o programa, e `disable = yes` desliga o serviço (mas o arquivo
+// continua lá, reativável).
+func collectXinetd(f *Facts, e *env.Env) {
+	nomes, err := e.ReadDirNamesErr("/etc/xinetd.d")
+	if env.EhLacuna(err) {
+		f.denyPersist("startup", "/etc/xinetd.d não pôde ser listado: os serviços "+
+			"que rodam no connect NÃO foram avaliados")
+		return
+	}
+	for _, n := range nomes {
+		p := "/etc/xinetd.d/" + n
+		if e.IsDir(p) {
+			continue
+		}
+		b, err := e.ReadFile(p)
+		if err != nil {
+			if env.EhLacuna(err) {
+				f.denyPersist("startup", p+" existe e não pôde ser lido: o servidor "+
+					"xinetd dele NÃO foi avaliado")
+			}
+			continue
+		}
+		var server string
+		var linha int
+		desabilitado := false
+		for i, raw := range strings.Split(string(b), "\n") {
+			ln := strings.TrimSpace(raw)
+			if k, v, ok := strings.Cut(ln, "="); ok {
+				k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+				switch k {
+				case "server":
+					server, linha = v, i+1
+				case "disable":
+					desabilitado = strings.EqualFold(v, "yes")
+				}
+			}
+		}
+		if server == "" || desabilitado {
+			continue
+		}
+		registrarServicoLegado(f, e, p, "xinetd",
+			"quando alguém conecta na porta do serviço",
+			[]TriggerLine{{N: linha, Text: server}})
+	}
+}
+
+// collectInittab lê /etc/inittab (sysvinit). Cada linha é
+//
+//	id:runlevels:action:process
+//
+// e as ações que EXECUTAM são respawn, wait, once, boot, bootwait, sysinit.
+// `x:2345:respawn:/tmp/.x` roda /tmp/.x no boot e o reergue se morrer — a
+// persistência clássica de sistema legado, que era a motivação original desta
+// ferramenta.
+func collectInittab(f *Facts, e *env.Env) {
+	b, err := e.ReadFile("/etc/inittab")
+	if err != nil {
+		if env.EhLacuna(err) {
+			f.denyPersist("startup", "/etc/inittab existe e não pôde ser lido: o que "+
+				"ele executa no boot NÃO foi avaliado")
+		}
+		return
+	}
+	acoesQueExecutam := map[string]bool{
+		"respawn": true, "wait": true, "once": true,
+		"boot": true, "bootwait": true, "sysinit": true,
+	}
+	var linhas []TriggerLine
+	for i, raw := range strings.Split(string(b), "\n") {
+		ln := strings.TrimSpace(raw)
+		if ln == "" || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		campos := strings.SplitN(ln, ":", 4)
+		if len(campos) != 4 || !acoesQueExecutam[campos[2]] {
+			continue
+		}
+		if prog := strings.TrimSpace(campos[3]); prog != "" {
+			linhas = append(linhas, TriggerLine{N: i + 1, Text: prog})
+		}
+	}
+	if len(linhas) > 0 {
+		registrarServicoLegado(f, e, "/etc/inittab", "inittab",
+			"no boot (e reergue, com respawn)", linhas)
+	}
+}

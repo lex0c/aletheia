@@ -7,7 +7,7 @@ GOFLAGS := -trimpath
 # LD_PRELOAD e a binário de sistema trojanizado (SPEC 4).
 export CGO_ENABLED = 0
 
-.PHONY: all build helper vm-image test lint verify clean dist scenarios images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix vm-matrix arches
+.PHONY: all build helper vm-image test race race-unit lint verify clean dist scenarios images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix vm-matrix arches
 
 all: verify
 
@@ -48,6 +48,23 @@ race: export CGO_ENABLED = 1
 race:
 	go test -race ./...
 	go test -race -tags scenarios -count=1 -timeout 15m ./test/...
+
+# race-unit é a METADE HERMÉTICA do alvo acima, e existe para a CI.
+#
+# Ela NÃO substitui `make race`: a nota ali em cima diz, com razão, que rodar o
+# detector só no que já estava coberto dá sensação de cobertura sem cobertura —
+# a corrida que apareceu de verdade estava na suíte de cenários. O que torna
+# esta versão honesta é ela ser NOMEADA como parcial e a CI dizer o que ficou
+# de fora.
+#
+# O corte é por DEPENDÊNCIA EXTERNA, não por preferência: a suíte de cenários
+# puxa quatro imagens do Docker Hub e tem 22 casos que precisam de qemu. Numa
+# CI de pull request isso é um gate que falha por rate limit de terceiro sem
+# nada de errado com o código — o mesmo motivo pelo qual ela fica fora do
+# caminho de release.
+race-unit: export CGO_ENABLED = 1
+race-unit:
+	go test -race -count=1 ./internal/... ./cmd/...
 
 lint:
 	gofmt -l . | tee /dev/stderr | grep -q . && { echo "arquivos não formatados"; exit 1; } || true

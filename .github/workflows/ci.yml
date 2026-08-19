@@ -1,0 +1,106 @@
+# Portão de entrada: roda em todo push na main e em todo pull request.
+#
+# # O que este workflow garante
+#
+# Ele não tem receita própria. Cada passo é um alvo do Makefile — o mesmo que
+# quem desenvolve roda antes de commitar. Duplicar os comandos aqui deixaria as
+# duas receitas divergirem em silêncio, e a divergência apareceria como uma CI
+# verde sobre um repositório que falha na máquina de alguém (é o mesmo
+# princípio do release.yml, que também não constrói nada por conta própria).
+#
+# `make verify` é o alvo PADRÃO do projeto (`all: verify`) e cobre o que foi
+# pedido de uma vez: gofmt, `go vet`, os testes unitários e a CONFIRMAÇÃO de
+# que o binário saiu estático — não a presunção.
+#
+# # O que ele NÃO roda, e por quê
+#
+# A suíte de cenários (`make scenarios`, e a segunda linha de `make race`) fica
+# de fora. Ela puxa quatro imagens do Docker Hub e tem 22 casos que sobem uma
+# microVM com qemu. Num portão de pull request isso é um gate que falha por
+# rate limit de terceiro ou por ausência de KVM no runner, sem nada de errado
+# com o código — e um gate que falha sozinho é um gate que as pessoas aprendem
+# a ignorar.
+#
+# A consequência precisa ficar dita, e não descoberta: o detector de corrida
+# aqui roda sobre `internal/` e `cmd/`, e NÃO sobre os cenários — que foi
+# exatamente onde uma corrida se escondeu uma vez. Antes de tag, `make race`
+# roda os dois lados.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Um push novo no mesmo PR cancela a execução anterior: o que importa é o
+# veredito sobre o ÚLTIMO commit, e manter as antigas vivas só gasta fila.
+# A main fica de fora do cancelamento — ali cada commit merece seu veredito.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # gofmt + go vet + testes + binário estático CONFIRMADO.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # A versão vem do go.mod: uma cópia do número aqui envelheceria sem
+          # ninguém perceber, e a CI passaria a testar com outro compilador.
+          go-version-file: go.mod
+          cache: true
+
+      - name: verify
+        run: make verify
+
+  # O detector de corrida exige cgo, e por isso é alvo separado: o CGO_ENABLED=0
+  # do topo do Makefile vale para o arquivo inteiro, e sem a concessão local o
+  # comando morre em "requires cgo" sem rodar teste nenhum.
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: race (unitários — a suíte de cenários NÃO entra aqui)
+        run: make race-unit
+
+  # Cross-compilação das outras duas arquiteturas.
+  #
+  # Existe porque o `verify` compila só a do runner, e a propriedade que
+  # justificou escolher Go — binário estático, sem libc do host — se perde por
+  # um `import` novo que puxe cgo. Hoje isso só é conferido no release, ou seja,
+  # DEPOIS de a tag existir: um PR que quebra o arm64 passaria batido até lá.
+  # Cross-compilar custa segundos e move a descoberta para o pull request.
+  arches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: compilar 386 e arm64
+        run: make arches
+
+      - name: confirmar que continuam estáticos
+        run: |
+          for b in dist/aletheia-386 dist/aletheia-arm64; do
+            file "$b"
+            file "$b" | grep -q "statically linked" || {
+              echo "FALHA: $b não é estático — algum import puxou cgo" >&2
+              exit 1
+            }
+          done

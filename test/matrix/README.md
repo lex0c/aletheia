@@ -44,6 +44,13 @@ Monta técnicas de ataque e mede **quais a aletheia pega**. Dois eixos:
     clsact — o próprio `tc filter show dev X` (sem pai) volta vazio. Agora varre
     os pais (ingress/egress do clsact, ingress legado, root).
 
+  A tabela fecha com um PONTO CEGO DECLARADO: um `cls_bpf` preso DENTRO de outro
+  netns (o plant faz `unshare(CLONE_NEWNET)` e anexa lá). A aletheia não o LÊ —
+  o rtnetlink roda no netns dela, e entrar em cada netns por `setns` moveria o
+  namespace de rede do processo —, mas DECLARA a lacuna quando há outro netns
+  (contêiner). Anexo por `bpf_link` é agnóstico a netns e já é coberto. A prova
+  exige que a declaração dispare com o netns presente e CALE no host de um só.
+
 Nenhum cenário conecta na internet. Os de rede usam TEST-NET-3
 (`203.0.113.0/24`), que nunca é roteada. Nada escreve fora de `/tmp` do contêiner.
 

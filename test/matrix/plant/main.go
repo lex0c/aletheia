@@ -427,6 +427,15 @@ func main() {
 		anexarActBPF(prog)
 		syscall.Close(prog)
 
+	case "netns-legacy": // rede.bpf: cls_bpf preso DENTRO de OUTRO netns — o
+		// rtnetlink da aletheia (no netns dela) não o vê; a aletheia deve
+		// DECLARAR a lacuna em vez de silenciar (nunca por setns).
+		runtime.LockOSThread() // NÃO desbloquear: a thread fica presa no netns novo
+		must(syscall.Unshare(syscall.CLONE_NEWNET), "unshare netns")
+		prog := carregarBPF(3 /*SCHED_CLS*/, 0)
+		anexarTC(prog, loIndice()) // lo do netns NOVO (ifindex 1)
+		syscall.Close(prog)
+
 	default:
 		fmt.Fprintln(os.Stderr, "técnica desconhecida:", os.Args[1])
 		os.Exit(2)

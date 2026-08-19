@@ -174,6 +174,11 @@ func collectBPF(f *Facts, e *env.Env) {
 	// aparecia como "sem dono visível" e virava lacuna; num nó com cilium isso
 	// é a maioria deles, e lacuna desse tamanho é indistinguível de não olhar.
 	anexosDeRede(f, e, porID, citados)
+	// A leitura por rtnetlink acima roda no netns da PRÓPRIA aletheia. O que
+	// ficou de fora — filtro de tc/XDP legado preso numa interface DENTRO de
+	// outro netns — é declarado, nunca lido por setns (mover o netns do processo
+	// corromperia a visão de rede de tudo).
+	lacunaDeNetns(f, e)
 	// O QUINTO detentor: programa preso a um CGROUP. Quem sabe é o próprio
 	// kernel, por um FD do diretório do cgroup. Fecha o gap que o FixCgroup
 	// declarava, e os IDs vistos aqui entram na lista de citados — um programa
@@ -261,6 +266,61 @@ func anexosDeRede(f *Facts, e *env.Env, porID map[uint32]*ProgramaBPF, citados m
 		}
 		anotar(ac.ProgID, onde)
 	}
+}
+
+// lacunaDeNetns declara o que a atribuição por rtnetlink NÃO alcança.
+//
+// Interfaces(), FiltrosBPF() e AcoesBPF() rodam no netns da própria aletheia. Um
+// filtro de tc/XDP ou uma ação act_bpf presa a uma interface DENTRO de outro
+// netns — o de um contêiner — não aparece nessas consultas. Ler esses anexos
+// exigiria entrar no netns (setns), que em Go moveria a thread e corromperia a
+// visão de rede do processo inteiro: a escolha é declarar, não arriscar o host.
+//
+// Anexo por bpf_link é AGNÓSTICO a netns (o link tem id global) e já foi coberto
+// por linksBPF — a lacuna é só dos anexos LEGADOS, os que só o rtnetlink do
+// próprio netns enxerga.
+//
+// Só declara quando há OUTRO netns (contêiner) e as consultas de rede de fato
+// rodaram (CapNetlink). Num host de um netns só — o comum — não há o que anunciar.
+func lacunaDeNetns(f *Facts, e *env.Env) {
+	if !e.Has(env.CapNetlink) || !e.Has(env.CapProcfs) {
+		return
+	}
+	meu, ok := inodeDeNS("/proc/self/ns/net")
+	if !ok {
+		return
+	}
+	pids, err := e.ReadDirNamesErr("/proc")
+	if err != nil {
+		return // não listar /proc já é lacuna do coletor de proc; não duplica aqui
+	}
+	outros := map[uint64]bool{}
+	for _, pid := range pids {
+		if _, err := strconv.Atoi(pid); err != nil {
+			continue
+		}
+		// ns/net ilegível (processo de outro usuário sem privilégio) é pulado: o
+		// que importa é se ALGUM outro netns aparece, não enumerar todos.
+		if ino, ok := inodeDeNS("/proc/" + pid + "/ns/net"); ok && ino != meu {
+			outros[ino] = true
+		}
+	}
+	if len(outros) == 0 {
+		return
+	}
+	f.partial("bpf", strconv.Itoa(len(outros))+" outro(s) network namespace(s) presente(s) "+
+		"(contêiner): filtro de tc/XDP e ação act_bpf presos por rtnetlink DENTRO deles NÃO "+
+		"foram lidos — entrar em cada netns moveria o namespace de rede do processo, e não é "+
+		"feito. Anexo por bpf_link é coberto, qualquer que seja o netns.")
+}
+
+// inodeDeNS devolve o inode de um /proc/<pid>/ns/net — a identidade do netns.
+func inodeDeNS(caminho string) (uint64, bool) {
+	var st syscall.Stat_t
+	if err := syscall.Stat(caminho, &st); err != nil {
+		return 0, false
+	}
+	return st.Ino, true
 }
 
 // Tetos da varredura de cgroup. A árvore INTEIRA é percorrida — limitar por

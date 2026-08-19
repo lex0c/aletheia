@@ -97,6 +97,7 @@ echo "binfmt_fired=$(tem kernel.binfmt_interpreter)"
 # a prova é a ATRIBUIÇÃO no dump (o programa não é acusado; ele é NOMEADO). ---
 /aletheia collect --out /tmp/dc0.json --no-progress >/dev/null 2>&1
 echo "cgroup_base=$(grep -c 'cgroup inet_ingress' /tmp/dc0.json 2>/dev/null)"
+echo "netns_base=$(grep -c 'network namespace' /tmp/dc0.json 2>/dev/null)"
 /plant cgroup-attach >/tmp/cg.out 2>/tmp/cg.err &
 sleep 1
 echo "cg_err=$(tr -d '\n' </tmp/cg.err)"
@@ -129,6 +130,14 @@ sleep 1
 echo "act_err=$(tr -d '\n' </tmp/act.err)"
 /aletheia collect --out /tmp/dna.json --no-progress >/dev/null 2>&1
 echo "act_attributed=$(grep -c 'plant_act' /tmp/dna.json 2>/dev/null)"
+
+# --- netns: cls_bpf preso DENTRO de outro netns. A aletheia não o LÊ (rtnetlink
+# roda no netns dela), mas tem de DECLARAR a lacuna — silêncio seria pior. ---
+/plant netns-legacy >/tmp/nsl.out 2>/tmp/nsl.err &
+sleep 1
+echo "nsl_err=$(tr -d '\n' </tmp/nsl.err)"
+/aletheia collect --out /tmp/dnl.json --no-progress >/dev/null 2>&1
+echo "netns_lacuna=$(grep -c 'network namespace' /tmp/dnl.json 2>/dev/null)"
 
 echo "===END==="
 poweroff -f 2>/dev/null || echo o > /proc/sysrq-trigger
@@ -166,6 +175,7 @@ linha "cgroup BPF"      "atribuído (BPF_PROG_QUERY)" "$(get cgroup_base)" "$(ge
 linha "XDP em lo"       "atribuído (RTM_GETLINK)"    "$(get net_base)"    "$(get xdp_attributed)"
 linha "cls_bpf (tc)"    "atribuído (RTM_GETTFILTER)" "$(get net_base)"    "$(get tc_attributed)"
 linha "act_bpf"         "atribuído (RTM_GETACTION)"  "$(get net_base)"    "$(get act_attributed)"
+linha "tc em outro netns" "lacuna netns DECLARADA"   "$(get netns_base)"  "$(get netns_lacuna)"
 
 echo
 [ "$falhou" = 0 ] && { echo "OK — todas as técnicas dispararam, e o baseline limpo calou."; exit 0; }

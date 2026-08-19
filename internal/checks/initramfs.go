@@ -104,7 +104,14 @@ func pesoDoInitramfs(a *facts.ArtefatoInitramfs, semDono map[string]bool) (check
 		return check.SevCritical, "e o arquivo está " + motivo +
 			": nada se instala ali de propósito, muito menos no initramfs", true
 	}
-	if a.Como != "hook executável" {
+	// Discrimina pelo TIPO, nunca pelo texto de apresentação.
+	//
+	// Enquanto isto comparava a.Como com "hook executável", o module-setup.sh
+	// do dracut — que a coleta passou a reconhecer sem exigir +x, porque o
+	// dracut o SOURCEIA — entrava no Facts e era descartado aqui em silêncio.
+	// A metade do bypass que a coleta fechou ficava aberta um andar acima, e o
+	// discriminador quebrou porque alguém acrescentou uma frase nova.
+	if a.Tipo != facts.InitramfsCodigo {
 		// Arquivo referenciado fora de diretório gravável: dado de admin
 		// (keyfile) é legítimo e comum, e propriedade não o distingue de payload.
 		return check.SevInfo, "", false

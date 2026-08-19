@@ -49,10 +49,17 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           # A versão vem do go.mod: uma cópia do número aqui envelheceria sem
           # ninguém perceber, e a CI passaria a testar com outro compilador.
+          #
+          # Precisa ser setup-go v6+: o parseGoVersionFile do v5 casa SÓ
+          # `^go (\d+...)` e ignora a diretiva `toolchain`. Com o v5 o runner
+          # instalava 1.25.x e o próprio Go baixava o 1.26.5 depois, por
+          # toolchain switching — o build acabava certo, mas por um segundo
+          # mecanismo implícito, enquanto este comentário afirmava que a fonte
+          # única era o go.mod. Agora é.
           go-version-file: go.mod
           cache: true
 
@@ -67,7 +74,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache: true
@@ -87,7 +94,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache: true

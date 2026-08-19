@@ -293,6 +293,23 @@ var shellEnv = check.Check{
 				// `=` vira "export ENV", que não está em varExecutada — e o alvo sairia
 				// sendo a linha inteira em vez do caminho.
 				alvo := linhaExecutavel(semExport(ln.Text))
+
+				// ENV SOZINHO não é sinal, e o FalsePositives deste check diz
+				// isso com todas as letras. `ENV=$HOME/.shrc` em /etc/profile é
+				// configuração de fábrica em vários sistemas, e emitir aviso
+				// para ela trocava um falso CRÍTICO por ruído permanente — que
+				// gasta a atenção do operador do mesmo jeito, só mais devagar.
+				//
+				// O que faz o achado é o REFORÇO: o alvo em diretório gravável,
+				// o alvo que nenhum pacote reivindica, ou a linha que não existe
+				// no /etc/skel. Sem nenhum dos três, a linha é config e o
+				// silêncio é a resposta certa.
+				motivo, gravavel := suspectDir(alvo)
+				semPacote := alvo != "" && semDono[alvo]
+				if !gravavel && !semPacote && !ln.Added {
+					continue
+				}
+
 				sev := check.SevWarn
 				ev := []string{
 					ln.Text,
@@ -302,10 +319,10 @@ var shellEnv = check.Check{
 					"QUANDO roda: " + t.When,
 				}
 				// O que decide não é a variável, é o ALVO dela.
-				if why, ok := suspectDir(alvo); ok {
+				if gravavel {
 					sev = check.SevCritical
-					ev = append(ev, "e o arquivo apontado está "+why)
-				} else if semDono[alvo] {
+					ev = append(ev, "e o arquivo apontado está "+motivo)
+				} else if semPacote {
 					ev = append(ev, "e nenhum pacote reivindica "+alvo)
 				}
 				if ln.Added {

@@ -39,10 +39,16 @@ func init() {
 		// admin escreveu.
 		Images: []string{"debian:12"},
 		Plant: `mkdir -p /usr/lib/dracut/modules.d/99evil
-			printf '#!/bin/bash\ninstall() { :; }\n' > /usr/lib/dracut/modules.d/99evil/module-setup.sh
-			chmod +x /usr/lib/dracut/modules.d/99evil/module-setup.sh`,
+			printf '#!/bin/bash\ninstall() { :; }\n' > /usr/lib/dracut/modules.d/99evil/module-setup.sh`,
+		// SEM chmod, de propósito. O dracut SOURCEIA o module-setup.sh
+		// (`. "$_moddir"/module-setup.sh`) e testa existência, não -x: o bit de
+		// execução não decide nada ali. Enquanto o cenário plantava 0755, ele
+		// concordava com a peneira em vez de exercitá-la — a distribuição
+		// entrega todos os module-setup.sh com 755, então o ÚNICO que um filtro
+		// de +x removia era exatamente este, o que alguém plantou sem se dar ao
+		// trabalho do chmod.
 		Expect: []Expect{
-			{ID: "persist.initramfs_hook", Sev: "CRITICAL", Evidence: "hook executável"},
+			{ID: "persist.initramfs_hook", Sev: "CRITICAL", Evidence: "sourceado"},
 		},
 		Exit: 2,
 	})

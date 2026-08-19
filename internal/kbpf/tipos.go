@@ -129,11 +129,14 @@ const (
 	// processo, e o descritor do PROGRAMA pode ter sido fechado logo depois —
 	// que é exatamente a forma do BPFDoor.
 	FixSocket
-	// FixNetlink: tc, xdp e roteamento. Quem segura é a interface, e ler isso
-	// exige netlink, que esta ferramenta ainda não fala.
+	// FixNetlink: tc, xdp e roteamento. Quem segura é a INTERFACE, e a
+	// ferramenta lê isso por netlink — XDP de cada link, filtros de tc
+	// (cls_bpf) e ações de tc (act_bpf) — quando a capacidade existe. O que
+	// resta fora é o netns que ela não entra.
 	FixNetlink
-	// FixCgroup: anexo por cgroup sem link. Exigiria BPF_PROG_QUERY em cada
-	// cgroup da árvore.
+	// FixCgroup: anexo por cgroup sem link. A ferramenta percorre a árvore com
+	// BPF_PROG_QUERY (attached) dentro de um orçamento; o que resta fora é o
+	// anexo EFETIVO herdado e o que teto, prazo ou permissão não alcançaram.
 	FixCgroup
 	// FixMapa: struct_ops e sockmap são segurados por um MAPA.
 	FixMapa

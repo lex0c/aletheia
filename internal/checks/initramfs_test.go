@@ -19,7 +19,7 @@ func initramfsF(art []facts.ArtefatoInitramfs, unowned ...string) *facts.Facts {
 // Hook sem dono num diretório de pacote é forte: tudo ali deveria vir de pacote.
 func TestInitramfsHookSemDonoEmPacoteECritico(t *testing.T) {
 	f := initramfsF([]facts.ArtefatoInitramfs{
-		{Path: "/usr/lib/dracut/modules.d/99x/module-setup.sh", Mecanismo: "dracut", Como: "hook executável"},
+		{Path: "/usr/lib/dracut/modules.d/99x/module-setup.sh", Mecanismo: "dracut", Como: "hook executável", Tipo: facts.InitramfsCodigo},
 	}, "/usr/lib/dracut/modules.d/99x/module-setup.sh")
 	r := initramfsHook.Run(initramfsHook, f, testEnv())
 	if len(r.Findings) != 1 || r.Findings[0].Sev != check.SevCritical {
@@ -30,7 +30,7 @@ func TestInitramfsHookSemDonoEmPacoteECritico(t *testing.T) {
 // Hook sem dono em /etc é território do administrador: WARN, não CRITICAL.
 func TestInitramfsHookEmEtcEAviso(t *testing.T) {
 	f := initramfsF([]facts.ArtefatoInitramfs{
-		{Path: "/etc/initramfs-tools/hooks/custom", Mecanismo: "initramfs-tools", Como: "hook executável"},
+		{Path: "/etc/initramfs-tools/hooks/custom", Mecanismo: "initramfs-tools", Como: "hook executável", Tipo: facts.InitramfsCodigo},
 	}, "/etc/initramfs-tools/hooks/custom")
 	r := initramfsHook.Run(initramfsHook, f, testEnv())
 	if len(r.Findings) != 1 || r.Findings[0].Sev != check.SevWarn {
@@ -41,7 +41,7 @@ func TestInitramfsHookEmEtcEAviso(t *testing.T) {
 // Hook com dono de pacote é o normal: não dispara.
 func TestInitramfsHookComDonoNaoDispara(t *testing.T) {
 	f := initramfsF([]facts.ArtefatoInitramfs{
-		{Path: "/usr/lib/initcpio/hooks/encrypt", Mecanismo: "mkinitcpio", Como: "hook executável"},
+		{Path: "/usr/lib/initcpio/hooks/encrypt", Mecanismo: "mkinitcpio", Como: "hook executável", Tipo: facts.InitramfsCodigo},
 	}) // não está em Ownership como unowned -> tratado como owned
 	if r := initramfsHook.Run(initramfsHook, f, testEnv()); len(r.Findings) != 0 {
 		t.Errorf("hook de pacote não dispara: %+v", r.Findings)
@@ -53,7 +53,7 @@ func TestInitramfsHookComDonoNaoDispara(t *testing.T) {
 // payload. Não pode disparar — senão todo host com disco cifrado vira achado.
 func TestInitramfsArquivoReferenciadoNaoEhJulgadoPorPropriedade(t *testing.T) {
 	f := initramfsF([]facts.ArtefatoInitramfs{
-		{Path: "/crypto_keyfile.bin", Mecanismo: "mkinitcpio", Como: "FILES em mkinitcpio.conf"},
+		{Path: "/crypto_keyfile.bin", Mecanismo: "mkinitcpio", Como: "FILES em mkinitcpio.conf", Tipo: facts.InitramfsEmbutido},
 	}, "/crypto_keyfile.bin")
 	if r := initramfsHook.Run(initramfsHook, f, testEnv()); len(r.Findings) != 0 {
 		t.Errorf("keyfile LUKS referenciada não pode virar achado: %+v", r.Findings)
@@ -64,7 +64,7 @@ func TestInitramfsArquivoReferenciadoNaoEhJulgadoPorPropriedade(t *testing.T) {
 // não há razão para embutir algo de /tmp no initramfs.
 func TestInitramfsReferenciadoEmTmpECritico(t *testing.T) {
 	f := initramfsF([]facts.ArtefatoInitramfs{
-		{Path: "/tmp/.payload", Mecanismo: "dracut", Como: "install_items em evil.conf"},
+		{Path: "/tmp/.payload", Mecanismo: "dracut", Como: "install_items em evil.conf", Tipo: facts.InitramfsEmbutido},
 	})
 	r := initramfsHook.Run(initramfsHook, f, testEnv())
 	if len(r.Findings) != 1 || r.Findings[0].Sev != check.SevCritical {

@@ -119,8 +119,24 @@ var bpfSemDono = check.Check{
 			if !p.SemDonoVisivel() {
 				continue
 			}
+			// A pergunta NÃO é "que tipo de programa é este", é "eu tinha
+			// cobertura para procurar onde ele está preso?".
+			//
+			// Antes, todo FixCgroup e FixNetlink virava lacuna pela NATUREZA DO
+			// TIPO — mesmo depois de a ferramenta ter percorrido a árvore de
+			// cgroup inteira por BPF_PROG_QUERY e lido tc, act_bpf e XDP de
+			// todas as interfaces. O trabalho de enumeração servia só para
+			// NOMEAR o detentor quando ele aparecia; quando não aparecia, a
+			// ferramenta dizia "não sei" tendo olhado em todo lugar. Programa de
+			// cgroup sem anexo nenhum, com a árvore inteiramente enumerada, é
+			// anomalia — e dizer isso é o que este check existe para fazer.
+			//
+			// Um único buraco na cobertura devolve a resposta para lacuna: o
+			// programa pode estar preso justamente no cgroup que o prazo não
+			// alcançou. (Não é preciso conferir p.Anexos aqui: SemDonoVisivel
+			// já exige que ele esteja vazio.)
 			fix := kbpf.FixacaoDe(p.TipoNum)
-			if fix != kbpf.FixVisivel && fix != kbpf.FixSocket {
+			if !cobreFixacao(f, fix) {
 				naoAtribuiveis[fix]++
 				continue
 			}
@@ -207,6 +223,15 @@ var bpfSemDono = check.Check{
 		if f.BPF.Cortado {
 			r.Partial = append(r.Partial, "a enumeração de eBPF bateu no teto: "+
 				"a lista não é o total")
+		}
+		// O netns é lacuna mesmo com o netlink completo, e ela precisa acompanhar
+		// o achado: um filtro preso a uma interface DENTRO do netns de um
+		// contêiner não é lido, então "sem anexo" vale para o namespace desta
+		// varredura, não para os de contêiner.
+		if f.BPF.CoberturaAnexo.NetnsGap {
+			r.Partial = append(r.Partial, "anexo de tc/XDP dentro de OUTRO namespace "+
+				"de rede não é lido: a ausência de anexo vale para o netns desta "+
+				"varredura, não para os de contêiner")
 		}
 		return r
 	},
@@ -448,6 +473,27 @@ func trampolimSemPrograma(f *facts.Facts) []string {
 // coisa, e oferecer candidato ali confundiria em vez de ajudar. E é candidato
 // mesmo — o kernel não expõe qual socket carrega qual programa, e afirmar mais
 // que isso seria inventar a ligação que falta.
+// cobreFixacao diz se a ferramenta procurou, DE VERDADE, o detentor de um
+// programa daquele mecanismo nesta execução.
+//
+// FixVisivel e FixSocket sempre cobrem: os quatro detentores legíveis (fd, pin,
+// link, tail call) e o dono do socket saem da própria enumeração, sem depender
+// de interface externa. Os outros dois dependem de netlink e de BPF_PROG_QUERY,
+// e a resposta vem da cobertura MEDIDA na coleta, não do tipo do programa.
+// FixMapa continua sem cobertura: o conteúdo dos mapas não é lido, e é por isso
+// que struct_ops e sockmap continuam em lacuna declarada.
+func cobreFixacao(f *facts.Facts, fix kbpf.Fixacao) bool {
+	switch fix {
+	case kbpf.FixVisivel, kbpf.FixSocket:
+		return true
+	case kbpf.FixNetlink:
+		return f.BPF.CoberturaAnexo.Netlink
+	case kbpf.FixCgroup:
+		return f.BPF.CoberturaAnexo.Cgroup
+	}
+	return false
+}
+
 func detentoresCandidatos(f *facts.Facts, fix kbpf.Fixacao) []string {
 	if fix != kbpf.FixSocket {
 		return nil

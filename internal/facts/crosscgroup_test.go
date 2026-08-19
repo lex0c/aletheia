@@ -32,7 +32,7 @@ func TestPercorrerCgroupsVisitaTudoComPrioridade(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(raiz, "cgroup.procs"), []byte("1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	paths, teto, fundo, _, _ := percorrerCgroups(raiz, 10_000, time.Now().Add(time.Minute))
+	paths, teto, fundo, _, _ := percorrerCgroups(raiz, 10_000, time.Now().Add(time.Minute), nil)
 	if teto || fundo {
 		t.Fatalf("árvore pequena não devia truncar: teto=%v fundo=%v", teto, fundo)
 	}
@@ -71,7 +71,7 @@ func TestPercorrerCgroupsVisitaTudoComPrioridade(t *testing.T) {
 // primeiro, são as folhas genéricas que caem.
 func TestPercorrerCgroupsCortaNoTeto(t *testing.T) {
 	raiz := árvoreCgroup(t, "a", "b", "c", "d", "e")
-	paths, teto, _, _, _ := percorrerCgroups(raiz, 3, time.Now().Add(time.Minute))
+	paths, teto, _, _, _ := percorrerCgroups(raiz, 3, time.Now().Add(time.Minute), nil)
 	if !teto {
 		t.Error("com 6 cgroups e teto 3, tem de truncar")
 	}

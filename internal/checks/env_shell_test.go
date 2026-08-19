@@ -28,10 +28,19 @@ func TestEnvNaoEhBashEnv(t *testing.T) {
 }
 
 func TestShellEnvSeveridadeVemDoAlvo(t *testing.T) {
-	// Alvo comum: AVISO, não crítico. É config documentada.
-	r := shellEnv.Run(shellEnv, fEnv("export ENV=/etc/shrc"), imgEnv())
+	// ENV para alvo comum, com dono de pacote: SILÊNCIO. É a configuração de
+	// fábrica de vários sistemas, e o FalsePositives do próprio check diz que
+	// sozinha ela não é sinal de nada — emitir aviso aqui trocaria um falso
+	// crítico por ruído permanente.
+	if r := shellEnv.Run(shellEnv, fEnv("export ENV=/etc/shrc"), imgEnv()); len(r.Findings) != 0 {
+		t.Fatalf("ENV de fábrica não é achado: %+v", r.Findings)
+	}
+	// Com reforço, sim: alvo que nenhum pacote reivindica.
+	f := fEnv("export ENV=/etc/shrc")
+	f.Ownership = []facts.Ownership{{Path: "/etc/shrc", Owned: false}}
+	r := shellEnv.Run(shellEnv, f, imgEnv())
 	if len(r.Findings) != 1 || r.Findings[0].Sev != check.SevWarn {
-		t.Fatalf("ENV para caminho normal é AVISO: %+v", r.Findings)
+		t.Fatalf("alvo sem dono de pacote é AVISO: %+v", r.Findings)
 	}
 	// Alvo em tmpfs: aí sim crítico.
 	r = shellEnv.Run(shellEnv, fEnv("export ENV=/dev/shm/.shrc"), imgEnv())

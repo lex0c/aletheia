@@ -39,10 +39,32 @@ import (
 type ArtefatoInitramfs struct {
 	Path      string `json:"path"`
 	Mecanismo string `json:"mechanism"`
-	// Como diz por que este arquivo importa: um hook executável, ou um caminho
-	// REFERENCIADO por uma configuração para ser embutido na imagem.
+	// Como é a frase que o relatório imprime. É APRESENTAÇÃO, e nada deve
+	// decidir nada a partir dela: enquanto o check discriminava comparando esta
+	// string com "hook executável", acrescentar um terceiro texto — o módulo de
+	// dracut sourceado — fez o artefato ser coletado e depois descartado em
+	// silêncio, que é o bypass que a coleta tinha acabado de fechar.
 	Como string `json:"how"`
+	// Tipo é o que DECIDE. Um campo tipado não some quando alguém melhora uma
+	// frase, e um valor novo obriga o switch do check a tratá-lo.
+	Tipo TipoArtefatoInitramfs `json:"kind"`
 }
+
+// TipoArtefatoInitramfs separa as duas naturezas que o check pesa de forma
+// diferente.
+type TipoArtefatoInitramfs string
+
+const (
+	// InitramfsCodigo é script que RODA na geração ou no boot: hook executável,
+	// e o module-setup.sh do dracut, que é sourceado e por isso não precisa do
+	// bit de execução. Sem dono de pacote, é achado.
+	InitramfsCodigo TipoArtefatoInitramfs = "codigo"
+	// InitramfsEmbutido é caminho REFERENCIADO por configuração para entrar na
+	// imagem (install_items, FILES). Dado de administrador — um keyfile — é
+	// legítimo e comum ali, e propriedade não o distingue de payload: só vira
+	// achado em diretório gravável.
+	InitramfsEmbutido TipoArtefatoInitramfs = "embutido"
+)
 
 // dirsHookInitramfs são os diretórios de SCRIPT de geração. Recursivo=true entra
 // um nível (scripts/ tem subpastas init-top/…, modules.d/ tem uma por módulo).
@@ -98,6 +120,13 @@ func participaDaGeracao(mecanismo, nome string, modo fs.FileMode) (string, bool)
 	return "", false
 }
 
+// tipoDeEmbutido é o construtor dos artefatos vindos de configuração. Existe
+// para nenhum ponto de criação esquecer o Tipo — o zero de uma string vazia
+// seria um artefato que o switch do check não reconhece.
+func artefatoEmbutido(path, mecanismo, como string) ArtefatoInitramfs {
+	return ArtefatoInitramfs{Path: path, Mecanismo: mecanismo, Como: como, Tipo: InitramfsEmbutido}
+}
+
 // coletaHooksDe registra os arquivos que participam da geração do initramfs.
 func coletaHooksDe(f *Facts, e *env.Env, dir, mecanismo string, recursivo bool) {
 	nomes, err := e.ReadDirNamesErr(dir)
@@ -130,7 +159,7 @@ func coletaHooksDe(f *Facts, e *env.Env, dir, mecanismo string, recursivo bool) 
 			continue
 		}
 		f.Initramfs = append(f.Initramfs, ArtefatoInitramfs{
-			Path: p, Mecanismo: mecanismo, Como: como,
+			Path: p, Mecanismo: mecanismo, Como: como, Tipo: InitramfsCodigo,
 		})
 	}
 }
@@ -159,9 +188,8 @@ func coletaDracutConf(f *Facts, e *env.Env) {
 				continue
 			}
 			for _, alvo := range caminhosDeAtribuicaoShell(string(b), "install_items") {
-				f.Initramfs = append(f.Initramfs, ArtefatoInitramfs{
-					Path: alvo, Mecanismo: "dracut", Como: "install_items em " + baseNome(p),
-				})
+				f.Initramfs = append(f.Initramfs,
+					artefatoEmbutido(alvo, "dracut", "install_items em "+baseNome(p)))
 			}
 		}
 	}
@@ -180,9 +208,8 @@ func coletaMkinitcpioConf(f *Facts, e *env.Env) {
 			continue
 		}
 		for _, alvo := range caminhosDeArrayShell(string(b), "FILES") {
-			f.Initramfs = append(f.Initramfs, ArtefatoInitramfs{
-				Path: alvo, Mecanismo: "mkinitcpio", Como: "FILES em mkinitcpio.conf",
-			})
+			f.Initramfs = append(f.Initramfs,
+				artefatoEmbutido(alvo, "mkinitcpio", "FILES em mkinitcpio.conf"))
 		}
 	}
 	// mkinitcpio.conf.d é o diretório de drop-in moderno.
@@ -197,12 +224,17 @@ func coletaMkinitcpioConf(f *Facts, e *env.Env) {
 			continue
 		}
 		p := "/etc/mkinitcpio.conf.d/" + n
-		if b, err := e.ReadFile(p); err == nil {
-			for _, alvo := range caminhosDeArrayShell(string(b), "FILES") {
-				f.Initramfs = append(f.Initramfs, ArtefatoInitramfs{
-					Path: alvo, Mecanismo: "mkinitcpio", Como: "FILES em " + baseNome(p),
-				})
+		b, err := e.ReadFile(p)
+		if err != nil {
+			if env.EhLacuna(err) {
+				f.denyPersist("initramfs", p+" não pôde ser lido ("+env.MotivoDoErro(err)+
+					"): os arquivos que ele manda EMBUTIR na imagem não foram avaliados")
 			}
+			continue
+		}
+		for _, alvo := range caminhosDeArrayShell(string(b), "FILES") {
+			f.Initramfs = append(f.Initramfs,
+				artefatoEmbutido(alvo, "mkinitcpio", "FILES em "+baseNome(p)))
 		}
 	}
 }

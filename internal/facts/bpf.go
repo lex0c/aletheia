@@ -108,6 +108,18 @@ type BPF struct {
 
 	// Cortado marca que algum teto foi atingido: a lista não é o total.
 	Cortado bool `json:"truncated,omitempty"`
+	// CoberturaAnexo diz se a busca pelo ponto de ANEXAÇÃO foi completa, por
+	// mecanismo. É o que separa duas afirmações muito diferentes sobre um
+	// programa sem dono visível:
+	//
+	//	"não achei onde ele está preso"          — pode ser cegueira minha
+	//	"procurei em todo lugar e não há"        — é anomalia
+	//
+	// Sem isto, todo programa de cgroup e de rede era contado como NÃO
+	// ATRIBUÍVEL por natureza, e o trabalho de ler tc, XDP, act_bpf e
+	// BPF_PROG_QUERY só servia para nomear o detentor quando ele existia —
+	// nunca para concluir a ausência dele.
+	CoberturaAnexo CoberturaDeAnexo `json:"attach_coverage"`
 }
 
 // SemDonoVisivel diz que nenhum dos detentores legíveis apareceu.
@@ -195,6 +207,25 @@ func collectBPF(f *Facts, e *env.Env) {
 	})
 }
 
+// CoberturaDeAnexo registra, por mecanismo, se a enumeração de anexos terminou
+// SEM buraco. Só um `true` autoriza concluir que um programa daquele mecanismo
+// está sem explicação; qualquer buraco devolve a resposta para "não pude olhar".
+type CoberturaDeAnexo struct {
+	// Netlink cobre tc (cls_bpf e act_bpf) e XDP. Fica falso quando falta a
+	// capacidade, quando o rtnetlink não abre, quando a enumeração de
+	// interfaces falha, ou quando alguma interface não pôde ser consultada.
+	Netlink bool `json:"netlink"`
+	// Cgroup cobre a árvore de cgroup v2 por BPF_PROG_QUERY. Fica falso quando
+	// a hierarquia não é v2, e quando teto, profundidade, prazo, listagem ou
+	// abertura deixaram qualquer cgroup para trás.
+	Cgroup bool `json:"cgroup"`
+	// NetnsGap continua sendo verdade mesmo com Netlink completo: a ferramenta
+	// não entra em outro namespace de rede, e um filtro preso a uma interface
+	// DENTRO de um netns de contêiner não é lido. É lacuna DECLARADA, não
+	// resolvida — e por isso ela não derruba Netlink, ela acompanha.
+	NetnsGap bool `json:"netns_gap"`
+}
+
 // anexosDeRede resolve os anexos que vivem numa INTERFACE: o XDP da placa e o
 // filtro de tc.
 //
@@ -261,6 +292,17 @@ func anexosDeRede(f *Facts, e *env.Env, porID map[uint32]*ProgramaBPF, citados m
 			"): programa preso numa AÇÃO não pôde ser atribuído")
 		return
 	}
+	// Cobertura COMPLETA: capacidade presente, rtnetlink aberto, interfaces
+	// enumeradas, nenhum filtro ilegível e as ações lidas. Só com todos esses
+	// "sim" um programa de rede sem anexo pode ser AFIRMADO sem explicação —
+	// qualquer um dos `return` acima deixa a cobertura falsa, que é o mesmo que
+	// dizer "não pude olhar".
+	if semFiltro == 0 {
+		f.BPF.CoberturaAnexo.Netlink = true
+	}
+	// E o netns continua fora, com cobertura completa ou não: a ferramenta não
+	// entra em outro namespace de rede.
+	f.BPF.CoberturaAnexo.NetnsGap = true
 	for _, ac := range acoes {
 		onde := "act_bpf"
 		if ac.Nome != "" {
@@ -356,7 +398,15 @@ func cgroupPrioritario(nome string) bool {
 // teto de quantidade corta a cauda; o de profundidade é fusível contra árvore
 // patológica. Devolve os caminhos, e se cada teto foi atingido — cada um é uma
 // lacuna diferente.
-func percorrerCgroups(raiz string, teto int, prazo time.Time) (paths []string, cortouTeto, cortouFundo, cortouPrazo bool, ilegiveis []string) {
+// visitar é chamado AO TIRAR o cgroup da fila, antes de descer nos filhos. É o
+// que torna a varredura streaming: com a consulta acontecendo depois de a
+// árvore inteira ter sido enumerada, um host com dezenas de milhares de cgroups
+// gastava o prazo DESCOBRINDO caminhos e consultava quase nenhum — e a
+// priorização de system.slice/kubepods/docker, que existe para o orçamento cair
+// no que importa, não servia para nada, porque a prioridade decidia só a ordem
+// da descoberta. Intercalando, o prazo que acaba deixa para trás o que é fundo
+// e irrelevante, não o que é prioritário.
+func percorrerCgroups(raiz string, teto int, prazo time.Time, visitar func(path string)) (paths []string, cortouTeto, cortouFundo, cortouPrazo bool, ilegiveis []string) {
 	type no struct {
 		path  string
 		depth int
@@ -380,6 +430,9 @@ func percorrerCgroups(raiz string, teto int, prazo time.Time) (paths []string, c
 		cur := fila[0]
 		fila = fila[1:]
 		paths = append(paths, cur.path)
+		if visitar != nil {
+			visitar(cur.path)
+		}
 		if cur.depth >= maxCgroupDepth {
 			cortouFundo = true
 			continue
@@ -431,32 +484,23 @@ func anexosDeCgroup(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]
 	}
 
 	prazo := time.Now().Add(prazoCgroup)
-	paths, cortouTeto, cortouFundo, cortouPrazo, ilegiveis := percorrerCgroups(base, maxCgroups, prazo)
-	if cortouPrazo {
-		f.partial("bpf", "a varredura da árvore de cgroups não terminou dentro de "+
-			strconv.Itoa(int(prazoCgroup/time.Second))+"s: os cgroups não visitados "+
-			"NÃO tiveram os anexos BPF enumerados")
-	}
-	if n := len(ilegiveis); n > 0 {
-		amostra := ilegiveis
-		if len(amostra) > 3 {
-			amostra = amostra[:3]
-		}
-		f.partial("bpf", strconv.Itoa(n)+" cgroup(s) não puderam ser listados, e a "+
-			"subárvore deles NÃO foi percorrida: "+strings.Join(amostra, ", "))
-	}
-	var consultados, semTempo int
-	for i, p := range paths {
-		if time.Now().After(prazo) {
-			semTempo = len(paths) - i
-			break
-		}
+	var naoAbertos []string
+	var consultados int
+	consultar := func(p string) {
 		// FD cru com O_DIRECTORY, no idioma de syscall do resto do kbpf: o
 		// BPF_PROG_QUERY só quer o descritor do diretório do cgroup. Evita o
 		// finalizer do *os.File e falha cedo se o caminho não for diretório.
 		fd, err := syscall.Open(p, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
 		if err != nil {
-			continue // cgroup que sumiu ou sem permissão de abrir: segue
+			// Mesma distinção da travessia, e pela mesma razão. Depois de um
+			// readdir bem-sucedido isto é quase sempre corrida — cgroup morre o
+			// tempo todo —, mas "quase sempre" não é o critério: um EACCES aqui
+			// significa cgroup NÃO consultado, e os programas anexados nele
+			// ficam fora do inventário sem ninguém dizer.
+			if !errors.Is(err, syscall.ENOENT) {
+				naoAbertos = append(naoAbertos, p+" ("+env.MotivoDoErro(err)+")")
+			}
+			return
 		}
 		porTipo, errosPorTipo := kbpf.AnexosDeCgroup(fd, kbpf.TiposDeCgroup)
 		syscall.Close(fd)
@@ -486,6 +530,32 @@ func anexosDeCgroup(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]
 			}
 		}
 	}
+
+	_, cortouTeto, cortouFundo, cortouPrazo, ilegiveis := percorrerCgroups(
+		base, maxCgroups, prazo, consultar)
+	if cortouPrazo {
+		f.partial("bpf", "a varredura de cgroup parou no prazo de "+
+			strconv.Itoa(int(prazoCgroup/time.Second))+"s depois de consultar "+
+			strconv.Itoa(consultados)+": os cgroups restantes NÃO tiveram os anexos "+
+			"BPF enumerados")
+	}
+	if n := len(ilegiveis); n > 0 {
+		amostra := ilegiveis
+		if len(amostra) > 3 {
+			amostra = amostra[:3]
+		}
+		f.partial("bpf", strconv.Itoa(n)+" cgroup(s) não puderam ser listados, e a "+
+			"subárvore deles NÃO foi percorrida: "+strings.Join(amostra, ", "))
+	}
+	if n := len(naoAbertos); n > 0 {
+		amostra := naoAbertos
+		if len(amostra) > 3 {
+			amostra = amostra[:3]
+		}
+		f.partial("bpf", strconv.Itoa(n)+" cgroup(s) não puderam ser abertos para "+
+			"consulta de anexo: os programas anexados neles NÃO foram enumerados — "+
+			strings.Join(amostra, ", "))
+	}
 	if cortouTeto {
 		f.partial("bpf", strconv.Itoa(consultados)+" cgroups consultados; o teto de "+
 			strconv.Itoa(maxCgroups)+" foi atingido e os demais NÃO foram avaliados "+
@@ -495,11 +565,12 @@ func anexosDeCgroup(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]
 		f.partial("bpf", "árvore de cgroup mais funda que "+strconv.Itoa(maxCgroupDepth)+
 			" níveis: os cgroups abaixo NÃO foram descidos")
 	}
-	if semTempo > 0 {
-		f.partial("bpf", strconv.Itoa(semTempo)+" cgroups NÃO foram consultados: o "+
-			"prazo de "+strconv.Itoa(int(prazoCgroup/time.Second))+"s da varredura de "+
-			"cgroup esgotou")
-	}
+	// Cobertura COMPLETA da árvore: nenhum teto, nenhum prazo, nenhum cgroup
+	// ilegível ou não aberto. Cada um desses é um lugar onde um anexo pode
+	// estar sem que ninguém tenha olhado, e basta um para a ausência deixar de
+	// ser afirmável.
+	f.BPF.CoberturaAnexo.Cgroup = !cortouTeto && !cortouFundo && !cortouPrazo &&
+		len(ilegiveis) == 0 && len(naoAbertos) == 0
 }
 
 // quandoCarregou traduz o relógio de boot para UTC.// quandoCarregou traduz o relógio de boot para UTC. Sem boot conhecido a

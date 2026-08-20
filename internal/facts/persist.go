@@ -943,12 +943,12 @@ func mesclarUnits(units []Unit, e *env.Env) {
 			units[i].Shadowed = true
 		}
 
-		// Dedup de DROP-IN pelo NOME DO ARQUIVO: para o MESMO basename em árvores
-		// diferentes (`/etc/.../10-x.conf` e `/usr/lib/.../10-x.conf`), o systemd
-		// aplica SÓ o de maior precedência (/etc > /run > /usr/lib). Aplicar os
-		// dois faz o reset de um clobber o Exec do outro — FN ou FP conforme a
-		// ordem. Só nomes DIFERENTES é que se combinam. O vencedor por basename
-		// fica; os perdedores viram Shadowed e não entram na config efetiva.
+		// Dedup de DROP-IN pelo NOME DO ARQUIVO: para o MESMO basename, o systemd
+		// aplica SÓ UM — e qual é decidido por dropinVence (árvore /etc > /run >
+		// /usr/lib e, dentro dela, especificidade: exato > prefixo > template >
+		// type-wide). Aplicar os dois faz o reset de um apagar o Exec do outro —
+		// FN ou FP conforme a ordem. Só nomes DIFERENTES é que se combinam. Os
+		// perdedores viram Shadowed e não entram na config efetiva.
 		vencedor := map[string]int{}
 		for _, i := range idxs {
 			if units[i].DropInFor == "" {
@@ -960,7 +960,7 @@ func mesclarUnits(units []Unit, e *env.Env) {
 				vencedor[bn] = i
 				continue
 			}
-			if precedenciaArvore(units[i].Path) < precedenciaArvore(units[v].Path) {
+			if dropinVence(units[i].Path, units[v].Path) {
 				units[v].Shadowed = true
 				vencedor[bn] = i
 			} else {
@@ -1056,13 +1056,51 @@ func mesclarUnits(units []Unit, e *env.Env) {
 // pertence — menor = maior precedência. Serve para escolher, entre drop-ins de
 // mesmo nome em árvores diferentes, o único que o systemd aplica. Caminho fora
 // das árvores conhecidas fica com a MENOR precedência (nunca vence).
-func precedenciaArvore(path string) int {
+func precedenciaArvore(caminho string) int {
 	for i, d := range unitDirs {
-		if strings.HasPrefix(path, d.dir+"/") {
+		if strings.HasPrefix(caminho, d.dir+"/") {
 			return i
 		}
 	}
 	return len(unitDirs)
+}
+
+// especificidadeDropin classifica um drop-in pela pasta .d/ que o contém, na
+// ordem do systemd — MAIS específico ganha quando dois drop-ins de MESMO nome
+// de arquivo colidem: type-wide (service.d/) < template (foo@.service.d/) <
+// prefixo-por-dash (foo-.service.d/, mais longo = mais específico) < nome exato
+// (foo.service.d/). É o discriminador que faltava: dois `10-x.conf`, um exato e
+// um type-wide na MESMA árvore, tinham o vencedor decidido pela ordem de coleta.
+func especificidadeDropin(caminho string) int {
+	d := strings.TrimSuffix(path.Base(path.Dir(caminho)), ".d")
+	i := strings.LastIndexByte(d, '.')
+	if i < 0 {
+		return 0 // "service" — só o tipo, o menos específico
+	}
+	nome := d[:i]
+	switch {
+	case strings.HasSuffix(nome, "@"):
+		return 1 // template@.service
+	case strings.HasSuffix(nome, "-"):
+		return 1 + len(nome) // prefixo-: foo-bar- é mais específico que foo-
+	default:
+		return 1_000_000 // nome exato: sempre o mais específico
+	}
+}
+
+// dropinVence diz se o drop-in `a` é o que o systemd aplica quando `a` e `b`
+// têm o MESMO nome de arquivo. Árvore de maior precedência primeiro (/etc >
+// /run > /usr/lib, como já era); empate na árvore, o mais específico; empate
+// nos dois, o caminho lexical — determinístico, nunca dependente da ordem em
+// que os arquivos foram lidos do disco.
+func dropinVence(a, b string) bool {
+	if pa, pb := precedenciaArvore(a), precedenciaArvore(b); pa != pb {
+		return pa < pb
+	}
+	if sa, sb := especificidadeDropin(a), especificidadeDropin(b); sa != sb {
+		return sa > sb
+	}
+	return a < b
 }
 
 // ehPadraoDropin diz se o alvo de um drop-in é um PADRÃO (casa várias units), e

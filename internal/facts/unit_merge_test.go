@@ -496,3 +496,48 @@ func TestUserUnit_MascaraEhVista(t *testing.T) {
 		t.Fatalf("máscara /dev/null de unit de usuário devia sair Masked e não-efetiva: %+v", m)
 	}
 }
+
+// #3: dois drop-ins de MESMO nome de arquivo (10-x.conf) na MESMA árvore (/etc),
+// um EXATO (zoo.service.d/) e um TYPE-WIDE (service.d/). O systemd aplica só o
+// mais específico — o exato. Antes o empate na árvore era resolvido pela ordem
+// de coleta. O nome "zoo" é lexicalmente MAIOR que "service": sem o critério de
+// especificidade, o desempate lexical escolheria o type-wide (errado) — então o
+// teste morre se a especificidade sumir.
+func TestMerge_DropinMesmaArvoreEspecificidadeVence(t *testing.T) {
+	us := coletarUnits(t, map[string]string{
+		"usr/lib/systemd/system/zoo.service":         "[Service]\nExecStart=/usr/bin/zoo\n",
+		"etc/systemd/system/zoo.service.d/10-x.conf": "[Service]\nExecStart=\nExecStart=/tmp/.evil\n",
+		"etc/systemd/system/service.d/10-x.conf":     "[Service]\nExecStart=\nExecStart=/usr/bin/legit\n",
+	}, nil)
+	exato := acharUnit(us, "/etc/systemd/system/zoo.service.d/10-x.conf")
+	wide := acharUnit(us, "/etc/systemd/system/service.d/10-x.conf")
+	if exato == nil || wide == nil {
+		t.Fatalf("drop-ins não coletados: %+v", us)
+	}
+	if exato.Shadowed {
+		t.Error("o drop-in EXATO (zoo.service.d/) é o mais específico: deve vencer")
+	}
+	if !wide.Shadowed {
+		t.Error("o type-wide (service.d/) de MESMO nome de arquivo é o descartado")
+	}
+	var alvos []string
+	for _, u := range us {
+		if u.Name == "zoo.service" && u.Efetiva() {
+			for _, ex := range u.Exec {
+				alvos = append(alvos, ex.Target)
+			}
+		}
+	}
+	temEvil, temLegit := false, false
+	for _, a := range alvos {
+		if a == "/tmp/.evil" {
+			temEvil = true
+		}
+		if a == "/usr/bin/legit" {
+			temLegit = true
+		}
+	}
+	if !temEvil || temLegit {
+		t.Errorf("o vencedor devia ser o exato (/tmp/.evil), não o type-wide (/usr/bin/legit): %v", alvos)
+	}
+}

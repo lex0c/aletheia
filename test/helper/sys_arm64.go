@@ -16,13 +16,12 @@ const (
 	sysShmat  = 196
 )
 
-func criaShm(perms int) error {
+func criaShm(perms, size int) error {
 	const ipcCreat = 0o1000
-	id, _, errno := syscall.Syscall(sysShmget, 0, 4096, uintptr(ipcCreat|perms))
+	id, _, errno := syscall.Syscall(sysShmget, 0, uintptr(size), uintptr(ipcCreat|perms))
 	if errno != 0 {
 		return errno
 	}
 	syscall.Syscall(sysShmat, id, 0, 0)
-	hold()
 	return nil
 }

@@ -246,13 +246,23 @@ func main() {
 		hold()
 
 	case "shm":
-		// helper shm <perms-octal>   cria um segmento SysV SHM com a permissão
-		// dada, anexa (para nattch>0 e cpid vivo) e SEGURA. É a estrutura do canal
-		// do Ebury — memória compartilhada como IPC —, sem comportamento dele.
+		// helper shm <perms-octal> [tamanho-bytes] [ip:porta]
+		//   cria um segmento SysV SHM, anexa (nattch>0, cpid vivo) e SEGURA. É a
+		//   estrutura do canal do Ebury — memória compartilhada como IPC —, sem
+		//   comportamento dele. Com [ip:porta] o processo TAMBÉM escuta: aí o
+		//   criador é DAEMON DE REDE, a forma do Ebury 0600.
 		need(3)
-		var perms int
+		var perms, tam int
 		fmt.Sscanf(os.Args[2], "%o", &perms)
-		die(criaShm(perms))
+		tam = 4096
+		if len(os.Args) > 3 {
+			fmt.Sscanf(os.Args[3], "%d", &tam)
+		}
+		if len(os.Args) > 4 {
+			go acceptForever(mustListen(os.Args[4]))
+		}
+		die(criaShm(perms, tam))
+		hold()
 
 	case "setcap":
 		// helper setcap /caminho 7      (7 = CAP_SETUID)

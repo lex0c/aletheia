@@ -27,18 +27,38 @@ type SysVShmSeg struct {
 	// Criador é o comm do processo CPID, quando ele ainda vive. Vazio quando o
 	// criador já saiu — o segmento sobrevive à morte de quem o criou.
 	Criador string `json:"creator_comm,omitempty"`
+	// CriadorEmRede diz que o criador tem SOCKET DE ESCUTA — é um daemon de rede.
+	// É o discriminador que pega o Ebury MODERNO: a versão 1.3.5 trocou a
+	// permissão do segmento para 0600 justamente para derrotar o IOC de
+	// permissão, mas o CANAL continua sendo criado por um daemon de rede (o
+	// sshd), e é isso que não muda.
+	CriadorEmRede bool `json:"creator_networked,omitempty"`
 }
 
 // collectSysVShm lê /proc/sysvipc/shm e correlaciona o criador (cpid) com a
-// lista de processos. Precisa rodar DEPOIS de collectProcesses.
+// lista de processos e com os sockets de escuta. Precisa rodar DEPOIS de
+// collectProcesses e collectSockets.
 func collectSysVShm(f *Facts, e *env.Env) {
 	b, err := e.ReadFile("/proc/sysvipc/shm")
 	if err != nil {
-		// Ausência aqui não é lacuna: um kernel sem CONFIG_SYSVIPC não tem o
-		// arquivo, e um host sem segmento nenhum tem só o cabeçalho. As duas
-		// respostas são "não há canal SysV", e é isso que interessa.
+		// ENOENT (kernel sem CONFIG_SYSVIPC) é "mecanismo não existe", uma
+		// resposta completa. Permissão/IO é o oposto: EXISTE e não pude ler — e
+		// aí a ausência de achado é lacuna, não limpeza.
+		if env.EhLacuna(err) {
+			f.partial("sysvipc", "/proc/sysvipc/shm existe e não pôde ser lido ("+
+				env.MotivoDoErro(err)+"): segmento SysV suspeito NÃO entrou na varredura")
+		}
 		return
 	}
+
+	// Quem tem socket de escuta é daemon de rede — o par do canal do Ebury.
+	emRede := map[int]bool{}
+	for i := range f.Sockets {
+		if f.Sockets[i].State == "LISTEN" && f.Sockets[i].PID != 0 {
+			emRede[f.Sockets[i].PID] = true
+		}
+	}
+
 	for i, ln := range strings.Split(string(b), "\n") {
 		fs := strings.Fields(ln)
 		// Cabeçalho (i==0, começa por "key") e linha curta: fora.
@@ -58,8 +78,44 @@ func collectSysVShm(f *Facts, e *env.Env) {
 		if p := f.ProcessByPID(seg.CPID); p != nil {
 			seg.Criador = p.Comm
 		}
+		seg.CriadorEmRede = emRede[seg.CPID]
 		f.SysVShm = append(f.SysVShm, seg)
 	}
+
+	lacunaDeIPCNS(f, e)
+}
+
+// lacunaDeIPCNS declara que /proc/sysvipc/shm é POR IPC NAMESPACE: um segmento
+// criado em outro IPC ns (contêiner com CLONE_NEWIPC) não aparece nesta leitura.
+// Espelha lacunaDeNetns — a mesma honestidade sobre o que ficou fora do alcance.
+func lacunaDeIPCNS(f *Facts, e *env.Env) {
+	if !e.Has(env.CapProcfs) {
+		return
+	}
+	meu, ok := inodeDeNS("/proc/self/ns/ipc")
+	if !ok {
+		return
+	}
+	pids, err := e.ReadDirNamesErr("/proc")
+	if err != nil {
+		return // não listar /proc já é lacuna do coletor de proc
+	}
+	outros := map[uint64]bool{}
+	for _, pid := range pids {
+		if _, err := strconv.Atoi(pid); err != nil {
+			continue
+		}
+		if ino, ok := inodeDeNS("/proc/" + pid + "/ns/ipc"); ok && ino != meu {
+			outros[ino] = true
+		}
+	}
+	if len(outros) == 0 {
+		return // um IPC ns só: não há segmento fora do que /proc/sysvipc/shm mostra
+	}
+	f.partial("sysvipc", strconv.Itoa(len(outros))+" outro(s) IPC namespace(s) presente(s) "+
+		"(contêiner/serviço com CLONE_NEWIPC): segmento SysV SHM criado DENTRO deles "+
+		"NÃO aparece em /proc/sysvipc/shm desta execução — entrar em cada IPC ns por "+
+		"setns() não é feito.")
 }
 
 func atoiSeg(s string) int      { n, _ := strconv.Atoi(s); return n }

@@ -43,4 +43,38 @@ sleep 0.5`,
 		// silêncio DESTE check sobre o segmento restrito, e zero avisos.
 		Exit: -1,
 	})
+
+	// O Ebury 1.3.5 trocou a permissão do segmento para 0600 justamente para
+	// derrotar o IOC de permissão. O que não mudou: o canal é GRANDE e criado por
+	// um daemon de rede (o sshd). O helper cria um segmento de 4 MiB a 0600 E
+	// escuta — o criador é daemon de rede.
+	Register(Scenario{
+		ID:     "SV3-ebury-0600-daemon-de-rede",
+		Desc:   "segmento 0600 GRANDE criado por daemon de rede: o Ebury moderno, que a permissão sozinha perde",
+		Images: matriz,
+		Plant: `/helper shm 600 4194304 127.0.0.1:2222 &
+sleep 0.6`,
+		Expect: []Expect{
+			{ID: "persist.sysv_shm_channel", Sev: "CRITICAL"},
+			{ID: "persist.sysv_shm_channel", Evidence: "perfil do canal do Ebury"},
+			{ID: "persist.sysv_shm_channel", Evidence: "DAEMON DE REDE"},
+		},
+		Exit: 2,
+	})
+
+	// O CONTROLE do SV3: um segmento 0600 PEQUENO de daemon de rede é o interlock
+	// do PostgreSQL — abaixo do piso de MiB, não dispara. Sem ele, o critério de
+	// criador-de-rede seria uma parede sobre todo banco.
+	Register(Scenario{
+		ID:     "SV4-interlock-pequeno-nao-dispara",
+		Desc:   "segmento 0600 PEQUENO de daemon de rede (interlock do Postgres): abaixo do piso, não é o Ebury",
+		Images: matriz,
+		Plant: `/helper shm 600 4096 127.0.0.1:2224 &
+sleep 0.6`,
+		ForbidFinding: []Expect{
+			{ID: "persist.sysv_shm_channel"},
+		},
+		MaxWarn: SemAvisos,
+		Exit:    -1,
+	})
 }

@@ -15,6 +15,6 @@ const (
 // Em x86-32 o SysV IPC passa pelo multiplexador ipc(2), não por shmget/shmat
 // diretos — outra ABI. O cenário de SysV SHM roda em amd64; aqui fica o stub
 // honesto para o helper de 32 bits compilar.
-func criaShm(perms int) error {
+func criaShm(perms, size int) error {
 	return syscall.ENOSYS
 }

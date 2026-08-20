@@ -290,10 +290,6 @@ func Collect(e *env.Env) *Facts {
 	if e.Has(env.CapProcfs) {
 		e.Stage("processos")
 		collectProcesses(f, e)
-		// Depois dos processos: o criador de um segmento SysV SHM é um cpid, e
-		// nomeá-lo exige a lista de processos já lida. O canal IPC que não
-		// aparece em socket nem em fd.
-		collectSysVShm(f, e)
 		// Depois dos processos: o dono de cada socket sai do join com os fds
 		// que o coletor de processo já leu.
 		// Os limites vêm ANTES dos sockets: além de serem os tetos que
@@ -302,6 +298,11 @@ func Collect(e *env.Env) *Facts {
 		e.Stage("rede")
 		collectLimitesDeRede(f, e)
 		collectSockets(f, e)
+		// DEPOIS dos sockets: o criador de um segmento SysV SHM é um cpid, e
+		// saber se ele é DAEMON DE REDE (tem socket de escuta) exige os sockets já
+		// lidos — é o discriminador que pega o Ebury 0600. O canal IPC que não
+		// aparece em socket nem em fd.
+		collectSysVShm(f, e)
 		// E os que leem PACOTE, que não aparecem em tabela de conexão nenhuma:
 		// é por eles que um filtro de socket eBPF órfão continua vivo.
 		collectSocketsBrutos(f, e)

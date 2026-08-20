@@ -443,6 +443,15 @@ func main() {
 		// resultado, não de suposição.
 		plantarBPFDoor()
 
+	case "sockmap": // FixMapa: um sk_skb preso por um SOCKMAP (STREAM_VERDICT),
+		// órfão de fd. É o tipo "segurado por MAPA" que o kernel.bpf_unowned
+		// declara em lacuna mas que NENHUM teste de kernel real exercia — só
+		// struct montada em unit test (tautológico). Aqui o programa é real,
+		// carregado num kernel real: a matriz MEDE se a aletheia (a) o vê no
+		// inventário e (b) declara a lacuna FixMapa — nunca silêncio nem CRÍTICO
+		// falso.
+		plantarSockmap()
+
 	default:
 		fmt.Fprintln(os.Stderr, "técnica desconhecida:", os.Args[1])
 		os.Exit(2)
@@ -453,6 +462,95 @@ func main() {
 		os.Stdout.Sync()
 	}
 	time.Sleep(120 * time.Second)
+}
+
+// criarSockmap cria um BPF_MAP_TYPE_SOCKMAP e devolve o fd. É o mapa que SEGURA
+// o programa sk_skb: enquanto o processo mantém este fd aberto, o anexo
+// STREAM_VERDICT mantém o programa vivo mesmo depois de fechado o fd do prog.
+func criarSockmap() int {
+	var a struct {
+		mapType, keySize, valueSize, maxEntries uint32
+		mapFlags, innerMapFD, numaNode          uint32
+		mapName                                 [16]byte
+	}
+	a.mapType = 15 // BPF_MAP_TYPE_SOCKMAP
+	a.keySize, a.valueSize, a.maxEntries = 4, 4, 8
+	copy(a.mapName[:], "plant_skm")
+	fd, _, e := syscall.Syscall(sysBPF, 0 /*BPF_MAP_CREATE*/, uintptr(unsafe.Pointer(&a)), unsafe.Sizeof(a))
+	if e != 0 {
+		must(fmt.Errorf("%v", e), "BPF_MAP_CREATE sockmap")
+	}
+	return int(fd)
+}
+
+// carregarSkSkb carrega um programa BPF_PROG_TYPE_SK_SKB trivial (devolve
+// SK_PASS). expected_attach_type = STREAM_VERDICT porque o kernel casa o tipo
+// esperado da carga com o do anexo. Devolve o fd do programa.
+func carregarSkSkb() int {
+	insns := []byte{
+		0xb7, 0, 0, 0, 1, 0, 0, 0, // MOV64 R0, 1 (SK_PASS)
+		0x95, 0, 0, 0, 0, 0, 0, 0, // BPF_EXIT
+	}
+	lic := []byte("GPL\x00")
+	log := make([]byte, 4096)
+	var a struct {
+		progType, insnCnt  uint32
+		insns, license     uint64
+		logLevel, logSize  uint32
+		logBuf             uint64
+		kernVer, progFlags uint32
+		progName           [16]byte
+		progIfindex        uint32
+		expectedAttachType uint32
+	}
+	a.progType = 14 // BPF_PROG_TYPE_SK_SKB
+	a.insnCnt = 2
+	a.insns = uint64(uintptr(unsafe.Pointer(&insns[0])))
+	a.license = uint64(uintptr(unsafe.Pointer(&lic[0])))
+	a.logLevel, a.logSize = 1, uint32(len(log))
+	a.logBuf = uint64(uintptr(unsafe.Pointer(&log[0])))
+	copy(a.progName[:], "plant_skskb")
+	a.expectedAttachType = 5 // BPF_SK_SKB_STREAM_VERDICT
+	fd, _, e := syscall.Syscall(sysBPF, 5 /*BPF_PROG_LOAD*/, uintptr(unsafe.Pointer(&a)), unsafe.Sizeof(a))
+	runtime.KeepAlive(insns)
+	runtime.KeepAlive(lic)
+	runtime.KeepAlive(log)
+	if e != 0 {
+		must(fmt.Errorf("%v — %s", e, log), "BPF_PROG_LOAD sk_skb")
+	}
+	return int(fd)
+}
+
+// anexarSockmapVerdict prende o programa sk_skb ao SOCKMAP como STREAM_VERDICT.
+// O anexo passa a ser o detentor do programa — quando o fd do prog fecha, é o
+// mapa (que o processo ainda segura) o único fio de volta ao PID.
+func anexarSockmapVerdict(mapFD, progFD int) {
+	var a struct{ targetFD, attachBpfFD, attachType, attachFlags uint32 }
+	a.targetFD = uint32(mapFD)
+	a.attachBpfFD = uint32(progFD)
+	a.attachType = 5 // BPF_SK_SKB_STREAM_VERDICT
+	_, _, e := syscall.Syscall(sysBPF, 8 /*BPF_PROG_ATTACH*/, uintptr(unsafe.Pointer(&a)), unsafe.Sizeof(a))
+	if e != 0 {
+		must(fmt.Errorf("%v", e), "BPF_PROG_ATTACH sockmap verdict")
+	}
+}
+
+// plantarSockmap monta o sk_skb-preso-por-sockmap e o deixa órfão de fd,
+// segurando o mapa aberto. Imprime prog_id/map_id (antes de fechar o prog) para
+// a matriz confirmar o achado sobre ESTE objeto, não outro BPF vivo na VM.
+func plantarSockmap() {
+	mapFD := criarSockmap() // o processo SEGURA o sockmap
+	prog := carregarSkSkb()
+	anexarSockmapVerdict(mapFD, prog)
+	progID := idDoObjetoBPF(prog)
+	mapID := idDoObjetoBPF(mapFD)
+	syscall.Close(prog) // órfão de fd: quem o segura é o anexo do sockmap
+	fmt.Printf("PLANT pid=%d prog_id=%d map_id=%d sockmap: sk_skb preso por SOCKMAP, órfão de fd\n",
+		os.Getpid(), progID, mapID)
+	os.Stdout.Sync()
+	for {
+		time.Sleep(time.Hour)
+	}
 }
 
 // criarMapa cria um BPF_MAP (array de 1 elemento) e devolve o fd. É o que um

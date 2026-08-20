@@ -88,6 +88,7 @@ echo "===BEGIN==="
 # --- BASELINE: host limpo. os três têm de CALAR (controle negativo). ---
 scan
 echo "base_socket=$(tem cross.socket_view) base_module=$(tem cross.module_view) base_binfmt=$(tem kernel.binfmt_interpreter)"
+echo "base_sockmap=$(grep -c 'segurado por um MAPA' /tmp/o.jsonl 2>/dev/null)"
 
 # --- socket_view: hook em tcp4_seq_show esconde a porta de /proc/net/tcp ---
 insmod /socknd.ko esconder=1
@@ -189,6 +190,21 @@ scan
 # bpf_unowned" passaria mesmo que o socket_filter específico sumisse.
 echo "bpfdoor_prog=$BDPROG bpfdoor_unowned=$(grep "\"id\":\"kernel.bpf_unowned\"" /tmp/o.jsonl 2>/dev/null | grep -c "prog id=$BDPROG")"
 
+# --- SOCKMAP: um sk_skb preso por um SOCKMAP (STREAM_VERDICT), órfão de fd. É o
+# tipo "segurado por MAPA": o kernel.bpf_unowned NÃO acusa (seria falso — o
+# conteúdo do mapa não foi lido) mas DECLARA a lacuna. Este caminho (FixMapa)
+# só tinha teste tautológico de struct; aqui o programa é REAL num kernel real.
+# A prova tem dois lados: o inventário VÊ o programa (nome plant_skskb — a ABI
+# de bpf(2) casou com o kernel) E a lacuna é DECLARADA (não silêncio).
+/plant sockmap >/tmp/skm.out 2>/tmp/skm.err &
+sleep 1
+SKMPROG=$(sed -n 's/.*prog_id=\([0-9]*\).*/\1/p' /tmp/skm.out)
+echo "sockmap_err=$(tr -d '\n' </tmp/skm.err)"
+/aletheia collect --out /tmp/dsk.json --no-progress >/dev/null 2>&1
+echo "sockmap_visto=$(grep -c 'plant_skskb' /tmp/dsk.json 2>/dev/null)"
+scan
+echo "sockmap_prog=$SKMPROG sockmap_lacuna=$(grep -c 'segurado por um MAPA' /tmp/o.jsonl 2>/dev/null)"
+
 echo "===END==="
 poweroff -f 2>/dev/null || echo o > /proc/sysrq-trigger
 sleep 3
@@ -227,6 +243,16 @@ linha "cls_bpf (tc)"    "atribuído (RTM_GETTFILTER)" "$(get net_base)"    "$(ge
 linha "act_bpf"         "atribuído (RTM_GETACTION)"  "$(get net_base)"    "$(get act_attributed)"
 linha "tc em outro netns" "lacuna netns DECLARADA"   "$(get netns_base)"  "$(get netns_lacuna)"
 linha "bpfdoor prog $(get bpfdoor_prog)" "kernel.bpf_unowned (órfão)" "0"     "$(get bpfdoor_unowned)"
+
+# O sk_skb-por-sockmap tem dois lados que TÊM de valer juntos: o inventário VÊ o
+# programa (plant_skskb — prova de que a ABI de bpf(2) casa com kernel REAL, não
+# com struct de teste) E o kernel.bpf_unowned DECLARA a lacuna FixMapa, em vez
+# de calar ou acusar em falso. Baseline sem FixMapa é o controle negativo.
+skv="$(get sockmap_visto)"; skl="$(get sockmap_lacuna)"; skb="$(get base_sockmap)"
+if [ "${skb:-9}" != "0" ]; then skres="BASE-SUJO!"; falhou=1
+elif [ "${skv:-0}" -ge 1 ] 2>/dev/null && [ "${skl:-0}" -ge 1 ] 2>/dev/null; then skres="PASS"
+else skres="FALHOU"; falhou=1; fi
+printf '%-22s %-28s %-12s\n' "sk_skb por sockmap" "FixMapa lacuna DECLARADA" "$skres"
 
 # O duplo-hide tem dois lados: cross.socket_view CALA (as fontes concordam) e o
 # kernel.ftrace_hook DISPARA (o hook em tcp4_seq_show é sinal independente).

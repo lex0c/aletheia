@@ -166,24 +166,36 @@ func execSemKey(exec []ExecLine, key string) []ExecLine {
 	return out
 }
 
-// unitDirs são as árvores de unit, na ordem de precedência do systemd. As de
-// /etc e /run vencem as de /usr — e é por isso que o atacante escreve nelas.
+// unitDirs são as árvores de unit, na ORDEM DE PRECEDÊNCIA REAL do systemd (a
+// primeira vence) — a "System Unit Search Path" da systemd.unit(5). A ordem
+// importa para valer: control e transient vencem /etc/systemd/system, e
+// /usr/local vence /usr/lib. Errar isso faz mesclarUnits() marcar como
+// Shadowed a unit que o systemd de fato executa — e como os checks pulam o que
+// não é Efetiva(), a implementação criada para tirar FP de unit inativa viraria
+// FN da unit ATIVA. É por transient/control que o `systemd-run` e os overrides
+// de runtime plantam sem deixar .service em /etc.
+//
+// generator.* são unidades GERADAS em runtime (/run) — um gerador malicioso é
+// vetor de persistência real, e por isso entram, no lugar certo da tabela.
+//
+// O load path de USER por-home (XDG: ~/.config/systemd/user etc.) ainda não
+// está aqui — é dívida declarada, a ser resolvida com a enumeração de homes.
 var unitDirs = []struct {
 	dir    string
 	scope  string
 	vendor bool
 }{
+	{"/etc/systemd/system.control", "system", false},
+	{"/run/systemd/system.control", "system", false},
+	{"/run/systemd/transient", "system", false},
+	{"/run/systemd/generator.early", "system", false},
 	{"/etc/systemd/system", "system", false},
 	{"/run/systemd/system", "system", false},
-	// Transient (systemd-run) e control (overrides de runtime): execução e
-	// persistência que NÃO deixam um .service permanente em /etc. `systemd-run`
-	// planta aqui, e sem estes diretórios a unit efêmera passava invisível.
-	{"/run/systemd/transient", "system", false},
-	{"/run/systemd/system.control", "system", false},
-	{"/etc/systemd/system.control", "system", false},
+	{"/run/systemd/generator", "system", false},
+	{"/usr/local/lib/systemd/system", "system", false},
 	{"/usr/lib/systemd/system", "system", true},
 	{"/lib/systemd/system", "system", true},
-	{"/usr/local/lib/systemd/system", "system", false},
+	{"/run/systemd/generator.late", "system", false},
 	{"/etc/systemd/user", "user", false},
 	{"/run/systemd/user.control", "user", false},
 	{"/usr/lib/systemd/user", "user", true},
@@ -576,13 +588,23 @@ func collectUnits(f *Facts, e *env.Env) {
 			if ent.IsDir() {
 				switch {
 				case strings.HasSuffix(name, ".wants"), strings.HasSuffix(name, ".requires"):
-					for _, ln := range e.ReadDirNames(full) {
+					nomes, errL := e.ReadDirNamesErr(full)
+					if env.EhLacuna(errL) {
+						f.denyPersist("unit", full+" não pôde ser listado ("+
+							env.MotivoDoErro(errL)+"): quais units esta árvore HABILITA NÃO foi lido")
+					}
+					for _, ln := range nomes {
 						wants[ln] = append(wants[ln], full+"/"+ln)
 					}
 				case strings.HasSuffix(name, ".d"):
 					// drop-ins: alteram a unit sem tocar no arquivo dela
 					target := strings.TrimSuffix(name, ".d")
-					for _, c := range e.ReadDirNames(full) {
+					nomes, errL := e.ReadDirNamesErr(full)
+					if env.EhLacuna(errL) {
+						f.denyPersist("unit", full+" não pôde ser listado ("+
+							env.MotivoDoErro(errL)+"): um drop-in plantado aqui NÃO foi avaliado")
+					}
+					for _, c := range nomes {
 						if !strings.HasSuffix(c, ".conf") {
 							continue
 						}
@@ -590,7 +612,7 @@ func collectUnits(f *Facts, e *env.Env) {
 							truncated = true
 							break
 						}
-						u := parseUnitFile(e, full+"/"+c, d.scope, d.vendor)
+						u := parseUnitFile(f, e, full+"/"+c, d.scope, d.vendor)
 						u.Name = target
 						u.DropInFor = target
 						u.Kind = kindOf(target)
@@ -606,7 +628,7 @@ func collectUnits(f *Facts, e *env.Env) {
 				truncated = true
 				continue
 			}
-			u := parseUnitFile(e, full, d.scope, d.vendor)
+			u := parseUnitFile(f, e, full, d.scope, d.vendor)
 			u.Name = name
 			u.Kind = kindOf(name)
 			// Máscara: link para /dev/null desliga a unit. Sem detectar, ela
@@ -633,12 +655,19 @@ func collectUnits(f *Facts, e *env.Env) {
 			negados = append(negados, dir)
 			continue
 		}
-		for _, name := range e.ReadDirNames(dir) {
+		nomes, errL := e.ReadDirNamesErr(dir)
+		if env.EhLacuna(errL) {
+			// lookup passou mas a listagem falhou (corrida/EIO): trate como
+			// negado, para não afirmar "nenhuma unit de usuário aqui".
+			negados = append(negados, dir)
+			continue
+		}
+		for _, name := range nomes {
 			if !isUnitName(name) || len(units) >= maxUnits {
 				truncated = truncated || len(units) >= maxUnits
 				continue
 			}
-			u := parseUnitFile(e, dir+"/"+name, "user", false)
+			u := parseUnitFile(f, e, dir+"/"+name, "user", false)
 			u.Name = name
 			u.Kind = kindOf(name)
 			units = append(units, u)
@@ -836,7 +865,8 @@ func mesclarUnits(units []Unit) {
 			return baseNome(ua.Path) < baseNome(ub.Path)
 		})
 
-		// Precedência e máscara: a primeira base vence.
+		// Precedência de BASE: a primeira (maior precedência) vence; as demais
+		// viram Shadowed.
 		primeiraBase := -1
 		for _, i := range idxs {
 			if units[i].DropInFor != "" {
@@ -848,21 +878,57 @@ func mesclarUnits(units []Unit) {
 			}
 			units[i].Shadowed = true
 		}
-		if primeiraBase >= 0 && units[primeiraBase].Masked {
-			for _, i := range idxs {
-				units[i].Masked = true // máscara desliga o grupo inteiro
+
+		// Dedup de DROP-IN pelo NOME DO ARQUIVO: para o MESMO basename em árvores
+		// diferentes (`/etc/.../10-x.conf` e `/usr/lib/.../10-x.conf`), o systemd
+		// aplica SÓ o de maior precedência (/etc > /run > /usr/lib). Aplicar os
+		// dois faz o reset de um clobber o Exec do outro — FN ou FP conforme a
+		// ordem. Só nomes DIFERENTES é que se combinam. O vencedor por basename
+		// fica; os perdedores viram Shadowed e não entram na config efetiva.
+		vencedor := map[string]int{}
+		for _, i := range idxs {
+			if units[i].DropInFor == "" {
+				continue
+			}
+			bn := baseNome(units[i].Path)
+			v, ok := vencedor[bn]
+			if !ok {
+				vencedor[bn] = i
+				continue
+			}
+			if precedenciaArvore(units[i].Path) < precedenciaArvore(units[v].Path) {
+				units[v].Shadowed = true
+				vencedor[bn] = i
+			} else {
+				units[i].Shadowed = true
 			}
 		}
 
-		// Resets sequenciais: um objeto com reset limpa os ANTERIORES do grupo.
-		for pos, i := range idxs {
-			for _, k := range units[i].ExecResetKeys {
-				for _, j := range idxs[:pos] {
-					units[j].Exec = execSemKey(units[j].Exec, k)
+		// Máscara: se a base vencedora é link para /dev/null, o grupo INTEIRO
+		// está mascarado — drop-in não ressuscita unit mascarada.
+		if primeiraBase >= 0 && units[primeiraBase].Masked {
+			for _, i := range idxs {
+				units[i].Masked = true
+			}
+		}
+
+		// Resets sequenciais, SÓ entre os efetivos (não-Shadowed), na ordem de
+		// carga: um objeto com reset limpa os ANTERIORES. Base sombreada ou
+		// drop-in perdedor de basename não roda, então seu reset também não vale.
+		var efetivos []int
+		for _, i := range idxs {
+			if !units[i].Shadowed {
+				efetivos = append(efetivos, i)
+			}
+		}
+		for pos, i := range efetivos {
+			for _, rk := range units[i].ExecResetKeys {
+				for _, j := range efetivos[:pos] {
+					units[j].Exec = execSemKey(units[j].Exec, rk)
 				}
 			}
 			if units[i].EnvFileReset {
-				for _, j := range idxs[:pos] {
+				for _, j := range efetivos[:pos] {
 					units[j].Environment = envSemArquivos(units[j].Environment, units[j].Path)
 					units[j].EnvFilesIlegiveis = nil
 				}
@@ -871,13 +937,32 @@ func mesclarUnits(units []Unit) {
 	}
 }
 
-func parseUnitFile(e *env.Env, path, scope string, vendor bool) Unit {
+// precedenciaArvore devolve o índice da árvore de unitDirs a que o caminho
+// pertence — menor = maior precedência. Serve para escolher, entre drop-ins de
+// mesmo nome em árvores diferentes, o único que o systemd aplica. Caminho fora
+// das árvores conhecidas fica com a MENOR precedência (nunca vence).
+func precedenciaArvore(path string) int {
+	for i, d := range unitDirs {
+		if strings.HasPrefix(path, d.dir+"/") {
+			return i
+		}
+	}
+	return len(unitDirs)
+}
+
+func parseUnitFile(f *Facts, e *env.Env, path, scope string, vendor bool) Unit {
 	u := Unit{Path: path, Scope: scope, Vendor: vendor}
 	if fi, err := e.Lstat(path); err == nil {
 		u.ModUTC = fi.ModTime().UTC().Format(time.RFC3339)
 	}
 	b, err := e.ReadFile(path)
 	if err != nil {
+		// "não consegui ler" ≠ "unit vazia". Um .service ilegível (EACCES) sem
+		// isto virava unit sem Exec/Env — benigna aos olhos dos checks. FN.
+		if env.EhLacuna(err) {
+			f.denyPersist("unit", path+" existe e não pôde ser lido ("+
+				env.MotivoDoErro(err)+"): o ExecStart/Environment desta unit NÃO foi avaliado")
+		}
 		return u
 	}
 
@@ -904,6 +989,12 @@ func parseUnitFile(e *env.Env, path, scope string, vendor bool) Unit {
 		switch {
 		case k == "ExecSearchPath":
 			// ANTES do HasPrefix(k,"Exec") — senão viraria uma linha de comando.
+			// Vazio RESETA a lista (como ExecStart=): sem isto, ExecSearchPath=/tmp/a
+			// seguido de ExecSearchPath= mantinha /tmp/a, divergindo do systemd.
+			if v == "" {
+				u.ExecSearchPath = nil
+				break
+			}
 			// Lista separada por espaço ou dois-pontos; pode repetir.
 			for _, d := range strings.FieldsFunc(v, func(r rune) bool { return r == ' ' || r == ':' }) {
 				if d != "" {

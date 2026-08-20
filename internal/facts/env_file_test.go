@@ -27,7 +27,7 @@ func TestEnvironmentFileGlobExpande(t *testing.T) {
 		[]byte("[Service]\nEnvironmentFile=/etc/app/*.env\nExecStart=/usr/bin/svc\n"), 0o644)
 	e := env.Probe(env.Options{Root: raiz, Version: "test"})
 	t.Cleanup(func() { e.Close() })
-	u := parseUnitFile(e, "/svc.service", "system", false)
+	u := parseUnitFile(&Facts{}, e, "/svc.service", "system", false)
 	v, ok := envDe(u, "LD_PRELOAD")
 	if !ok || v != "/tmp/.x.so" {
 		t.Fatalf("glob /etc/app/*.env deve incorporar backdoor.env: %+v", u.Environment)
@@ -45,7 +45,7 @@ func TestEnvironmentFileVazioRedefine(t *testing.T) {
 		[]byte("[Service]\nEnvironment=FOO=bar\nEnvironmentFile=/etc/old.env\nEnvironmentFile=\nExecStart=/usr/bin/svc\n"), 0o644)
 	e := env.Probe(env.Options{Root: raiz, Version: "test"})
 	t.Cleanup(func() { e.Close() })
-	u := parseUnitFile(e, "/svc.service", "system", false)
+	u := parseUnitFile(&Facts{}, e, "/svc.service", "system", false)
 	if _, ok := envDe(u, "LD_PRELOAD"); ok {
 		t.Errorf("EnvironmentFile= vazio deveria descartar old.env: %+v", u.Environment)
 	}
@@ -68,7 +68,7 @@ func TestEnvironmentFileGlobDirIlegivelLacuna(t *testing.T) {
 	t.Cleanup(func() { os.Chmod(filepath.Join(raiz, "etc/app"), 0o755) })
 	e := env.Probe(env.Options{Root: raiz, Version: "test"})
 	t.Cleanup(func() { e.Close() })
-	u := parseUnitFile(e, "/svc.service", "system", false)
+	u := parseUnitFile(&Facts{}, e, "/svc.service", "system", false)
 	if len(u.EnvFilesIlegiveis) == 0 {
 		t.Errorf("diretório do glob ilegível tem de virar lacuna: %+v", u)
 	}
@@ -106,7 +106,7 @@ func TestEnvironmentFileEspecificadorViraLacuna(t *testing.T) {
 		[]byte("[Service]\nEnvironmentFile=%h/.config/.env\nExecStart=/usr/bin/svc\n"), 0o644)
 	e := env.Probe(env.Options{Root: raiz, Version: "test"})
 	t.Cleanup(func() { e.Close() })
-	u := parseUnitFile(e, "/svc.service", "system", false)
+	u := parseUnitFile(&Facts{}, e, "/svc.service", "system", false)
 	if len(u.EnvFilesIlegiveis) == 0 {
 		t.Errorf("%%h não expandido tem de virar lacuna, não sumir: %+v", u)
 	}

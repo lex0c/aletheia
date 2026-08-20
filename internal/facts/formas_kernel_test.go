@@ -222,7 +222,7 @@ func TestParseUnitFileFormasCondicionais(t *testing.T) {
 		}
 		e := env.Probe(env.Options{Root: raiz, Version: "test"})
 		t.Cleanup(func() { e.Close() })
-		return parseUnitFile(e, "/x.service", "system", false)
+		return parseUnitFile(&Facts{}, e, "/x.service", "system", false)
 	}
 
 	t.Run("continuacao de linha", func(t *testing.T) {

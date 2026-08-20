@@ -23,6 +23,98 @@ func init() {
 	check.Register(unitExecSuspect)
 	check.Register(unitDropIn)
 	check.Register(unitTimerFrequent)
+	check.Register(unitSemDono)
+}
+
+// unitSemDono — runbook §7.2 e §24.
+//
+// O buraco entre dois checks que já existiam. O `unit_exec_suspect` pega a unit
+// que executa de CAMINHO suspeito (/tmp, /home) ou baixa-e-executa; o
+// `no_package_owner` pega o binário órfão como ARQUIVO. Nenhum dos dois pega a
+// forma clássica do backdoor por serviço:
+//
+//	ExecStart=/bin/shellserver, User=root, Restart=always
+//
+// O binário está em /bin — não é caminho suspeito, então o primeiro check cala.
+// E ainda que o segundo aponte o /bin/shellserver como sem dono, ninguém liga
+// isso à UNIT que o ressuscita: o responder mata o processo e o systemd o
+// reergue em cinco segundos.
+//
+// Aqui o sinal é a combinação: unit FORA de /usr/lib (Vendor=false, alguém a
+// escreveu) executando um binário que mora em diretório de PACOTE e que NENHUM
+// pacote entregou. É a assinatura do serviço-backdoor — e a ação é remover a
+// unit ANTES de matar, que os outros dois não dizem.
+var unitSemDono = check.Check{
+	ID:       "persist.unit_unowned",
+	Ref:      "7.2",
+	Title:    "serviço de systemd executa um binário de sistema que nenhum pacote entregou",
+	Group:    "persist",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Wtf:      true,
+	FalsePositives: []string{
+		"agente instalado à mão tem unit própria e binário sem dono — mas em " +
+			"/opt ou /usr/local, onde sem dono é a NORMA. Este check exige o " +
+			"binário num diretório de PACOTE (/bin, /usr/lib…), onde nada deveria " +
+			"existir sem um pacote atrás",
+		"o que separa este achado do serviço legítimo NÃO é a unit estar em /etc " +
+			"(drop-in e customização vivem lá): é o binário executado não ter DONO " +
+			"de pacote E morar onde tudo tem dono",
+		"sem a base de pacotes legível (contêiner mínimo, imagem sem dpkg/rpm) a " +
+			"pergunta de propriedade não pode ser feita, e o achado não se forma — " +
+			"vira lacuna declarada, não silêncio",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		var r check.Result
+		semDono := caminhosSemDono(f)
+		if len(semDono) == 0 {
+			r.Partial = append(r.Partial, f.PersistDenied["pkg"]...)
+			r.Partial = append(r.Partial, f.PersistDenied["unit"]...)
+			return r
+		}
+		visto := map[string]bool{}
+		for i := range f.Units {
+			u := &f.Units[i]
+			// Unit de PACOTE não entra: ela e o binário dela vêm juntos, com dono.
+			if u.Vendor {
+				continue
+			}
+			for _, ex := range u.Exec {
+				// O ALVO EFETIVO, não o primeiro token: `ExecStart=/usr/bin/env
+				// /bin/shellserver` esconderia o backdoor atrás do env.
+				alvo := strings.TrimLeft(alvoEfetivo(ex.Cmd), "-@+!:")
+				if !semDono[alvo] || !dirDePacote(alvo) {
+					continue
+				}
+				chave := u.Name + "\x00" + alvo
+				if visto[chave] {
+					continue
+				}
+				visto[chave] = true
+
+				ev := []string{
+					ex.Key + "=" + ex.Cmd,
+					"o alvo " + alvo + " mora em diretório de PACOTE e NENHUM pacote o " +
+						"reivindica (base: " + f.Pkg.Kind + "): binário de sistema que " +
+						"ninguém entregou",
+					"arquivo: " + u.Path,
+				}
+				ev = append(ev, unitContext(u)...)
+
+				fd := self.F(check.SevCritical, u.Name, "", ev...)
+				fd.Quando, fd.QuandoFonte = u.ModUTC, "mtime do arquivo da unit"
+				fd.NextSteps = []string{
+					"remova a UNIT antes de matar o processo — com Restart o systemd " +
+						"o ressuscita em segundos (runbook §19)",
+					"preserve o binário " + alvo + " antes de qualquer coisa (runbook §6)",
+				}
+				r.Findings = append(r.Findings, fd)
+			}
+		}
+		r.Partial = append(r.Partial, f.PersistDenied["unit"]...)
+		return r
+	},
 }
 
 // unitExecSuspect — runbook §7.2.

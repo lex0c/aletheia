@@ -173,6 +173,9 @@ func collectPersist(f *Facts, e *env.Env) {
 	// deploy de implante. Depois do collectPkg ele nunca era perguntado, e o
 	// check pesava tudo como aviso.
 	collectInterpretador(f, e)
+	// nsswitch.conf: uma fonte NSS com lib sem dono roda em TODA resolução de
+	// nome. Antes do collectPkg, para o caminho da lib entrar na propriedade.
+	collectNSS(f, e)
 	// Por último: a pergunta de propriedade precisa dos candidatos que os
 	// coletores acima produziram.
 	collectPkg(f, e)

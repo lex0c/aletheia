@@ -48,8 +48,11 @@ type Facts struct {
 	Loader Loader `json:"loader"`
 	// HooksInterp são as variáveis que fazem um interpretador carregar código
 	// de terceiro — o LD_PRELOAD de quem não é ELF.
-	HooksInterp   []HookInterp   `json:"interpreter_hooks,omitempty"`
-	Units         []Unit         `json:"units,omitempty"`
+	HooksInterp []HookInterp `json:"interpreter_hooks,omitempty"`
+	Units       []Unit       `json:"units,omitempty"`
+	// NSSModules são as fontes do /etc/nsswitch.conf e a lib que cada uma
+	// carrega — um libnss_ sem dono é backdoor carregado em toda resolução.
+	NSSModules    []NSSModule    `json:"nss_modules,omitempty"`
 	ToolArtifacts []ToolArtifact `json:"tool_artifacts,omitempty"`
 	Cron          []CronEntry    `json:"cron,omitempty"`
 	SSH           SSHConfig      `json:"ssh"`

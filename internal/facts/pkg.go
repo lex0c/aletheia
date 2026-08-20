@@ -335,6 +335,14 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 			add(primeiroToken(ex.Cmd), "unit "+u.Name)
 		}
 	}
+	// A lib de cada fonte NSS: um libnss_ sem dono é carregado em toda resolução
+	// de nome, inclusive por daemon root (§7.8). É caminho de disco, não linha
+	// de comando — entra por addDoDisco.
+	for i := range f.NSSModules {
+		if f.NSSModules[i].Path != "" {
+			addDoDisco(f.NSSModules[i].Path, "módulo NSS "+f.NSSModules[i].Fonte)
+		}
+	}
 	// O `init=` da linha de boot. É o PID 1: o kernel o executa antes de
 	// existir userland, e não há unit, cron nem perfil de shell que registre
 	// isso. Sem entrar aqui, a única pergunta que separa um init legítimo de um

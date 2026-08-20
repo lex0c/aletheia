@@ -35,6 +35,17 @@ const (
 	maxUnits = 3000
 )
 
+// execPathPadrao é o PATH FIXO que o systemd usa para resolver um Exec*= de
+// nome NU quando a unit NÃO declara ExecSearchPath nem um PATH próprio — a
+// mesma lista embutida do PID 1 (systemd.exec(5), "a fixed value"). Sem ela, um
+// ExecStart de nome nu ficava sem alvo concreto e o check de dono não via o
+// binário que de fato roda.
+var execPathPadrao = []string{
+	"/usr/local/sbin", "/usr/local/bin",
+	"/usr/sbin", "/usr/bin",
+	"/sbin", "/bin",
+}
+
 // Loader é o que o linker dinâmico injeta em TODO processo dinâmico
 // (runbook §7.8). É o rootkit de userland mais comum, e cabe em três arquivos.
 type Loader struct {
@@ -142,6 +153,12 @@ type Unit struct {
 type ExecLine struct {
 	Key string `json:"key"` // ExecStart | ExecStartPre | …
 	Cmd string `json:"cmd"`
+	// RawCmd é o comando como escrito no arquivo, ANTES de resolver o nome nu
+	// contra qualquer search path. A resolução EFETIVA (com o ExecSearchPath do
+	// drop-in e o PATH fixo do systemd) só é possível pós-merge; guardar o cru
+	// deixa essa resolução partir sempre da origem, não de um Cmd já mexido por
+	// uma resolução por-arquivo que o merge invalidou. Interno à coleta.
+	RawCmd string `json:"-"`
 	// Target é o ALVO EFETIVO — o programa que de fato roda, desembrulhados os
 	// wrappers (env, sudo, sh -c, env -S). Computado UMA vez na coleta para que
 	// a pergunta de propriedade e os checks de execução usem a MESMA resposta.
@@ -632,16 +649,21 @@ func collectUnits(f *Facts, e *env.Env) {
 				truncated = true
 				continue
 			}
+			// Máscara ANTES do parse: link para /dev/null (clássica) ou arquivo
+			// vazio desliga a unit. Detectar aqui, sem chamar o ReadFile, evita
+			// que o /dev/null (ErrNaoEhArquivo, que é lacuna) vire gap FALSO — a
+			// unit sairia Masked E "não consegui ler" ao mesmo tempo. Máscara é
+			// config conhecida, não uma falha de leitura.
+			if detectarMascara(e, full) {
+				units = append(units, Unit{
+					Path: full, Name: name, Scope: d.scope,
+					Vendor: d.vendor, Kind: kindOf(name), Masked: true,
+				})
+				continue
+			}
 			u := parseUnitFile(f, e, full, d.scope, d.vendor)
 			u.Name = name
 			u.Kind = kindOf(name)
-			// Máscara: link para /dev/null desliga a unit. Sem detectar, ela
-			// vinha como unit VAZIA (o ReadFile segue o link e lê nada) e podia
-			// ser tratada como real; e uma máscara sobre um nome de sistema é
-			// legítima, não um achado.
-			if alvo, err := e.Readlink(full); err == nil && alvo == "/dev/null" {
-				u.Masked = true
-			}
 			units = append(units, u)
 		}
 	}
@@ -708,7 +730,7 @@ func collectUnits(f *Facts, e *env.Env) {
 	// (por dash). Antes só o exato entrava — um `service.d/50-x.conf` que altera
 	// TODA service, ou um `foo-.service.d/`, passava invisível. Expande para as
 	// bases que casa ANTES do merge, para o resto da fusão seguir 1:1.
-	units = expandirDropins(units)
+	units = expandirDropins(f, units)
 
 	// Config EFETIVA: precedência por nome (a de maior precedência vence, as
 	// demais viram Shadowed), máscara propagada ao grupo, e resets de Exec/Env
@@ -984,8 +1006,31 @@ func mesclarUnits(units []Unit, e *env.Env) {
 		}
 		for _, i := range efetivos {
 			for j := range units[i].Exec {
-				if len(searchPath) > 0 && !temPATH {
-					units[i].Exec[j].Cmd = resolverNomeNu(e, units[i].Exec[j].Cmd, searchPath)
+				// Resolve SEMPRE a partir do cru: uma resolução por-arquivo já
+				// pode ter mexido o Cmd (base com ExecSearchPath próprio), e o
+				// merge invalida essa escolha — um drop-in que RESETA e re-aponta
+				// o ExecSearchPath mudaria o alvo, mas o resolverNomeNu num Cmd já
+				// com "/" era no-op. Partir do RawCmd cura o FN.
+				cru := units[i].Exec[j].RawCmd
+				if cru == "" {
+					cru = units[i].Exec[j].Cmd // defensivo: unit sem raw (não deve ocorrer)
+				}
+				if temPATH {
+					// PATH próprio (Environment=): é ELE que o systemd consulta, e
+					// não o modelamos por-arquivo. Deixa o nome nu cru — resolver
+					// contra um path que o systemd não usaria acusaria errado.
+					units[i].Exec[j].Cmd = cru
+				} else {
+					dirs := searchPath
+					if len(dirs) == 0 {
+						// Sem ExecSearchPath e sem PATH próprio, o systemd resolve o
+						// nome nu contra um PATH FIXO (systemd.exec(5)). Sem isto,
+						// ExecStart=shellserver — um binário dropado em /usr/local/bin
+						// por quem tinha escrita ali — escapava do check de dono: o
+						// alvo ficava no nome nu, que candidatosDePropriedade rejeita.
+						dirs = execPathPadrao
+					}
+					units[i].Exec[j].Cmd = resolverNomeNu(e, cru, dirs)
 				}
 				units[i].Exec[j].Target = AlvoEfetivoDeExec(units[i].Exec[j].Cmd)
 			}
@@ -1053,15 +1098,19 @@ func dropinCasaUnit(padrao, unit string) bool {
 // ele casa (Name/DropInFor = a base), para o merge seguir 1:1. Um padrão que não
 // casa base nenhuma FICA (dormente): é um drop-in plantado que os checks ainda
 // devem ver. Drop-in exato e base passam intactos.
-func expandirDropins(units []Unit) []Unit {
+func expandirDropins(f *Facts, units []Unit) []Unit {
 	basesPorScope := map[string][]string{}
 	for _, u := range units {
 		if u.DropInFor == "" {
 			basesPorScope[u.Scope] = append(basesPorScope[u.Scope], u.Name)
 		}
 	}
-	var out []Unit
+	out := make([]Unit, 0, len(units))
+	truncou := false
 	for _, u := range units {
+		if truncou {
+			break
+		}
 		if u.DropInFor == "" || !ehPadraoDropin(u.DropInFor) {
 			out = append(out, u)
 			continue
@@ -1077,6 +1126,15 @@ func expandirDropins(units []Unit) []Unit {
 			continue
 		}
 		for _, base := range casou {
+			// Teto: a expansão de PADRÃO × bases é O(N²), e o filesystem é
+			// hostil — um `service.d/` type-wide sobre milhares de services
+			// materializaria milhões de Unit. O `maxUnits` da coleta não pega
+			// isso porque roda ANTES. Estourá-lo vira lacuna DECLARADA, nunca
+			// blowup silencioso.
+			if len(out) >= maxUnits {
+				truncou = true
+				break
+			}
 			cp := u
 			cp.Name = base
 			cp.DropInFor = base
@@ -1084,7 +1142,29 @@ func expandirDropins(units []Unit) []Unit {
 			out = append(out, cp)
 		}
 	}
+	if truncou {
+		f.partial("persist", "a expansão de drop-ins por padrão (service.d/, template@., "+
+			"prefixo-) passou do teto de "+strconv.Itoa(maxUnits)+" units efetivas: o "+
+			"excedente NÃO foi avaliado — um host com milhares de units e um drop-in amplo")
+	}
 	return out
+}
+
+// detectarMascara diz se uma unit está MASCARADA sem precisar parseá-la: link
+// para /dev/null (a máscara clássica) OU arquivo regular de tamanho ZERO (o
+// systemd trata os dois como desligada). Detectar ANTES do parse evita que o
+// ReadFile de um /dev/null (ErrNaoEhArquivo, que é lacuna) vire gap FALSO —
+// máscara é config CONHECIDA, não "não consegui ler".
+func detectarMascara(e *env.Env, path string) bool {
+	fi, err := e.Lstat(path)
+	if err != nil {
+		return false
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		alvo, err := e.Readlink(path)
+		return err == nil && alvo == "/dev/null"
+	}
+	return fi.Mode().IsRegular() && fi.Size() == 0
 }
 
 func parseUnitFile(f *Facts, e *env.Env, path, scope string, vendor bool) Unit {
@@ -1149,7 +1229,7 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope string, vendor bool) Unit {
 				u.ExecResetKeys = append(u.ExecResetKeys, k)
 				continue
 			}
-			u.Exec = append(u.Exec, ExecLine{Key: k, Cmd: v})
+			u.Exec = append(u.Exec, ExecLine{Key: k, Cmd: v, RawCmd: v})
 		case k == "Restart":
 			u.Restart = v
 		case k == "User":

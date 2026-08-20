@@ -3,6 +3,7 @@ package facts
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -309,4 +310,138 @@ func TestColeta_UserXDGLocalShare(t *testing.T) {
 		}
 	}
 	t.Errorf("unit em ~/.local/share/systemd/user deve ser coletada; veio %d units", len(f.Units))
+}
+
+// #4 (regressão): uma unit MASCARADA não pode virar lacuna. O parseUnitFile
+// declara gap quando o ReadFile falha (EACCES é "não consegui ler") — mas
+// /dev/null devolve ErrNaoEhArquivo, que EhLacuna também classifica como gap.
+// Sem detectar a máscara ANTES do parse, a unit saía Masked E "não consegui
+// ler" ao mesmo tempo: cobertura parcial falsa. Cobre link/dev/null e o
+// arquivo de tamanho-zero, que o systemd também trata como máscara.
+func TestMerge_MascaraNaoGeraLacuna(t *testing.T) {
+	raiz := t.TempDir()
+	os.MkdirAll(filepath.Join(raiz, "etc/systemd/system"), 0o755)
+	if err := os.Symlink("/dev/null", filepath.Join(raiz, "etc/systemd/system/foo.service")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(raiz, "etc/systemd/system/bar.service"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	defer e.Close()
+	f := &Facts{}
+	collectUnits(f, e)
+
+	foo := acharUnit(f.Units, "/etc/systemd/system/foo.service")
+	if foo == nil || !foo.Masked || foo.Efetiva() {
+		t.Fatalf("link /dev/null devia sair Masked e não-efetiva: %+v", foo)
+	}
+	bar := acharUnit(f.Units, "/etc/systemd/system/bar.service")
+	if bar == nil || !bar.Masked || bar.Efetiva() {
+		t.Fatalf("arquivo vazio é máscara para o systemd: Masked e não-efetiva: %+v", bar)
+	}
+	for cat, motivos := range f.PersistDenied {
+		for _, m := range motivos {
+			if strings.Contains(m, "foo.service") || strings.Contains(m, "bar.service") {
+				t.Fatalf("máscara é config conhecida, não lacuna — gap falso em %q: %q", cat, m)
+			}
+		}
+	}
+}
+
+// #6 (regressão): a expansão de drop-in POR PADRÃO é O(bases × padrões). Um
+// punhado de drop-ins type-wide (service.d/) sobre centenas de services
+// materializaria dezenas de milhares de Unit — e o maxUnits da COLETA não pega
+// isso porque roda antes da expansão. O teto aqui corta e DECLARA a lacuna.
+func TestExpandirDropins_TetoDeExpansaoDeclaraLacuna(t *testing.T) {
+	const nBases, nPadroes = 100, 40 // 100 × 40 = 4000 > maxUnits (3000)
+	var units []Unit
+	for i := 0; i < nBases; i++ {
+		s := strconv.Itoa(i)
+		units = append(units, Unit{
+			Name: "svc" + s + ".service", Scope: "system",
+			Path: "/usr/lib/systemd/system/svc" + s + ".service",
+		})
+	}
+	for j := 0; j < nPadroes; j++ {
+		s := strconv.Itoa(j)
+		units = append(units, Unit{
+			Name: "service.d/" + s + "-wide.conf", DropInFor: "service", Scope: "system",
+			Path: "/etc/systemd/system/service.d/" + s + "-wide.conf",
+		})
+	}
+	f := &Facts{}
+	out := expandirDropins(f, units)
+	if len(f.Partial["persist"]) == 0 {
+		t.Fatal("estouro do teto de expansão devia declarar lacuna em Partial[persist]")
+	}
+	if len(out) > maxUnits {
+		t.Fatalf("sem teto a saída seria %d; o teto devia limitar a <= %d, veio %d",
+			nBases+nBases*nPadroes, maxUnits, len(out))
+	}
+}
+
+// #2 (FN): um drop-in que RESETA o ExecSearchPath e re-aponta para um diretório
+// oculto MOVE o alvo efetivo. A resolução por-arquivo já tinha fixado o Cmd da
+// base no diretório dela (com "/"), e o resolverNomeNu pós-merge era no-op sobre
+// caminho já resolvido — então a aletheia reportava o binário LEGÍTIMO e perdia
+// o dropado. Resolver a partir do RawCmd cura: o alvo tem de ser o do drop-in.
+func TestMerge_DropinResetaSearchPathMoveAlvo(t *testing.T) {
+	us := coletarUnits(t, map[string]string{
+		"usr/lib/systemd/system/svc.service":         "[Service]\nExecStart=agent\nExecSearchPath=/opt/real/bin\n",
+		"opt/real/bin/agent":                         "#!/bin/sh\n",
+		"etc/systemd/system/svc.service.d/10-x.conf": "[Service]\nExecSearchPath=\nExecSearchPath=/tmp/.oculto\n",
+		"tmp/.oculto/agent":                          "#!/bin/sh\n",
+	}, nil)
+	svc := acharUnit(us, "/usr/lib/systemd/system/svc.service")
+	if svc == nil || len(svc.Exec) == 0 {
+		t.Fatalf("svc.service sem Exec: %+v", us)
+	}
+	alvo := svc.Exec[0].Target
+	if !strings.Contains(alvo, "/tmp/.oculto/agent") {
+		t.Fatalf("reset+re-aponta do drop-in devia mover o alvo para /tmp/.oculto/agent, veio %q", alvo)
+	}
+	if strings.Contains(alvo, "/opt/real/bin") {
+		t.Fatalf("o alvo não podia ficar no diretório da base após o reset: %q", alvo)
+	}
+}
+
+// #1 (FN): ExecStart de nome NU, SEM ExecSearchPath e SEM PATH próprio. O
+// systemd resolve contra um PATH fixo; se o binário está num diretório desse
+// PATH onde o atacante teve escrita (/usr/local/bin), o alvo efetivo é ele. Sem
+// resolver, o alvo ficava no nome nu "shellserver" e o check de dono nem via o
+// binário — candidatosDePropriedade rejeita quem não tem "/". FN de evasão barata.
+func TestMerge_NomeNuResolveContraPathPadrao(t *testing.T) {
+	// O binário dropado num diretório de PACOTE (/usr/sbin): é lá que o sistema
+	// espera SÓ arquivos de pacote, e o check sem-dono dispara. Com o nome nu não
+	// resolvido, o alvo ficava "shellserver" — sem "/", fora de dirDePacote — e o
+	// check nem perguntava por ele.
+	us := coletarUnits(t, map[string]string{
+		"usr/lib/systemd/system/web.service": "[Service]\nExecStart=shellserver --port 8080\n",
+		"usr/sbin/shellserver":               "#!/bin/sh\n",
+	}, nil)
+	web := acharUnit(us, "/usr/lib/systemd/system/web.service")
+	if web == nil || len(web.Exec) == 0 {
+		t.Fatalf("web.service sem Exec: %+v", us)
+	}
+	if alvo := web.Exec[0].Target; alvo != "/usr/sbin/shellserver" {
+		t.Fatalf("nome nu devia resolver contra o PATH fixo do systemd para /usr/sbin/shellserver, veio %q", alvo)
+	}
+}
+
+// #1 contra-prova: um PATH PRÓPRIO (Environment=PATH=) desliga a resolução — é
+// ele que o systemd consultaria, e não o modelamos. Resolver contra o PATH fixo
+// aqui acusaria um diretório que o systemd não olharia: FP. O nome nu fica cru.
+func TestMerge_PathProprioNaoResolveContraPadrao(t *testing.T) {
+	us := coletarUnits(t, map[string]string{
+		"usr/lib/systemd/system/web.service": "[Service]\nEnvironment=PATH=/opt/app/bin\nExecStart=shellserver\n",
+		"usr/local/bin/shellserver":          "#!/bin/sh\n",
+	}, nil)
+	web := acharUnit(us, "/usr/lib/systemd/system/web.service")
+	if web == nil || len(web.Exec) == 0 {
+		t.Fatalf("web.service sem Exec: %+v", us)
+	}
+	if alvo := web.Exec[0].Target; alvo != "shellserver" {
+		t.Fatalf("com PATH próprio o nome nu fica cru (não modelamos esse PATH), veio %q", alvo)
+	}
 }

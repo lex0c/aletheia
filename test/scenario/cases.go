@@ -1310,52 +1310,14 @@ func init() {
 		MustBeComplete: true,
 	})
 
-	Register(Scenario{
-		ID:   "91-ocultacao-por-rootkit",
-		Desc: "as quatro comparações cruzadas só disparam contra ocultação de verdade",
-		// A pergunta que estes checks fazem é diferente de todas as outras:
-		// não "isto que vejo é suspeito?", mas "o que vejo é TUDO que existe?".
-		//
-		// Demonstrá-los exige um rootkit que esconda processo, thread, módulo ou
-		// programa eBPF — e a suíte não vai carregar um para se testar. A lógica
-		// está coberta por teste unitário; o que NÃO dá para provar aqui é o
-		// comportamento contra ocultação real.
-		//
-		// O que a suíte prova é o contrário, e isso tem valor próprio: em host
-		// limpo, desktop e contêiner, as comparações não produzem achado
-		// nenhum. Chegar a isso custou corrigir dois enganos — usar a lista de
-		// processos LIDOS em vez dos LISTADOS, e tratar thread como processo,
-		// que sozinho gerava 152 falsos positivos.
-		//
-		// O cross.bpf_hidden entrou nesta lista pelo mesmo motivo e com uma
-		// diferença: a rota do trampolim compara ftrace com a enumeração da
-		// bpf(2), e produzi-la exigiria um programa que o kernel ANEXA e NÃO
-		// LISTA. Só um kernel manipulado faz isso — que é justamente o que o
-		// check existe para achar.
-		//
-		// A lista MINGUOU à medida que os plantios de ocultação real foram
-		// construídos (cases_ocultacao.go, tier de VM):
-		//   cross.socket_view   RK-cross-socket-view (socknd hooka tcp4_seq_show)
-		//   cross.module_view   RK-cross-module-view (modhide some da lista)
-		//   cross.hidden_pid    RK-hidden-pid (pidhide filtra o PID do getdents64)
-		//   cross.thread_count  RK-thread-count (pidhide filtra um TID do task dir)
-		//
-		// Sobra cross.bpf_hidden, e ele é de outra natureza: não basta filtrar um
-		// readdir. A rota do trampolim compara o que o ftrace conhece com a
-		// enumeração da bpf(2), e produzi-la exige um programa que o kernel ANEXA
-		// e a bpf(2) NÃO LISTA — um iterador de bpf manipulado, não um syscall
-		// hookado. É uma construção maior que a dos outros quatro, e fica
-		// declarada até existir.
-		UntestableChecks: []string{"cross.bpf_hidden"},
-		Untestable: "exige um rootkit que esconda processo, thread, módulo ou " +
-			"programa eBPF. Carregar um LKM de ocultação na suíte trocaria a " +
-			"garantia de um check pela perda de controle sobre o ambiente de teste. " +
-			"O mesmo vale para o efeito que estes quatro têm sobre a CONFIANÇA: " +
-			"quando um deles dispara, a ausência de achado em todos os outros " +
-			"deixa de valer e a cobertura é rebaixada em bloco. Essa lógica está " +
-			"coberta por teste unitário no motor (invalidarAusencias); provar o " +
-			"encadeamento inteiro aqui esbarra na mesma recusa.",
-	})
+	// O cenário 91 (ocultacao-por-rootkit) foi REMOVIDO: ele declarava as cinco
+	// comparações cruzadas impossíveis de plantar ("carregar um LKM de ocultação
+	// trocaria a garantia de um check pela perda de controle do ambiente"). O tier
+	// de VM desfez essa recusa — cada cross.* agora é MEDIDO contra kernel real em
+	// cases_ocultacao.go (RK-cross-socket-view, RK-cross-module-view, RK-hidden-pid,
+	// RK-thread-count, RK-bpf-hidden). O efeito sobre a CONFIANÇA (um cross.*
+	// CRITICAL invalida as ausências) que o 91 documentava agora é asserção viva:
+	// os quatro CRITICAL exigem MustBeIncomplete + "O KERNEL SE CONTRADISSE".
 
 	Register(Scenario{
 		ID:   "92-userland-trojanizado",

@@ -5,15 +5,15 @@ package scenario
 // Ocultação por kernel, MEDIDA contra kernel real.
 //
 // A família cross.* — a arma anti-rootkit da ferramenta: "o que vejo é TUDO que
-// existe?" — era o buraco mais antigo da suíte. cross.socket_view, .module_view,
-// .hidden_pid e .thread_count só apareciam como UntestableChecks (o 91 e o Q1),
-// "provados" fora do registro ou não medidos. A justificativa de então
-// ("carregar um LKM de ocultação perderia o controle do ambiente") era do tier
-// de CONTÊINER; o tier de VM torna o carregamento seguro — o módulo morre com o
-// QEMU, e o kernel do host nunca é tocado. Então cada um vira contrato Go, com
-// Expect/Forbid, exit code, cobertura e a invalidação de ausências na asserção.
-// (Sobra cross.bpf_hidden, que exige um iterador de bpf manipulado, não um
-// hook de syscall — construção maior, ainda declarada no 91.)
+// existe?" — era o buraco mais antigo da suíte. As CINCO comparações
+// (cross.socket_view, .module_view, .hidden_pid, .thread_count, .bpf_hidden) só
+// apareciam como UntestableChecks (o 91 e o Q1), "provadas" fora do registro ou
+// não medidas. A justificativa de então ("carregar um LKM de ocultação perderia
+// o controle do ambiente") era do tier de CONTÊINER; o tier de VM torna o
+// carregamento seguro — o módulo morre com o QEMU, e o kernel do host nunca é
+// tocado. Agora cada uma é contrato Go, com Expect/Forbid, exit code, cobertura
+// e a invalidação de ausências na asserção. O 91 foi removido; nada de cross.*
+// fica só declarado.
 //
 // O que difere do vm-matrix: lá a medição é uma tabela de shell; aqui é o mesmo
 // binário sob o mesmo contrato do resto da suíte — exit code, cobertura e a
@@ -188,5 +188,40 @@ func init() {
 		// Exit 1: o achado é WARN. Um WARN de ocultação de thread ainda tira o
 		// exit de zero — a automação de frota não pode arquivar isto como limpo.
 		Exit: 1,
+	})
+}
+
+// --- cross.bpf_hidden: fdinfo cita um programa que a enumeração da bpf(2) nega. ---
+//
+// A forma do PID oculto, um nível acima, no kernel. Um processo carrega um
+// programa eBPF e SEGURA o descritor (`helper bpf hold`), então
+// /proc/<pid>/fdinfo mostra prog_id=X. O bpfhide hooka a bpf(2) e faz o
+// BPF_PROG_GET_NEXT_ID pular X — a enumeração não o devolve. A leitura de fdinfo
+// não passa pela bpf(2), então continua citando X. Duas fontes do mesmo kernel:
+// uma cita o objeto, a outra o nega.
+//
+// É o ÚLTIMO cross.* a sair dos UntestableChecks. Precisou de um hook DIFERENTE
+// (a bpf(2), não o getdents64), mas do mesmo arcabouço ftrace+`call *` cru do
+// pidhide. O achado exige confirmação por DUAS enumerações completas
+// (confirmarOcultosBPF); o hook esconde X das duas.
+func init() {
+	Register(Scenario{
+		ID:               "RK-bpf-hidden",
+		Desc:             "programa eBPF citado pelo fdinfo de um processo e escondido da enumeração da bpf(2)",
+		Mode:             VM,
+		Kernel:           "lts",
+		ModulosOcultacao: true,
+		Setup: `/helper bpf hold implante &
+			HP=$!
+			sleep 0.5
+			ID=$(grep -h '^prog_id:' /proc/$HP/fdinfo/* 2>/dev/null | awk '{print $2}' | head -1)
+			insmod /modulos/bpfhide.ko oculto=$ID`,
+		Expect: []Expect{
+			{ID: "cross.bpf_hidden", Sev: "CRITICAL"},
+			{ID: "cross.bpf_hidden", Evidence: "citado por um descritor aberto"},
+		},
+		ExpectOutput:     []string{"O KERNEL SE CONTRADISSE"},
+		MustBeIncomplete: true,
+		Exit:             2,
 	})
 }

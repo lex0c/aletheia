@@ -233,3 +233,23 @@ func TestUnitIlegivelViraGap(t *testing.T) {
 		t.Errorf("unit ilegível deve virar gap declarado, não silêncio: %v", f.Partial["persist"])
 	}
 }
+
+// P1 #4: o ExecSearchPath de um DROP-IN alcança o ExecStart da BASE. Por-arquivo
+// a base (ExecStart=agent, sem searchpath próprio) via só "agent"; é o drop-in
+// ExecSearchPath=/tmp/.hidden que faz o systemd rodar /tmp/.hidden/agent. A
+// resolução na EffectiveUnit (pós-merge) fecha esse bypass.
+func TestMerge_ExecSearchPathDeDropinAlcancaBase(t *testing.T) {
+	us := coletarUnits(t, map[string]string{
+		"usr/lib/systemd/system/x.service":            "[Service]\nExecStart=agent\n",
+		"etc/systemd/system/x.service.d/10-path.conf": "[Service]\nExecSearchPath=/tmp/.hidden\n",
+		"tmp/.hidden/agent":                           "x",
+	}, nil)
+	base := acharUnit(us, "/usr/lib/systemd/system/x.service")
+	if base == nil || len(base.Exec) != 1 {
+		t.Fatalf("base: %+v", base)
+	}
+	if base.Exec[0].Target != "/tmp/.hidden/agent" {
+		t.Errorf("o ExecStart da base deve resolver contra o ExecSearchPath do drop-in: Target=%q, Cmd=%q",
+			base.Exec[0].Target, base.Exec[0].Cmd)
+	}
+}

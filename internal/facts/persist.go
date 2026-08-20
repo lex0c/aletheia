@@ -120,6 +120,10 @@ type Unit struct {
 	// REDEFINE aquela lista, e SÓ ela — `ExecStart=` vazio não zera
 	// ExecStartPre). Num drop-in, alcança os objetos carregados antes.
 	ExecResetKeys []string `json:"exec_reset_keys,omitempty"`
+	// ExecSearchPathReset marca um `ExecSearchPath=` vazio, que REDEFINE a lista
+	// de busca. Num drop-in, alcança a base: a resolução pós-merge usa esta marca
+	// para acumular o ExecSearchPath EFETIVO na ordem de carga.
+	ExecSearchPathReset bool `json:"exec_search_path_reset,omitempty"`
 	// Shadowed: existe uma unit de mesmo nome em árvore de MAIOR precedência —
 	// o systemd executa aquela, não esta. Masked: o arquivo é link para
 	// /dev/null (a unit está DESLIGADA). Os checks de execução pulam as duas: o
@@ -686,7 +690,7 @@ func collectUnits(f *Facts, e *env.Env) {
 	// demais viram Shadowed), máscara propagada ao grupo, e resets de Exec/Env
 	// de drop-in aplicados aos objetos carregados ANTES. Depois disto, os checks
 	// de execução veem o que o systemd realmente roda, não cada arquivo cru.
-	mesclarUnits(units)
+	mesclarUnits(units, e)
 	sort.Slice(units, func(i, j int) bool {
 		if units[i].Name != units[j].Name {
 			return units[i].Name < units[j].Name
@@ -839,7 +843,7 @@ func lerEnvFileNaUnit(u *Unit, e *env.Env, arq string) {
 //	             carregados ANTES dele (base + drop-ins anteriores). Não se
 //	             faz MERGE (isso duplicaria): cada objeto mantém sua própria
 //	             contribuição pós-reset, e os checks somam olhando cada um.
-func mesclarUnits(units []Unit) {
+func mesclarUnits(units []Unit, e *env.Env) {
 	grupos := map[string][]int{}
 	var ordem []string
 	for i := range units {
@@ -934,6 +938,34 @@ func mesclarUnits(units []Unit) {
 				}
 			}
 		}
+
+		// Resolução EFETIVA de ExecSearchPath e Target: SÓ agora, com a
+		// EffectiveUnit montada, o ExecSearchPath de um DROP-IN alcança o
+		// ExecStart da BASE. Por-arquivo (parseUnitFile), a base não via o
+		// searchpath do drop-in — FN do bypass `ExecStart=agent` + drop-in
+		// `ExecSearchPath=/tmp/.hidden`. O searchpath acumula na ordem de carga,
+		// honrando o reset; um PATH próprio (Environment=) desliga a busca.
+		var searchPath []string
+		temPATH := false
+		for _, i := range efetivos {
+			if units[i].ExecSearchPathReset {
+				searchPath = nil
+			}
+			searchPath = append(searchPath, units[i].ExecSearchPath...)
+			for _, s := range units[i].Environment {
+				if s.Key == "PATH" {
+					temPATH = true
+				}
+			}
+		}
+		for _, i := range efetivos {
+			for j := range units[i].Exec {
+				if len(searchPath) > 0 && !temPATH {
+					units[i].Exec[j].Cmd = resolverNomeNu(e, units[i].Exec[j].Cmd, searchPath)
+				}
+				units[i].Exec[j].Target = AlvoEfetivoDeExec(units[i].Exec[j].Cmd)
+			}
+		}
 	}
 }
 
@@ -993,6 +1025,7 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope string, vendor bool) Unit {
 			// seguido de ExecSearchPath= mantinha /tmp/a, divergindo do systemd.
 			if v == "" {
 				u.ExecSearchPath = nil
+				u.ExecSearchPathReset = true
 				break
 			}
 			// Lista separada por espaço ou dois-pontos; pode repetir.

@@ -97,19 +97,33 @@ func collectNSS(f *Facts, e *env.Env) {
 		}
 	}
 
+	// A glibc resolve o soname pelo LOADER, então a busca precisa da MESMA visão
+	// do loader — não uma segunda lista fixa. Sem isto, um `libnss_impl.so.2` num
+	// diretório que só o ld.so.conf.d do atacante conhece (`/opt/.lib`) era
+	// localizável pela glibc e invisível para a ferramenta. Os SearchDirs saem do
+	// collectLoader, que roda antes deste coletor.
+	dirs := append([]string{}, nssLibDirs...)
+	for _, d := range f.Loader.SearchDirs {
+		dirs = append(dirs, d.Dir)
+	}
 	for _, fonte := range ordem {
 		m := porFonte[fonte]
-		m.Path = localizarLibNSS(e, fonte)
+		m.Path = localizarLibNSS(e, dirs, fonte)
 		f.NSSModules = append(f.NSSModules, *m)
 	}
 }
 
 // localizarLibNSS acha a `libnss_<fonte>.so.{2,1}` nos diretórios de biblioteca
-// do sistema. Devolve o primeiro caminho que existe, ou "" se nenhum — uma
-// fonte declarada sem biblioteca no lugar padrão não é acusável (nem sempre é
-// implante; pode ser fonte cuja lib está noutro caminho de busca).
-func localizarLibNSS(e *env.Env, fonte string) string {
-	for _, dir := range nssLibDirs {
+// do sistema E nos diretórios de busca declarados no ld.so.conf. Devolve o
+// primeiro caminho que existe, ou "" se nenhum — uma fonte sem biblioteca
+// localizada não é acusável (pode ser embutida no glibc, ou estar noutro lugar).
+func localizarLibNSS(e *env.Env, dirs []string, fonte string) string {
+	visto := map[string]bool{}
+	for _, dir := range dirs {
+		if dir == "" || visto[dir] {
+			continue
+		}
+		visto[dir] = true
 		for _, ver := range []string{".so.2", ".so.1"} {
 			p := dir + "/libnss_" + fonte + ver
 			if _, err := e.Lstat(p); err == nil {

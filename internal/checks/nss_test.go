@@ -36,3 +36,21 @@ func TestNSSModuleSemDono(t *testing.T) {
 		}
 	}
 }
+
+// item 9: no musl o check NÃO acusa (o nsswitch é ignorado pela libc), e declara
+// a inaplicabilidade em vez de silenciar.
+func TestNSSModuleMuslNaoAcusa(t *testing.T) {
+	f := &facts.Facts{
+		NSSModules: []facts.NSSModule{{Fonte: "impl", Path: "/usr/lib/libnss_impl.so.2", Servicos: []string{"passwd"}}},
+		Ownership:  []facts.Ownership{{Path: "/usr/lib/libnss_impl.so.2", Owned: false}},
+		Pkg:        facts.PkgDB{Kind: "apk"},
+	}
+	f.Host.Libc = "musl"
+	r := nssModuleSemDono.Run(nssModuleSemDono, f, testEnv())
+	if len(r.Findings) != 0 {
+		t.Fatalf("musl ignora nsswitch: não pode acusar execução NSS-glibc: %+v", r.Findings)
+	}
+	if len(r.Partial) == 0 {
+		t.Error("inaplicabilidade no musl tem de ser declarada, não silenciada")
+	}
+}

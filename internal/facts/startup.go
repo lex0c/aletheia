@@ -643,9 +643,18 @@ func arvoreXinetd(f *Facts, e *env.Env) []arquivoXinetd {
 	var out []arquivoXinetd
 	visto := map[string]bool{}
 	cortou := false
+	cortouProf := false
 	var seguir func(p string, prof int)
 	seguir = func(p string, prof int) {
-		if cortou || prof > maxXinetdProf || visto[p] {
+		if cortou || visto[p] {
+			return
+		}
+		if prof > maxXinetdProf {
+			// Teto de PROFUNDIDADE, separado do de quantidade: uma cadeia de
+			// include muito funda (ou em ciclo que o visited-set não pega por
+			// caminho variável) para aqui, e o que ficou além é lacuna, não
+			// silêncio.
+			cortouProf = true
 			return
 		}
 		visto[p] = true
@@ -704,6 +713,11 @@ func arvoreXinetd(f *Facts, e *env.Env) []arquivoXinetd {
 		f.denyPersist("startup", "a árvore de include do xinetd passou de "+
 			strconv.Itoa(maxXinetdArquivos)+" arquivos e foi cortada: serviços além "+
 			"disso NÃO foram avaliados")
+	}
+	if cortouProf {
+		f.denyPersist("startup", "a árvore de include do xinetd passou de "+
+			strconv.Itoa(maxXinetdProf)+" níveis de profundidade e foi cortada: "+
+			"serviços incluídos além disso NÃO foram avaliados")
 	}
 	return out
 }

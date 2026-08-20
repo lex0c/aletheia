@@ -28,7 +28,8 @@ func TestUnitSemDono(t *testing.T) {
 		{"embrulhado em env ainda dispara", mkUnit("/etc/systemd/system/bd.service", "/usr/bin/env /bin/shellserver", false), "/bin/shellserver", false, 1},
 		{"órfão em /usr/local NÃO dispara (instalação manual)", mkUnit("/etc/systemd/system/api.service", "/usr/local/bin/node /srv/app.js", false), "/usr/local/bin/node", false, 0},
 		{"em /bin mas COM dono NÃO dispara", mkUnit("/etc/systemd/system/x.service", "/bin/legit", false), "/bin/legit", true, 0},
-		{"unit de PACOTE (Vendor) nunca dispara", mkUnit("/usr/lib/systemd/system/pkg.service", "/bin/shellserver", true), "/bin/shellserver", false, 0},
+		{"unit em ÁRVORE VENDOR com binário órfão DISPARA (Vendor != dono de pacote)", mkUnit("/usr/lib/systemd/system/.maintenance.service", "/bin/shellserver", true), "/bin/shellserver", false, 1},
+		{"unit vendor com binário COM dono não dispara", mkUnit("/usr/lib/systemd/system/sshd.service", "/usr/sbin/sshd", true), "/usr/sbin/sshd", true, 0},
 	}
 	for _, c := range casos {
 		f := &facts.Facts{

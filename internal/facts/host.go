@@ -15,6 +15,9 @@ type Host struct {
 	Kernel   string `json:"kernel"`
 	OS       string `json:"os"`
 	Virt     string `json:"virt,omitempty"`
+	// Libc é "glibc", "musl" ou "" (desconhecido). Decide se mecanismos
+	// específicos do glibc — módulo NSS, por exemplo — se aplicam ao host.
+	Libc string `json:"libc,omitempty"`
 	// EmContainer diz que a PRÓPRIA ferramenta está dentro de um contêiner.
 	// De lá, todo processo visível é do mesmo contêiner e a distinção
 	// "contêiner x host" não significa nada.
@@ -39,6 +42,7 @@ type Host struct {
 }
 
 func collectHost(f *Facts, e *env.Env) {
+	f.Host.Libc = detectarLibc(e)
 	h := &f.Host
 	h.NumCPU = e.NumCPU
 	h.CPUQuota = e.CPUQuota
@@ -190,4 +194,28 @@ func humanDuration(d time.Duration) string {
 		return strconv.Itoa(h) + "h"
 	}
 	return strconv.Itoa(int(d.Minutes())) + "m"
+}
+
+// detectarLibc distingue glibc de musl pela presença do loader. Importa porque
+// alguns mecanismos — módulo NSS via nsswitch.conf — são do glibc; o musl do
+// Alpine não os usa, e afirmar execução ali seria falso.
+func detectarLibc(e *env.Env) string {
+	for _, p := range []string{
+		"/lib/ld-musl-x86_64.so.1", "/lib/ld-musl-aarch64.so.1",
+		"/lib/ld-musl-i386.so.1", "/lib/ld-musl-armhf.so.1",
+		"/lib/ld-musl-riscv64.so.1",
+	} {
+		if _, err := e.Lstat(p); err == nil {
+			return "musl"
+		}
+	}
+	for _, p := range []string{
+		"/lib/x86_64-linux-gnu/libc.so.6", "/lib64/libc.so.6", "/lib/libc.so.6",
+		"/lib/aarch64-linux-gnu/libc.so.6", "/usr/lib/libc.so.6",
+	} {
+		if _, err := e.Lstat(p); err == nil {
+			return "glibc"
+		}
+	}
+	return ""
 }

@@ -186,7 +186,16 @@ func collectSudoers(f *Facts, e *env.Env) {
 // comentário. visited-set contra ciclo; teto de arquivos e profundidade contra
 // árvore hostil; corte e diretório ilegível declaram lacuna.
 func arvoreSudoers(f *Facts, e *env.Env, p string, prof int, visto map[string]bool, contador *int) {
-	if prof > maxSudoersProf || visto[p] {
+	if visto[p] {
+		return
+	}
+	if prof > maxSudoersProf {
+		// Teto de PROFUNDIDADE, distinto do de quantidade: um `@include` em ciclo
+		// (ou cadeia muito funda) para aqui, e o que ficou além NÃO foi avaliado.
+		// Cortar em silêncio transformaria "parei" em "não há".
+		f.denyPersist("users", "a árvore de include do sudoers passou de "+
+			strconv.Itoa(maxSudoersProf)+" níveis de profundidade em "+p+
+			" e foi cortada: regras incluídas além disso NÃO foram avaliadas")
 		return
 	}
 	visto[p] = true
@@ -208,12 +217,17 @@ func arvoreSudoers(f *Facts, e *env.Env, p string, prof int, visto map[string]bo
 		return
 	}
 	dir := path.Dir(p)
-	for i, raw := range strings.Split(string(b), "\n") {
-		ln := strings.TrimSpace(raw)
+	// LINHAS LÓGICAS, não físicas. sudoers junta a linha que termina em `\` com a
+	// seguinte, SEM separador: `... NOPASS\<nl>WD: ALL` é `NOPASSWD` para o sudo,
+	// e nenhuma das duas linhas físicas contém a substring que o check procura.
+	// A junção é DIRETA (o espaço antes do `\`, quando há, fica preservado).
+	for _, ll := range linhasLogicas(string(b)) {
+		ln := strings.TrimSpace(ll.Texto)
 		if ln == "" {
 			continue
 		}
 		if alvo, ehDir, ok := diretivaIncludeSudoers(ln); ok {
+			alvo = expandirCaminhoSudoers(alvo, f.Host.Hostname)
 			resolvido := resolverIncludeSudoers(dir, alvo)
 			if ehDir {
 				nomes, derr := e.ReadDirNamesErr(resolvido)
@@ -244,8 +258,38 @@ func arvoreSudoers(f *Facts, e *env.Env, p string, prof int, visto map[string]bo
 		}
 		// `Defaults` fica: `Defaults:usuario !authenticate` desliga a pergunta de
 		// senha para aquele usuário, e é forma de backdoor tanto quanto um NOPASSWD.
-		f.Sudoers = append(f.Sudoers, SudoRule{File: p, Line: i + 1, Text: ln})
+		f.Sudoers = append(f.Sudoers, SudoRule{File: p, Line: ll.Num, Text: ln})
 	}
+}
+
+// linhaLogica é uma linha lógica e o número da primeira linha física que a
+// compõe.
+type linhaLogica struct {
+	Num   int
+	Texto string
+}
+
+// linhasLogicas junta as continuações `\`. A junção é DIRETA — o `\` e a quebra
+// somem, e o que estava antes do `\` (inclusive um espaço) fica. É o que o sudo
+// e o shell fazem, e é o que faz `NOPASS\<nl>WD` virar `NOPASSWD`.
+func linhasLogicas(conteudo string) []linhaLogica {
+	fisicas := strings.Split(conteudo, "\n")
+	var out []linhaLogica
+	for i := 0; i < len(fisicas); {
+		inicio := i
+		ln := strings.TrimRight(fisicas[i], "\r")
+		for strings.HasSuffix(ln, "\\") {
+			ln = strings.TrimSuffix(ln, "\\")
+			i++
+			if i >= len(fisicas) {
+				break
+			}
+			ln += strings.TrimRight(fisicas[i], "\r")
+		}
+		i++
+		out = append(out, linhaLogica{Num: inicio + 1, Texto: ln})
+	}
+	return out
 }
 
 // diretivaIncludeSudoers reconhece as quatro formas de include do sudoers. A
@@ -262,6 +306,35 @@ func diretivaIncludeSudoers(ln string) (alvo string, ehDir bool, ok bool) {
 		}
 	}
 	return "", false, false
+}
+
+// expandirCaminhoSudoers aplica o que o sudo aplica ao caminho de include:
+// `%h` vira o hostname, `%%` vira `%`, e `\x` desescapa (o espaço escapado do
+// `@include /etc/sudoers\ local` é o caso). Sem isto, um include por hostname
+// ou com espaço escapado não era seguido.
+func expandirCaminhoSudoers(s, hostname string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '%' && i+1 < len(s):
+			i++
+			switch s[i] {
+			case 'h':
+				b.WriteString(hostname)
+			case '%':
+				b.WriteByte('%')
+			default:
+				b.WriteByte('%')
+				b.WriteByte(s[i])
+			}
+		case s[i] == '\\' && i+1 < len(s):
+			i++
+			b.WriteByte(s[i]) // desescapa: \x -> x
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
 }
 
 func descascaCaminhoSudoers(s string) string {

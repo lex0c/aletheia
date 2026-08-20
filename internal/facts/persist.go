@@ -89,10 +89,15 @@ type Unit struct {
 	// é o que responde "isto vai rodar?" sem chamar systemctl.
 	EnabledBy []string `json:"enabled_by,omitempty"`
 
-	Exec     []ExecLine `json:"exec,omitempty"`
-	Restart  string     `json:"restart,omitempty"`
-	User     string     `json:"user,omitempty"`
-	WantedBy []string   `json:"wanted_by,omitempty"`
+	Exec []ExecLine `json:"exec,omitempty"`
+	// ExecSearchPath são os diretórios onde o systemd procura um Exec*= de nome
+	// NU. É um bypass barato: ExecStart=agent com ExecSearchPath=/tmp/.cache/bin
+	// resolve para /tmp/.cache/bin/agent, e sem representar isto o parser via só
+	// "agent" — nem caminho suspeito nem propriedade eram avaliados.
+	ExecSearchPath []string `json:"exec_search_path,omitempty"`
+	Restart        string   `json:"restart,omitempty"`
+	User           string   `json:"user,omitempty"`
+	WantedBy       []string `json:"wanted_by,omitempty"`
 
 	// Gatilhos, por tipo de unit.
 	OnCalendar      []string `json:"on_calendar,omitempty"`
@@ -107,6 +112,10 @@ type Unit struct {
 	// EnvFilesIlegiveis são os EnvironmentFile= que a unit referencia e que não
 	// puderam ser lidos — um LD_PRELOAD ali fica sem avaliação.
 	EnvFilesIlegiveis []string `json:"env_files_unreadable,omitempty"`
+	// EnvFileReset marca que este arquivo teve um `EnvironmentFile=` vazio, que
+	// REDEFINE a lista. Num drop-in, isso alcança a unit base de mesmo nome — a
+	// fusão pós-coleta usa esta marca.
+	EnvFileReset bool `json:"env_file_reset,omitempty"`
 
 	ModUTC string `json:"mod_utc,omitempty"`
 
@@ -187,6 +196,28 @@ func collectPersist(f *Facts, e *env.Env) {
 	collectLogs(f, e)
 	collectMAC(f, e)
 	collectSegredos(f, e)
+
+	// Fusão de reset entre drop-in e unit base: um `EnvironmentFile=` vazio num
+	// drop-in redefine a lista de arquivos de ambiente da unit INTEIRA (base +
+	// drop-ins carregados antes). Como base e drop-in são objetos Unit separados,
+	// o reset precisa ser aplicado aqui, depois de ler todos. Sem isto, um
+	// LD_PRELOAD num EnvironmentFile da base que um drop-in limpou virava FP.
+	resetPorNome := map[string]bool{}
+	for i := range f.Units {
+		if f.Units[i].DropInFor != "" && f.Units[i].EnvFileReset {
+			resetPorNome[f.Units[i].Name] = true
+		}
+	}
+	for i := range f.Units {
+		u := &f.Units[i]
+		if u.DropInFor == "" && resetPorNome[u.Name] {
+			// Descarta as entradas de ARQUIVO da base (as Environment= EM LINHA
+			// ficam; um arquivo RE-adicionado pelo drop-in após o reset também,
+			// porque mora no objeto do drop-in).
+			u.Environment = envSemArquivos(u.Environment, u.Path)
+			u.EnvFilesIlegiveis = nil
+		}
+	}
 
 	// Environment= de unit tem o MESMO efeito do /etc/environment, e por isso
 	// alimenta a mesma lista: um check só, uma leitura só.
@@ -629,6 +660,22 @@ func kindOf(n string) string {
 
 // parseUnitFile lê o formato INI do systemd. Chave REPETIDA é normal
 // (ExecStart= pode aparecer várias vezes) e continuação com "\" também.
+// temEspecificadorSystemd diz se o caminho tem um especificador `%X` (que não
+// seja `%%`, o por-cento literal). O systemd os expande em tempo de execução;
+// aqui, sem o contexto da unit, eles não são resolvíveis.
+func temEspecificadorSystemd(s string) bool {
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] == '%' {
+			if s[i+1] == '%' {
+				i++ // %% é literal, pula os dois
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // temGlobShell diz se o caminho tem wildcard de shell — o que o systemd expande
 // no EnvironmentFile=.
 func temGlobShell(s string) bool {
@@ -639,6 +686,16 @@ func temGlobShell(s string) bool {
 // wildcard — e incorpora as atribuições na unit. É função de escopo de pacote
 // porque `parseUnitFile` sombreia o pacote `path` com um parâmetro homônimo.
 func incorporarEnvironmentFile(u *Unit, e *env.Env, arq string) {
+	// `%%` é o por-cento literal; qualquer outro `%X` é um ESPECIFICADOR do
+	// systemd (%h = home, %i = instância, %t = runtime dir). Sem o contexto de
+	// quem roda a unit não dá para expandi-lo com segurança — e ler o literal
+	// `%h/.env` daria ENOENT e sumiria um LD_PRELOAD em silêncio. Declara-se a
+	// lacuna em vez de silenciar.
+	if temEspecificadorSystemd(arq) {
+		u.EnvFilesIlegiveis = append(u.EnvFilesIlegiveis, arq+
+			" (contém especificador % do systemd, não expandido sem o contexto da unit)")
+		return
+	}
 	if !temGlobShell(arq) {
 		lerEnvFileNaUnit(u, e, arq)
 		return
@@ -734,6 +791,14 @@ func parseUnitFile(e *env.Env, path, scope string, vendor bool) Unit {
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
 
 		switch {
+		case k == "ExecSearchPath":
+			// ANTES do HasPrefix(k,"Exec") — senão viraria uma linha de comando.
+			// Lista separada por espaço ou dois-pontos; pode repetir.
+			for _, d := range strings.FieldsFunc(v, func(r rune) bool { return r == ' ' || r == ':' }) {
+				if d != "" {
+					u.ExecSearchPath = append(u.ExecSearchPath, d)
+				}
+			}
 		case strings.HasPrefix(k, "Exec"):
 			// "ExecStart=" vazio RESETA a lista — é assim que um drop-in
 			// substitui o comando da unit original.
@@ -771,6 +836,9 @@ func parseUnitFile(e *env.Env, path, scope string, vendor bool) Unit {
 				// esquecido virava achado. Os Environment= EM LINHA ficam.
 				u.Environment = envSemArquivos(u.Environment, path)
 				u.EnvFilesIlegiveis = nil
+				// E marca: se ESTE arquivo é um drop-in, o reset alcança a unit
+				// BASE de mesmo nome — a fusão pós-coleta aplica isso.
+				u.EnvFileReset = true
 				break
 			}
 			// O `-` no começo é "ignore se faltar". (Aqui `path` é o PARÂMETRO —
@@ -797,7 +865,45 @@ func parseUnitFile(e *env.Env, path, scope string, vendor bool) Unit {
 	if pending != "" {
 		u.Truncated = "última linha termina em continuação e ficou incompleta"
 	}
+	// Depois de ler o arquivo inteiro: resolve nome NU de Exec*= contra o
+	// ExecSearchPath (que pode ter vindo DEPOIS do ExecStart). Feito aqui, os
+	// checks de caminho suspeito e propriedade veem o alvo concreto.
+	resolverComandosUnit(&u, e)
 	return u
+}
+
+// resolverComandosUnit resolve os Exec*= de nome NU contra o ExecSearchPath da
+// unit, como o systemd faz. O bare name vira caminho concreto para o alvo
+// efetivo dos checks; sem isto, `ExecStart=agent` com ExecSearchPath=/tmp/x
+// escondia /tmp/x/agent.
+func resolverComandosUnit(u *Unit, e *env.Env) {
+	if len(u.ExecSearchPath) == 0 {
+		return
+	}
+	for i := range u.Exec {
+		u.Exec[i].Cmd = resolverNomeNu(e, u.Exec[i].Cmd, u.ExecSearchPath)
+	}
+}
+
+func resolverNomeNu(e *env.Env, cmd string, dirs []string) string {
+	toks := strings.Fields(cmd)
+	if len(toks) == 0 {
+		return cmd
+	}
+	prim := toks[0]
+	nu := strings.TrimLeft(prim, "-@+!:")
+	if nu == "" || strings.ContainsRune(nu, '/') {
+		return cmd // já é caminho, não nome nu
+	}
+	for _, dir := range dirs {
+		p := strings.TrimSuffix(dir, "/") + "/" + nu
+		if _, err := e.Lstat(p); err == nil {
+			// Preserva os prefixos do systemd ("-", "@", "+", "!") antes do path.
+			toks[0] = prim[:len(prim)-len(nu)] + p
+			return strings.Join(toks, " ")
+		}
+	}
+	return cmd
 }
 
 // camposComAspas divide respeitando aspas: Environment="A=1" "B=2 3".

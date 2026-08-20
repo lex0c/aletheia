@@ -76,10 +76,13 @@ var unitSemDono = check.Check{
 		visto := map[string]bool{}
 		for i := range f.Units {
 			u := &f.Units[i]
-			// Unit de PACOTE não entra: ela e o binário dela vêm juntos, com dono.
-			if u.Vendor {
-				continue
-			}
+			// NÃO se pula por Vendor. Vendor significa "o ARQUIVO está em
+			// /usr/lib/systemd/system", não "veio de pacote" — e um atacante com
+			// root escreve ali e ganharia isenção. Uma unit da árvore vendor
+			// executando binário órfão é MAIS suspeita, não menos. O
+			// discriminador real é o dono do binário (semDono) e o diretório de
+			// pacote (dirDePacote), abaixo: unit legítima de pacote tem binário
+			// COM dono e não dispara.
 			for _, ex := range u.Exec {
 				// O ALVO EFETIVO, não o primeiro token: `ExecStart=/usr/bin/env
 				// /bin/shellserver` esconderia o backdoor atrás do env.

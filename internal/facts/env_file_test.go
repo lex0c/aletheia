@@ -73,3 +73,41 @@ func TestEnvironmentFileGlobDirIlegivelLacuna(t *testing.T) {
 		t.Errorf("diretório do glob ilegível tem de virar lacuna: %+v", u)
 	}
 }
+
+// item 4: EnvironmentFile= vazio num DROP-IN redefine a lista da unit base de
+// mesmo nome. Antes, o LD_PRELOAD da base sobrevivia — FP.
+func TestEnvironmentFileResetDeDropInLimpaBase(t *testing.T) {
+	raiz := t.TempDir()
+	os.MkdirAll(filepath.Join(raiz, "etc/systemd/system/x.service.d"), 0o755)
+	os.MkdirAll(filepath.Join(raiz, "etc"), 0o755)
+	os.WriteFile(filepath.Join(raiz, "etc/x.env"), []byte("LD_PRELOAD=/tmp/.old.so\n"), 0o644)
+	os.WriteFile(filepath.Join(raiz, "usr/lib/systemd/system/x.service"),
+		[]byte("[Service]\nEnvironmentFile=/etc/x.env\nExecStart=/usr/bin/x\n"), 0o644)
+	os.MkdirAll(filepath.Join(raiz, "usr/lib/systemd/system"), 0o755)
+	os.WriteFile(filepath.Join(raiz, "usr/lib/systemd/system/x.service"),
+		[]byte("[Service]\nEnvironmentFile=/etc/x.env\nExecStart=/usr/bin/x\n"), 0o644)
+	os.WriteFile(filepath.Join(raiz, "etc/systemd/system/x.service.d/override.conf"),
+		[]byte("[Service]\nEnvironmentFile=\n"), 0o644)
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	t.Cleanup(func() { e.Close() })
+	f := Collect(e)
+	for _, ev := range f.Loader.EnvVars {
+		if ev.Key == "LD_PRELOAD" && ev.Value == "/tmp/.old.so" {
+			t.Fatalf("drop-in com EnvironmentFile= vazio deveria limpar o preload da base: %+v", f.Loader.EnvVars)
+		}
+	}
+}
+
+// item 5: %-specifier vira lacuna, não ENOENT silencioso.
+func TestEnvironmentFileEspecificadorViraLacuna(t *testing.T) {
+	raiz := t.TempDir()
+	os.MkdirAll(filepath.Join(raiz, "svc"), 0o755)
+	os.WriteFile(filepath.Join(raiz, "svc.service"),
+		[]byte("[Service]\nEnvironmentFile=%h/.config/.env\nExecStart=/usr/bin/svc\n"), 0o644)
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	t.Cleanup(func() { e.Close() })
+	u := parseUnitFile(e, "/svc.service", "system", false)
+	if len(u.EnvFilesIlegiveis) == 0 {
+		t.Errorf("%%h não expandido tem de virar lacuna, não sumir: %+v", u)
+	}
+}

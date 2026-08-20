@@ -521,6 +521,14 @@ var doasSemSenha = check.Check{
 				d.File + ":" + strconv.Itoa(d.Line) + " — " + d.Text,
 				"`permit nopass` concede escalada SEM pedir senha",
 			}
+			// Suporte a confdir (/etc/doas.d) é FEATURE DE BUILD do OpenDoas, não
+			// universal. Numa build sem confdir, uma regra ali é inerte — a regra
+			// EXISTE, mas pode não estar ativa, e isso não é inferível do disco.
+			if strings.HasPrefix(d.File, "/etc/doas.d/") {
+				ev = append(ev, "vem de /etc/doas.d — confira se este build do doas LÊ "+
+					"confdir (é opção de compilação do OpenDoas): a regra existe, mas "+
+					"pode estar inerte")
+			}
 			quem := d.Identidade
 			if strings.HasPrefix(quem, ":") {
 				ev = append(ev, "vale para todo o GRUPO "+quem[1:])

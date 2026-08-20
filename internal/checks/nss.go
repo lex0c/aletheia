@@ -45,6 +45,18 @@ var nssModuleSemDono = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+		// O mecanismo é do glibc. No musl (Alpine) o nsswitch.conf é IGNORADO, e
+		// afirmar "roda em toda resolução" seria falso. Só o glibc — ou o
+		// desconhecido, onde a presença de nsswitch.conf + libnss_ já é padrão
+		// glibc — sustenta a afirmação; no musl vira nota, não acusação.
+		if f.Host.Libc == "musl" {
+			if len(f.NSSModules) > 0 {
+				r.Partial = append(r.Partial, "há fontes no /etc/nsswitch.conf, mas a "+
+					"libc é musl: ela IGNORA o nsswitch, então nenhum libnss_ é carregado "+
+					"por ele — a via NSS-glibc não se aplica a este host")
+			}
+			return r
+		}
 		semDono := caminhosSemDono(f)
 		if len(semDono) == 0 {
 			r.Partial = append(r.Partial, f.PersistDenied["pkg"]...)

@@ -100,3 +100,16 @@ func TestSudoersIncludedirIlegivelDeclaraLacuna(t *testing.T) {
 		t.Errorf("includedir ilegível tem de declarar lacuna: %+v", f.PersistDenied["users"])
 	}
 }
+
+// Linha lógica: sudoers junta `\` no fim SEM separador. A regra quebrada no meio
+// da palavra NOPASSWD é uma só linha lógica — o detector precisa vê-la inteira.
+func TestSudoersLinhaLogicaContinuacao(t *testing.T) {
+	e := raizComArqs(t, map[string]string{
+		"etc/sudoers": "attacker ALL=(ALL) NOPASS\\\nWD: ALL\n",
+	})
+	f := &Facts{}
+	collectSudoers(f, e)
+	if !temRegraSudo(f, "NOPASSWD") {
+		t.Fatalf("continuação \\ deveria juntar NOPASS+WD em NOPASSWD: %+v", f.Sudoers)
+	}
+}

@@ -304,3 +304,19 @@ func TestLoaderTetoDeIncludeDeclaraLacuna(t *testing.T) {
 		t.Errorf("cadeia acima do teto tem de declarar lacuna: %v", f.PersistDenied["loader"])
 	}
 }
+
+// ExecSearchPath: ExecStart de nome NU resolve contra o dir customizado. Sem
+// isso, o alvo real (/tmp/.cache/bin/agent) some — o parser via só "agent".
+func TestExecSearchPathResolveNomeNu(t *testing.T) {
+	raiz := t.TempDir()
+	os.MkdirAll(filepath.Join(raiz, "tmp/.cache/bin"), 0o755)
+	os.WriteFile(filepath.Join(raiz, "tmp/.cache/bin/agent"), []byte("x"), 0o755)
+	os.WriteFile(filepath.Join(raiz, "svc.service"),
+		[]byte("[Service]\nExecSearchPath=/tmp/.cache/bin\nExecStart=agent --daemon\nRestart=always\n"), 0o644)
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	t.Cleanup(func() { e.Close() })
+	u := parseUnitFile(e, "/svc.service", "system", false)
+	if len(u.Exec) != 1 || u.Exec[0].Cmd != "/tmp/.cache/bin/agent --daemon" {
+		t.Fatalf("nome nu deve resolver contra ExecSearchPath: %+v", u.Exec)
+	}
+}

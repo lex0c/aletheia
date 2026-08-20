@@ -124,6 +124,12 @@ type BPF struct {
 
 	// Cortado marca que algum teto foi atingido: a lista não é o total.
 	Cortado bool `json:"truncated,omitempty"`
+	// ProgramasCortado é o corte ESPECÍFICO da enumeração de programas —
+	// distinto do agregado Cortado (que também liga por corte de link/pin/tail
+	// call). As duas rotas do bpf_hidden dependem só da lista de PROGRAMAS estar
+	// completa; usar o agregado suprimia contradição de trampolim por um corte
+	// de OUTRO subsistema.
+	ProgramasCortado bool `json:"programs_truncated,omitempty"`
 	// CoberturaAnexo diz se a busca pelo ponto de ANEXAÇÃO foi completa, por
 	// mecanismo. É o que separa duas afirmações muito diferentes sobre um
 	// programa sem dono visível:
@@ -181,6 +187,7 @@ func collectBPF(f *Facts, e *env.Env) {
 	}
 	f.BPF.Enumerado = true
 	f.BPF.Cortado = cortou
+	f.BPF.ProgramasCortado = cortou
 	// A completude da lista de PROGRAMAS, capturada aqui — antes que links, pins
 	// e tail calls façam OR em f.BPF.Cortado. A confirmação de programa oculto
 	// depende SÓ de a enumeração de programas ter sido completa: um corte na

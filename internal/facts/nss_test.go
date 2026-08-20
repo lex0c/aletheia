@@ -74,3 +74,20 @@ func TestCollectNSSAusenteNaoEhLacuna(t *testing.T) {
 		t.Errorf("ausência de nsswitch.conf não é lacuna: %+v", f.PersistDenied["nss"])
 	}
 }
+
+// item 1: a lib pode morar num dir que só o ld.so.conf conhece. O coletor usa a
+// visão do loader (SearchDirs), não só a lista fixa.
+func TestCollectNSSSegueSearchDirsDoLoader(t *testing.T) {
+	e := raizNSS(t, map[string]string{
+		"etc/nsswitch.conf":         "passwd: files impl\n",
+		"opt/.lib/libnss_impl.so.2": "\x7fELF",
+	})
+	f := &Facts{}
+	// simula o que collectLoader deixaria: /opt/.lib como diretório de busca
+	f.Loader.SearchDirs = []LoaderDir{{Dir: "/opt/.lib", From: "/etc/ld.so.conf.d/x.conf"}}
+	collectNSS(f, e)
+	m, ok := nssPorFonte(f, "impl")
+	if !ok || m.Path != "/opt/.lib/libnss_impl.so.2" {
+		t.Fatalf("lib em dir do ld.so.conf deve ser localizada: %+v", f.NSSModules)
+	}
+}

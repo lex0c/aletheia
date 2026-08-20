@@ -58,6 +58,7 @@ type Facts struct {
 	SSH           SSHConfig       `json:"ssh"`
 	SSHKeys       []SSHKey        `json:"ssh_keys,omitempty"`
 	SSHClientExec []SSHClientExec `json:"ssh_client_exec,omitempty"`
+	SysVShm       []SysVShmSeg    `json:"sysvipc_shm,omitempty"`
 	Triggers      []Trigger       `json:"triggers,omitempty"`
 	// ConfiancaDeHost são as entradas .rhosts/hosts.equiv — login sem senha
 	// host-based (ATT&CK T1021.004).
@@ -278,6 +279,10 @@ func Collect(e *env.Env) *Facts {
 	if e.Has(env.CapProcfs) {
 		e.Stage("processos")
 		collectProcesses(f, e)
+		// Depois dos processos: o criador de um segmento SysV SHM é um cpid, e
+		// nomeá-lo exige a lista de processos já lida. O canal IPC que não
+		// aparece em socket nem em fd.
+		collectSysVShm(f, e)
 		// Depois dos processos: o dono de cada socket sai do join com os fds
 		// que o coletor de processo já leu.
 		// Os limites vêm ANTES dos sockets: além de serem os tetos que

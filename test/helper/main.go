@@ -245,6 +245,15 @@ func main() {
 		die(cmd.Start())
 		hold()
 
+	case "shm":
+		// helper shm <perms-octal>   cria um segmento SysV SHM com a permissão
+		// dada, anexa (para nattch>0 e cpid vivo) e SEGURA. É a estrutura do canal
+		// do Ebury — memória compartilhada como IPC —, sem comportamento dele.
+		need(3)
+		var perms int
+		fmt.Sscanf(os.Args[2], "%o", &perms)
+		die(criaShm(perms))
+
 	case "setcap":
 		// helper setcap /caminho 7      (7 = CAP_SETUID)
 		//

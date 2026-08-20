@@ -253,3 +253,60 @@ func TestMerge_ExecSearchPathDeDropinAlcancaBase(t *testing.T) {
 			base.Exec[0].Target, base.Exec[0].Cmd)
 	}
 }
+
+// P1/P2 #8: drop-in POR PADRÃO. O systemd aplica também de TYPE.d/ (type-wide) e
+// PREFIX-.service.d/ (por dash), não só de NAME.service.d/. Um `service.d/` que
+// altera TODA service, ou um `foo-.service.d/`, passava invisível.
+func TestMerge_DropinPorPadrao(t *testing.T) {
+	us := coletarUnits(t, map[string]string{
+		"usr/lib/systemd/system/foo.service":             "[Service]\nExecStart=/usr/bin/foo\n",
+		"usr/lib/systemd/system/foo-bar.service":         "[Service]\nExecStart=/usr/bin/foobar\n",
+		"etc/systemd/system/service.d/50-global.conf":    "[Service]\nExecStartPre=/tmp/.global\n",
+		"etc/systemd/system/foo-.service.d/50-pref.conf": "[Service]\nExecStartPre=/tmp/.pref\n",
+	}, nil)
+	tem := func(unit, alvo string) bool {
+		for _, u := range us {
+			if u.Name == unit && u.Efetiva() {
+				for _, ex := range u.Exec {
+					if ex.Target == alvo {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+	if !tem("foo.service", "/tmp/.global") || !tem("foo-bar.service", "/tmp/.global") {
+		t.Error("type-wide service.d/ deve alcançar TODA service")
+	}
+	if !tem("foo-bar.service", "/tmp/.pref") {
+		t.Error("prefixo foo-.service.d/ deve alcançar foo-bar.service")
+	}
+	if tem("foo.service", "/tmp/.pref") {
+		t.Error("prefixo foo-.service.d/ NÃO alcança foo.service (não casa o dash)")
+	}
+}
+
+// P2 #8 (parte a): o load path de user por-home inclui ~/.local/share/systemd/
+// user e o user.control, não só ~/.config/systemd/user. Uma unit de backdoor
+// nesses cantos precisa ser COLETADA (visível aos checks).
+func TestColeta_UserXDGLocalShare(t *testing.T) {
+	raiz := t.TempDir()
+	os.MkdirAll(filepath.Join(raiz, "etc"), 0o755)
+	os.WriteFile(filepath.Join(raiz, "etc/passwd"),
+		[]byte("dev:x:1000:1000::/home/dev:/bin/bash\n"), 0o644)
+	dir := filepath.Join(raiz, "home/dev/.local/share/systemd/user")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "backdoor.service"), []byte("[Service]\nExecStart=/tmp/.x\n"), 0o644)
+
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	t.Cleanup(func() { e.Close() })
+	f := &Facts{}
+	collectUnits(f, e)
+	for _, u := range f.Units {
+		if u.Name == "backdoor.service" && u.Scope == "user" {
+			return
+		}
+	}
+	t.Errorf("unit em ~/.local/share/systemd/user deve ser coletada; veio %d units", len(f.Units))
+}

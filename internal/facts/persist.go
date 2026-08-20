@@ -652,29 +652,46 @@ func collectUnits(f *Facts, e *env.Env) {
 		f.denyPersist("unit", "/etc/passwd ilegível ou vazio: nenhum home foi "+
 			"vasculhado, e unit de usuário é um esconderijo comum")
 	}
+	// O load path de USER por-home (systemd.unit(5), "User Unit Search Path"):
+	// não só ~/.config/systemd/user, mas o user.control ao lado dele e o
+	// ~/.local/share/systemd/user (XDG_DATA_HOME). Sem estes, uma unit de usuário
+	// plantada nesses cantos passava invisível.
+	//
+	// LIMITE declarado: a PRECEDÊNCIA exata do user por-home ainda não é honrada
+	// (o ~/.config/systemd/user deveria VENCER /etc/systemd/user, e o runtime
+	// user.control mora em $XDG_RUNTIME_DIR/…, que depende do UID). Aqui o foco é
+	// COLETAR — a unit fica visível aos checks; num conflito de nome entre árvores
+	// de user, qual vence pode sair trocado.
+	userSubdirs := []string{
+		".config/systemd/user.control",
+		".config/systemd/user",
+		".local/share/systemd/user",
+	}
 	var negados []string
 	for _, home := range homes {
-		dir := home + "/.config/systemd/user"
-		if _, negado := lookup(e, dir); negado {
-			negados = append(negados, dir)
-			continue
-		}
-		nomes, errL := e.ReadDirNamesErr(dir)
-		if env.EhLacuna(errL) {
-			// lookup passou mas a listagem falhou (corrida/EIO): trate como
-			// negado, para não afirmar "nenhuma unit de usuário aqui".
-			negados = append(negados, dir)
-			continue
-		}
-		for _, name := range nomes {
-			if !isUnitName(name) || len(units) >= maxUnits {
-				truncated = truncated || len(units) >= maxUnits
+		for _, sub := range userSubdirs {
+			dir := home + "/" + sub
+			if _, negado := lookup(e, dir); negado {
+				negados = append(negados, dir)
 				continue
 			}
-			u := parseUnitFile(f, e, dir+"/"+name, "user", false)
-			u.Name = name
-			u.Kind = kindOf(name)
-			units = append(units, u)
+			nomes, errL := e.ReadDirNamesErr(dir)
+			if env.EhLacuna(errL) {
+				// lookup passou mas a listagem falhou (corrida/EIO): trate como
+				// negado, para não afirmar "nenhuma unit de usuário aqui".
+				negados = append(negados, dir)
+				continue
+			}
+			for _, name := range nomes {
+				if !isUnitName(name) || len(units) >= maxUnits {
+					truncated = truncated || len(units) >= maxUnits
+					continue
+				}
+				u := parseUnitFile(f, e, dir+"/"+name, "user", false)
+				u.Name = name
+				u.Kind = kindOf(name)
+				units = append(units, u)
+			}
 		}
 	}
 
@@ -686,6 +703,13 @@ func collectUnits(f *Facts, e *env.Env) {
 	for i := range units {
 		units[i].EnabledBy = wants[units[i].Name]
 	}
+	// Drop-in POR PADRÃO: o systemd aplica um drop-in não só de NAME.TYPE.d/, mas
+	// de TYPE.d/ (type-wide), TEMPLATE@.TYPE.d/ (instâncias) e PREFIX-.TYPE.d/
+	// (por dash). Antes só o exato entrava — um `service.d/50-x.conf` que altera
+	// TODA service, ou um `foo-.service.d/`, passava invisível. Expande para as
+	// bases que casa ANTES do merge, para o resto da fusão seguir 1:1.
+	units = expandirDropins(units)
+
 	// Config EFETIVA: precedência por nome (a de maior precedência vence, as
 	// demais viram Shadowed), máscara propagada ao grupo, e resets de Exec/Env
 	// de drop-in aplicados aos objetos carregados ANTES. Depois disto, os checks
@@ -980,6 +1004,87 @@ func precedenciaArvore(path string) int {
 		}
 	}
 	return len(unitDirs)
+}
+
+// ehPadraoDropin diz se o alvo de um drop-in é um PADRÃO (casa várias units), e
+// não um nome exato: só o tipo ("service" = type-wide), um template ("foo@")
+// ou um prefixo por dash ("foo-").
+func ehPadraoDropin(alvo string) bool {
+	i := strings.LastIndexByte(alvo, '.')
+	if i < 0 {
+		return true // só o tipo: type-wide (service.d/, timer.d/…)
+	}
+	nome := alvo[:i]
+	return strings.HasSuffix(nome, "@") || strings.HasSuffix(nome, "-")
+}
+
+// dropinCasaUnit implementa o casamento de drop-in do systemd: o dir P.d/ altera
+// a unit NAME.TYPE quando P é TYPE (type-wide), TEMPLATE@.TYPE (a instância de um
+// template) ou PREFIX-.TYPE (truncando NAME em cada dash). É a mesma regra da
+// systemd.unit(5), "The drop-in files ... are read from directories".
+func dropinCasaUnit(padrao, unit string) bool {
+	i := strings.LastIndexByte(unit, '.')
+	if i < 0 {
+		return padrao == unit
+	}
+	nome, tipo := unit[:i], unit[i+1:]
+	switch {
+	case padrao == unit: // exato (redundante aqui, mas seguro)
+		return true
+	case padrao == tipo: // type-wide: "service" casa "*.service"
+		return true
+	}
+	if at := strings.IndexByte(nome, '@'); at >= 0 {
+		if padrao == nome[:at+1]+"."+tipo { // "foo@.service" casa "foo@qualquer.service"
+			return true
+		}
+	}
+	for j := len(nome) - 1; j >= 0; j-- {
+		if nome[j] == '-' {
+			if padrao == nome[:j+1]+"."+tipo { // "foo-.service", "foo-bar-.service"
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// expandirDropins troca cada drop-in POR PADRÃO por uma cópia para CADA base que
+// ele casa (Name/DropInFor = a base), para o merge seguir 1:1. Um padrão que não
+// casa base nenhuma FICA (dormente): é um drop-in plantado que os checks ainda
+// devem ver. Drop-in exato e base passam intactos.
+func expandirDropins(units []Unit) []Unit {
+	basesPorScope := map[string][]string{}
+	for _, u := range units {
+		if u.DropInFor == "" {
+			basesPorScope[u.Scope] = append(basesPorScope[u.Scope], u.Name)
+		}
+	}
+	var out []Unit
+	for _, u := range units {
+		if u.DropInFor == "" || !ehPadraoDropin(u.DropInFor) {
+			out = append(out, u)
+			continue
+		}
+		var casou []string
+		for _, base := range basesPorScope[u.Scope] {
+			if base != u.DropInFor && dropinCasaUnit(u.DropInFor, base) {
+				casou = append(casou, base)
+			}
+		}
+		if len(casou) == 0 {
+			out = append(out, u) // dormente: mantém para os checks verem o drop-in plantado
+			continue
+		}
+		for _, base := range casou {
+			cp := u
+			cp.Name = base
+			cp.DropInFor = base
+			cp.Kind = kindOf(base)
+			out = append(out, cp)
+		}
+	}
+	return out
 }
 
 func parseUnitFile(f *Facts, e *env.Env, path, scope string, vendor bool) Unit {

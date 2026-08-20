@@ -1006,6 +1006,7 @@ func mesclarUnits(units []Unit, e *env.Env) {
 		// `ExecSearchPath=/tmp/.hidden`. O searchpath acumula na ordem de carga,
 		// honrando o reset; um PATH próprio (Environment=) desliga a busca.
 		var searchPath []string
+		var pathProprio []string // dirs do PATH via Environment=, na ordem
 		temPATH := false
 		for _, i := range efetivos {
 			if units[i].ExecSearchPathReset {
@@ -1014,7 +1015,10 @@ func mesclarUnits(units []Unit, e *env.Env) {
 			searchPath = append(searchPath, units[i].ExecSearchPath...)
 			for _, s := range units[i].Environment {
 				if s.Key == "PATH" {
+					// Environment= com a mesma chave: a ÚLTIMA vence (systemd),
+					// então sobrescreve.
 					temPATH = true
+					pathProprio = dirsAbsolutos(strings.Split(s.Value, ":"))
 				}
 			}
 		}
@@ -1029,10 +1033,19 @@ func mesclarUnits(units []Unit, e *env.Env) {
 				if cru == "" {
 					cru = units[i].Exec[j].Cmd // defensivo: unit sem raw (não deve ocorrer)
 				}
-				if temPATH {
-					// PATH próprio (Environment=): é ELE que o systemd consulta, e
-					// não o modelamos por-arquivo. Deixa o nome nu cru — resolver
-					// contra um path que o systemd não usaria acusaria errado.
+				if temPATH && len(pathProprio) > 0 {
+					// PATH próprio (Environment=): é ELE que o systemd consulta.
+					// Resolve o nome nu contra ESSE path — não o fixo, não deixa
+					// cru. Sem isto, Environment=PATH=/tmp/.cache + ExecStart=agent
+					// deixava /tmp/.cache/agent como nome nu, FORA do alcance dos
+					// checks de dono e de caminho suspeito. Resolver contra o path
+					// REAL do systemd põe o alvo certo na frente deles — e um PATH
+					// legítimo (/opt/app/bin) resolve certo, sem falso positivo.
+					units[i].Exec[j].Cmd = resolverNomeNu(e, cru, pathProprio)
+				} else if temPATH {
+					// PATH próprio mas sem componente ABSOLUTO utilizável (só
+					// relativos, que o systemd resolveria contra um cwd que não
+					// modelamos): deixa cru em vez de acusar contra path errado.
 					units[i].Exec[j].Cmd = cru
 				} else {
 					dirs := searchPath
@@ -1393,6 +1406,20 @@ func resolverNomeNu(e *env.Env, cmd string, dirs []string) string {
 		}
 	}
 	return cmd
+}
+
+// dirsAbsolutos filtra uma lista de componentes de PATH para só os ABSOLUTOS.
+// Um PATH pode ter componente vazio (= cwd) ou relativo, que o systemd resolve
+// contra um diretório de trabalho que não modelamos — resolver o nome nu contra
+// eles acusaria um caminho errado.
+func dirsAbsolutos(dirs []string) []string {
+	var out []string
+	for _, d := range dirs {
+		if strings.HasPrefix(d, "/") {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // camposComAspas divide respeitando aspas: Environment="A=1" "B=2 3".

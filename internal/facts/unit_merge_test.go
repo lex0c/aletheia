@@ -541,3 +541,23 @@ func TestMerge_DropinMesmaArvoreEspecificidadeVence(t *testing.T) {
 		t.Errorf("o vencedor devia ser o exato (/tmp/.evil), não o type-wide (/usr/bin/legit): %v", alvos)
 	}
 }
+
+// Environment=PATH=/tmp/.cache + ExecStart=agent: o nome nu tem de resolver
+// contra o PATH PRÓPRIO da unit (é ele que o systemd consulta), não ficar cru.
+// Sem isto, /tmp/.cache/agent escapava dos checks de dono e caminho suspeito.
+func TestMerge_EnvironmentPATHResolveNomeNu(t *testing.T) {
+	us := coletarUnits(t, map[string]string{
+		"etc/systemd/system/svc.service": "[Service]\nEnvironment=PATH=/tmp/.cache\nExecStart=agent --daemon\n",
+		"tmp/.cache/agent":               "x",
+	}, nil)
+	u := acharUnit(us, "/etc/systemd/system/svc.service")
+	if u == nil {
+		t.Fatalf("unit não coletada: %+v", us)
+	}
+	if len(u.Exec) != 1 || u.Exec[0].Cmd != "/tmp/.cache/agent --daemon" {
+		t.Fatalf("Environment=PATH deve resolver o nome nu contra o path próprio: %+v", u.Exec)
+	}
+	if u.Exec[0].Target != "/tmp/.cache/agent" {
+		t.Errorf("alvo efetivo deve ser /tmp/.cache/agent, veio %q", u.Exec[0].Target)
+	}
+}

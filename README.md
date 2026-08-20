@@ -9,10 +9,6 @@ incidente:
 2. **Quais evidências sustentam essa conclusão?**
 3. **O que a ferramenta não conseguiu verificar?**
 
-A distinção entre "não encontrei" e "não consegui observar" faz parte do modelo
-da ferramenta. Cobertura incompleta é reportada explicitamente e afeta o exit
-code.
-
 > **Aletheia é uma ferramenta de triagem, não uma prova de que o host está
 > limpo.** Em um sistema cujo kernel já foi comprometido, interfaces como
 > `/proc`, `/sys`, tracefs e até syscalls podem fornecer uma visão falsa. Para
@@ -26,43 +22,6 @@ code.
 **Alḗtheia** (`ἀλήθεια`) é uma palavra do grego antigo normalmente traduzida
 como **verdade**, mas sua formação também carrega a ideia de
 **des-ocultamento**: aquilo que deixa de estar escondido.
-
-Essa ideia descreve melhor o propósito da ferramenta do que simplesmente
-"detectar malware".
-
-Durante uma investigação Linux, quase tudo o que o analista observa é uma visão
-fornecida pelo próprio sistema investigado:
-
-```text
-ps          -> /proc
-ss          -> kernel
-ls          -> VFS
-systemctl   -> systemd + filesystem
-bpftool     -> kernel BPF API
-```
-
-Se alguma dessas camadas foi manipulada, "não apareceu nada" pode significar
-duas coisas completamente diferentes:
-
-```text
-não existe
-```
-
-ou:
-
-```text
-existe, mas a fonte usada para observar não mostrou
-```
-
-Aletheia foi desenhado em torno dessa diferença.
-
-Por isso a ferramenta tenta:
-
-- consultar fontes primitivas em vez de depender de comandos do host;
-- cruzar visões diferentes do mesmo objeto quando possível;
-- correlacionar sinais independentes em vez de confiar em uma única heurística;
-- declarar explicitamente quando uma fonte não pôde ser observada;
-- impedir que cobertura incompleta seja apresentada como resultado limpo.
 
 ---
 
@@ -400,8 +359,6 @@ Isso permite analisar o mesmo retrato várias vezes:
 
 inclusive com uma versão futura da ferramenta, desde que o formato do dump seja
 compatível.
-
-#### O que `collect` não é
 
 O dump do `collect` **não é uma aquisição forense completa do host**.
 

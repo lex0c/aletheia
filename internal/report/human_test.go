@@ -74,10 +74,12 @@ func TestCompactoAgrupaPorID(t *testing.T) {
 	}
 	out := render(r, 0)
 
-	if !strings.Contains(out, "4×") {
-		t.Errorf("quatro achados do mesmo ID devem virar uma linha com 4×:\n%s", out)
+	if !strings.Contains(out, "×4") {
+		t.Errorf("quatro achados do mesmo ID devem virar uma linha com ×4:\n%s", out)
 	}
-	if n := strings.Count(out, "proc.suspeito"); n > 1 {
+	// O detalhe agrupa: no máximo uma linha no FOCUS (resumo) e uma no detalhe.
+	// Quatro linhas seria a falha de agrupamento que este teste guarda.
+	if n := strings.Count(out, "proc.suspeito"); n > 2 {
 		t.Errorf("o ID não deve se repetir na saída compacta (%d vezes)", n)
 	}
 }
@@ -164,8 +166,8 @@ func TestAritmeticaDaCoberturaFecha(t *testing.T) {
 		NotChecked: []check.NotChecked{{ID: "c", Reason: "sem root"}},
 	}}
 	out := render(r, 0)
-	if !strings.Contains(out, "completos 3 · parciais 2 · não verificados 1 · total 6") {
-		t.Errorf("a linha de cobertura precisa fechar a conta:\n%s", out)
+	if !strings.Contains(out, "3/6 completos") || !strings.Contains(out, "2 parciais") || !strings.Contains(out, "1 não verificados") {
+		t.Errorf("a linha de cobertura precisa fechar a conta (completos/parciais/não verificados):\n%s", out)
 	}
 }
 
@@ -179,7 +181,7 @@ func TestLacunaDeColetaTemLinhaPropria(t *testing.T) {
 	if !strings.Contains(out, "coleta") || !strings.Contains(out, "250 processos") {
 		t.Errorf("a lacuna de coleta precisa de linha própria:\n%s", out)
 	}
-	if !strings.Contains(out, "completos 3 · parciais 0 · não verificados 0 · total 3") {
+	if !strings.Contains(out, "3/3 completos") {
 		t.Error("a lacuna de coleta não pode mexer na aritmética de checks")
 	}
 	if !strings.Contains(out, "RESULT: INCOMPLETE") {
@@ -269,10 +271,19 @@ func TestVerboseTrazEvidenciaEFalsoPositivo(t *testing.T) {
 		t.Error("o default é formato de DECISÃO: FP detalhado é ruído ali")
 	}
 
+	// -v traz o FATO (evidência); o FP (explicação) desce para -vv, para o -v
+	// não virar parede de prosa.
 	verbose := render(r, 1)
+	if !strings.Contains(verbose, "exe=/memfd:x") {
+		t.Errorf("-v precisa do fato (evidência):\n%s", verbose)
+	}
+	if strings.Contains(verbose, "runtime que usa memfd") {
+		t.Error("-v NÃO deve trazer o FP (explicação): isso é -vv")
+	}
+	vv := render(r, 2)
 	for _, want := range []string{"exe=/memfd:x", "FP:", "runtime que usa memfd"} {
-		if !strings.Contains(verbose, want) {
-			t.Errorf("-v sem %q:\n%s", want, verbose)
+		if !strings.Contains(vv, want) {
+			t.Errorf("-vv sem %q:\n%s", want, vv)
 		}
 	}
 }
@@ -422,13 +433,15 @@ func TestRelatorioMostraAlvoCorrelacionado(t *testing.T) {
 	}
 	out := render(r, 0)
 
-	if !strings.Contains(out, "3 sinais no mesmo alvo") {
-		t.Errorf("o alvo correlacionado não apareceu:\n%s", out)
+	// A entidade correlacionada pid=19 sai numa linha com os rótulos dos 3
+	// sinais e a contagem — a "história" do incidente, escaneável.
+	if !strings.Contains(out, "pid=19") || !strings.Contains(out, "×3") {
+		t.Errorf("o alvo correlacionado não apareceu com a contagem:\n%s", out)
 	}
-	// pid=19 aparece uma vez como cabeçalho do grupo; pid=77 uma vez solto.
-	if n := strings.Count(out, "pid=19"); n != 1 {
-		t.Errorf("pid=19 apareceu %d vezes: cada achado sai uma vez só\n%s", n, out)
+	if !strings.Contains(out, "revshell") {
+		t.Errorf("os rótulos curtos dos sinais devem aparecer:\n%s", out)
 	}
+	// O alvo com um sinal só continua na lista.
 	if !strings.Contains(out, "pid=77") {
 		t.Errorf("o alvo com um sinal só precisa continuar aparecendo:\n%s", out)
 	}
@@ -481,32 +494,6 @@ func TestAcoesNaoPerdemComandoDistinto(t *testing.T) {
 	}
 }
 
-// Dois listeners do mesmo processo produzem dois achados de mesmo ID e mesmo
-// sujeito. Dentro do bloco de um alvo eles viravam duas linhas idênticas — o
-// que as separa está na evidência, não no título — e o operador procurava uma
-// diferença que a tela não mostrava.
-func TestSinaisDoGrupoCompactaRepeticao(t *testing.T) {
-	g := check.SubjectGroup{Subject: "/x", Findings: []check.Finding{
-		{ID: "net.listener_unowned", Subject: "pid=1", Title: "porta exposta"},
-		{ID: "net.listener_unowned", Subject: "pid=1", Title: "porta exposta"},
-		{ID: "integrity.no_package_owner", Subject: "/x", Title: "sem dono"},
-	}}
-	s := sinaisDoGrupo(g)
-	if len(s) != 2 {
-		t.Fatalf("duas linhas: a repetida e a outra; deu %d", len(s))
-	}
-	if s[0].n != 2 {
-		t.Errorf("a contagem tem que sobreviver — duas portas não são uma: n=%d", s[0].n)
-	}
-	if s[1].n != 1 {
-		t.Errorf("o achado distinto não pode ser somado ao anterior: n=%d", s[1].n)
-	}
-	// A ORDEM é a do relatório: compactar não pode reordenar o bloco.
-	if s[0].fd.ID != "net.listener_unowned" || s[1].fd.ID != "integrity.no_package_owner" {
-		t.Error("a ordem original do grupo se perdeu")
-	}
-}
-
 func TestCortaPorRune(t *testing.T) {
 	// Cortar por byte parte o acento no meio e emite lixo no terminal.
 	if got := corta("binário", 4); got != "bin…" {
@@ -534,18 +521,15 @@ func TestBlocoDeAlvoPorAtor(t *testing.T) {
 			fd("b", "pid=7", "/x", "fala com a internet"),
 		},
 	}
+	// terse: a entidade /x sai numa linha com os rótulos dos dois sinais.
 	out := render(r, 0)
-
-	if !strings.Contains(out, "/x") || !strings.Contains(out, "2 sinais no mesmo alvo") {
+	if !strings.Contains(out, "/x") {
 		t.Fatalf("o grupo tinha que se formar pelo ator:\n%s", out)
 	}
-	// O sujeito PRÓPRIO do achado sobrevive: é ele que o operador usa depois.
-	if !strings.Contains(out, "(pid=7)") {
-		t.Errorf("o pid do achado de rede sumiu dentro do bloco:\n%s", out)
-	}
-	// E o achado que JÁ é o alvo não ganha um parêntese redundante "(/x)".
-	if strings.Contains(out, "(/x)") {
-		t.Errorf("o achado cujo sujeito é o próprio alvo não repete o alvo:\n%s", out)
+	// -v: o sujeito PRÓPRIO de cada achado (pid=7) sobrevive no detalhe.
+	outv := render(r, 1)
+	if !strings.Contains(outv, "pid=7") {
+		t.Errorf("o pid do achado de rede sumiu do detalhe -v:\n%s", outv)
 	}
 }
 
@@ -565,15 +549,15 @@ func TestBlocoDeAlvoCortaComContagem(t *testing.T) {
 		Sev: check.SevWarn, Subject: "/x", Title: "sem dono"})
 	r := &check.Report{Coverage: check.Coverage{Total: 1, Complete: 1}, Findings: fs}
 
+	// terse: /x com a contagem real de achados (21).
 	out := render(r, 0)
-	if !strings.Contains(out, "21 sinais no mesmo alvo") {
-		t.Errorf("a contagem do cabeçalho tem que ser a real:\n%s", out)
+	if !strings.Contains(out, "×21") {
+		t.Errorf("a contagem do alvo tem que ser a real (21):\n%s", out)
 	}
-	if !strings.Contains(out, "e mais 13 sinal(is)") {
-		t.Errorf("o que passou do teto tem que aparecer como contagem:\n%s", out)
-	}
-	if n := strings.Count(out, "     · "); n != 9 {
-		t.Errorf("esperava 8 linhas de sinal + a do corte, deu %d:\n%s", n, out)
+	// -v: o detalhe corta os membros repetidos e diz quantos sobraram.
+	outv := render(r, 1)
+	if !strings.Contains(outv, "iguais") {
+		t.Errorf("o que passou do teto de membros tem que aparecer como contagem:\n%s", outv)
 	}
 }
 
@@ -596,12 +580,13 @@ func TestBlocoDeAlvoContaOCorteSobreLinhasCompactadas(t *testing.T) {
 		Sev: check.SevWarn, Subject: "/x", Title: "sem dono"})
 
 	out := render(&check.Report{Coverage: check.Coverage{Total: 1, Complete: 1}, Findings: fs}, 0)
-	if !strings.Contains(out, "22 sinais no mesmo alvo") {
-		t.Errorf("o cabeçalho conta ACHADOS, e são 22:\n%s", out)
+	// O alvo correlacionado /x sai numa linha só, com a contagem de achados (22)
+	// e os rótulos curtos dos sinais. Sem paredão: o operador escaneia.
+	if !strings.Contains(out, "/x") || !strings.Contains(out, "×22") {
+		t.Errorf("o correlacionado /x deve sair numa linha com ×22:\n%s", out)
 	}
-	// 8 linhas cobrem 10+7 = 17 achados; sobram 5.
-	if !strings.Contains(out, "e mais 5 sinal(is)") {
-		t.Errorf("o corte tem que contar o que sobrou de verdade:\n%s", out)
+	if !strings.Contains(out, "egress_unowned") {
+		t.Errorf("os rótulos curtos dos sinais devem aparecer:\n%s", out)
 	}
 }
 

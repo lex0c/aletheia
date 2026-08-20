@@ -110,20 +110,33 @@ type BaselineInfo struct {
 // de ação, rodapé de cobertura. ~18 linhas independentemente do tamanho do
 // incidente.
 func Human(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, o Options) {
+	t := temaPara(o.Color)
 	writeHeader(w, f, e)
 	writeAnalise(w, o.Analise)
 	writeBaseline(w, o.Baseline)
 	writeJanela(w, o.Janela)
 	writeIOC(w, o.IOC)
 
+	// O CORPO é a lista de decisão: veredito, uma linha por entidade que precisa
+	// de atenção (id local, entidade, o que é — sem §ref, sem prosa), o contexto
+	// resumido e o que fazer AGORA. O operador escaneia, não lê.
+	writeSumario(w, t, r)
+	itens := itensDeFoco(r)
+	writeFoco(w, t, itens)
+	writeContext(w, t, r)
+	writeNextSteps(w, r)
+
+	// O DETALHE — evidência por entidade — é do investigador, e só sai no -v,
+	// abaixo da régua. O default fica escaneável.
 	if o.Verbose > 0 {
-		writeVerbose(w, r, o)
-	} else {
-		writeCompact(w, r)
+		if len(r.Findings) > 0 {
+			fmt.Fprintln(w, t.regua())
+			fmt.Fprintln(w)
+		}
+		writeVerbose(w, t, r, o)
 	}
 
-	writeNextSteps(w, r)
-	writeCoverage(w, r, o)
+	writeCoverage(w, t, r, o)
 	writeResult(w, r)
 }
 
@@ -189,171 +202,71 @@ func writeAnalise(w io.Writer, a *AnaliseInfo) {
 	fmt.Fprintln(w)
 }
 
-// maxSinaisPorGrupo é o teto de linhas de um alvo correlacionado no resumo. O
-// que passa disso vira uma linha com a contagem, e nunca desaparece.
-const maxSinaisPorGrupo = 8
-
-// sinal é uma linha do bloco de um alvo, com quantos achados idênticos ela
-// representa.
-type sinal struct {
-	fd check.Finding
-	n  int
-}
-
-// sinaisDoGrupo junta o que é REPETIÇÃO dentro do bloco de um alvo.
-//
-// O caso apareceu no primeiro host real: o `adb` escuta em duas portas, o check
-// de listener emitiu dois achados de mesmo ID e mesmo pid, e o bloco imprimiu
-// duas linhas idênticas — o que distingue as duas está na evidência, não no
-// título. Solto, isso já vinha compactado como "2×"; dentro do grupo voltava a
-// ser texto repetido sem motivo aparente, que faz o operador procurar uma
-// diferença que a linha não mostra.
-//
-// A contagem fica, porque duas portas não são uma. Some só a duplicata visual.
-func sinaisDoGrupo(g check.SubjectGroup) []sinal {
-	var out []sinal
-	pos := map[string]int{}
-	for _, fd := range g.Findings {
-		k := fd.ID + "\x00" + fd.Subject
-		if i, ok := pos[k]; ok {
-			out[i].n++
-			continue
-		}
-		pos[k] = len(out)
-		out = append(out, sinal{fd: fd, n: 1})
-	}
-	return out
-}
-
-func writeCompact(w io.Writer, r *check.Report) {
-	crit, warn, manual, _ := r.Counts()
-	cov := r.Coverage
-	fmt.Fprintf(w, "⛔ %d   ⚠ %d   ◆ %d manuais   ·   cobertura %d/%d\n\n",
-		crit, warn, manual, cov.Complete, cov.Total)
-
-	if len(r.Findings) == 0 {
-		fmt.Fprintln(w, "✓ nenhum indicador coberto disparou")
-		fmt.Fprintln(w)
-		return
-	}
-
-	// O mesmo alvo visto por checks diferentes vem PRIMEIRO e junto: é a forma
-	// de um incidente, e listá-lo solto contaria quatro fatos onde há uma
-	// história.
-	grupos, resto := r.Correlate()
-	for _, g := range grupos {
-		fmt.Fprintf(w, "%s %-13s %d sinais no mesmo alvo\n",
-			g.Sev().Mark(), Safe(g.Subject), len(g.Findings))
-		sinais := sinaisDoGrupo(g)
-		for i, e := range sinais {
-			// Antes do ator, um grupo só reunia achados do MESMO sujeito e o
-			// teto era o número de checks. Agora um binário acusado reúne todos
-			// os processos que o executam, e um interpretador modificado com
-			// quarenta processos imprimiria quarenta linhas numa seção que
-			// existe para caber na tela. O corte diz quanto sobrou e onde ver:
-			// truncar em silêncio é a forma de mentir que esta ferramenta não
-			// pode ter.
-			//
-			// As duas contas são sobre as LINHAS JÁ COMPACTADAS, e não sobre o
-			// total bruto de achados. Misturar as duas escalas dizia "e mais
-			// 14" onde faltavam 5: as oito linhas impressas podem representar
-			// mais de oito achados, e a diferença ia toda para o número errado.
-			if i == maxSinaisPorGrupo && len(sinais) > maxSinaisPorGrupo+1 {
-				resta := 0
-				for _, s := range sinais[maxSinaisPorGrupo:] {
-					resta += s.n
-				}
-				fmt.Fprintf(w, "     · … e mais %d sinal(is) no mesmo alvo — `-v` mostra todos\n", resta)
-				break
-			}
-			fd := e.fd
-			line := "     · "
-			if e.n > 1 {
-				line += strconv.Itoa(e.n) + "× "
-			}
-			line += Safe(fd.Title) + marcaNovo(fd)
-			// Quando o grupo se formou por ATOR, o sujeito próprio do achado é
-			// outra coisa — `pid=17`, `sshd.service` —, e é ELE que o operador
-			// usa no passo seguinte. Perdê-lo dentro do bloco trocaria uma
-			// história por um alvo que ninguém consegue seguir.
-			if fd.Ator != "" && fd.Subject != "" {
-				line += " (" + Safe(fd.Subject) + ")"
-			}
-			if fd.Downgraded {
-				line += " ⚠rebaixado"
-			}
-			fmt.Fprintln(w, pad(line, 76)+"§"+Safe(fd.Ref))
-		}
-	}
-	if len(grupos) > 0 && len(resto) > 0 {
-		fmt.Fprintln(w)
-	}
-
-	for _, g := range check.GroupByIDSev(resto) {
-		first := g.First()
-		if first.Sev == check.SevInfo {
-			continue
-		}
-		subj := first.Subject
-		if g.N() > 1 {
-			subj = strconv.Itoa(g.N()) + "×"
-		}
-		line := fmt.Sprintf("%s %-13s %s%s", first.Sev.Mark(), Safe(subj),
-			Safe(first.Title), marcaNovo(first))
-		if g.N() > 1 {
-			line += " (" + Safe(g.Subjects(3)) + ")"
-		}
-		if first.Downgraded {
-			line += " ⚠rebaixado"
-		}
-		fmt.Fprintln(w, pad(line, 76)+"§"+first.Ref)
-	}
-	fmt.Fprintln(w)
-}
-
 // grouped compacta por ID: "8× exe em local suspeito" no lugar de oito linhas.
 // É a outra metade da leitura — o mesmo check em muitos alvos, contra muitos
 // checks no mesmo alvo.
-func writeVerbose(w io.Writer, r *check.Report, o Options) {
+// Tetos do detalhe -v: alvos por check e linhas de evidência por alvo. O que
+// passa vira contagem, nunca some. -vv não corta.
+const (
+	maxMembros   = 6
+	maxEvidencia = 2
+)
+
+// writeVerbose é o detalhe do INVESTIGADOR: agrupado por check (o mesmo tipo em
+// N alvos vira UM bloco, não N), com os fatos de cada alvo — não a prosa. O
+// título pedagógico, o §ref e os falsos-positivos saem daqui: o -v mostra O QUE
+// e ONDE; o -vv acrescenta a explicação para a auditoria a fundo.
+func writeVerbose(w io.Writer, t Tema, r *check.Report, o Options) {
+	// ids locais na mesma ordem do topo, para o operador cruzar "olha o W3".
+	idPorChave := map[string]string{}
+	for _, it := range itensDeFoco(r) {
+		idPorChave[it.alvo] = it.id
+	}
+
 	var lastSev check.Severity = -1
-	// O bloco FP é IDÊNTICO para todo achado do mesmo check — repeti-lo por
-	// achado enche o relatório de prosa. Em -v sai UMA vez por check (o
-	// primeiro achado dele); em -vv sai completo, por achado, para a auditoria
-	// a fundo. A caveat continua visível, sem a parede.
-	fpMostrado := map[string]bool{}
-	nsMostrado := map[string]bool{}
-	for _, fd := range r.Findings {
-		if fd.Sev == check.SevInfo && o.Verbose < 2 {
+	for _, g := range check.GroupByIDSev(r.Findings) {
+		first := g.First()
+		if first.Sev == check.SevInfo && o.Verbose < 2 {
 			continue
 		}
-		if fd.Sev != lastSev {
-			fmt.Fprintf(w, "════ %s %s\n\n", fd.Sev, strings.Repeat("═", max(0, 62-len(fd.Sev.String()))))
-			lastSev = fd.Sev
+		if first.Sev != lastSev {
+			fmt.Fprintln(w, t.pintaSev(first.Sev, "== "+first.Sev.String()+" =="))
+			fmt.Fprintln(w)
+			lastSev = first.Sev
 		}
-		head := fmt.Sprintf("%s %-40s §%-6s %s", fd.Sev.Mark(), Safe(fd.ID), Safe(fd.Ref), fd.Origin)
-		if fd.Downgraded {
-			head += " ⚠rebaixado"
+		cab := t.etiqueta(first.Sev) + "  " + t.negrito(Safe(first.ID))
+		if g.N() > 1 {
+			cab += t.fraco(" ×" + strconv.Itoa(g.N()))
 		}
-		fmt.Fprintln(w, head)
-		if fd.Subject != "" {
-			fmt.Fprintln(w, "   "+Safe(fd.Subject))
+		if first.Downgraded {
+			cab += t.fraco(" rebaixado")
 		}
-		fmt.Fprintln(w, "   "+Safe(fd.Title))
-		for _, ev := range fd.Evidence {
-			fmt.Fprintln(w, "   · "+Safe(ev))
-		}
-		// Os → são guia por CHECK, quase iguais entre achados do mesmo tipo. Em
-		// -v saem uma vez por check; em -vv, por achado. O caminho de cada
-		// achado continua na linha de subject.
-		if len(fd.NextSteps) > 0 && (o.Verbose >= 2 || !nsMostrado[fd.ID]) {
-			for _, ns := range fd.NextSteps {
-				fmt.Fprintln(w, "   → "+Safe(ns))
+		fmt.Fprintln(w, cab)
+
+		for i, fd := range g.Findings {
+			if i >= maxMembros && o.Verbose < 2 && g.N() > maxMembros+1 {
+				fmt.Fprintf(w, "   %s\n", t.fraco("… +"+strconv.Itoa(g.N()-i)+" iguais (use -vv)"))
+				break
 			}
-			nsMostrado[fd.ID] = true
+			linha := "   " + Safe(nz(fd.Subject, fd.Title))
+			if id, ok := idPorChave[nz(fd.Ator, fd.Subject)]; ok {
+				linha = "   [" + id + "] " + Safe(nz(fd.Subject, fd.Title))
+			}
+			fmt.Fprintln(w, linha)
+			for j, ev := range fd.Evidence {
+				if j >= maxEvidencia && o.Verbose < 2 {
+					fmt.Fprintf(w, "       %s\n", t.fraco("…"))
+					break
+				}
+				fmt.Fprintln(w, "       "+t.fraco(Safe(corta(ev, 110))))
+			}
 		}
-		if len(fd.FalsePositives) > 0 && (o.Verbose >= 2 || !fpMostrado[fd.ID]) {
-			fmt.Fprintln(w, "   FP: "+Safe(strings.Join(fd.FalsePositives, " · ")))
-			fpMostrado[fd.ID] = true
+		// A AÇÃO fica (é operacional), uma vez por check. FP só no -vv.
+		for _, ns := range first.NextSteps {
+			fmt.Fprintln(w, "   -> "+Safe(ns))
+		}
+		if o.Verbose >= 2 && len(first.FalsePositives) > 0 {
+			fmt.Fprintln(w, "   "+t.fraco("FP: "+Safe(strings.Join(first.FalsePositives, " · "))))
 		}
 		fmt.Fprintln(w)
 	}
@@ -368,12 +281,12 @@ func writeNextSteps(w io.Writer, r *check.Report) {
 	}
 
 	if crit == 0 {
-		fmt.Fprintln(w, "Revise os avisos antes de qualquer ação. Ordem em runbook §19.")
+		fmt.Fprintln(w, "Revise os avisos antes de agir.")
 		fmt.Fprintln(w)
 		return
 	}
 
-	fmt.Fprintln(w, "AGORA, nesta ordem (runbook §19 — não inverta):")
+	fmt.Fprintln(w, "AGORA, nesta ordem:")
 	n := 1
 	// O passo irreversível vem primeiro. A seleção é pelo campo Irreversible,
 	// não por casar o texto do comando: acoplar por string faz uma reescrita
@@ -419,46 +332,110 @@ func writeNextSteps(w io.Writer, r *check.Report) {
 		fmt.Fprintf(w, "  %d. %s   ← irreversível se pulado\n", n, Safe(c))
 		n++
 	}
-	fmt.Fprintf(w, "  %d. isolar na camada de REDE, não no host (runbook §18)\n", n)
-	fmt.Fprintf(w, "  %d. remover persistência ANTES de matar (runbook §19)\n", n+1)
+	fmt.Fprintf(w, "  %d. isolar na camada de REDE, não no host\n", n)
+	fmt.Fprintf(w, "  %d. remover persistência ANTES de matar\n", n+1)
 	fmt.Fprintln(w)
 }
 
-func writeCoverage(w io.Writer, r *check.Report, o Options) {
+// maxLacunasCompactas é o teto de lacunas de coleta listadas no modo de
+// decisão. O que passa vira contagem, com o ponteiro para -v — nunca some.
+
+// maxCausas é o teto de causas de lacuna listadas no modo de decisão.
+const maxCausas = 5
+
+func writeCoverage(w io.Writer, t Tema, r *check.Report, o Options) {
 	c := r.Coverage
 	nPartial, nNot := len(c.Partial), len(c.NotChecked)
 
-	fmt.Fprintf(w, "COBERTURA   completos %d · parciais %d · não verificados %d · total %d\n",
-		c.Complete, nPartial, nNot, c.Total)
-
-	if nNot > 0 {
-		if o.Verbose > 0 {
-			for _, nc := range c.NotChecked {
-				fmt.Fprintf(w, "  não verificado  %s (§%s) — %s\n", Safe(nc.ID), Safe(nc.Ref), Safe(nc.Reason))
-			}
-		} else {
-			fmt.Fprintln(w, "  não verificado  "+Safe(summarize(reasonsOf(c.NotChecked), 3)))
-		}
+	// Cabeçalho terse: só o que não é zero.
+	cab := fmt.Sprintf("%s  %d/%d completos", t.negrito("COBERTURA"), c.Complete, c.Total)
+	if nPartial > 0 {
+		cab += fmt.Sprintf(" · %d parciais", nPartial)
 	}
-	if len(c.CollectorGaps) > 0 {
-		for _, g := range c.CollectorGaps {
+	if nNot > 0 {
+		cab += fmt.Sprintf(" · %d não verificados", nNot)
+	}
+	fmt.Fprintln(w, cab)
+
+	// -v: a lista por check, completa (a auditoria a fundo).
+	if o.Verbose > 0 {
+		for _, nc := range c.NotChecked {
+			fmt.Fprintf(w, "  não verificado  %s — %s\n", Safe(nc.ID), Safe(nc.Reason))
+		}
+		for _, g := range dedupe(c.CollectorGaps) {
 			fmt.Fprintln(w, "  coleta          "+Safe(g))
 		}
+		for _, p := range c.Partial {
+			fmt.Fprintf(w, "  parcial         %s — %s\n", Safe(p.ID), Safe(strings.Join(p.Reasons, " · ")))
+		}
+		fmt.Fprintln(w)
+		return
 	}
-	if nPartial > 0 {
-		if o.Verbose > 0 {
-			for _, p := range c.Partial {
-				fmt.Fprintf(w, "  parcial         %s (§%s) — %s\n", Safe(p.ID), Safe(p.Ref), Safe(strings.Join(p.Reasons, " · ")))
-			}
-		} else {
-			var rs []string
-			for _, p := range c.Partial {
-				rs = append(rs, p.Reasons...)
-			}
-			fmt.Fprintln(w, "  parcial         "+Safe(summarize(rs, 3)))
+
+	// Default: agrupa por CAUSA RAIZ, ordenada por IMPACTO (quantos checks cada
+	// uma degrada). O operador vê ONDE a cobertura é fraca e a alavanca para
+	// fechá-la — não 26 linhas de detalhe por check.
+	impacto := map[string]int{}
+	var ordem []string
+	acumula := func(txt string) {
+		chave := causaCurta(txt)
+		if chave == "" {
+			return
+		}
+		if _, ok := impacto[chave]; !ok {
+			ordem = append(ordem, chave)
+		}
+		impacto[chave]++
+	}
+	for _, p := range c.Partial {
+		for _, rz := range dedupe(p.Reasons) {
+			acumula(rz)
 		}
 	}
+	for _, nc := range c.NotChecked {
+		acumula(nc.Reason)
+	}
+	for _, g := range c.CollectorGaps {
+		acumula(g)
+	}
+	sort.SliceStable(ordem, func(i, j int) bool { return impacto[ordem[i]] > impacto[ordem[j]] })
+
+	lim := len(ordem)
+	if lim > maxCausas {
+		lim = maxCausas
+	}
+	temRoot := false
+	for _, causa := range ordem[:lim] {
+		n := impacto[causa]
+		prefixo := "     ·"
+		if n > 0 {
+			prefixo = fmt.Sprintf("  %2d×  ", n)
+		}
+		fmt.Fprintf(w, "%s %s\n", t.fraco(prefixo), t.fraco(Safe(causa)))
+		if mencionaRoot(causa) {
+			temRoot = true
+		}
+	}
+	if lim < len(ordem) {
+		fmt.Fprintf(w, "  %s\n", t.fraco(fmt.Sprintf("… +%d causas — -v detalha", len(ordem)-lim)))
+	}
+	if temRoot {
+		fmt.Fprintln(w, "  "+t.fraco("→ rode como root para recuperar boa parte"))
+	}
 	fmt.Fprintln(w)
+}
+
+// causaCurta reduz um motivo de lacuna à sua raiz escaneável: cortado no
+// comprimento. O "o quê" fica no começo do motivo e o "porquê" pedagógico no
+// fim — o corte naturalmente para perto do fim do "o quê".
+func causaCurta(s string) string {
+	return corta(strings.TrimSpace(s), 72)
+}
+
+func mencionaRoot(s string) bool {
+	l := strings.ToLower(s)
+	return strings.Contains(l, "root") || strings.Contains(l, "cap_") ||
+		strings.Contains(l, "permiss") || strings.Contains(l, "privilég")
 }
 
 func writeResult(w io.Writer, r *check.Report) {
@@ -481,9 +458,13 @@ func writeResult(w io.Writer, r *check.Report) {
 		}
 		fmt.Fprintln(w, "        Isto NÃO é o mesmo que host limpo (runbook §35.8).")
 	default:
-		fmt.Fprintf(w, "        %d críticos · %d avisos · %d manuais · cobertura %d/%d\n",
-			crit, warn, manual, r.Coverage.Complete, r.Coverage.Total)
+		// A contagem já saiu no sumário do topo; aqui a linha fecha o veredito
+		// sem repeti-la. (crit/warn/manual ficam para o -v da automação via JSONL.)
+		fmt.Fprintln(w)
 	}
+	_ = crit
+	_ = warn
+	_ = manual
 
 	if len(r.TrustBroken) > 0 {
 		fmt.Fprintln(w)
@@ -628,13 +609,6 @@ func nz(s, def string) string {
 	return s
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // writeBaseline declara a referência usada, e é a primeira coisa depois do
 // cabeçalho de propósito: o resto do relatório foi medido contra ela.
 func writeBaseline(w io.Writer, b *BaselineInfo) {
@@ -707,20 +681,4 @@ func writeIOC(w io.Writer, i *IOCInfo) {
 		fmt.Fprintf(w, "            ⚠ NÃO entendido: %s\n", Safe(a))
 	}
 	fmt.Fprintln(w)
-}
-
-// marcaNovo destaca o achado AUSENTE da baseline.
-//
-// Quando há uma referência, esta é a informação mais valiosa da execução: tudo
-// o que já era conhecido desceu de nível, e o que sobra em cima é o que mudou
-// desde a captura. Sem a marca, o operador teria de comparar dois relatórios
-// para descobrir o que a ferramenta já sabe.
-//
-// Fora de uma comparação a marca não aparece: sem baseline TUDO seria novo, e
-// uma marca que está em toda linha não distingue nada.
-func marcaNovo(fd check.Finding) string {
-	if fd.Novo {
-		return " ✳NOVO"
-	}
-	return ""
 }

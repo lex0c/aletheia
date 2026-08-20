@@ -404,7 +404,7 @@ func emitir(r *check.Report, f *facts.Facts, e *env.Env, o saida) int {
 	}
 	report.Human(humanOut, r, f, e, report.Options{
 		Verbose: o.verbose, Baseline: bl, IOC: infoIOC(o.ioc),
-		Janela: jn, Analise: o.analise,
+		Janela: jn, Analise: o.analise, Color: corHabilitada(humanOut),
 	})
 
 	return writeJSONL(o.jsonFH, r.Exit(), r, f, e, bl, jn, o.analise)
@@ -499,4 +499,23 @@ func escreverSoma(caminho, hash, base string) error {
 		return err
 	}
 	return fh.Close()
+}
+
+// corHabilitada decide o realce ANSI por progressive enhancement: só quando a
+// saída é um TERMINAL de verdade, TERM não é "dumb" e NO_COLOR não foi pedido.
+// Redirecionado para arquivo ou pipe (ticket, `| less -R` sem querer), sai texto
+// puro — a cor nunca carrega significado, então nada se perde.
+func corHabilitada(w io.Writer) bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	if t := os.Getenv("TERM"); t == "" || t == "dumb" {
+		return false
+	}
+	fh, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	fi, err := fh.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }

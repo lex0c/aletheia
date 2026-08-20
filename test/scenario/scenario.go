@@ -105,6 +105,24 @@ type Scenario struct {
 	// cenário é PULADO com o motivo, nunca passa em silêncio.
 	RequerModulo bool
 
+	// ModulosOcultacao diz que o cenário carrega os módulos de OCULTAÇÃO —
+	// socknd (hooka tcp4_seq_show, esconde socket de /proc/net) e/ou modhide
+	// (some de /proc/modules mas o ftrace o delata). São o que prova
+	// cross.socket_view e cross.module_view contra kernel real.
+	//
+	// Não dá para plantar esses fatos: hook de ftrace e módulo escondido vêm do
+	// KERNEL, não de arquivo em disco. E, ao contrário do dummy.ko do
+	// RequerModulo (levantado dos módulos do host), estes são COMPILADOS contra o
+	// linux-lts do Alpine e só carregam sob ele — por isso o cenário usa
+	// Kernel:"lts". O `make vm-modulos` os compila e extrai o kernel casado; o
+	// `make vm-image` os enfia no initramfs e escreve o marcador. Sem isso o
+	// cenário é PULADO com o motivo, nunca passa em silêncio.
+	//
+	// Por que não em contêiner: um hook em tcp4_seq_show no /proc/net do HOST
+	// esconderia conexão do host inteiro. Só é seguro dentro do QEMU descartável,
+	// com o kernel do próprio guest — a mesma recusa que o vm-matrix já respeita.
+	ModulosOcultacao bool
+
 	// Caps são capabilities extras do contêiner (--cap-add). Só os cenários que
 	// PRECISAM de privilégio para montar a situação as pedem: NET_ADMIN para
 	// criar apelido de endereço, SYS_ADMIN para o unshare.

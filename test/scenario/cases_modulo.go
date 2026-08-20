@@ -124,27 +124,11 @@ func init() {
 		Exit:           -1,
 	})
 
-	Register(Scenario{
-		ID:   "Q1-cross-socket-view-exige-modulo",
-		Desc: "cross-view de socket: /proc/net esconde a conexão, o INET_DIAG a mostra — provado no test/matrix",
-		// Por que fica FORA deste harness, e onde é provado.
-		//
-		// cross.socket_view compara /proc/net/tcp com o NETLINK_INET_DIAG e acusa
-		// a conexão que uma fonte esconde e a outra mostra. Demonstrar isso exige
-		// um módulo de kernel que hooka tcp4_seq_show para sumir com UMA conexão
-		// de /proc/net sem tocar no INET_DIAG.
-		//
-		// Em contêiner é impossível: o /proc/net é o do HOST, e um hook ali
-		// esconderia conexão do host inteiro. O harness Go de VM carrega só o
-		// dummy.ko genérico (RequerModulo) e não compila módulo arbitrário — a
-		// infra para um módulo específico não existe aqui.
-		//
-		// É DEMONSTRADO em test/matrix (make vm-matrix), tier de VM, que compila e
-		// carrega o socket-hidden-module.c e exige que a Aletheia acuse a conexão
-		// escondida — com baseline limpo como controle negativo. A impossibilidade
-		// AQUI fica escrita, com o motivo e o ponteiro, em vez de o check aparecer
-		// como não demonstrado.
-		Untestable:       "precisa de um módulo que esconde socket de /proc/net; o harness Go só carrega dummy.ko. Provado em test/matrix (make vm-matrix), que compila e carrega o socket-hidden-module.",
-		UntestableChecks: []string{"cross.socket_view"},
-	})
+	// O antigo Q1 vivia AQUI, declarando cross.socket_view impossível de provar
+	// neste harness ("só carrega dummy.ko, não compila módulo arbitrário"). Isso
+	// deixou de ser verdade: o build-modulos.sh compila o socket-hidden-module.c
+	// contra o linux-lts e o enfia no initramfs, e o RK-cross-socket-view
+	// (cases_ocultacao.go) o carrega e EXIGE o achado — Expect, não Untestable. O
+	// mesmo para cross.module_view (RK-cross-module-view). O que era prova só no
+	// vm-matrix agora também é contrato Go.
 }

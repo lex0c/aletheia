@@ -109,6 +109,19 @@ vm-image: build helper arches
 vm-kernels:
 	./test/vm/kernels.sh
 
+# vm-modulos compila os módulos de OCULTAÇÃO (socknd hooka tcp4_seq_show; modhide
+# some de /proc/modules) contra o linux-lts do Alpine e extrai esse kernel. São o
+# que faz os cenários RK-cross-socket-view / RK-cross-module-view / RK-duplo-hide
+# medirem cross.socket_view, cross.module_view e kernel.ftrace_hook contra kernel
+# REAL — não mais só prova de shell no vm-matrix.
+#
+# Separado do `scenarios` porque exige DOCKER: sem rodá-lo, o `vm-image` não
+# acha os .ko, não escreve o marcador, e os três cenários são PULADOS com o
+# motivo. Para medir de verdade: `make vm-modulos && make scenarios`. Nada aqui
+# carrega módulo no host — a compilação é em contêiner, o load só dentro do QEMU.
+vm-modulos:
+	./test/vm/build-modulos.sh
+
 # vm-ftrace-proof prova, bootando um kernel de verdade, que available_filter_functions
 # retém um módulo que se escondeu de /proc/modules — a terceira interface do
 # check cross.module_view. Compila o módulo num contêiner e o carrega SÓ dentro

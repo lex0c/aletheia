@@ -99,6 +99,32 @@ if [[ "$arch" == "amd64" ]]; then
 	fi
 fi
 
+# Os módulos de OCULTAÇÃO, quando o `build-modulos.sh` já os compilou.
+#
+# socknd (hooka tcp4_seq_show) e modhide (some de /proc/modules) provam
+# cross.socket_view e cross.module_view contra kernel real — o que contêiner não
+# alcança e teste unitário não prova. Diferente do dummy.ko acima, eles são
+# COMPILADOS contra o linux-lts do Alpine e SÓ carregam sob o vmlinuz-lts que o
+# `build-modulos.sh` extrai junto; o cenário os seleciona com Kernel:"lts".
+#
+# Aqui só os ENFIAMOS no initramfs — o carregamento é no Setup do cenário, dentro
+# do QEMU. O marcador confirma que ESTE initramfs os contém: é a diferença entre
+# "compilei uma vez" e "estão na imagem que vou bootar". Sem ele o harness PULA os
+# cenários de ocultação com o motivo, em vez de falhar. Só no amd64 — os .ko são
+# de 64 bits e o guest 386 boota outro kernel.
+rm -f "$out/modulos-ocultacao$sfx.txt"
+if [[ "$arch" == "amd64" && -d "$root/dist/vm/modulos-ocultacao" ]]; then
+	kos=("$root/dist/vm/modulos-ocultacao"/*.ko)
+	if [[ -f "${kos[0]:-}" ]]; then
+		mkdir -p "$rootfs/modulos"
+		for ko in "${kos[@]}"; do
+			install -m 0644 "$ko" "$rootfs/modulos/$(basename "$ko")"
+		done
+		echo "módulos de ocultação no initramfs: $(basename -a "${kos[@]}" | tr '\n' ' ')"
+		basename -a "${kos[@]}" > "$out/modulos-ocultacao$sfx.txt"
+	fi
+fi
+
 # /init: PID 1 do guest. Monta o mínimo, aplica o cenário, varre, desliga.
 cat > "$rootfs/init" <<'INIT'
 #!/bin/sh

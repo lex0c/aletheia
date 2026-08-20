@@ -393,6 +393,19 @@ func runVM(t *testing.T, sc scenario.Scenario) result {
 		}
 	}
 
+	// Os módulos de ocultação são COMPILADOS (não levantados do host) e só entram
+	// no initramfs quando o `make vm-modulos` correu antes do `make vm-image`. O
+	// marcador prova que ESTE initramfs os contém; sem ele, pular com o motivo em
+	// vez de bootar uma VM que não tem o que carregar.
+	if sc.ModulosOcultacao {
+		marcador, _ := filepath.Abs("../dist/vm/modulos-ocultacao" + suffix + ".txt")
+		if _, err := os.Stat(marcador); err != nil {
+			t.Skipf("os módulos de ocultação (socknd/modhide) não estão no " +
+				"initramfs: eles são compilados contra o linux-lts do Alpine. " +
+				"Rode `make vm-modulos` (exige docker) e depois `make vm-image`")
+		}
+	}
+
 	initramfs, err := filepath.Abs("../dist/vm/initramfs" + suffix + ".gz")
 	if err != nil {
 		t.Fatal(err)
@@ -450,7 +463,13 @@ func kernelFor(t *testing.T, sc scenario.Scenario) string {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(p); err != nil {
-		t.Skipf("kernel %s ausente — rode `make vm-kernels` (exige rede): %v", name, err)
+		// O linux-lts sai do `make vm-modulos` (junto dos módulos casados); os
+		// kernels de época, do `make vm-kernels`. A mensagem aponta para o certo.
+		alvo := "`make vm-kernels` (exige rede)"
+		if name == "lts" {
+			alvo = "`make vm-modulos` (exige docker)"
+		}
+		t.Skipf("kernel %s ausente — rode %s: %v", name, alvo, err)
 	}
 	return p
 }

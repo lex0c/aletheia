@@ -1332,9 +1332,14 @@ func init() {
 		// bpf(2), e produzi-la exigiria um programa que o kernel ANEXA e NÃO
 		// LISTA. Só um kernel manipulado faz isso — que é justamente o que o
 		// check existe para achar.
+		//
+		// cross.module_view SAIU desta lista: deixou de ser impossível de provar.
+		// O RK-cross-module-view (cases_ocultacao.go) carrega o modhide numa VM
+		// descartável e EXIGE o achado. cross.socket_view foi pelo mesmo caminho
+		// (RK-cross-socket-view). Sobram aqui os três que ainda não têm plantio de
+		// ocultação real: PID, thread e programa eBPF escondidos.
 		UntestableChecks: []string{
-			"cross.hidden_pid", "cross.thread_count", "cross.module_view",
-			"cross.bpf_hidden",
+			"cross.hidden_pid", "cross.thread_count", "cross.bpf_hidden",
 		},
 		Untestable: "exige um rootkit que esconda processo, thread, módulo ou " +
 			"programa eBPF. Carregar um LKM de ocultação na suíte trocaria a " +

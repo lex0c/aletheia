@@ -235,6 +235,33 @@ const (
 // N alvos vira UM bloco, não N), com os fatos de cada alvo — não a prosa. O
 // título pedagógico, o §ref e os falsos-positivos saem daqui: o -v mostra O QUE
 // e ONDE; o -vv acrescenta a explicação para a auditoria a fundo.
+// nextStepsComuns devolve os NextSteps presentes em TODOS os membros do grupo —
+// a ação GENÉRICA do check. O que NÃO está aqui é específico de um alvo (o
+// `cp /path` daquele arquivo) e precisa sair por membro: senão o -v mostra N
+// alvos mas só o comando de preservação do primeiro, e os outros se perdem.
+func nextStepsComuns(fs []check.Finding) map[string]bool {
+	if len(fs) == 0 {
+		return nil
+	}
+	cont := map[string]int{}
+	for _, fd := range fs {
+		visto := map[string]bool{}
+		for _, ns := range fd.NextSteps {
+			if !visto[ns] {
+				visto[ns] = true
+				cont[ns]++
+			}
+		}
+	}
+	comum := map[string]bool{}
+	for ns, n := range cont {
+		if n == len(fs) {
+			comum[ns] = true
+		}
+	}
+	return comum
+}
+
 func writeVerbose(w io.Writer, t Tema, r *check.Report, o Options) {
 	// ids locais na mesma ordem do topo, para o operador cruzar "olha o W3".
 	idPorChave := map[string]string{}
@@ -262,6 +289,7 @@ func writeVerbose(w io.Writer, t Tema, r *check.Report, o Options) {
 		}
 		fmt.Fprintln(w, cab)
 
+		comum := nextStepsComuns(g.Findings)
 		for i, fd := range g.Findings {
 			if i >= maxMembros && o.Verbose < 2 && g.N() > maxMembros+1 {
 				fmt.Fprintf(w, "   %s\n", t.fraco("… +"+strconv.Itoa(g.N()-i)+" iguais (use -vv)"))
@@ -279,10 +307,20 @@ func writeVerbose(w io.Writer, t Tema, r *check.Report, o Options) {
 				}
 				fmt.Fprintln(w, "       "+Safe(ev))
 			}
+			// Ação ESPECÍFICA daquele alvo (o `cp /path` do arquivo), sob o
+			// membro. O genérico do check sai depois, uma vez.
+			for _, ns := range fd.NextSteps {
+				if !comum[ns] {
+					fmt.Fprintln(w, "       "+t.fraco("-> "+Safe(ns)))
+				}
+			}
 		}
-		// A AÇÃO fica (é operacional), uma vez por check. FP só no -vv.
+		// A AÇÃO GENÉRICA do check (o mesmo texto em todo membro) sai uma vez, na
+		// ordem do primeiro. FP só no -vv.
 		for _, ns := range first.NextSteps {
-			fmt.Fprintln(w, t.fraco("   -> "+Safe(ns)))
+			if comum[ns] {
+				fmt.Fprintln(w, t.fraco("   -> "+Safe(ns)))
+			}
 		}
 		if o.Verbose >= 2 && len(first.FalsePositives) > 0 {
 			fmt.Fprintln(w, "   "+t.fraco("FP: "+Safe(strings.Join(first.FalsePositives, " · "))))
@@ -294,30 +332,19 @@ func writeVerbose(w io.Writer, t Tema, r *check.Report, o Options) {
 // writeNextSteps adapta: com crítico, é a ordem do runbook §19; só com aviso,
 // vira "revise antes de agir"; sem nada, some.
 func writeNextSteps(w io.Writer, t Tema, r *check.Report) {
-	// O bloco verboso de ação saiu da view — ele repetia o mesmo `cp` por achado
-	// e virava parede. Fica SÓ a salvaguarda que a pressa destrói: preservar a
-	// amostra ANTES de matar o processo. memfd e binário apagado têm UMA cópia,
-	// e ela some no kill; os comandos, por achado, estão no -v.
+	// O bloco verboso de ação saiu da view. Fica SÓ a salvaguarda que a pressa
+	// destrói: preservar a amostra ANTES de agir. Um memfd/binário apagado tem
+	// UMA cópia e ela some no kill; um eBPF órfão some no REBOOT. Os passos, por
+	// achado, estão no -v.
 	//
-	// O gatilho é o campo Irreversible, não o texto do comando: acoplar por
-	// string faria uma reescrita inocente calar o passo que não pode ser pulado,
-	// com todos os testes verdes.
-	temIrrev := false
-	for _, fd := range r.Irreversible() {
-		for _, ns := range fd.NextSteps {
-			if strings.HasPrefix(ns, "sudo ") {
-				temIrrev = true
-				break
-			}
-		}
-		if temIrrev {
-			break
-		}
-	}
-	if !temIrrev {
+	// O gatilho é o CAMPO Irreversible, e SÓ ele — não o texto do comando. Casar
+	// por "sudo " (a versão anterior) calava justamente o kernel.bpf_unowned,
+	// cujos passos são "guarde AGORA/bpftool/NÃO reinicie", nenhum começando com
+	// sudo: o achado sumia no reboot e a salvaguarda não aparecia. FN.
+	if len(r.Irreversible()) == 0 {
 		return
 	}
-	fmt.Fprintln(w, t.negrito("preserve ANTES de matar")+
+	fmt.Fprintln(w, t.negrito("preserve ANTES de agir")+
 		t.fraco(" — há passo irreversível; aletheia help"))
 	fmt.Fprintln(w)
 }

@@ -113,7 +113,7 @@ func TestSalvaguardaDePreservacao(t *testing.T) {
 	r := &check.Report{Findings: []check.Finding{fd}, Coverage: check.Coverage{Total: 1, Complete: 1}}
 	out := render(r, 0)
 
-	if !strings.Contains(out, "preserve ANTES de matar") {
+	if !strings.Contains(out, "preserve ANTES de agir") {
 		t.Errorf("achado irreversível precisa avisar para preservar antes de matar:\n%s", out)
 	}
 	// O bloco verboso antigo NÃO volta.
@@ -128,8 +128,21 @@ func TestSalvaguardaDePreservacao(t *testing.T) {
 
 func TestSalvaguardaSomeSemIrreversivel(t *testing.T) {
 	out := render(&check.Report{Coverage: check.Coverage{Total: 3, Complete: 3}}, 0)
-	if strings.Contains(out, "preserve ANTES de matar") {
+	if strings.Contains(out, "preserve ANTES de agir") {
 		t.Error("sem achado irreversível não há o que preservar antes de matar")
+	}
+}
+
+// REGRESSÃO: o gatilho é o CAMPO Irreversible, não o texto. kernel.bpf_unowned
+// é irreversível (some no reboot) e NENHUM passo dele começa com "sudo " — casar
+// por texto o calava. A salvaguarda tem de aparecer mesmo assim.
+func TestSalvaguardaDisparaSemComandoSudo(t *testing.T) {
+	fd := f("kernel.bpf_unowned", "35", "bpf prog id=42", check.SevCritical)
+	fd.Irreversible = true
+	fd.NextSteps = []string{"guarde AGORA o id e a tag", "NÃO reinicie o host antes de decidir"}
+	r := &check.Report{Findings: []check.Finding{fd}, Coverage: check.Coverage{Total: 1, Complete: 1}}
+	if !strings.Contains(render(r, 0), "preserve ANTES de agir") {
+		t.Errorf("achado irreversível sem passo sudo ainda precisa da salvaguarda:\n%s", render(r, 0))
 	}
 }
 
@@ -251,7 +264,7 @@ func TestPromocaoIrreversivelNaoDependeDoTextoDoComando(t *testing.T) {
 	r := &check.Report{Findings: []check.Finding{fd}, Coverage: check.Coverage{Total: 1, Complete: 1}}
 	// A salvaguarda dispara pelo CAMPO Irreversible, não por casar o texto: um
 	// comando totalmente diferente ainda avisa. O comando em si fica no -v.
-	if !strings.Contains(render(r, 0), "preserve ANTES de matar") {
+	if !strings.Contains(render(r, 0), "preserve ANTES de agir") {
 		t.Error("a promoção deve ser pelo campo, não pelo texto do comando")
 	}
 	if !strings.Contains(render(r, 1), "dd if=/proc/42/mem") {
@@ -622,5 +635,26 @@ func TestBlocoDeKernelContraditorioDizOQueFazer(t *testing.T) {
 		if !strings.Contains(got, quer) {
 			t.Errorf("o bloco precisa conter %q:\n%s", quer, got)
 		}
+	}
+}
+
+// O -v agrupa por check, mas AÇÃO específica de alvo não pode ser agrupada: cada
+// arquivo de no_package_owner tem seu próprio `cp /path`. Agrupar só o primeiro
+// perdia os demais comandos de preservação; o genérico é que sai uma vez.
+func TestVerboseMantemAcaoEspecificaPorAlvo(t *testing.T) {
+	mk := func(sub string) check.Finding {
+		return check.Finding{ID: "integrity.no_package_owner", Sev: check.SevWarn, Subject: sub,
+			NextSteps: []string{"sudo cp " + sub + " \"$IR/\"", "pergunte QUEM instalou"}}
+	}
+	r := &check.Report{Coverage: check.Coverage{Total: 1, Complete: 1},
+		Findings: []check.Finding{mk("/a"), mk("/b"), mk("/c")}}
+	out := render(r, 1)
+	for _, p := range []string{"cp /a", "cp /b", "cp /c"} {
+		if !strings.Contains(out, p) {
+			t.Errorf("o -v perdeu a ação específica %q:\n%s", p, out)
+		}
+	}
+	if n := strings.Count(out, "pergunte QUEM instalou"); n != 1 {
+		t.Errorf("a ação genérica deve sair UMA vez, saiu %d", n)
 	}
 }

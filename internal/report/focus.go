@@ -26,14 +26,30 @@ type itemFoco struct {
 	sinais    []string // os checks que sustentam (para o correlacionado)
 	n         int      // quantos achados/processos a entidade reúne
 	correlato bool
-	rebaixado bool // algum achado veio de binário do host (confiança rebaixada)
-	novo      bool // ausente da baseline: o que MUDOU desde a captura
+	rebaixado bool     // algum achado veio de binário do host (confiança rebaixada)
+	novo      bool     // ausente da baseline: o que MUDOU desde a captura
+	fkeys     []string // chaves ESTÁVEIS dos achados deste item (id\x00subject)
+}
+
+// chaveFinding é a identidade ESTÁVEL de um achado para cruzar o id local do
+// topo (C1/W3) com o membro no -v. Antes o cruzamento era por it.alvo, que num
+// grupo não-correlacionado com vários achados é a STRING sintetizada
+// "subj1, subj2" — não bate com o Subject de cada membro, e o [W3] sumia no
+// detalhe. Aqui a chave é o próprio achado.
+func chaveFinding(fd check.Finding) string { return fd.ID + "\x00" + fd.Subject }
+
+func chavesDe(fs []check.Finding) []string {
+	out := make([]string, 0, len(fs))
+	for _, fd := range fs {
+		out = append(out, chaveFinding(fd))
+	}
+	return out
 }
 
 // itensDeFoco monta a lista ordenada de entidades e atribui ids locais por
 // severidade (C1.., W1.., M1..). Correlacionados primeiro dentro de cada
 // severidade: são as histórias, e é para elas que o operador deve ir.
-func itensDeFoco(r *check.Report) []itemFoco {
+func itensDeFoco(r *check.Report) ([]itemFoco, map[string]string) {
 	grupos, resto := r.Correlate()
 	var itens []itemFoco
 
@@ -52,6 +68,7 @@ func itensDeFoco(r *check.Report) []itemFoco {
 			correlato: true,
 			rebaixado: algumRebaixado(g.Findings),
 			novo:      algumNovo(g.Findings),
+			fkeys:     chavesDe(g.Findings),
 		})
 	}
 	for _, g := range check.GroupByIDSev(resto) {
@@ -70,6 +87,7 @@ func itensDeFoco(r *check.Report) []itemFoco {
 			n:         g.N(),
 			rebaixado: algumRebaixado(g.Findings),
 			novo:      algumNovo(g.Findings),
+			fkeys:     chavesDe(g.Findings),
 		})
 	}
 
@@ -85,14 +103,19 @@ func itensDeFoco(r *check.Report) []itemFoco {
 		return itens[i].n > itens[j].n
 	})
 
-	// ids locais por severidade.
+	// ids locais por severidade, e o mapa ESTÁVEL achado -> id local, para o -v
+	// cruzar cada membro com o topo sem depender da string de apresentação.
+	idPorFinding := map[string]string{}
 	cont := map[check.Severity]int{}
 	for i := range itens {
 		letra := letraSev(itens[i].sev)
 		cont[itens[i].sev]++
 		itens[i].id = letra + strconv.Itoa(cont[itens[i].sev])
+		for _, k := range itens[i].fkeys {
+			idPorFinding[k] = itens[i].id
+		}
 	}
-	return itens
+	return itens, idPorFinding
 }
 
 func algumNovo(fs []check.Finding) bool {
@@ -196,7 +219,7 @@ const larguraAlvo = 34
 // alinhada em colunas para bater o olho — id local, entidade, o que é. Sem §ref,
 // sem explicação, sem prosa. A resposta a incidente é ágil: o operador escaneia
 // a lista, não lê um relatório.
-func writeFoco(w io.Writer, t Tema, itens []itemFoco) {
+func writeFoco(w io.Writer, t Tema, itens []itemFoco, largura int) {
 	temAcao := false
 	for _, it := range itens {
 		if it.sev == check.SevCritical || it.sev == check.SevWarn {
@@ -207,24 +230,35 @@ func writeFoco(w io.Writer, t Tema, itens []itemFoco) {
 	if !temAcao {
 		return
 	}
+	// TTY estreito: a linha larga (id + sev + alvo + resumo ≈ 110 colunas) quebra
+	// e desfaz a hierarquia que o redesign criou. Abaixo de 100 col, a entidade
+	// fica na 1ª linha e o resumo, indentado, na 2ª — nada quebra. Largura 0
+	// (pipe/arquivo) mantém o layout largo: o destino não quebra em 80.
+	estreito := largura > 0 && largura < 100
 	for _, it := range itens {
 		if it.sev != check.SevCritical && it.sev != check.SevWarn {
 			continue // contexto/manual sai no resumo de CONTEXT
-		}
-		alvo := Safe(corta(it.alvo, larguraAlvo))
-		oque := Safe(corta(it.resumo, 60))
-		if it.n > 1 {
-			oque += t.fraco(" ×" + strconv.Itoa(it.n))
-		}
-		if it.rebaixado {
-			oque += t.fraco(" rebaixado")
 		}
 		et := t.pintaSev(it.sev, t.etiqueta(it.sev))
 		marca := "   "
 		if it.novo {
 			marca = t.negrito("NEW") // ausente da baseline: o que mudou
 		}
-		fmt.Fprintf(w, "  %-3s %s %s %s  %s\n", "["+it.id+"]", et, marca, pad(alvo, larguraAlvo), oque)
+		sufixo := ""
+		if it.n > 1 {
+			sufixo += t.fraco(" ×" + strconv.Itoa(it.n))
+		}
+		if it.rebaixado {
+			sufixo += t.fraco(" rebaixado")
+		}
+		id := "[" + it.id + "]"
+		if estreito {
+			fmt.Fprintf(w, "  %-3s %s %s %s\n", id, et, marca, Safe(corta(it.alvo, largura-17)))
+			fmt.Fprintf(w, "       %s%s\n", Safe(corta(it.resumo, largura-8)), sufixo)
+			continue
+		}
+		fmt.Fprintf(w, "  %-3s %s %s %s  %s%s\n",
+			id, et, marca, pad(Safe(corta(it.alvo, larguraAlvo)), larguraAlvo), Safe(corta(it.resumo, 60)), sufixo)
 	}
 	fmt.Fprintln(w)
 }

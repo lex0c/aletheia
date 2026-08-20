@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/dump"
@@ -407,7 +408,7 @@ func emitir(r *check.Report, f *facts.Facts, e *env.Env, o saida) int {
 	}
 	report.Human(humanOut, r, f, e, report.Options{
 		Verbose: o.verbose, Coverage: o.coverage, Baseline: bl, IOC: infoIOC(o.ioc),
-		Janela: jn, Analise: o.analise, Color: corHabilitada(humanOut),
+		Janela: jn, Analise: o.analise, Color: corHabilitada(humanOut), Largura: larguraDoTerminal(humanOut),
 	})
 
 	return writeJSONL(o.jsonFH, r.Exit(), r, f, e, bl, jn, o.analise)
@@ -521,4 +522,22 @@ func corHabilitada(w io.Writer) bool {
 	}
 	fi, err := fh.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// larguraDoTerminal devolve a largura em colunas do TTY de saída (TIOCGWINSZ),
+// ou 0 quando não há TTY — pipe/arquivo têm largura "desconhecida", e o relatório
+// mantém o layout largo nesse caso (o destino não quebra em 80). Zero-dep: ioctl
+// direto, sem x/term.
+func larguraDoTerminal(w io.Writer) int {
+	fh, ok := w.(*os.File)
+	if !ok {
+		return 0
+	}
+	var ws struct{ Row, Col, Xpixel, Ypixel uint16 }
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fh.Fd(),
+		uintptr(syscall.TIOCGWINSZ), uintptr(unsafe.Pointer(&ws)))
+	if errno != 0 {
+		return 0
+	}
+	return int(ws.Col)
 }

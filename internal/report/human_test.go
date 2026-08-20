@@ -658,3 +658,54 @@ func TestVerboseMantemAcaoEspecificaPorAlvo(t *testing.T) {
 		t.Errorf("a ação genérica deve sair UMA vez, saiu %d", n)
 	}
 }
+
+// P1 UX: num TTY estreito (< 100 col) a linha larga do FOCUS quebra e desfaz a
+// hierarquia. Abaixo do limiar, a entidade fica numa linha e o resumo na
+// seguinte. Largura 0 (pipe/arquivo) mantém o layout largo.
+func TestFocoQuebraEmTerminalEstreito(t *testing.T) {
+	r := &check.Report{Coverage: check.Coverage{Total: 10, Complete: 9},
+		Findings: []check.Finding{{ID: "integrity.no_package_owner", Sev: check.SevWarn,
+			Subject: "/home/lex/.local/share/app/versions/2.1.235/bin/x"}}}
+	render2 := func(largura int) string {
+		var b bytes.Buffer
+		Human(&b, r, testFacts(), testEnv(), Options{Largura: largura})
+		return b.String()
+	}
+	linhaCom := func(out, needle string) string {
+		for _, ln := range strings.Split(out, "\n") {
+			if strings.Contains(ln, needle) {
+				return ln
+			}
+		}
+		return ""
+	}
+	if !strings.Contains(linhaCom(render2(0), "[W1]"), "no_package_owner") {
+		t.Error("no layout largo (pipe), entidade e resumo ficam na MESMA linha")
+	}
+	if strings.Contains(linhaCom(render2(80), "[W1]"), "no_package_owner") {
+		t.Errorf("num TTY de 80 col, o resumo deve cair para a 2ª linha:\n%s", render2(80))
+	}
+}
+
+// P2 #9: o id local (C1/W3) precisa cruzar do topo com o membro no -v por chave
+// ESTÁVEL, não pela string sintetizada it.alvo ("/a, /b"). Num grupo não
+// correlacionado com vários achados, o [W1] sumia ao lado dos membros.
+func TestIDLocalCruzaComMembroNoVerbose(t *testing.T) {
+	mk := func(sub string) check.Finding {
+		return check.Finding{ID: "integrity.pkgdb_tampered", Sev: check.SevWarn, Subject: sub}
+	}
+	r := &check.Report{Coverage: check.Coverage{Total: 1, Complete: 1},
+		Findings: []check.Finding{mk("/a"), mk("/b"), mk("/c")}}
+	out := render(r, 1)
+	for _, sub := range []string{"/a", "/b", "/c"} {
+		ok := false
+		for _, ln := range strings.Split(out, "\n") {
+			if strings.Contains(ln, sub) && strings.Contains(ln, "[W1]") {
+				ok = true
+			}
+		}
+		if !ok {
+			t.Errorf("o membro %s no -v deve carregar o id local [W1] do topo:\n%s", sub, out)
+		}
+	}
+}

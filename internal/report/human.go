@@ -20,6 +20,10 @@ type Options struct {
 	Verbose int  // 0 = decisão, 1 = investigação, 2 = + INFO e detalhe
 	Color   bool // reservado; o padrão é texto puro para caber em ticket
 
+	// Largura é a largura do terminal de saída em colunas (0 = desconhecida,
+	// pipe/arquivo). A lista de foco quebra em duas linhas num TTY estreito.
+	Largura int
+
 	// Coverage mostra a SEÇÃO de cobertura (as causas e os gaps de coleta). Por
 	// padrão ela fica oculta — mas o NÚMERO (cobertura X/Y) continua no resumo
 	// do topo e alimenta o veredito INCOMPLETE e o "não prova host limpo". A
@@ -131,8 +135,8 @@ func Human(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, o Options) 
 	// número fica sempre no resumo: o default é enxuto sem esconder a invariante.
 	mostrarCob := o.Coverage || o.Verbose >= 2
 	writeSumario(w, t, r, mostrarCob)
-	itens := itensDeFoco(r)
-	writeFoco(w, t, itens)
+	itens, _ := itensDeFoco(r)
+	writeFoco(w, t, itens, o.Largura)
 	writeContext(w, t, r)
 	writeNextSteps(w, t, r)
 
@@ -264,10 +268,7 @@ func nextStepsComuns(fs []check.Finding) map[string]bool {
 
 func writeVerbose(w io.Writer, t Tema, r *check.Report, o Options) {
 	// ids locais na mesma ordem do topo, para o operador cruzar "olha o W3".
-	idPorChave := map[string]string{}
-	for _, it := range itensDeFoco(r) {
-		idPorChave[it.alvo] = it.id
-	}
+	_, idPorFinding := itensDeFoco(r)
 
 	var lastSev check.Severity = -1
 	for _, g := range check.GroupByIDSev(r.Findings) {
@@ -296,7 +297,7 @@ func writeVerbose(w io.Writer, t Tema, r *check.Report, o Options) {
 				break
 			}
 			linha := "   " + Safe(nz(fd.Subject, fd.Title))
-			if id, ok := idPorChave[nz(fd.Ator, fd.Subject)]; ok {
+			if id, ok := idPorFinding[chaveFinding(fd)]; ok {
 				linha = "   [" + id + "] " + Safe(nz(fd.Subject, fd.Title))
 			}
 			fmt.Fprintln(w, linha)

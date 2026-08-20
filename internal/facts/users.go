@@ -2,6 +2,8 @@ package facts
 
 import (
 	"os"
+	"path"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -163,33 +165,116 @@ func lerShadow(f *Facts, e *env.Env) map[string]string {
 	return out
 }
 
+const (
+	maxSudoersArquivos = 256
+	maxSudoersProf     = 16
+)
+
 func collectSudoers(f *Facts, e *env.Env) {
-	arquivos := []string{"/etc/sudoers"}
-	for _, n := range e.ReadDirNames("/etc/sudoers.d") {
-		arquivos = append(arquivos, "/etc/sudoers.d/"+n)
+	// Árvore de configuração a partir de /etc/sudoers, seguindo os includes que
+	// o próprio sudo segue. Ler /etc/sudoers.d fixo tinha dois defeitos: um
+	// `@includedir /opt/.x` era invisível (bypass), e /etc/sudoers.d era varrido
+	// mesmo sem `@includedir` correspondente, podendo virar achado sobre regra
+	// que o sudo nunca lê (FP). ReadDirNames engolindo o diretório ilegível era
+	// o terceiro — agora vira lacuna.
+	arvoreSudoers(f, e, "/etc/sudoers", 0, map[string]bool{}, new(int))
+}
+
+// arvoreSudoers percorre /etc/sudoers seguindo `@include`/`@includedir` e as
+// formas legadas `#include`/`#includedir`. O `#include` NÃO é comentário — é a
+// sintaxe antiga de include —, e por isso a checagem de include precede a de
+// comentário. visited-set contra ciclo; teto de arquivos e profundidade contra
+// árvore hostil; corte e diretório ilegível declaram lacuna.
+func arvoreSudoers(f *Facts, e *env.Env, p string, prof int, visto map[string]bool, contador *int) {
+	if prof > maxSudoersProf || visto[p] {
+		return
 	}
-	for _, p := range arquivos {
-		b, err := e.ReadFile(p)
-		if err != nil {
-			// /etc/sudoers é 0440 de root: sem privilégio ele é ILEGÍVEL, e
-			// engolir isso faria a ferramenta dizer "nenhuma regra de sudo
-			// perigosa" quando o que houve foi não ter conseguido olhar.
-			if !os.IsNotExist(err) {
-				f.denyPersist("users", p+" ilegível: as regras de sudo NÃO foram avaliadas")
+	visto[p] = true
+	if *contador >= maxSudoersArquivos {
+		f.denyPersist("users", "a árvore de include do sudoers passou de "+
+			strconv.Itoa(maxSudoersArquivos)+" arquivos e foi cortada: regras além "+
+			"disso NÃO foram avaliadas")
+		return
+	}
+	*contador++
+	b, err := e.ReadFile(p)
+	if err != nil {
+		// /etc/sudoers é 0440 de root: sem privilégio ele é ILEGÍVEL, e engolir
+		// isso faria a ferramenta dizer "nenhuma regra de sudo perigosa" quando
+		// o que houve foi não ter conseguido olhar.
+		if !os.IsNotExist(err) {
+			f.denyPersist("users", p+" ilegível: as regras de sudo declaradas ali NÃO foram avaliadas")
+		}
+		return
+	}
+	dir := path.Dir(p)
+	for i, raw := range strings.Split(string(b), "\n") {
+		ln := strings.TrimSpace(raw)
+		if ln == "" {
+			continue
+		}
+		if alvo, ehDir, ok := diretivaIncludeSudoers(ln); ok {
+			resolvido := resolverIncludeSudoers(dir, alvo)
+			if ehDir {
+				nomes, derr := e.ReadDirNamesErr(resolvido)
+				if env.EhLacuna(derr) {
+					f.denyPersist("users", resolvido+" (includedir de sudoers) não pôde "+
+						"ser listado ("+env.MotivoDoErro(derr)+"): as regras dele NÃO foram avaliadas")
+					continue
+				}
+				sort.Strings(nomes)
+				for _, n := range nomes {
+					// sudo ignora nomes terminados em '~' ou com '.' no meio.
+					if n == "" || strings.HasSuffix(n, "~") || strings.ContainsRune(n, '.') {
+						continue
+					}
+					q := resolvido + "/" + n
+					if e.IsDir(q) {
+						continue
+					}
+					arvoreSudoers(f, e, q, prof+1, visto, contador)
+				}
+			} else {
+				arvoreSudoers(f, e, resolvido, prof+1, visto, contador)
 			}
 			continue
 		}
-		for i, raw := range strings.Split(string(b), "\n") {
-			ln := strings.TrimSpace(raw)
-			if ln == "" || strings.HasPrefix(ln, "#") {
-				continue
-			}
-			// `Defaults` fica: `Defaults:usuario !authenticate` desliga a
-			// pergunta de senha para aquele usuário, e é forma de backdoor tanto
-			// quanto um NOPASSWD.
-			f.Sudoers = append(f.Sudoers, SudoRule{File: p, Line: i + 1, Text: ln})
+		if strings.HasPrefix(ln, "#") {
+			continue // comentário de verdade (já descontados os #include)
+		}
+		// `Defaults` fica: `Defaults:usuario !authenticate` desliga a pergunta de
+		// senha para aquele usuário, e é forma de backdoor tanto quanto um NOPASSWD.
+		f.Sudoers = append(f.Sudoers, SudoRule{File: p, Line: i + 1, Text: ln})
+	}
+}
+
+// diretivaIncludeSudoers reconhece as quatro formas de include do sudoers. A
+// checagem de `includedir` precede a de `include` porque uma é prefixo da outra.
+func diretivaIncludeSudoers(ln string) (alvo string, ehDir bool, ok bool) {
+	for _, pref := range []string{"@includedir", "#includedir"} {
+		if r, corta := strings.CutPrefix(ln, pref); corta && (r == "" || r[0] == ' ' || r[0] == '\t') {
+			return descascaCaminhoSudoers(r), true, true
 		}
 	}
+	for _, pref := range []string{"@include", "#include"} {
+		if r, corta := strings.CutPrefix(ln, pref); corta && (r == "" || r[0] == ' ' || r[0] == '\t') {
+			return descascaCaminhoSudoers(r), false, true
+		}
+	}
+	return "", false, false
+}
+
+func descascaCaminhoSudoers(s string) string {
+	return strings.Trim(strings.TrimSpace(s), `"`)
+}
+
+// resolverIncludeSudoers resolve o alvo do include: absoluto vale como está,
+// relativo é relativo ao diretório do arquivo que inclui — como o sudo faz.
+func resolverIncludeSudoers(dir, alvo string) string {
+	if strings.HasPrefix(alvo, "/") {
+		return alvo
+	}
+	return path.Join(dir, alvo)
 }
 
 // collectDoas lê /etc/doas.conf e /etc/doas.d/*.conf. Formato:

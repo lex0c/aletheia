@@ -234,6 +234,21 @@ func TestEvasaoAlvoEfetivo(t *testing.T) {
 		{"bash -c '/tmp/.x -flag'", true, "bash -c com aspas e flag"},
 		{"sudo env nohup /tmp/.x", true, "wrappers aninhados"},
 		{"tcpd sh -c /tmp/.x", true, "tcpd embrulhando sh -c"},
+		// Arity de opção: a opção que consome argumento não pode engolir o alvo.
+		{"sudo -u root /tmp/.x", true, "sudo -u root: -u come 'root', não o alvo"},
+		{"doas -u root /tmp/.x", true, "doas -u root"},
+		{"env -u LD_PRELOAD /tmp/.x", true, "env -u VAR"},
+		{"env -C /srv /tmp/.x", true, "env -C dir"},
+		{"stdbuf -o L /tmp/.x", true, "stdbuf -o L (forma separada)"},
+		{"timeout --signal KILL 30 /tmp/.x", true, "timeout --signal KILL + duração"},
+		{"timeout -k 5 30 /tmp/.x", true, "timeout -k 5 + duração"},
+		{"nice -n 10 /tmp/.x", true, "nice -n 10"},
+		{"nice -10 /tmp/.x", true, "nice -10 (forma anexada antiga)"},
+		{"ionice -c 3 /tmp/.x", true, "ionice -c 3 (separada)"},
+		{"sudo -u root -- /tmp/.x", true, "-- encerra as opções"},
+		// Negativos: o alvo legítimo continua legítimo depois das opções.
+		{"sudo -u root /usr/bin/legit", false, "opção não torna alvo legítimo suspeito"},
+		{"env -u LD_PRELOAD /usr/sbin/sshd", false, "env -u de daemon legítimo"},
 		// Negativos: o alvo real é legítimo, mesmo embrulhado.
 		{"/usr/bin/legit", false, "programa legítimo sem wrapper"},
 		{"sudo /usr/bin/legit", false, "sudo não torna legítimo suspeito"},

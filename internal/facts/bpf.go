@@ -181,6 +181,14 @@ func collectBPF(f *Facts, e *env.Env) {
 	}
 	f.BPF.Enumerado = true
 	f.BPF.Cortado = cortou
+	// A completude da lista de PROGRAMAS, capturada aqui — antes que links, pins
+	// e tail calls façam OR em f.BPF.Cortado. A confirmação de programa oculto
+	// depende SÓ de a enumeração de programas ter sido completa: um corte na
+	// leitura de links ou pins não torna "citado e não listado" inconclusivo,
+	// porque a lista de programas continua total. Usar o Cortado agregado
+	// cancelava a confirmação por um corte de OUTRO subsistema — cobertura
+	// degradada à toa (seguro, mas desnecessário).
+	programasCompleta := !cortou
 
 	porID := map[uint32]*ProgramaBPF{}
 	for _, p := range progs {
@@ -216,7 +224,7 @@ func collectBPF(f *Facts, e *env.Env) {
 	anexosDeCgroup(f, porID, citados)
 	tailCalls(f)
 
-	f.BPF.Ocultos = confirmarOcultosBPF(f, citados, porID, !f.BPF.Cortado)
+	f.BPF.Ocultos = confirmarOcultosBPF(f, citados, porID, programasCompleta)
 
 	sort.Slice(f.BPF.Programas, func(i, j int) bool {
 		return f.BPF.Programas[i].ID < f.BPF.Programas[j].ID

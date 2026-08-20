@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 
@@ -408,37 +409,13 @@ func collectInetd(f *Facts, e *env.Env) {
 // `server =` é o programa, e `disable = yes` desliga o serviço (mas o arquivo
 // continua lá, reativável).
 func collectXinetd(f *Facts, e *env.Env) {
-	// A árvore inteira do xinetd: o arquivo raiz E o includedir que ele aponta.
-	// Ler só o /etc/xinetd.d é o buraco clássico — um serviço declarado direto
-	// no xinetd.conf (forma antiga, ainda válida) passava invisível.
-	textos := map[string]string{}
-	if b, err := e.ReadFile("/etc/xinetd.conf"); err == nil {
-		textos["/etc/xinetd.conf"] = string(b)
-	} else if env.EhLacuna(err) {
-		f.denyPersist("startup", "/etc/xinetd.conf existe e não pôde ser lido: "+
-			"serviços declarados nele NÃO foram avaliados")
-	}
-
-	nomes, err := e.ReadDirNamesErr("/etc/xinetd.d")
-	if env.EhLacuna(err) {
-		f.denyPersist("startup", "/etc/xinetd.d não pôde ser listado: os serviços "+
-			"que rodam no connect NÃO foram avaliados")
-	}
-	for _, n := range nomes {
-		q := "/etc/xinetd.d/" + n
-		if e.IsDir(q) {
-			continue
-		}
-		b, err := e.ReadFile(q)
-		if err != nil {
-			if env.EhLacuna(err) {
-				f.denyPersist("startup", q+" existe e não pôde ser lido: o servidor "+
-					"xinetd dele NÃO foi avaliado")
-			}
-			continue
-		}
-		textos[q] = string(b)
-	}
+	// A árvore de configuração do xinetd, seguindo `include`/`includedir` a
+	// partir de /etc/xinetd.conf — como o próprio xinetd a monta. Ler
+	// /etc/xinetd.d fixo tinha dois defeitos simétricos: um `includedir
+	// /opt/.x` apontando para outro lugar era invisível (bypass), e
+	// /etc/xinetd.d era varrido MESMO quando nada o incluía, transformando
+	// config inerte em achado (FP).
+	arquivos := arvoreXinetd(f, e)
 
 	// defaults{} governa TODA a árvore, mesmo que more no xinetd.conf e o serviço
 	// esteja num arquivo do includedir. Por isso a decisão de "está ligado?" só
@@ -451,8 +428,8 @@ func collectXinetd(f *Facts, e *env.Env) {
 		linha              int
 	}
 	var servicos []svc
-	for arq, txt := range textos {
-		for _, bl := range parseXinetd(txt) {
+	for _, af := range arquivos {
+		for _, bl := range parseXinetd(af.texto) {
 			if bl.ehDefaults {
 				for _, nm := range strings.Fields(bl.attrs["disabled"]) {
 					desabilitadosGlobal[nm] = true
@@ -479,7 +456,7 @@ func collectXinetd(f *Facts, e *env.Env) {
 				// desembrulha, mas precisa dos args.
 				cmd = server + " " + sa
 			}
-			servicos = append(servicos, svc{arq, bl.nome, cmd, bl.serverLinha})
+			servicos = append(servicos, svc{af.path, bl.nome, cmd, bl.serverLinha})
 		}
 	}
 
@@ -580,16 +557,155 @@ func aplicaAtributoXinetd(b *blocoXinetd, ln string, linha int) {
 	if eq < 0 {
 		return
 	}
-	chave := strings.TrimRight(strings.TrimSpace(ln[:eq]), "+-")
-	chave = strings.TrimSpace(chave)
+	lhs := strings.TrimSpace(ln[:eq])
+	op := "="
+	switch {
+	case strings.HasSuffix(lhs, "+"):
+		op = "+="
+		lhs = strings.TrimSpace(strings.TrimSuffix(lhs, "+"))
+	case strings.HasSuffix(lhs, "-"):
+		op = "-="
+		lhs = strings.TrimSpace(strings.TrimSuffix(lhs, "-"))
+	}
+	chave := lhs
 	valor := strings.TrimSpace(ln[eq+1:])
 	if chave == "" {
 		return
 	}
-	b.attrs[chave] = valor
+	// `enabled`/`disabled` são atributos de CONJUNTO: += acrescenta, -= remove,
+	// = redefine. Tratar tudo como = (o que o parser fazia) apagava
+	// `enabled += ssh` sobre um `enabled = bd`, e o `bd` sumia da lista branca —
+	// virava "desabilitado" e um serviço ativo passava despercebido.
+	if chave == "enabled" || chave == "disabled" {
+		b.attrs[chave] = aplicaConjuntoXinetd(b.attrs[chave], op, valor)
+		return
+	}
+	b.attrs[chave] = valor // escalar: última atribuição vence
 	if chave == "server" {
 		b.serverLinha = linha
 	}
+}
+
+// aplicaConjuntoXinetd aplica `=`/`+=`/`-=` a um atributo set-valued do xinetd,
+// preservando a ordem de inserção.
+func aplicaConjuntoXinetd(atual, op, valor string) string {
+	var ordem []string
+	set := map[string]bool{}
+	push := func(x string) {
+		if x != "" && !set[x] {
+			set[x] = true
+			ordem = append(ordem, x)
+		}
+	}
+	if op != "=" {
+		for _, x := range strings.Fields(atual) {
+			push(x)
+		}
+	}
+	if op == "-=" {
+		rem := map[string]bool{}
+		for _, x := range strings.Fields(valor) {
+			rem[x] = true
+		}
+		var novo []string
+		for _, x := range ordem {
+			if !rem[x] {
+				novo = append(novo, x)
+			}
+		}
+		return strings.Join(novo, " ")
+	}
+	for _, x := range strings.Fields(valor) {
+		push(x)
+	}
+	return strings.Join(ordem, " ")
+}
+
+const (
+	maxXinetdArquivos = 256
+	maxXinetdProf     = 16
+)
+
+// arquivoXinetd é um arquivo de configuração já lido, na ordem em que a árvore
+// de include o alcançou — ordem determinística, ao contrário de um range sobre
+// mapa.
+type arquivoXinetd struct {
+	path  string
+	texto string
+}
+
+// arvoreXinetd percorre a configuração a partir de /etc/xinetd.conf, seguindo
+// `include ARQUIVO` e `includedir DIR`. É o entrypoint do próprio xinetd: o que
+// ele não alcança por include, ele não roda — e o que esta função não alcança,
+// ela não reporta. visited-set contra ciclo; teto de arquivos e profundidade
+// contra árvore hostil; corte declara lacuna.
+func arvoreXinetd(f *Facts, e *env.Env) []arquivoXinetd {
+	var out []arquivoXinetd
+	visto := map[string]bool{}
+	cortou := false
+	var seguir func(p string, prof int)
+	seguir = func(p string, prof int) {
+		if cortou || prof > maxXinetdProf || visto[p] {
+			return
+		}
+		visto[p] = true
+		if len(out) >= maxXinetdArquivos {
+			cortou = true
+			return
+		}
+		b, err := e.ReadFile(p)
+		if err != nil {
+			if env.EhLacuna(err) {
+				f.denyPersist("startup", p+" (config do xinetd) não pôde ser lido ("+
+					env.MotivoDoErro(err)+"): os serviços declarados ali NÃO foram avaliados")
+			}
+			return
+		}
+		out = append(out, arquivoXinetd{p, string(b)})
+		for _, raw := range strings.Split(string(b), "\n") {
+			ln := raw
+			if i := strings.IndexByte(ln, '#'); i >= 0 {
+				ln = ln[:i]
+			}
+			campos := strings.Fields(ln)
+			if len(campos) < 2 {
+				continue
+			}
+			switch campos[0] {
+			case "include":
+				seguir(campos[1], prof+1)
+			case "includedir":
+				nomes, derr := e.ReadDirNamesErr(campos[1])
+				if env.EhLacuna(derr) {
+					f.denyPersist("startup", campos[1]+" (includedir do xinetd) não pôde "+
+						"ser listado ("+env.MotivoDoErro(derr)+"): os serviços dele NÃO "+
+						"foram avaliados")
+					continue
+				}
+				sort.Strings(nomes)
+				for _, n := range nomes {
+					// xinetd ignora nomes começados por '.', terminados em '~' ou
+					// com '.' no meio (backup de editor, .rpmsave). "varrido =
+					// rodaria" é o que evita transformar arquivo inerte em achado.
+					if n == "" || n[0] == '.' || strings.HasSuffix(n, "~") || strings.ContainsRune(n, '.') {
+						continue
+					}
+					q := campos[1] + "/" + n
+					if e.IsDir(q) {
+						continue
+					}
+					seguir(q, prof+1)
+				}
+			}
+		}
+	}
+	seguir("/etc/xinetd.conf", 0)
+	if cortou {
+		f.denyPersist("startup", "a árvore de include do xinetd passou de "+
+			strconv.Itoa(maxXinetdArquivos)+" arquivos e foi cortada: serviços além "+
+			"disso NÃO foram avaliados")
+	}
+	return out
 }
 
 // collectInittab lê /etc/inittab (sysvinit). Cada linha é

@@ -410,15 +410,45 @@ func alvoEfetivo(cmd string) string {
 	for passo := 0; passo < 8 && len(toks) > 0; passo++ {
 		base := baseDe(strings.TrimLeft(toks[0], "-@+!:"))
 		switch {
-		case base == "sudo" || base == "env" || base == "nohup" || base == "setsid" ||
-			base == "doas" || base == "exec" || base == "stdbuf" || base == "tcpd" ||
-			base == "ionice" || base == "nice" || base == "timeout":
-			// pula o wrapper e as opções que o precedem (VAR=val do env, -flags).
-			// `timeout` leva um argumento de DURAÇÃO; trata-se como opção.
+		case ehWrapperDeExec(base):
+			// Pula o wrapper E as opções dele — respeitando quais opções
+			// CONSOMEM UM ARGUMENTO. "pule todo token que começa com -" era a
+			// evasão: em `sudo -u root /tmp/.x` o `-u` come `root`, o laço parava
+			// em `root` e devolvia `root` como alvo — o /tmp/.x, o payload real,
+			// sumia da decisão. Cada wrapper tem a sua tabela de arity.
+			comArg := wrapperOpcaoComArg[base]
 			toks = toks[1:]
-			for len(toks) > 0 && (strings.HasPrefix(toks[0], "-") ||
-				strings.Contains(toks[0], "=") || ehDuracao(toks[0])) {
-				toks = toks[1:]
+			usouDuracao := false
+			for len(toks) > 0 {
+				t := toks[0]
+				if t == "--" { // fim das opções: o próximo token é o programa
+					toks = toks[1:]
+					break
+				}
+				if strings.HasPrefix(t, "-") && t != "-" {
+					toks = toks[1:]
+					// `--opt=val` / `-oVAL`: valor anexado, nada mais a consumir.
+					if strings.ContainsRune(t, '=') {
+						continue
+					}
+					// forma separada `-o VAL`: consome o argumento se a opção o exige.
+					if comArg[t] && len(toks) > 0 {
+						toks = toks[1:]
+					}
+					continue
+				}
+				// `env FOO=bar prog`: a atribuição faz parte do env, não é o alvo.
+				if base == "env" && strings.ContainsRune(t, '=') {
+					toks = toks[1:]
+					continue
+				}
+				// `timeout 30 prog`: a duração é posicional, uma só, antes do alvo.
+				if base == "timeout" && !usouDuracao && ehDuracao(t) {
+					usouDuracao = true
+					toks = toks[1:]
+					continue
+				}
+				break // este é o programa
 			}
 		case interpretadoresDePipe[base]:
 			// shell: o alvo real está no argumento do -c. Sem -c, o próprio
@@ -440,6 +470,39 @@ func alvoEfetivo(cmd string) string {
 		}
 	}
 	return ""
+}
+
+// ehWrapperDeExec diz se o token é um wrapper que executa OUTRO programa. A
+// lista é a mesma que virava evasão de "primeiro executável" em systemd,
+// gatilho e inetd/xinetd.
+func ehWrapperDeExec(base string) bool {
+	switch base {
+	case "sudo", "env", "nohup", "setsid", "doas", "exec", "stdbuf", "tcpd",
+		"ionice", "nice", "timeout":
+		return true
+	}
+	return false
+}
+
+// wrapperOpcaoComArg lista, por wrapper, as opções em FORMA SEPARADA que
+// consomem o próximo token como valor (`-u root`, `--signal KILL`). O que não
+// estiver aqui é tratado como flag sem argumento — inclusive as formas anexadas
+// (`-oL`, `--opt=val`, `nice -10`), que já carregam o valor no próprio token.
+// Errar para "flag sem argumento" é o lado SEGURO: consome de menos e o alvo
+// real continua adiante; consumir de mais é que engoliria o payload.
+var wrapperOpcaoComArg = map[string]map[string]bool{
+	"sudo": {"-u": true, "--user": true, "-g": true, "--group": true,
+		"-h": true, "--host": true, "-p": true, "--prompt": true,
+		"-C": true, "--close-from": true, "-R": true, "--chroot": true,
+		"-D": true, "--chdir": true, "-U": true, "--other-user": true,
+		"-r": true, "--role": true, "-t": true, "--type": true},
+	"doas":    {"-u": true, "-C": true, "-a": true},
+	"env":     {"-u": true, "--unset": true, "-C": true, "--chdir": true, "-S": true, "--split-string": true},
+	"exec":    {"-a": true},
+	"stdbuf":  {"-i": true, "--input": true, "-o": true, "--output": true, "-e": true, "--error": true},
+	"timeout": {"-s": true, "--signal": true, "-k": true, "--kill-after": true},
+	"nice":    {"-n": true, "--adjustment": true},
+	"ionice":  {"-c": true, "--class": true, "-n": true, "--classdata": true, "-p": true, "--pid": true},
 }
 
 // ehDuracao reconhece o argumento de `timeout`: um número com sufixo opcional

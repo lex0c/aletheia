@@ -506,6 +506,13 @@ mkdir -p /etc/sudoers.d /root/.ssh /home/sysadm/.ssh
 printf 'sysadm:x:0:0:System Admin:/home/sysadm:/bin/bash\n' >> /etc/passwd
 printf 'sysadm::20000:0:99999:7:::\n' >> /etc/shadow
 
+# o /etc/sudoers de fábrica, que é o que faz o sudoers.d ser lido: sem esta
+# linha o drop-in abaixo seria INERTE, e a ferramenta segue o mesmo grafo de
+# include que o sudo segue. A imagem base não traz sudo, então o arquivo é
+# plantado explicitamente — como todo host com sudo o tem.
+printf 'root ALL=(ALL:ALL) ALL\n@includedir /etc/sudoers.d\n' > /etc/sudoers
+chmod 440 /etc/sudoers
+
 # sudo sem senha, num arquivo que ninguém abre
 printf 'sysadm ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/90-sysadm
 chmod 440 /etc/sudoers.d/90-sysadm

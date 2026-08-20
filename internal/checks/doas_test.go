@@ -49,3 +49,21 @@ func TestDoasComSenhaEDenyNaoDisparam(t *testing.T) {
 	}
 	_ = strings.TrimSpace
 }
+
+// cmd restrito a um SHELL como root é root irrestrito: CRÍTICO, não aviso.
+// `permit nopass user cmd /bin/sh` restringe "a um comando" que executa
+// qualquer outro — a restrição é ilusória.
+func TestDoasCmdShellEhCritico(t *testing.T) {
+	casos := []facts.DoasRule{
+		{Permit: true, NoPass: true, Identidade: "bob", Comando: "/bin/sh", Text: "permit nopass bob cmd /bin/sh"},
+		{Permit: true, NoPass: true, Identidade: "bob", Comando: "/usr/bin/bash", Text: "permit nopass bob cmd /usr/bin/bash"},
+		{Permit: true, NoPass: true, Identidade: "bob", Comando: "python3 -c import os", Text: "permit nopass bob cmd python3"},
+	}
+	for _, d := range casos {
+		f := fDoas(d)
+		r := doasSemSenha.Run(doasSemSenha, f, testEnv())
+		if len(r.Findings) != 1 || r.Findings[0].Sev != check.SevCritical {
+			t.Errorf("shell/interpretador como root é CRÍTICO: %q -> %+v", d.Comando, r.Findings)
+		}
+	}
+}

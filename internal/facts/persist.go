@@ -626,6 +626,80 @@ func kindOf(n string) string {
 
 // parseUnitFile lê o formato INI do systemd. Chave REPETIDA é normal
 // (ExecStart= pode aparecer várias vezes) e continuação com "\" também.
+// temGlobShell diz se o caminho tem wildcard de shell — o que o systemd expande
+// no EnvironmentFile=.
+func temGlobShell(s string) bool {
+	return strings.ContainsAny(s, "*?[")
+}
+
+// incorporarEnvironmentFile resolve um EnvironmentFile= — literal ou com
+// wildcard — e incorpora as atribuições na unit. É função de escopo de pacote
+// porque `parseUnitFile` sombreia o pacote `path` com um parâmetro homônimo.
+func incorporarEnvironmentFile(u *Unit, e *env.Env, arq string) {
+	if !temGlobShell(arq) {
+		lerEnvFileNaUnit(u, e, arq)
+		return
+	}
+	// systemd expande WILDCARD no ÚLTIMO componente. `/etc/app/*.env` virava
+	// ReadFile do literal, ENOENT, e um backdoor.env ali era FN silencioso.
+	dir, padrao := path.Split(arq)
+	dir = strings.TrimSuffix(dir, "/")
+	nomes, gerr := e.ReadDirNamesErr(dir)
+	if env.EhLacuna(gerr) {
+		// Diretório do glob ilegível: não dá para saber se há um arquivo de
+		// ambiente casando — lacuna, não silêncio.
+		u.EnvFilesIlegiveis = append(u.EnvFilesIlegiveis, arq+" (diretório do glob ilegível)")
+		return
+	}
+	sort.Strings(nomes)
+	for _, n := range nomes {
+		if ok, _ := path.Match(padrao, n); ok {
+			lerEnvFileNaUnit(u, e, dir+"/"+n)
+		}
+	}
+}
+
+// envSemArquivos remove de uma lista de env as entradas que vieram de
+// EnvironmentFile= (File != caminho da unit), preservando os Environment= EM
+// LINHA. É o efeito de um `EnvironmentFile=` vazio, que redefine a lista.
+func envSemArquivos(envs []EnvSetting, unitPath string) []EnvSetting {
+	var out []EnvSetting
+	for _, es := range envs {
+		if es.File == unitPath {
+			out = append(out, es)
+		}
+	}
+	return out
+}
+
+// lerEnvFileNaUnit lê um arquivo de EnvironmentFile= e incorpora as atribuições.
+// Ilegível vira lacuna registrada no Unit (collectUnits a declara); as linhas
+// são KEY=value no estilo shell.
+func lerEnvFileNaUnit(u *Unit, e *env.Env, arq string) {
+	eb, err := e.ReadFile(arq)
+	if err != nil {
+		if env.EhLacuna(err) {
+			u.EnvFilesIlegiveis = append(u.EnvFilesIlegiveis, arq)
+		}
+		return
+	}
+	for _, el := range strings.Split(string(eb), "\n") {
+		el = strings.TrimSpace(el)
+		if el == "" || strings.HasPrefix(el, "#") {
+			continue
+		}
+		el = strings.TrimPrefix(el, "export ")
+		kk, vv, ok := strings.Cut(el, "=")
+		if !ok {
+			continue
+		}
+		u.Environment = append(u.Environment, EnvSetting{
+			File: arq, Key: strings.TrimSpace(kk),
+			Value: strings.Trim(strings.TrimSpace(vv), `"'`),
+		})
+	}
+}
+
 func parseUnitFile(e *env.Env, path, scope string, vendor bool) Unit {
 	u := Unit{Path: path, Scope: scope, Vendor: vendor}
 	if fi, err := e.Lstat(path); err == nil {
@@ -685,32 +759,21 @@ func parseUnitFile(e *env.Env, path, scope string, vendor bool) Unit {
 		case k == "EnvironmentFile":
 			// A unit carrega env de um ARQUIVO à parte, e um LD_PRELOAD ali é a
 			// mesma rota da §7.8 escondida um nível abaixo: quem lê a unit vê só
-			// `EnvironmentFile=/tmp/.env`, não o preload dentro dela. O `-` no
-			// começo é "ignore se faltar". As linhas do arquivo são KEY=value
-			// no estilo shell.
+			// `EnvironmentFile=/tmp/.env`, não o preload dentro dela.
 			arq := strings.TrimSpace(v)
-			arq = strings.TrimPrefix(arq, "-")
-			if eb, err := e.ReadFile(arq); err == nil {
-				for _, el := range strings.Split(string(eb), "\n") {
-					el = strings.TrimSpace(el)
-					if el == "" || strings.HasPrefix(el, "#") {
-						continue
-					}
-					el = strings.TrimPrefix(el, "export ")
-					kk, vv, ok := strings.Cut(el, "=")
-					if !ok {
-						continue
-					}
-					u.Environment = append(u.Environment, EnvSetting{
-						File: arq, Key: strings.TrimSpace(kk),
-						Value: strings.Trim(strings.TrimSpace(vv), `"'`),
-					})
-				}
-			} else if env.EhLacuna(err) {
-				// Arquivo referenciado e ilegível: um LD_PRELOAD ali NÃO foi
-				// avaliado. Registra no Unit; collectUnits declara a lacuna.
-				u.EnvFilesIlegiveis = append(u.EnvFilesIlegiveis, arq)
+			if arq == "" {
+				// `EnvironmentFile=` vazio REDEFINE a lista: o systemd descarta
+				// os arquivos de ambiente acumulados até aqui. Manter old.env
+				// depois disso gerava FP — um LD_PRELOAD que o systemd já tinha
+				// esquecido virava achado. Os Environment= EM LINHA ficam.
+				u.Environment = envSemArquivos(u.Environment, path)
+				u.EnvFilesIlegiveis = nil
+				break
 			}
+			// O `-` no começo é "ignore se faltar". (Aqui `path` é o PARÂMETRO —
+			// o caminho da unit —, não o pacote: a expansão de glob mora num
+			// helper de escopo de pacote.)
+			incorporarEnvironmentFile(&u, e, strings.TrimPrefix(arq, "-"))
 		case k == "Environment":
 			// Environment=LD_PRELOAD=… numa unit é a rota da §7.8 que ninguém
 			// associa a execução de código: entra no mesmo lugar que o

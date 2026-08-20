@@ -532,6 +532,14 @@ var doasSemSenha = check.Check{
 				sev = check.SevCritical
 				ev = append(ev, "e é root, QUALQUER comando, sem senha: é escalada "+
 					"irrestrita para "+quem)
+			case comoRoot && ehShellOuInterp(d.Comando):
+				// "restrita a UM comando" só é menor privilégio se aquele comando
+				// não for um shell. `cmd /bin/sh` como root É root irrestrito: o
+				// alvo executa qualquer coisa a partir dali. Não é a GTFOBins
+				// inteira — é a classe direta de interpretador.
+				sev = check.SevCritical
+				ev = append(ev, "e o comando é um SHELL/interpretador ("+d.Comando+"): "+
+					"restringir a `sh` como root não restringe nada — é root irrestrito")
 			case comoRoot:
 				ev = append(ev, "restrita ao comando `"+d.Comando+"` — menor privilégio, "+
 					"vale conferir se ninguém reconhece a regra")
@@ -579,4 +587,17 @@ func indiceSemCaixa(texto, alvo string) int {
 		}
 	}
 	return -1
+}
+
+// ehShellOuInterp diz se o comando é um shell ou interpretador direto. Reusa o
+// mesmo conjunto do classificador de pipe (systemd.go) — a lista de coisas que,
+// recebendo argumento, executam qualquer coisa. Pega o primeiro token porque a
+// regra de doas pode citar `cmd /bin/sh args ...`.
+func ehShellOuInterp(cmd string) bool {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return false
+	}
+	campos := strings.Fields(cmd)
+	return interpretadoresDePipe[baseDe(campos[0])]
 }

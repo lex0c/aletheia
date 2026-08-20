@@ -278,7 +278,10 @@ func procurarHooks(f *Facts, e *env.Env, dir string, prof int, vistos *int, trun
 func lerHooks(f *Facts, e *env.Env, dir string) {
 	nomes, err := e.ReadDirNamesErr(dir)
 	if env.EhLacuna(err) {
-		f.denyPersist("trust", dir+" não pôde ser listado ("+env.MotivoDoErro(err)+
+		// Categoria "githook", não "trust": persist.trigger_exec herda
+		// PersistDenied["githook"], e uma lacuna gravada em "trust" existiria no
+		// agregado mas sumiria da cobertura do check que depende dela.
+		f.denyPersist("githook", dir+" não pôde ser listado ("+env.MotivoDoErro(err)+
 			"): os git hooks — que rodam a cada operação de git e sobrevivem ao "+
 			"redeploy — NÃO foram avaliados")
 		return
@@ -292,7 +295,7 @@ func lerHooks(f *Facts, e *env.Env, dir string) {
 		if t, ok := lerTrigger(e, p, "git_hook",
 			"a cada operação de git — sobrevive ao redeploy e não mora em /etc", ""); ok {
 			if t.Ilegvel {
-				f.denyPersist("trust", p+" existe e não pôde ser LIDO: um git hook "+
+				f.denyPersist("githook", p+" existe e não pôde ser LIDO: um git hook "+
 					"plantado ali — que roda a cada operação de git — NÃO foi avaliado")
 			}
 			f.Triggers = append(f.Triggers, t)

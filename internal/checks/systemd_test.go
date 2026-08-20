@@ -12,9 +12,12 @@ import (
 // todo serviço local legítimo viraria achado. E unit de PACOTE (Vendor) nunca.
 func TestUnitSemDono(t *testing.T) {
 	mkUnit := func(path, cmd string, vendor bool) facts.Unit {
+		// Target é o alvo efetivo que o coletor (mesclarUnits) computa — a fonte
+		// da verdade que unit_unowned consome. A fixture o carimba como o dado
+		// pós-coleta faria.
 		return facts.Unit{
 			Name: baseDe(path), Path: path, Kind: "service", Vendor: vendor,
-			Exec: []facts.ExecLine{{Key: "ExecStart", Cmd: cmd}},
+			Exec: []facts.ExecLine{{Key: "ExecStart", Cmd: cmd, Target: facts.AlvoEfetivoDeExec(cmd)}},
 		}
 	}
 	casos := []struct {

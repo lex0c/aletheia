@@ -561,3 +561,101 @@ func TestMerge_EnvironmentPATHResolveNomeNu(t *testing.T) {
 		t.Errorf("alvo efetivo deve ser /tmp/.cache/agent, veio %q", u.Exec[0].Target)
 	}
 }
+
+// FN de multi-usuário: alice/foo.service e bob/foo.service são arquivos
+// DIFERENTES de gerenciadores diferentes. Sem o Manager na chave, um sombreava
+// o outro e o Exec da sombreada não era avaliado. Agora as duas sobrevivem, cada
+// uma com seu ExecStart.
+func TestMerge_UserUnitsPorManagerNaoColidem(t *testing.T) {
+	us := coletarUnits(t, map[string]string{
+		"etc/passwd": "root:x:0:0::/root:/bin/sh\n" +
+			"alice:x:1000:1000::/home/alice:/bin/sh\n" +
+			"bob:x:1001:1001::/home/bob:/bin/sh\n",
+		"home/alice/.config/systemd/user/foo.service": "[Service]\nExecStart=/tmp/alice-thing\n",
+		"home/bob/.config/systemd/user/foo.service":   "[Service]\nExecStart=/tmp/bob-thing\n",
+	}, nil)
+
+	var alice, bob *Unit
+	for i := range us {
+		if us[i].Manager == "alice" && us[i].Name == "foo.service" {
+			alice = &us[i]
+		}
+		if us[i].Manager == "bob" && us[i].Name == "foo.service" {
+			bob = &us[i]
+		}
+	}
+	if alice == nil || bob == nil {
+		t.Fatalf("as DUAS units de usuário têm de existir com Manager próprio: %+v", us)
+	}
+	if alice.Shadowed || bob.Shadowed {
+		t.Error("nenhuma pode sombrear a outra — são gerenciadores diferentes")
+	}
+	if len(alice.Exec) != 1 || alice.Exec[0].Cmd != "/tmp/alice-thing" {
+		t.Errorf("alice manteve o próprio Exec? %+v", alice.Exec)
+	}
+	if len(bob.Exec) != 1 || bob.Exec[0].Cmd != "/tmp/bob-thing" {
+		t.Errorf("bob manteve o próprio Exec? %+v", bob.Exec)
+	}
+}
+
+// FN do wrapper: `ExecStart=/usr/bin/env agent` roda `agent` via PATH, mas o
+// nome nu embrulhado não era resolvido — o alvo ficava "agent" (nu), fora do
+// check de dono. Agora o alvo efetivo é resolvido contra o PATH.
+func TestMerge_NomeNuAtrasDeWrapperResolve(t *testing.T) {
+	us := coletarUnits(t, map[string]string{
+		"etc/systemd/system/svc.service": "[Service]\nExecStart=/usr/bin/env agent --daemon\n",
+		"usr/local/bin/agent":            "x",
+	}, nil)
+	u := acharUnit(us, "/etc/systemd/system/svc.service")
+	if u == nil || len(u.Exec) != 1 {
+		t.Fatalf("unit/exec: %+v", us)
+	}
+	// /usr/local/bin está no PATH fixo do systemd.exec(5): o agente embrulhado
+	// resolve para lá, não fica nome nu.
+	if u.Exec[0].Target != "/usr/local/bin/agent" {
+		t.Errorf("alvo atrás de env deve resolver: quer /usr/local/bin/agent, veio %q", u.Exec[0].Target)
+	}
+}
+
+// RootDirectory=/jail: o systemd executa /jail/usr/bin/x, não o /usr/bin/x do
+// host. O alvo efetivo tem de vir prefixado pelo chroot.
+func TestMerge_RootDirectoryPrefixaAlvo(t *testing.T) {
+	us := coletarUnits(t, map[string]string{
+		"etc/systemd/system/jailed.service": "[Service]\nRootDirectory=/jail\nExecStart=/usr/bin/x\n",
+		"jail/usr/bin/x":                    "bin",
+	}, nil)
+	u := acharUnit(us, "/etc/systemd/system/jailed.service")
+	if u == nil || len(u.Exec) != 1 {
+		t.Fatalf("unit/exec: %+v", us)
+	}
+	if u.Exec[0].Target != "/jail/usr/bin/x" {
+		t.Errorf("RootDirectory deve prefixar o alvo: quer /jail/usr/bin/x, veio %q", u.Exec[0].Target)
+	}
+}
+
+// RootImage=: o binário vive numa imagem não montada; a unit é PULADA pelos
+// checks de arquivo e a lacuna é declarada. Sem isto, o check avaliaria o
+// /usr/bin/x do host — arquivo errado.
+func TestMerge_RootImageDeclaraLacuna(t *testing.T) {
+	raiz := t.TempDir()
+	os.MkdirAll(filepath.Join(raiz, "etc/systemd/system"), 0o755)
+	os.WriteFile(filepath.Join(raiz, "etc/systemd/system/img.service"),
+		[]byte("[Service]\nRootImage=/srv/app.raw\nExecStart=/usr/bin/x\n"), 0o644)
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	t.Cleanup(func() { e.Close() })
+	f := &Facts{}
+	collectUnits(f, e)
+	u := acharUnit(f.Units, "/etc/systemd/system/img.service")
+	if u == nil || u.RootImage != "/srv/app.raw" {
+		t.Fatalf("RootImage deve ser parseado: %+v", u)
+	}
+	var achou bool
+	for _, p := range f.PersistDenied["unit"] {
+		if strings.Contains(p, "RootImage=/srv/app.raw") {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Errorf("RootImage deve declarar lacuna: %v", f.PersistDenied["unit"])
+	}
+}

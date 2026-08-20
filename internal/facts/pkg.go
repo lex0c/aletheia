@@ -334,6 +334,9 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 		if !u.Efetiva() {
 			continue // sombreada/mascarada: o systemd não a roda
 		}
+		if u.RootImage != "" {
+			continue // ExecStart dentro de imagem não montada: não há caminho de host
+		}
 		for _, ex := range u.Exec {
 			// O primeiro token E o ALVO EFETIVO: com wrapper (`env /bin/.x`) o
 			// primeiro token é o env (com dono) e o backdoor mora no alvo efetivo.

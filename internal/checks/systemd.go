@@ -79,6 +79,9 @@ var unitSemDono = check.Check{
 			if !u.Efetiva() {
 				continue // sombreada por outra de maior precedência, ou mascarada
 			}
+			if u.RootImage != "" {
+				continue // ExecStart dentro de imagem não montada: lacuna declarada
+			}
 			// NÃO se pula por Vendor. Vendor significa "o ARQUIVO está em
 			// /usr/lib/systemd/system", não "veio de pacote" — e um atacante com
 			// root escreve ali e ganharia isenção. Uma unit da árvore vendor
@@ -87,9 +90,13 @@ var unitSemDono = check.Check{
 			// pacote (dirDePacote), abaixo: unit legítima de pacote tem binário
 			// COM dono e não dispara.
 			for _, ex := range u.Exec {
-				// O ALVO EFETIVO, não o primeiro token: `ExecStart=/usr/bin/env
-				// /bin/shellserver` esconderia o backdoor atrás do env.
-				alvo := strings.TrimLeft(alvoEfetivo(ex.Cmd), "-@+!:")
+				// ex.Target é o ALVO EFETIVO já resolvido pelo coletor (com o
+				// ExecSearchPath/PATH/RootDirectory da unit e o wrapper
+				// desembrulhado) — a MESMA string que candidatosDePropriedade usou.
+				// Recalcular alvoEfetivo(ex.Cmd) aqui perdia a resolução: um
+				// `ExecStart=/usr/bin/env agent` deixava o alvo como nome nu "agent",
+				// que não casava com o /usr/local/bin/agent do conjunto semDono.
+				alvo := strings.TrimLeft(ex.Target, "-@+!:")
 				if !semDono[alvo] || !dirDePacote(alvo) {
 					continue
 				}

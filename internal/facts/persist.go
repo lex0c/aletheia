@@ -87,6 +87,15 @@ type Unit struct {
 	// e é um esconderijo comum.
 	Scope string `json:"scope"` // system | user
 
+	// Manager é o DONO da unit de usuário quando ela vem do home dele
+	// (~/.config/systemd/user). Vazio para unit de sistema e para as árvores de
+	// user COMPARTILHADAS (/etc/systemd/user, /usr/lib/systemd/user). Cada
+	// usuário roda seu próprio gerenciador; sem isto, alice/foo.service e
+	// bob/foo.service — arquivos DIFERENTES — competiam como se fossem a mesma
+	// unit, e a de um sombreava a do outro, deixando o Exec da sombreada sem
+	// avaliação. FN.
+	Manager string `json:"manager,omitempty"`
+
 	// Vendor marca a unit que veio de pacote (/usr/lib, /lib) contra a que
 	// alguém escreveu (/etc, /run). A de /etc tem PRECEDÊNCIA e pode
 	// sobrescrever uma legítima de mesmo nome.
@@ -106,9 +115,19 @@ type Unit struct {
 	// resolve para /tmp/.cache/bin/agent, e sem representar isto o parser via só
 	// "agent" — nem caminho suspeito nem propriedade eram avaliados.
 	ExecSearchPath []string `json:"exec_search_path,omitempty"`
-	Restart        string   `json:"restart,omitempty"`
-	User           string   `json:"user,omitempty"`
-	WantedBy       []string `json:"wanted_by,omitempty"`
+
+	// RootDirectory= faz o systemd executar num chroot: ExecStart=/usr/bin/x
+	// roda /jail/usr/bin/x, NÃO o /usr/bin/x do host. Sem modelar isto, o check
+	// avaliava o arquivo ERRADO — o do host, que nem é o que executa.
+	RootDirectory string `json:"root_directory,omitempty"`
+	// RootImage= monta uma IMAGEM de disco como raiz. O binário vive DENTRO da
+	// imagem, que não está montada na varredura — não dá para lê-lo. É lacuna
+	// declarada, não um arquivo de host para acusar em falso.
+	RootImage string `json:"root_image,omitempty"`
+
+	Restart  string   `json:"restart,omitempty"`
+	User     string   `json:"user,omitempty"`
+	WantedBy []string `json:"wanted_by,omitempty"`
 
 	// Gatilhos, por tipo de unit.
 	OnCalendar      []string `json:"on_calendar,omitempty"`
@@ -629,13 +648,20 @@ func collectUnits(f *Facts, e *env.Env) {
 	}
 	var negados []string
 	for _, home := range homes {
+		usuario := home[strings.LastIndexByte(home, '/')+1:]
 		for _, sub := range userSubdirs {
 			dir := home + "/" + sub
 			// MESMA varredura da árvore de sistema: arquivos, drop-in .d/ e
 			// máscara. Sem isto o user via só arquivos isUnitName — um
 			// ~/.config/systemd/user/foo.service.d/ passava invisível.
+			antes := len(units)
 			trunc, lerr := coletarDirDeUnits(f, e, dir, "user", false, &units, wants)
 			truncated = truncated || trunc
+			// Carimba o DONO em tudo que veio deste home: é o que separa o
+			// gerenciador de um usuário do de outro no merge.
+			for i := antes; i < len(units); i++ {
+				units[i].Manager = usuario
+			}
 			if env.EhLacuna(lerr) {
 				// Existe e não listou (permissão/corrida): resume entre os homes,
 				// senão escanear sem root vira uma linha por home 0700.
@@ -663,7 +689,7 @@ func collectUnits(f *Facts, e *env.Env) {
 	// demais viram Shadowed), máscara propagada ao grupo, e resets de Exec/Env
 	// de drop-in aplicados aos objetos carregados ANTES. Depois disto, os checks
 	// de execução veem o que o systemd realmente roda, não cada arquivo cru.
-	mesclarUnits(units, e)
+	mesclarUnits(f, units, e)
 	sort.Slice(units, func(i, j int) bool {
 		if units[i].Name != units[j].Name {
 			return units[i].Name < units[j].Name
@@ -903,11 +929,17 @@ func lerEnvFileNaUnit(u *Unit, e *env.Env, arq string) {
 //	             carregados ANTES dele (base + drop-ins anteriores). Não se
 //	             faz MERGE (isso duplicaria): cada objeto mantém sua própria
 //	             contribuição pós-reset, e os checks somam olhando cada um.
-func mesclarUnits(units []Unit, e *env.Env) {
+func mesclarUnits(f *Facts, units []Unit, e *env.Env) {
 	grupos := map[string][]int{}
 	var ordem []string
 	for i := range units {
-		k := units[i].Scope + "\x00" + units[i].Name
+		// O Manager entra na chave: a unit do home de um usuário só se funde com
+		// drop-in do MESMO usuário. Sem ele, o foo.service de dois usuários caía
+		// no mesmo grupo e um sombreava o outro (FN). A árvore de user
+		// COMPARTILHADA (Manager="") fica no seu próprio grupo — a precedência
+		// exata entre compartilhada e por-home continua declarada como limite,
+		// mas nenhuma unit deixa de ser avaliada por causa de outra.
+		k := units[i].Scope + "\x00" + units[i].Manager + "\x00" + units[i].Name
 		if _, ok := grupos[k]; !ok {
 			ordem = append(ordem, k)
 		}
@@ -1007,12 +1039,23 @@ func mesclarUnits(units []Unit, e *env.Env) {
 		// honrando o reset; um PATH próprio (Environment=) desliga a busca.
 		var searchPath []string
 		var pathProprio []string // dirs do PATH via Environment=, na ordem
+		var rootDir, rootImg string
 		temPATH := false
 		for _, i := range efetivos {
 			if units[i].ExecSearchPathReset {
 				searchPath = nil
 			}
 			searchPath = append(searchPath, units[i].ExecSearchPath...)
+			// RootDirectory/RootImage: valor único, a última atribuição não-vazia
+			// vence. (Um drop-in que RESETA com valor vazio para tirar o chroot é
+			// caso de borda; manter o rootDir da base é o lado SEGURO — verifica
+			// dentro do jail, não o host.)
+			if units[i].RootDirectory != "" {
+				rootDir = units[i].RootDirectory
+			}
+			if units[i].RootImage != "" {
+				rootImg = units[i].RootImage
+			}
 			for _, s := range units[i].Environment {
 				if s.Key == "PATH" {
 					// Environment= com a mesma chave: a ÚLTIMA vence (systemd),
@@ -1023,46 +1066,94 @@ func mesclarUnits(units []Unit, e *env.Env) {
 			}
 		}
 		for _, i := range efetivos {
+			// Os diretórios contra os quais o systemd resolve um nome NU, decididos
+			// UMA vez para a unit efetiva:
+			//   PATH próprio (Environment=)  -> só ele (o systemd não consulta o fixo)
+			//   PATH próprio só relativo     -> nil (cwd que não modelamos; não resolve)
+			//   ExecSearchPath               -> ele
+			//   nada                         -> o PATH fixo do systemd.exec(5)
+			var dirs []string
+			switch {
+			case temPATH && len(pathProprio) > 0:
+				dirs = pathProprio
+			case temPATH:
+				dirs = nil
+			case len(searchPath) > 0:
+				dirs = searchPath
+			default:
+				dirs = execPathPadrao
+			}
+			// RootDirectory=: o systemd resolve e executa DENTRO do chroot. As
+			// buscas de nome nu passam a olhar /jail+dir, e o alvo é /jail+path —
+			// senão o check avaliava o arquivo do HOST, que nem é o que roda.
+			if rootDir != "" {
+				dirs = prefixarDirs(rootDir, dirs)
+			}
+			// RootImage=: a raiz é uma IMAGEM de disco não montada. O binário vive
+			// dentro dela e não dá para lê-lo — lacuna declarada uma vez por unit,
+			// e sem alvo de host para não acusar o arquivo errado.
+			if rootImg != "" {
+				f.denyPersist("unit", "unit "+units[i].Name+" roda com RootImage="+rootImg+
+					": o ExecStart vive DENTRO da imagem de disco (não montada) e NÃO "+
+					"foi analisado — nem dono, nem caminho.")
+			}
 			for j := range units[i].Exec {
 				// Resolve SEMPRE a partir do cru: uma resolução por-arquivo já
 				// pode ter mexido o Cmd (base com ExecSearchPath próprio), e o
-				// merge invalida essa escolha — um drop-in que RESETA e re-aponta
-				// o ExecSearchPath mudaria o alvo, mas o resolverNomeNu num Cmd já
-				// com "/" era no-op. Partir do RawCmd cura o FN.
+				// merge invalida essa escolha. Partir do RawCmd cura o FN.
 				cru := units[i].Exec[j].RawCmd
 				if cru == "" {
 					cru = units[i].Exec[j].Cmd // defensivo: unit sem raw (não deve ocorrer)
 				}
-				if temPATH && len(pathProprio) > 0 {
-					// PATH próprio (Environment=): é ELE que o systemd consulta.
-					// Resolve o nome nu contra ESSE path — não o fixo, não deixa
-					// cru. Sem isto, Environment=PATH=/tmp/.cache + ExecStart=agent
-					// deixava /tmp/.cache/agent como nome nu, FORA do alcance dos
-					// checks de dono e de caminho suspeito. Resolver contra o path
-					// REAL do systemd põe o alvo certo na frente deles — e um PATH
-					// legítimo (/opt/app/bin) resolve certo, sem falso positivo.
-					units[i].Exec[j].Cmd = resolverNomeNu(e, cru, pathProprio)
-				} else if temPATH {
-					// PATH próprio mas sem componente ABSOLUTO utilizável (só
-					// relativos, que o systemd resolveria contra um cwd que não
-					// modelamos): deixa cru em vez de acusar contra path errado.
-					units[i].Exec[j].Cmd = cru
-				} else {
-					dirs := searchPath
-					if len(dirs) == 0 {
-						// Sem ExecSearchPath e sem PATH próprio, o systemd resolve o
-						// nome nu contra um PATH FIXO (systemd.exec(5)). Sem isto,
-						// ExecStart=shellserver — um binário dropado em /usr/local/bin
-						// por quem tinha escrita ali — escapava do check de dono: o
-						// alvo ficava no nome nu, que candidatosDePropriedade rejeita.
-						dirs = execPathPadrao
-					}
-					units[i].Exec[j].Cmd = resolverNomeNu(e, cru, dirs)
+				cmd := cru
+				if len(dirs) > 0 {
+					cmd = resolverNomeNu(e, cru, dirs)
 				}
-				units[i].Exec[j].Target = AlvoEfetivoDeExec(units[i].Exec[j].Cmd)
+				units[i].Exec[j].Cmd = cmd
+
+				// O alvo EFETIVO, DEPOIS de desembrulhar o wrapper. E se o programa
+				// embrulhado ainda é NOME NU, resolve-o também: `ExecStart=/usr/bin/env
+				// agent` desembrulha para `agent`, e sem resolvê-lo o alvo ficava nome
+				// nu — fora do check de dono. `env` roda o programa via PATH, os
+				// mesmos `dirs`.
+				tgt := AlvoEfetivoDeExec(cmd)
+				if len(dirs) > 0 && !strings.ContainsRune(strings.TrimLeft(tgt, "-@+!:"), '/') {
+					tgt = resolverNomeNu(e, tgt, dirs)
+				}
+				if rootDir != "" {
+					// O alvo absoluto que não veio pela busca (ExecStart=/usr/bin/x)
+					// ainda precisa do prefixo do chroot; o que veio da busca já
+					// resolveu sob o root, e sobRoot é idempotente.
+					tgt = sobRoot(rootDir, tgt)
+				}
+				// RootImage= não mexe no alvo: a unit inteira é PULADA pelos checks
+				// de arquivo (u.RootImage != ""), com a lacuna já declarada.
+				units[i].Exec[j].Target = tgt
 			}
 		}
 	}
+}
+
+// prefixarDirs põe cada diretório de busca DENTRO de um root (RootDirectory=).
+func prefixarDirs(root string, dirs []string) []string {
+	out := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		out = append(out, sobRoot(root, d))
+	}
+	return out
+}
+
+// sobRoot prefixa um caminho ABSOLUTO com um root (chroot do RootDirectory=). É
+// idempotente: um caminho já sob o root não é prefixado de novo.
+func sobRoot(root, p string) string {
+	if root == "" || !strings.HasPrefix(p, "/") {
+		return p
+	}
+	r := strings.TrimSuffix(root, "/")
+	if p == r || strings.HasPrefix(p, r+"/") {
+		return p
+	}
+	return r + p
 }
 
 // precedenciaArvore devolve o índice da árvore de unitDirs a que o caminho
@@ -1295,6 +1386,12 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope string, vendor bool) Unit {
 				continue
 			}
 			u.Exec = append(u.Exec, ExecLine{Key: k, Cmd: v, RawCmd: v})
+		case k == "RootDirectory":
+			// Vazio RESETA (drop-in que tira o chroot). A ÚLTIMA atribuição vence
+			// no merge, resolvida em mesclarUnits.
+			u.RootDirectory = v
+		case k == "RootImage":
+			u.RootImage = v
 		case k == "Restart":
 			u.Restart = v
 		case k == "User":

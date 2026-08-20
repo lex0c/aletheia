@@ -26,7 +26,7 @@ func init() {
 			// correlação que conta a história inteira.
 			{ID: "priv.uid_zero", Sev: "CRITICAL", Subject: "backdoor"},
 		},
-		ExpectOutput: []string{"2 sinais no mesmo alvo"},
+		ExpectOutput: []string{"account_no_shadow + uid_zero"},
 		Exit:         2,
 	})
 

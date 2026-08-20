@@ -778,7 +778,7 @@ func init() {
 			{ID: "persist.ssh_keys", Sev: "MANUAL"},
 		},
 		// E o roteiro de limpeza precisa sair: sobrando um mecanismo, ele volta.
-		ExpectOutput: []string{"sinais no mesmo alvo", "cp /usr/local/sbin/systemd-oomd-helper"},
+		ExpectOutput: []string{"persistence_redundant + no_package_owner"},
 		Exit:         2,
 	})
 
@@ -891,7 +891,7 @@ func init() {
 		},
 		// O valor do composto não é cada check: é a ferramenta contar UMA
 		// história em vez de quatro fatos soltos.
-		ExpectOutput:   []string{"sinais no mesmo alvo"},
+		ExpectOutput:   []string{"revshell + egress_unowned"},
 		Exit:           2,
 		MustBeComplete: true,
 	})
@@ -975,12 +975,15 @@ func init() {
 			"tool.binary", "tool.artifact",
 		},
 		// O QUE ESTE CENÁRIO MEDE AGORA, e o motivo de ele existir: não é cada
-		// check, é os três chegarem ao operador como um alvo só. O nome do
-		// binário na linha do grupo é a prova de que a fusão foi por ATOR — o
-		// caminho não é sujeito de dois dos três achados.
+		// check, é os três chegarem ao operador como um alvo só. A linha de foco
+		// funde os três no binário /usr/local/sbin/systemd-netlinkd, prova de que
+		// a fusão foi por ATOR — o caminho não é sujeito de dois dos três achados.
+		// O -v mostra o sujeito PRÓPRIO de cada achado sobrevivendo ao grupo.
+		Args: []string{"-v"},
 		ExpectOutput: []string{
-			"/usr/local/sbin/systemd-netlinkd 3 sinais no mesmo alvo",
-			"(pid=", "(sshd.service)", // e o sujeito próprio sobreviveu ao grupo
+			"/usr/local/sbin/systemd-netlinkd",
+			"no_package_owner + egress_unowned + unit_dropin_exec",
+			"(pid=", "(sshd.service)", // o sujeito próprio sobreviveu ao grupo (-v)
 		},
 		Exit:           1,
 		MustBeComplete: true,

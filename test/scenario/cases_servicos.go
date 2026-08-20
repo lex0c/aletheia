@@ -80,9 +80,11 @@ func init() {
 		},
 		// A unit do pacote está ao lado e NÃO pode ser acusada de nada.
 		ForbidOutput: []string{"/usr/sbin/sshd"},
-		// E os três sinais têm que chegar como UM alvo, com o nome do implante.
+		// E os três sinais têm que chegar como UM alvo, com o nome do implante: a
+		// linha de foco funde os três no binário systemd-netlinkd.
 		ExpectOutput: []string{
-			"/usr/local/sbin/systemd-netlinkd 3 sinais no mesmo alvo",
+			"/usr/local/sbin/systemd-netlinkd",
+			"no_package_owner + egress_unowned + unit_dropin_exec",
 		},
 		Exit:           1,
 		MustBeComplete: true,

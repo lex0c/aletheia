@@ -139,7 +139,7 @@ func init() {
 			{ID: "persist.cron_suspect"},
 			{ID: "persist.unit_exec_suspect"},
 		},
-		ExpectOutput: []string{"sinais no mesmo alvo"},
+		ExpectOutput: []string{"unit_exec_suspect + persistence_redundant"},
 		Exit:         2,
 	})
 
@@ -176,7 +176,7 @@ func init() {
 		// Correlação por sujeito: config e binário da MESMA ferramenta viram um
 		// bloco, e é isso que faz o operador ver "rclone" em vez de dois avisos
 		// soltos.
-		ExpectOutput: []string{"sinais no mesmo alvo", "rclone"},
+		ExpectOutput: []string{"artifact + binary", "rclone"},
 		Exit:         1,
 	})
 

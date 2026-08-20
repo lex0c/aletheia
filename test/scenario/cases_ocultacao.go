@@ -4,14 +4,16 @@ package scenario
 
 // Ocultação por kernel, MEDIDA contra kernel real.
 //
-// Estes três eram o buraco mais antigo da suíte: cross.socket_view e
-// cross.module_view — a arma anti-rootkit da ferramenta — só apareciam como
-// UntestableChecks (o 91 e o Q1), "provados" fora do registro, no
-// test/matrix/vm-matrix.sh. A justificativa de então ("carregar um LKM de
-// ocultação perderia o controle do ambiente") era do tier de CONTÊINER; o tier
-// de VM torna o carregamento seguro — o módulo morre com o QEMU, e o kernel do
-// host nunca é tocado. Então o que estava medido em shell vira contrato Go, com
-// Expect/Forbid, e os checks deixam de ser só declarados.
+// A família cross.* — a arma anti-rootkit da ferramenta: "o que vejo é TUDO que
+// existe?" — era o buraco mais antigo da suíte. cross.socket_view, .module_view,
+// .hidden_pid e .thread_count só apareciam como UntestableChecks (o 91 e o Q1),
+// "provados" fora do registro ou não medidos. A justificativa de então
+// ("carregar um LKM de ocultação perderia o controle do ambiente") era do tier
+// de CONTÊINER; o tier de VM torna o carregamento seguro — o módulo morre com o
+// QEMU, e o kernel do host nunca é tocado. Então cada um vira contrato Go, com
+// Expect/Forbid, exit code, cobertura e a invalidação de ausências na asserção.
+// (Sobra cross.bpf_hidden, que exige um iterador de bpf manipulado, não um
+// hook de syscall — construção maior, ainda declarada no 91.)
 //
 // O que difere do vm-matrix: lá a medição é uma tabela de shell; aqui é o mesmo
 // binário sob o mesmo contrato do resto da suíte — exit code, cobertura e a
@@ -119,5 +121,72 @@ func init() {
 		// falha e manda reexaminar o que mudou.
 		Forbid: []string{"cross.socket_view"},
 		Exit:   2,
+	})
+}
+
+// --- cross.hidden_pid: um filho visível aponta para um pai que sumiu. ---
+//
+// A rota PPID é a mais forte do check: não tem corrida. Um pai P forka um filho
+// C (que fica VISÍVEL), P segue vivo, e o pidhide filtra o d_name de P do
+// getdents64 — P some da listagem de /proc mas /proc/P/stat continua resolvendo
+// (lookup não passa por readdir). C declara PPID=P, P responde a stat e não está
+// na lista: a listagem mentiu. CRITICAL, e kernelBreaker — invalida as ausências
+// desta execução.
+//
+// A montagem: `sh -c 'C & exec P'` faz o pid do sh (capturado por $!) forkar C e
+// depois virar P por exec; C nasceu antes do exec, então seu PPID é P. Esconde-se
+// P. Ambos são /helper (Go) só para terem vida longa; o que importa é a relação.
+func init() {
+	Register(Scenario{
+		ID:               "RK-hidden-pid",
+		Desc:             "processo some da listagem de /proc mas um filho visível o declara como pai e ele responde a stat",
+		Mode:             VM,
+		Kernel:           "lts",
+		ModulosOcultacao: true,
+		Setup: `sh -c '/helper sleep 300 & exec /helper sleep 300' &
+			P=$!
+			sleep 0.5
+			insmod /modulos/pidhide.ko oculto=$P`,
+		Expect: []Expect{
+			// A via PPID é CRITICAL de propósito: ela não tem a corrida da
+			// sondagem, então a divergência é prova, não indício.
+			{ID: "cross.hidden_pid", Sev: "CRITICAL"},
+			{ID: "cross.hidden_pid", Evidence: "a LISTAGEM de /proc é que o omitiu"},
+		},
+		ExpectOutput:     []string{"O KERNEL SE CONTRADISSE"},
+		MustBeIncomplete: true,
+		Exit:             2,
+	})
+
+	// --- cross.thread_count: o status conta N, o diretório de tarefas mostra N-1. ---
+	//
+	// Um processo Go (/helper) tem várias threads de runtime. O status DECLARA a
+	// contagem (o kernel a soma das tasks reais, que o hook não toca); o
+	// diretório /proc/<pid>/task tem uma entrada por TID, e o pidhide filtra UMA
+	// do getdents64. As duas leituras divergem, e a releitura do coletor confirma
+	// que persiste — não é thread que morreu no intervalo.
+	//
+	// WARN, não CRITICAL, e por isso NÃO invalida ausências: esconder uma thread
+	// é forte indício, mas runtime com pool encolhe o task dir o tempo todo, e o
+	// check paga essa incerteza em severidade. Escolhe-se um TID que não é o líder
+	// (TID != PID) para não mexer na entrada que também nomeia o processo.
+	Register(Scenario{
+		ID:               "RK-thread-count",
+		Desc:             "contagem de threads do status diverge do diretório task porque uma entrada de TID foi filtrada do readdir",
+		Mode:             VM,
+		Kernel:           "lts",
+		ModulosOcultacao: true,
+		Setup: `/helper sleep 300 &
+			HP=$!
+			sleep 0.5
+			TID=$(ls /proc/$HP/task | grep -v "^$HP\$" | head -1)
+			insmod /modulos/pidhide.ko oculto=$TID`,
+		Expect: []Expect{
+			{ID: "cross.thread_count", Sev: "WARN"},
+			{ID: "cross.thread_count", Evidence: "esconder uma thread exige mentir nos dois"},
+		},
+		// Exit 1: o achado é WARN. Um WARN de ocultação de thread ainda tira o
+		// exit de zero — a automação de frota não pode arquivar isto como limpo.
+		Exit: 1,
 	})
 }

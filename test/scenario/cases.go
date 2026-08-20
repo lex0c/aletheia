@@ -1333,14 +1333,20 @@ func init() {
 		// LISTA. Só um kernel manipulado faz isso — que é justamente o que o
 		// check existe para achar.
 		//
-		// cross.module_view SAIU desta lista: deixou de ser impossível de provar.
-		// O RK-cross-module-view (cases_ocultacao.go) carrega o modhide numa VM
-		// descartável e EXIGE o achado. cross.socket_view foi pelo mesmo caminho
-		// (RK-cross-socket-view). Sobram aqui os três que ainda não têm plantio de
-		// ocultação real: PID, thread e programa eBPF escondidos.
-		UntestableChecks: []string{
-			"cross.hidden_pid", "cross.thread_count", "cross.bpf_hidden",
-		},
+		// A lista MINGUOU à medida que os plantios de ocultação real foram
+		// construídos (cases_ocultacao.go, tier de VM):
+		//   cross.socket_view   RK-cross-socket-view (socknd hooka tcp4_seq_show)
+		//   cross.module_view   RK-cross-module-view (modhide some da lista)
+		//   cross.hidden_pid    RK-hidden-pid (pidhide filtra o PID do getdents64)
+		//   cross.thread_count  RK-thread-count (pidhide filtra um TID do task dir)
+		//
+		// Sobra cross.bpf_hidden, e ele é de outra natureza: não basta filtrar um
+		// readdir. A rota do trampolim compara o que o ftrace conhece com a
+		// enumeração da bpf(2), e produzi-la exige um programa que o kernel ANEXA
+		// e a bpf(2) NÃO LISTA — um iterador de bpf manipulado, não um syscall
+		// hookado. É uma construção maior que a dos outros quatro, e fica
+		// declarada até existir.
+		UntestableChecks: []string{"cross.bpf_hidden"},
 		Untestable: "exige um rootkit que esconda processo, thread, módulo ou " +
 			"programa eBPF. Carregar um LKM de ocultação na suíte trocaria a " +
 			"garantia de um check pela perda de controle sobre o ambiente de teste. " +

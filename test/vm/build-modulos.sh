@@ -47,13 +47,14 @@ trap 'rm -rf "$work" 2>/dev/null || docker run --rm -v "$work":/w "$img" rm -rf 
 
 cp "$here/socket-hidden-module.c" "$work/socknd.c"
 cp "$here/ftrace-hidden-module.c" "$work/modhide.c"
+cp "$here/pid-hide-module.c" "$work/pidhide.c"
 cat > "$work/Makefile" <<'MK'
-obj-m := socknd.o modhide.o
+obj-m := socknd.o modhide.o pidhide.o
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 MK
 
-echo "[1/2] compilando socknd + modhide contra o linux-lts do Alpine…"
+echo "[1/2] compilando socknd + modhide + pidhide contra o linux-lts do Alpine…"
 docker run --rm -v "$work":/m -w /m "$img" sh -c '
 	set -e
 	apk add --no-cache build-base linux-lts-dev linux-lts >/dev/null 2>&1
@@ -74,7 +75,7 @@ docker run --rm -v "$work":/m -w /m "$img" sh -c '
 
 echo "[2/2] publicando kernel e módulos em dist/vm/…"
 install -m 0644 "$work/vmlinuz-lts" "$out/kernels/vmlinuz-lts"
-for ko in socknd modhide inet_diag tcp_diag; do
+for ko in socknd modhide pidhide inet_diag tcp_diag; do
 	[ -f "$work/$ko.ko" ] || { echo "esperava $ko.ko e ele não saiu da compilação" >&2; exit 1; }
 	install -m 0644 "$work/$ko.ko" "$out/modulos-ocultacao/$ko.ko"
 done

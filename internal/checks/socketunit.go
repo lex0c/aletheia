@@ -55,6 +55,9 @@ var socketDeBackdoor = check.Check{
 			if u.Kind != "socket" && u.Kind != "path" {
 				continue
 			}
+			if !u.Efetiva() {
+				continue // sombreada ou mascarada: não ativa
+			}
 			if len(u.Listen) == 0 && len(u.WatchPaths) == 0 {
 				continue
 			}

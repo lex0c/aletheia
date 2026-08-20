@@ -65,19 +65,36 @@ var nssModuleSemDono = check.Check{
 		}
 		for i := range f.NSSModules {
 			m := &f.NSSModules[i]
-			if m.Path == "" || !semDono[m.Path] {
+			// Dispara sobre QUALQUER candidato sem dono. Com shadowing (uma cópia
+			// legítima e um implante), o loader escolhe pelo ld.so.cache — que
+			// esta ferramenta ainda não lê —, então o candidato órfão não pode
+			// ser descartado por existir uma cópia com dono ao lado.
+			var orfaos []string
+			for _, p := range m.Paths {
+				if semDono[p] {
+					orfaos = append(orfaos, p)
+				}
+			}
+			if len(orfaos) == 0 {
 				continue
 			}
 			ev := []string{
-				"a fonte `" + m.Fonte + "` do nsswitch.conf carrega " + m.Path,
+				"a fonte `" + m.Fonte + "` do nsswitch.conf carrega " + strings.Join(orfaos, ", "),
 				"esse arquivo está num diretório de biblioteca e NENHUM pacote o " +
 					"reivindica (base: " + f.Pkg.Kind + "): módulo NSS que ninguém entregou",
 				"resolve para os serviços: " + strings.Join(m.Servicos, ", ") +
 					" — o código roda em CADA resolução desses, inclusive por daemon root",
 			}
+			if len(m.Paths) > len(orfaos) {
+				// Há também uma cópia COM dono: shadowing. Qual carrega depende do
+				// ld.so.cache (ainda não lido) — a ambiguidade fica dita.
+				ev = append(ev, "ATENÇÃO: existe também uma cópia COM dono de pacote "+
+					"para esta fonte — qual o loader carrega depende do ld.so.cache, "+
+					"não do primeiro diretório; trate a órfã como possivelmente ativa")
+			}
 			fd := self.F(check.SevCritical, "libnss_"+m.Fonte, "", ev...)
 			fd.NextSteps = []string{
-				"preserve " + m.Path + " antes de qualquer coisa (runbook §6)",
+				"preserve " + strings.Join(orfaos, ", ") + " antes de qualquer coisa (runbook §6)",
 				"remova a fonte `" + m.Fonte + "` do /etc/nsswitch.conf — enquanto " +
 					"ela estiver lá, toda resolução recarrega o módulo",
 				"a lib é carregada por PROCESSOS JÁ EM EXECUÇÃO: reinicie os daemons " +

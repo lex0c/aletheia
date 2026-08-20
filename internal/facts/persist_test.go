@@ -102,6 +102,8 @@ func TestEnvAssign(t *testing.T) {
 
 func TestUnitParsing(t *testing.T) {
 	f := imagem(t, map[string]string{
+		// x.service NÃO tem drop-in de reset: verifica o PARSING (continuação,
+		// duas diretivas Exec, Restart, User).
 		"etc/systemd/system/x.service": `# comentário
 [Unit]
 Description=x
@@ -117,9 +119,12 @@ User=nobody
 WantedBy=multi-user.target
 `,
 		"etc/systemd/system/multi-user.target.wants/x.service": "link",
-		"etc/systemd/system/x.service.d/over.conf":             "[Service]\nExecStart=\nExecStart=/tmp/.y\n",
-		"etc/systemd/system/b.timer":                           "[Timer]\nOnUnitActiveSec=45s\nOnCalendar=*-*-* *:*:00\n",
-		"usr/lib/systemd/system/vendor.service":                "[Service]\nExecStart=/usr/bin/vendor\n",
+		// y.service + drop-in de reset: verifica a FUSÃO. O ExecStart= vazio do
+		// drop-in reseta a lista de ExecStart da base — mas NÃO o ExecStartPre.
+		"etc/systemd/system/y.service":             "[Service]\nExecStartPre=/bin/prep\nExecStart=/tmp/old\n",
+		"etc/systemd/system/y.service.d/over.conf": "[Service]\nExecStart=\nExecStart=/tmp/.y\n",
+		"etc/systemd/system/b.timer":               "[Timer]\nOnUnitActiveSec=45s\nOnCalendar=*-*-* *:*:00\n",
+		"usr/lib/systemd/system/vendor.service":    "[Service]\nExecStart=/usr/bin/vendor\n",
 	})
 
 	byPath := map[string]*Unit{}
@@ -152,17 +157,26 @@ WantedBy=multi-user.target
 		t.Error("unit em /usr/lib precisa ser marcada como de pacote")
 	}
 
-	// "ExecStart=" vazio RESETA: é assim que um drop-in SUBSTITUI o comando.
-	// Guardar os dois faria o relatório mostrar um comando que não roda mais.
-	d := byPath["/etc/systemd/system/x.service.d/over.conf"]
+	// "ExecStart=" vazio RESETA: o drop-in SUBSTITUI o ExecStart.
+	d := byPath["/etc/systemd/system/y.service.d/over.conf"]
 	if d == nil {
 		t.Fatal("drop-in não coletado")
 	}
-	if d.DropInFor != "x.service" {
+	if d.DropInFor != "y.service" {
 		t.Errorf("DropInFor = %q", d.DropInFor)
 	}
 	if len(d.Exec) != 1 || d.Exec[0].Cmd != "/tmp/.y" {
 		t.Errorf("o ExecStart vazio devia ter zerado a lista: %v", d.Exec)
+	}
+	// FUSÃO ciente de diretiva: o reset do drop-in tira o ExecStart /tmp/old da
+	// BASE, mas o ExecStartPre /bin/prep SOBREVIVE (listas independentes).
+	yb := byPath["/etc/systemd/system/y.service"]
+	if yb == nil {
+		t.Fatal("y.service base não coletada")
+	}
+	if len(yb.Exec) != 1 || yb.Exec[0].Key != "ExecStartPre" {
+		t.Errorf("o reset de ExecStart do drop-in devia limpar só o ExecStart da base, "+
+			"preservando o ExecStartPre: %+v", yb.Exec)
 	}
 
 	tm := byPath["/etc/systemd/system/b.timer"]

@@ -331,16 +331,24 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 	}
 	for i := range f.Units {
 		u := &f.Units[i]
+		if !u.Efetiva() {
+			continue // sombreada/mascarada: o systemd não a roda
+		}
 		for _, ex := range u.Exec {
+			// O primeiro token E o ALVO EFETIVO: com wrapper (`env /bin/.x`) o
+			// primeiro token é o env (com dono) e o backdoor mora no alvo efetivo.
+			// Sem o alvo aqui, unit_unowned calculava o alvo certo mas a pergunta
+			// de propriedade nunca fora feita sobre ele.
 			add(primeiroToken(ex.Cmd), "unit "+u.Name)
+			add(ex.Target, "unit "+u.Name+" (alvo efetivo)")
 		}
 	}
 	// A lib de cada fonte NSS: um libnss_ sem dono é carregado em toda resolução
 	// de nome, inclusive por daemon root (§7.8). É caminho de disco, não linha
 	// de comando — entra por addDoDisco.
 	for i := range f.NSSModules {
-		if f.NSSModules[i].Path != "" {
-			addDoDisco(f.NSSModules[i].Path, "módulo NSS "+f.NSSModules[i].Fonte)
+		for _, p := range f.NSSModules[i].Paths {
+			addDoDisco(p, "módulo NSS "+f.NSSModules[i].Fonte)
 		}
 	}
 	// O `init=` da linha de boot. É o PID 1: o kernel o executa antes de

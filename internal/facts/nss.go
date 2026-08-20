@@ -25,11 +25,16 @@ import (
 // do sssd, mdns do avahi — todos com dono. O `libnss_impl.so.2` do atacante,
 // não. Por isso o caminho resolvido entra na pergunta de propriedade.
 
-// NSSModule é uma fonte declarada no nsswitch.conf e a biblioteca que ela
-// carrega, quando encontrada.
+// NSSModule é uma fonte declarada no nsswitch.conf e as bibliotecas candidatas
+// que ela poderia carregar.
 type NSSModule struct {
-	Fonte    string   `json:"source"`
-	Path     string   `json:"path,omitempty"` // libnss_<fonte>.so.2 resolvido
+	Fonte string `json:"source"`
+	// Paths são TODAS as libnss_<fonte>.so.{2,1} encontradas nos diretórios de
+	// biblioteca. Guardar todas — e não só a primeira — importa contra
+	// shadowing: uma cópia legítima em /usr/lib e um implante em /opt/.hidden
+	// coexistem, e qual o loader carrega depende do ld.so.cache. Devolver só a
+	// primeira mascararia o implante atrás da legítima.
+	Paths    []string `json:"paths,omitempty"`
 	Servicos []string `json:"services,omitempty"`
 }
 
@@ -108,16 +113,17 @@ func collectNSS(f *Facts, e *env.Env) {
 	}
 	for _, fonte := range ordem {
 		m := porFonte[fonte]
-		m.Path = localizarLibNSS(e, dirs, fonte)
+		m.Paths = localizarLibNSS(e, dirs, fonte)
 		f.NSSModules = append(f.NSSModules, *m)
 	}
 }
 
-// localizarLibNSS acha a `libnss_<fonte>.so.{2,1}` nos diretórios de biblioteca
-// do sistema E nos diretórios de busca declarados no ld.so.conf. Devolve o
-// primeiro caminho que existe, ou "" se nenhum — uma fonte sem biblioteca
-// localizada não é acusável (pode ser embutida no glibc, ou estar noutro lugar).
-func localizarLibNSS(e *env.Env, dirs []string, fonte string) string {
+// localizarLibNSS acha TODAS as `libnss_<fonte>.so.{2,1}` nos diretórios de
+// biblioteca do sistema E nos diretórios de busca do ld.so.conf. Devolve todas
+// as que existem — o loader escolhe uma pelo ld.so.cache, e devolver só a
+// primeira mascararia um implante que coexiste com a cópia legítima.
+func localizarLibNSS(e *env.Env, dirs []string, fonte string) []string {
+	var out []string
 	visto := map[string]bool{}
 	for _, dir := range dirs {
 		if dir == "" || visto[dir] {
@@ -126,10 +132,11 @@ func localizarLibNSS(e *env.Env, dirs []string, fonte string) string {
 		visto[dir] = true
 		for _, ver := range []string{".so.2", ".so.1"} {
 			p := dir + "/libnss_" + fonte + ver
-			if _, err := e.Lstat(p); err == nil {
-				return p
+			if _, err := e.Lstat(p); err == nil && !visto[p] {
+				visto[p] = true
+				out = append(out, p)
 			}
 		}
 	}
-	return ""
+	return out
 }

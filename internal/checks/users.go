@@ -511,6 +511,13 @@ var doasSemSenha = check.Check{
 			if !d.Permit || !d.NoPass {
 				continue
 			}
+			// LAST-MATCH do doas: a ÚLTIMA regra que casa um pedido decide. Um
+			// `permit nopass X` seguido de `deny X` NÃO concede nada — o deny é a
+			// regra efetiva. Avaliar cada permit isolado gerava FP sobre uma regra
+			// que a ordem já anulou.
+			if !concedeNopassEfetivo(f.Doas, i) {
+				continue
+			}
 
 			// alvo vazio = root (o padrão do doas). E comando vazio = QUALQUER
 			// comando, que é o que torna a regra ampla.
@@ -608,4 +615,31 @@ func ehShellOuInterp(cmd string) bool {
 	}
 	campos := strings.Fields(cmd)
 	return interpretadoresDePipe[baseDe(campos[0])]
+}
+
+// concedeNopassEfetivo aplica o last-match do doas: a regra `permit nopass` no
+// índice i só é a decisão efetiva se NENHUMA regra POSTERIOR de mesma identidade
+// e escopo abrangente a sobrescrever. Uma regra posterior que casa e (a) nega ou
+// (b) concede COM senha torna o nopass de i inerte.
+func concedeNopassEfetivo(rs []facts.DoasRule, i int) bool {
+	r := rs[i]
+	for j := i + 1; j < len(rs); j++ {
+		o := rs[j]
+		if o.Identidade != r.Identidade {
+			continue
+		}
+		// `o` cobre o pedido mais amplo de `r`? Alvo vazio = qualquer; comando
+		// vazio = qualquer. Se `r` é amplo (comando vazio), só um `o` amplo cobre.
+		cobreAlvo := o.Alvo == "" || o.Alvo == r.Alvo
+		cobreCmd := o.Comando == "" || (r.Comando != "" && o.Comando == r.Comando)
+		if !cobreAlvo || !cobreCmd {
+			continue
+		}
+		// Uma regra posterior que casa DECIDE. Se ela nega ou pede senha, o
+		// nopass de `r` deixou de ser o efetivo.
+		if !o.Permit || !o.NoPass {
+			return false
+		}
+	}
+	return true
 }

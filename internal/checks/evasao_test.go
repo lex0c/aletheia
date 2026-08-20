@@ -234,6 +234,8 @@ func TestEvasaoAlvoEfetivo(t *testing.T) {
 		{"bash -c '/tmp/.x -flag'", true, "bash -c com aspas e flag"},
 		{"sudo env nohup /tmp/.x", true, "wrappers aninhados"},
 		{"tcpd sh -c /tmp/.x", true, "tcpd embrulhando sh -c"},
+		{"/usr/bin/env -S /tmp/.x --daemon", true, "env -S: o programa está DENTRO do argumento"},
+		{"env -S \"/tmp/.x --daemon\"", true, "env -S com aspas"},
 		// Arity de opção: a opção que consome argumento não pode engolir o alvo.
 		{"sudo -u root /tmp/.x", true, "sudo -u root: -u come 'root', não o alvo"},
 		{"doas -u root /tmp/.x", true, "doas -u root"},

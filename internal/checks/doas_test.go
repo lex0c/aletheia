@@ -67,3 +67,27 @@ func TestDoasCmdShellEhCritico(t *testing.T) {
 		}
 	}
 }
+
+// last-match: `permit nopass X` anulado por um `deny X` posterior NÃO dispara.
+func TestDoasLastMatchDenyPosteriorAnula(t *testing.T) {
+	f := fDoas(
+		facts.DoasRule{Permit: true, NoPass: true, Identidade: "attacker", Text: "permit nopass attacker"},
+		facts.DoasRule{Permit: false, Identidade: "attacker", Text: "deny attacker"},
+	)
+	r := doasSemSenha.Run(doasSemSenha, f, testEnv())
+	if len(r.Findings) != 0 {
+		t.Fatalf("deny posterior anula o permit nopass (last-match): %+v", r.Findings)
+	}
+}
+
+// Mas um deny ANTES do permit não anula (a ordem importa).
+func TestDoasDenyAntesNaoAnula(t *testing.T) {
+	f := fDoas(
+		facts.DoasRule{Permit: false, Identidade: "attacker", Text: "deny attacker"},
+		facts.DoasRule{Permit: true, NoPass: true, Identidade: "attacker", Text: "permit nopass attacker"},
+	)
+	r := doasSemSenha.Run(doasSemSenha, f, testEnv())
+	if len(r.Findings) != 1 {
+		t.Fatalf("permit nopass depois do deny é a regra efetiva: %+v", r.Findings)
+	}
+}

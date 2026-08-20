@@ -50,8 +50,8 @@ func TestCollectNSSLocalizaLibEIgnoraAcoes(t *testing.T) {
 	if !ok {
 		t.Fatalf("fonte impl não coletada: %+v", f.NSSModules)
 	}
-	if m.Path != "/usr/lib/libnss_impl.so.2" {
-		t.Errorf("lib não localizada: %q", m.Path)
+	if len(m.Paths) != 1 || m.Paths[0] != "/usr/lib/libnss_impl.so.2" {
+		t.Errorf("lib não localizada: %q", m.Paths)
 	}
 	// blocos de ação NÃO podem virar fonte
 	for _, bad := range []string{"SUCCESS=return", "NOTFOUND", "return", "[SUCCESS=return]"} {
@@ -87,7 +87,7 @@ func TestCollectNSSSegueSearchDirsDoLoader(t *testing.T) {
 	f.Loader.SearchDirs = []LoaderDir{{Dir: "/opt/.lib", From: "/etc/ld.so.conf.d/x.conf"}}
 	collectNSS(f, e)
 	m, ok := nssPorFonte(f, "impl")
-	if !ok || m.Path != "/opt/.lib/libnss_impl.so.2" {
+	if !ok || len(m.Paths) != 1 || m.Paths[0] != "/opt/.lib/libnss_impl.so.2" {
 		t.Fatalf("lib em dir do ld.so.conf deve ser localizada: %+v", f.NSSModules)
 	}
 }

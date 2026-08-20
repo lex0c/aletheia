@@ -116,6 +116,16 @@ type Unit struct {
 	// REDEFINE a lista. Num drop-in, isso alcança a unit base de mesmo nome — a
 	// fusão pós-coleta usa esta marca.
 	EnvFileReset bool `json:"env_file_reset,omitempty"`
+	// ExecResetKeys são as diretivas Exec*= que tiveram atribuição vazia (que
+	// REDEFINE aquela lista, e SÓ ela — `ExecStart=` vazio não zera
+	// ExecStartPre). Num drop-in, alcança os objetos carregados antes.
+	ExecResetKeys []string `json:"exec_reset_keys,omitempty"`
+	// Shadowed: existe uma unit de mesmo nome em árvore de MAIOR precedência —
+	// o systemd executa aquela, não esta. Masked: o arquivo é link para
+	// /dev/null (a unit está DESLIGADA). Os checks de execução pulam as duas: o
+	// que o sistema não roda não é persistência ativa.
+	Shadowed bool `json:"shadowed,omitempty"`
+	Masked   bool `json:"masked,omitempty"`
 
 	ModUTC string `json:"mod_utc,omitempty"`
 
@@ -128,10 +138,33 @@ type Unit struct {
 type ExecLine struct {
 	Key string `json:"key"` // ExecStart | ExecStartPre | …
 	Cmd string `json:"cmd"`
+	// Target é o ALVO EFETIVO — o programa que de fato roda, desembrulhados os
+	// wrappers (env, sudo, sh -c, env -S). Computado UMA vez na coleta para que
+	// a pergunta de propriedade e os checks de execução usem a MESMA resposta.
+	Target string `json:"target,omitempty"`
 }
 
 // Enabled diz se algo aponta para esta unit.
 func (u Unit) Enabled() bool { return len(u.EnabledBy) > 0 }
+
+// Efetiva diz se o systemd de fato RODA esta unit: nem sombreada por outra de
+// maior precedência, nem mascarada (link para /dev/null). Os checks de execução
+// e a pergunta de propriedade só olham units efetivas — o que não roda não é
+// persistência ativa. Drop-in não é "efetivo" por si (ele modifica a base), mas
+// os checks de drop-in olham DropInFor diretamente, não este predicado.
+func (u Unit) Efetiva() bool { return !u.Shadowed && !u.Masked }
+
+// execSemKey remove as linhas de uma diretiva Exec*= específica, preservando as
+// demais — é o efeito de um `ExecStart=` vazio, que reseta só a lista dele.
+func execSemKey(exec []ExecLine, key string) []ExecLine {
+	var out []ExecLine
+	for _, e := range exec {
+		if e.Key != key {
+			out = append(out, e)
+		}
+	}
+	return out
+}
 
 // unitDirs são as árvores de unit, na ordem de precedência do systemd. As de
 // /etc e /run vencem as de /usr — e é por isso que o atacante escreve nelas.
@@ -142,10 +175,17 @@ var unitDirs = []struct {
 }{
 	{"/etc/systemd/system", "system", false},
 	{"/run/systemd/system", "system", false},
+	// Transient (systemd-run) e control (overrides de runtime): execução e
+	// persistência que NÃO deixam um .service permanente em /etc. `systemd-run`
+	// planta aqui, e sem estes diretórios a unit efêmera passava invisível.
+	{"/run/systemd/transient", "system", false},
+	{"/run/systemd/system.control", "system", false},
+	{"/etc/systemd/system.control", "system", false},
 	{"/usr/lib/systemd/system", "system", true},
 	{"/lib/systemd/system", "system", true},
 	{"/usr/local/lib/systemd/system", "system", false},
 	{"/etc/systemd/user", "user", false},
+	{"/run/systemd/user.control", "user", false},
 	{"/usr/lib/systemd/user", "user", true},
 }
 
@@ -197,31 +237,17 @@ func collectPersist(f *Facts, e *env.Env) {
 	collectMAC(f, e)
 	collectSegredos(f, e)
 
-	// Fusão de reset entre drop-in e unit base: um `EnvironmentFile=` vazio num
-	// drop-in redefine a lista de arquivos de ambiente da unit INTEIRA (base +
-	// drop-ins carregados antes). Como base e drop-in são objetos Unit separados,
-	// o reset precisa ser aplicado aqui, depois de ler todos. Sem isto, um
-	// LD_PRELOAD num EnvironmentFile da base que um drop-in limpou virava FP.
-	resetPorNome := map[string]bool{}
-	for i := range f.Units {
-		if f.Units[i].DropInFor != "" && f.Units[i].EnvFileReset {
-			resetPorNome[f.Units[i].Name] = true
-		}
-	}
-	for i := range f.Units {
-		u := &f.Units[i]
-		if u.DropInFor == "" && resetPorNome[u.Name] {
-			// Descarta as entradas de ARQUIVO da base (as Environment= EM LINHA
-			// ficam; um arquivo RE-adicionado pelo drop-in após o reset também,
-			// porque mora no objeto do drop-in).
-			u.Environment = envSemArquivos(u.Environment, u.Path)
-			u.EnvFilesIlegiveis = nil
-		}
-	}
-
+	// A fusão de precedência, máscara e resets de drop-in roda em collectUnits
+	// (mesclarUnits), antes daqui — f.Units já reflete a config EFETIVA.
+	//
+	// Só as units efetivas alimentam a lista de preload: uma unit sombreada por
+	// outra de maior precedência, ou mascarada (link para /dev/null), não roda.
 	// Environment= de unit tem o MESMO efeito do /etc/environment, e por isso
 	// alimenta a mesma lista: um check só, uma leitura só.
 	for i := range f.Units {
+		if !f.Units[i].Efetiva() {
+			continue // unit sombreada ou mascarada não injeta env: não roda
+		}
 		for _, s := range f.Units[i].Environment {
 			switch s.Key {
 			case "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT":
@@ -583,6 +609,13 @@ func collectUnits(f *Facts, e *env.Env) {
 			u := parseUnitFile(e, full, d.scope, d.vendor)
 			u.Name = name
 			u.Kind = kindOf(name)
+			// Máscara: link para /dev/null desliga a unit. Sem detectar, ela
+			// vinha como unit VAZIA (o ReadFile segue o link e lê nada) e podia
+			// ser tratada como real; e uma máscara sobre um nome de sistema é
+			// legítima, não um achado.
+			if alvo, err := e.Readlink(full); err == nil && alvo == "/dev/null" {
+				u.Masked = true
+			}
 			units = append(units, u)
 		}
 	}
@@ -620,6 +653,11 @@ func collectUnits(f *Facts, e *env.Env) {
 	for i := range units {
 		units[i].EnabledBy = wants[units[i].Name]
 	}
+	// Config EFETIVA: precedência por nome (a de maior precedência vence, as
+	// demais viram Shadowed), máscara propagada ao grupo, e resets de Exec/Env
+	// de drop-in aplicados aos objetos carregados ANTES. Depois disto, os checks
+	// de execução veem o que o systemd realmente roda, não cada arquivo cru.
+	mesclarUnits(units)
 	sort.Slice(units, func(i, j int) bool {
 		if units[i].Name != units[j].Name {
 			return units[i].Name < units[j].Name
@@ -760,6 +798,79 @@ func lerEnvFileNaUnit(u *Unit, e *env.Env, arq string) {
 	}
 }
 
+// mesclarUnits reconstrói a config EFETIVA a partir dos arquivos crus, sem
+// APAGAR os objetos (os checks de drop-in ainda os olham). Faz três coisas:
+//
+//	precedência  entre bases de mesmo (escopo,nome), a de MAIOR precedência (a
+//	             primeira na ordem de coleta = ordem de unitDirs) vence; as
+//	             demais viram Shadowed. O systemd roda uma só.
+//	máscara      se a base vencedora é link para /dev/null, o grupo INTEIRO está
+//	             mascarado — drop-ins não ressuscitam unit mascarada.
+//	resets       ExecStart=/EnvironmentFile= vazios num objeto limpam os
+//	             carregados ANTES dele (base + drop-ins anteriores). Não se
+//	             faz MERGE (isso duplicaria): cada objeto mantém sua própria
+//	             contribuição pós-reset, e os checks somam olhando cada um.
+func mesclarUnits(units []Unit) {
+	grupos := map[string][]int{}
+	var ordem []string
+	for i := range units {
+		k := units[i].Scope + "\x00" + units[i].Name
+		if _, ok := grupos[k]; !ok {
+			ordem = append(ordem, k)
+		}
+		grupos[k] = append(grupos[k], i)
+	}
+	for _, k := range ordem {
+		idxs := grupos[k]
+		// Ordem de CARGA: base antes de drop-in; entre bases, a ordem de coleta
+		// (precedência); entre drop-ins, por nome de arquivo (como o systemd).
+		sort.SliceStable(idxs, func(a, b int) bool {
+			ua, ub := &units[idxs[a]], &units[idxs[b]]
+			da, db := ua.DropInFor != "", ub.DropInFor != ""
+			if da != db {
+				return !da
+			}
+			if !da {
+				return false // bases: mantém ordem de coleta
+			}
+			return baseNome(ua.Path) < baseNome(ub.Path)
+		})
+
+		// Precedência e máscara: a primeira base vence.
+		primeiraBase := -1
+		for _, i := range idxs {
+			if units[i].DropInFor != "" {
+				continue
+			}
+			if primeiraBase == -1 {
+				primeiraBase = i
+				continue
+			}
+			units[i].Shadowed = true
+		}
+		if primeiraBase >= 0 && units[primeiraBase].Masked {
+			for _, i := range idxs {
+				units[i].Masked = true // máscara desliga o grupo inteiro
+			}
+		}
+
+		// Resets sequenciais: um objeto com reset limpa os ANTERIORES do grupo.
+		for pos, i := range idxs {
+			for _, k := range units[i].ExecResetKeys {
+				for _, j := range idxs[:pos] {
+					units[j].Exec = execSemKey(units[j].Exec, k)
+				}
+			}
+			if units[i].EnvFileReset {
+				for _, j := range idxs[:pos] {
+					units[j].Environment = envSemArquivos(units[j].Environment, units[j].Path)
+					units[j].EnvFilesIlegiveis = nil
+				}
+			}
+		}
+	}
+}
+
 func parseUnitFile(e *env.Env, path, scope string, vendor bool) Unit {
 	u := Unit{Path: path, Scope: scope, Vendor: vendor}
 	if fi, err := e.Lstat(path); err == nil {
@@ -803,7 +914,10 @@ func parseUnitFile(e *env.Env, path, scope string, vendor bool) Unit {
 			// "ExecStart=" vazio RESETA a lista — é assim que um drop-in
 			// substitui o comando da unit original.
 			if v == "" {
-				u.Exec = nil
+				// Reset da lista DAQUELA diretiva só (ExecStart= não zera
+				// ExecStartPre — são listas independentes no systemd).
+				u.Exec = execSemKey(u.Exec, k)
+				u.ExecResetKeys = append(u.ExecResetKeys, k)
 				continue
 			}
 			u.Exec = append(u.Exec, ExecLine{Key: k, Cmd: v})
@@ -869,6 +983,9 @@ func parseUnitFile(e *env.Env, path, scope string, vendor bool) Unit {
 	// ExecSearchPath (que pode ter vindo DEPOIS do ExecStart). Feito aqui, os
 	// checks de caminho suspeito e propriedade veem o alvo concreto.
 	resolverComandosUnit(&u, e)
+	for i := range u.Exec {
+		u.Exec[i].Target = AlvoEfetivoDeExec(u.Exec[i].Cmd)
+	}
 	return u
 }
 
@@ -879,6 +996,17 @@ func parseUnitFile(e *env.Env, path, scope string, vendor bool) Unit {
 func resolverComandosUnit(u *Unit, e *env.Env) {
 	if len(u.ExecSearchPath) == 0 {
 		return
+	}
+	// O ExecSearchPath só vale quando $PATH NÃO foi fornecido pela unit
+	// (Environment=/EnvironmentFile=). Com um PATH próprio, é ele que o systemd
+	// usa — resolver contra o ExecSearchPath aqui acusaria um diretório que o
+	// systemd não consultaria. (LIMITE: o PATH de EnvironmentFile e o de drop-in
+	// não são vistos neste ponto por-arquivo — é a mesma dívida de config
+	// efetiva do resto.)
+	for _, s := range u.Environment {
+		if s.Key == "PATH" {
+			return
+		}
 	}
 	for i := range u.Exec {
 		u.Exec[i].Cmd = resolverNomeNu(e, u.Exec[i].Cmd, u.ExecSearchPath)

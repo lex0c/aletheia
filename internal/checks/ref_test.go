@@ -25,13 +25,15 @@ import (
 // certo do auditd. O que dá para automatizar é o outro erro, que é o barato de
 // cometer: citar um número que não existe.
 //
-// # Por que ele pula quando não acha o runbook
+// # Onde ele acha o runbook
 //
-// O runbook não mora neste repositório — ele é o documento de origem, e a CLI é
-// derivada dele. Copiá-lo para cá criaria uma segunda cópia para envelhecer.
-// Então: quando o arquivo está por perto, o teste roda; quando não está, ele
-// PULA com o motivo e o caminho esperado. É a mesma regra dos cenários que
-// dependem de imagem ou de qemu — nunca passar em silêncio.
+// O runbook mora no repo, em docs/RUNBOOK.md — é a fonte contra a qual os §ref
+// são validados, e tê-lo aqui faz a catraca rodar no CI, não só onde o arquivo
+// existe por acaso. O risco de "segunda cópia para envelhecer" é justamente o
+// que este teste guarda: se o runbook e os §ref divergirem, ele FALHA.
+// ALETHEIA_RUNBOOK ainda vence (para apontar a uma cópia externa mais nova) e os
+// caminhos legados seguem como fallback; sem nenhum, o teste PULA com o motivo —
+// nunca passa em silêncio.
 func TestTodoRefExisteNoRunbook(t *testing.T) {
 	texto, caminho := lerRunbook(t)
 	secoes := parseSecoes(t, texto, caminho)

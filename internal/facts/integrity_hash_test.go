@@ -365,3 +365,36 @@ func TestLinhaCompridaNaBaseDeHashViraLacunaENaoFimDeArquivo(t *testing.T) {
 			"verificado com cara de íntegro é o pior resultado possível")
 	}
 }
+
+// O cluster de ctime: um ctime compartilhado por clusterBulk+ arquivos é
+// build/extração em massa (o falso positivo de contêiner), não timestomping —
+// que é feito arquivo a arquivo e deixa ctime isolado.
+func TestSemClustersDeBuild(t *testing.T) {
+	// 4 arquivos com o MESMO ctime (o instante da extração da imagem) + 1
+	// isolado (o backdoor tocado depois).
+	cand := []Timestomp{
+		{Path: "/etc/apt/apt.conf.d/docker-clean", MetaUTC: "2026-08-19T17:00:03Z"},
+		{Path: "/etc/apt/apt.conf.d/docker-gzip", MetaUTC: "2026-08-19T17:00:03Z"},
+		{Path: "/etc/apt/apt.conf.d/docker-no-lang", MetaUTC: "2026-08-19T17:00:03Z"},
+		{Path: "/etc/apt/apt.conf.d/docker-autoremove", MetaUTC: "2026-08-19T17:00:03Z"},
+		{Path: "/usr/local/sbin/.backdoor", MetaUTC: "2026-08-19T17:05:41Z"},
+	}
+	got := semClustersDeBuild(cand)
+	if len(got) != 1 || got[0].Path != "/usr/local/sbin/.backdoor" {
+		t.Fatalf("o bloco de build tinha de ser suprimido e só o isolado ficar: %+v", got)
+	}
+}
+
+// O A4 planta DOIS timestomps (ctime da hora do plant): um cluster de 2 fica
+// ABAIXO do limite e sobrevive — a detecção do timestomp real num contêiner não
+// pode ser cegada pela supressão do bloco de build.
+func TestA4NaoEhSuprimidoPorClusterPequeno(t *testing.T) {
+	cand := []Timestomp{
+		{Path: "/usr/local/sbin/dbus-broker-helper", MetaUTC: "2026-08-19T17:05:41Z"},
+		{Path: "/etc/systemd/system/dbus-broker-helper.service", MetaUTC: "2026-08-19T17:05:41Z"},
+	}
+	got := semClustersDeBuild(cand)
+	if len(got) != 2 {
+		t.Fatalf("dois timestomps são cluster pequeno e têm de sobreviver: %+v", got)
+	}
+}

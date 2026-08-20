@@ -270,7 +270,24 @@ type Timestomp struct {
 // muito anterior ao ctime por desenho — a data vem do arquivo dentro do pacote,
 // construído meses antes, e o ctime é a hora da instalação. Sem esse recorte,
 // todo binário do sistema apareceria como falsificado.
+//
+// O CLUSTER de ctime é o segundo recorte, e ele mata o falso positivo de
+// contêiner. Uma imagem de contêiner (ou uma extração em massa: tar -x, rsync,
+// restauração de backup) dá o MESMO ctime a dezenas de arquivos de uma vez — o
+// instante em que a camada foi montada. Medido num debian:12 limpo: DOZE
+// arquivos de config do apt, todos com o mtime do build da base e o ctime
+// idêntico da extração, gritando CRITICAL num host saudável.
+//
+// Timestomping é o oposto: feito arquivo a arquivo, o `touch -r` deixa um ctime
+// ISOLADO — a hora em que o atacante tocou aquele arquivo, distinta do bloco. Um
+// ctime compartilhado por muitos arquivos NÃO é backdating; é a operação em
+// massa. Suprime o bloco, mantém o isolado.
+//
+// Não é gate por "estou em contêiner" — isso cegaria a detecção do próprio
+// timestomp DENTRO de um contêiner (o A4 planta o backdoor num contêiner e tem
+// de ser pego). É a DISTRIBUIÇÃO dos ctimes que separa build de backdating.
 func coletarTimestomp(f *Facts, e *env.Env) {
+	var cand []Timestomp
 	for i := range f.Ownership {
 		o := &f.Ownership[i]
 		if o.Owned {
@@ -288,19 +305,49 @@ func coletarTimestomp(f *Facts, e *env.Env) {
 		if delta < minTimestompH {
 			continue
 		}
-		f.Timestomps = append(f.Timestomps, Timestomp{
+		t := Timestomp{
 			Path:    o.Path,
 			ModUTC:  mt.UTC().Format("2006-01-02T15:04:05Z"),
 			MetaUTC: ct.UTC().Format("2006-01-02T15:04:05Z"),
 			DeltaH:  delta,
-		})
+		}
+		cand = append(cand, t)
 	}
+	f.Timestomps = semClustersDeBuild(cand)
+}
+
+// semClustersDeBuild remove os candidatos cujo ctime é compartilhado por
+// clusterBulk+ arquivos — o bloco de build/extração, não backdating. Puro, para
+// ser testável sem tocar em ctime de arquivo de verdade.
+func semClustersDeBuild(cand []Timestomp) []Timestomp {
+	porCtime := map[string]int{}
+	for _, t := range cand {
+		porCtime[t.MetaUTC]++
+	}
+	var out []Timestomp
+	for _, t := range cand {
+		if porCtime[t.MetaUTC] >= clusterBulk {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // minTimestompH é a folga. Instalação, cópia e build produzem diferenças de
 // minutos legitimamente; o que interessa é o arquivo que DIZ ser de meses atrás
 // e cujos metadados foram tocados agora.
 const minTimestompH = 48
+
+// clusterBulk é quantos arquivos com o MESMO ctime já contam como operação em
+// massa (build de imagem, tar -x, rsync) em vez de backdating. O A4 planta DOIS
+// timestomps (ctime da hora do plant); o falso positivo de contêiner são doze
+// (ctime da extração). Quatro separa os dois com folga dos dois lados.
+//
+// O limite: um atacante que timestompa 4+ arquivos NO MESMO SEGUNDO por script
+// seria perdido — mas esse padrão É a forma do bloco, e o preço de não o perder
+// é gritar em todo contêiner, que ensina o operador a ignorar o check.
+const clusterBulk = 4
 
 type hashRef struct {
 	hash string

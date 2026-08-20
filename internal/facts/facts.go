@@ -16,7 +16,18 @@ import (
 // SchemaVersion versiona o facts.json. Um binário novo lendo um dump antigo
 // precisa saber o que mudou — e isso acontece no meio de incidente, com a VM
 // já destruída.
-const SchemaVersion = 1
+//
+// A REGRA que dá sentido ao número: sobe SEMPRE que um coletor NOVO passa a
+// alimentar um check. Sem isso, um dump anterior ao coletor tem o campo VAZIO, e
+// o check novo lê vazio como "olhei e não achei" quando a verdade é "esta versão
+// nunca olhou" — a mentira central que a ferramenta existe para não cometer. O
+// Carregar() do dump recusa (ErrEsquema) o que não casa, então subir aqui obriga
+// a RE-COLETAR em vez de concluir ausência sobre o que não foi observado.
+//
+//	2  coleta de /proc/sysvipc/shm (persist.sysv_shm_channel) e do config de
+//	   cliente ssh (persist.ssh_client_exec). Um dump v1 não os tem, e os dois
+//	   checks concluiriam "limpo" sobre fatos nunca coletados.
+const SchemaVersion = 2
 
 // Facts é o retrato do host.
 type Facts struct {

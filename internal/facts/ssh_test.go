@@ -168,8 +168,9 @@ func TestSshdConfigIlegivelNaoViraHostSemSSH(t *testing.T) {
 	}
 }
 
-// O parser do config de cliente: a diretiva certa vira comando, e o que NÃO
-// executa (ProxyCommand none, LocalCommand sem PermitLocalCommand) fica de fora.
+// O parser do config de cliente: a diretiva certa vira comando; o `none` fica
+// fora; e o LocalCommand NÃO é descartado por ordem — PermitLocalCommand e
+// LocalCommand são parâmetros independentes (primeiro valor obtido vence).
 func TestParseClientConfig(t *testing.T) {
 	cfg := "" +
 		"Host bom\n" +
@@ -178,8 +179,8 @@ func TestParseClientConfig(t *testing.T) {
 		"    ProxyCommand /tmp/.beacon %h\n" +
 		"Host desligado\n" +
 		"    ProxyCommand none\n" +
-		"Host local-inerte\n" +
-		"    LocalCommand /tmp/x\n" + // sem PermitLocalCommand: não executa
+		"Host local-antes\n" +
+		"    LocalCommand /tmp/x\n" + // aparece ANTES do permit, mas conta
 		"Host local-vivo\n" +
 		"    PermitLocalCommand yes\n" +
 		"    LocalCommand /tmp/y\n" +
@@ -187,11 +188,6 @@ func TestParseClientConfig(t *testing.T) {
 
 	got := AnalisaConfigClienteParaTeste("/root/.ssh/config", "root", []byte(cfg))
 
-	quer := map[string]string{
-		"ProxyCommand": "ssh -W %h:%p bastion", // o primeiro ProxyCommand achado
-		"LocalCommand": "/tmp/y",               // só o que tem a permissão
-		"Match exec":   "/tmp/decide.sh %h",    // desaspado
-	}
 	viu := map[string]int{}
 	for _, d := range got {
 		viu[d.Directive]++
@@ -200,21 +196,80 @@ func TestParseClientConfig(t *testing.T) {
 	if viu["ProxyCommand"] != 2 {
 		t.Errorf("ProxyCommand: quer 2 (o `none` não conta), viu %d", viu["ProxyCommand"])
 	}
-	if viu["LocalCommand"] != 1 {
-		t.Errorf("LocalCommand: quer 1 (o inerte sem PermitLocalCommand fica fora), viu %d", viu["LocalCommand"])
+	// AMBOS os LocalCommand entram — o de antes do permit não pode ser
+	// descartado (era o falso negativo). Como há PermitLocalCommand yes no blob,
+	// os dois saem confirmados.
+	if viu["LocalCommand"] != 2 {
+		t.Errorf("LocalCommand: quer 2 (ordem não descarta), viu %d", viu["LocalCommand"])
 	}
-	if viu["Match exec"] != 1 {
-		t.Errorf("Match exec: quer 1, viu %d", viu["Match exec"])
-	}
-	// a desaspagem do Match exec
 	for _, d := range got {
-		if d.Directive == "Match exec" && d.Command != quer["Match exec"] {
-			t.Errorf("Match exec desaspado: quer %q, viu %q", quer["Match exec"], d.Command)
+		if d.Directive == "LocalCommand" && d.Ativacao != "confirmada" {
+			t.Errorf("LocalCommand %q: ativação quer confirmada (há permit yes), viu %q", d.Command, d.Ativacao)
+		}
+		if d.Directive == "Match exec" && d.Command != "/tmp/decide.sh %h" {
+			t.Errorf("Match exec desaspado: quer %q, viu %q", "/tmp/decide.sh %h", d.Command)
 		}
 	}
 }
 
-// matchExec pega o comando depois de `exec`, com e sem aspas.
+// LocalCommand sem PermitLocalCommand yes ainda é REGISTRADO — some-lo seria FN.
+// A incerteza vai para a ativação, não para o silêncio.
+func TestLocalCommandSemPermitNaoSomeSilencioso(t *testing.T) {
+	got := AnalisaConfigClienteParaTeste("/root/.ssh/config", "root",
+		[]byte("Host x\n    LocalCommand /tmp/.z\n"))
+	var n int
+	for _, d := range got {
+		if d.Directive == "LocalCommand" {
+			n++
+			if d.Ativacao != "não confirmada" {
+				t.Errorf("sem permit, ativação quer 'não confirmada', viu %q", d.Ativacao)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("LocalCommand sem permit tem de ser REGISTRADO (não descartado): viu %d", n)
+	}
+}
+
+// As evasões baratas do parser: separador `=`, `!exec` e KnownHostsCommand.
+func TestClientConfigEvasoes(t *testing.T) {
+	cfg := "" +
+		"ProxyCommand=/tmp/.a\n" + // separador `=`, sem espaço
+		"KnownHostsCommand /tmp/.collector %h\n" + // executa, faltava
+		"Match !exec \"/tmp/.probe\"\n" // exec NEGADO ainda roda o comando
+	got := AnalisaConfigClienteParaTeste("/root/.ssh/config", "root", []byte(cfg))
+	quer := map[string]string{
+		"ProxyCommand":      "/tmp/.a",
+		"KnownHostsCommand": "/tmp/.collector %h",
+		"Match exec":        "/tmp/.probe",
+	}
+	viu := map[string]string{}
+	for _, d := range got {
+		viu[d.Directive] = d.Command
+	}
+	for dir, cmd := range quer {
+		if viu[dir] != cmd {
+			t.Errorf("%s: quer %q, viu %q", dir, cmd, viu[dir])
+		}
+	}
+}
+
+// cortaDiretiva aceita espaço, tab e `=` (com e sem branco em volta).
+func TestCortaDiretiva(t *testing.T) {
+	casos := []struct{ in, k, v string }{
+		{"ProxyCommand /x", "ProxyCommand", "/x"},
+		{"ProxyCommand=/x", "ProxyCommand", "/x"},
+		{"ProxyCommand = /x", "ProxyCommand", "/x"},
+		{"ProxyCommand\t/x", "ProxyCommand", "/x"},
+	}
+	for _, c := range casos {
+		if k, v := cortaDiretiva(c.in); k != c.k || v != c.v {
+			t.Errorf("cortaDiretiva(%q) = (%q,%q), quer (%q,%q)", c.in, k, v, c.k, c.v)
+		}
+	}
+}
+
+// matchExec pega o comando depois de `exec` ou `!exec`, com e sem aspas.
 func TestMatchExec(t *testing.T) {
 	casos := []struct {
 		in, quer string
@@ -222,7 +277,8 @@ func TestMatchExec(t *testing.T) {
 	}{
 		{`host bastion exec "/opt/gate %h"`, "/opt/gate %h", true},
 		{`exec /usr/bin/decide`, "/usr/bin/decide", true},
-		{`host foo`, "", false}, // sem exec
+		{`host x !exec "/tmp/.probe"`, "/tmp/.probe", true}, // negado ainda executa
+		{`host foo`, "", false},                             // sem exec
 	}
 	for _, c := range casos {
 		got, ok := matchExec(c.in)

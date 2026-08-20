@@ -51,4 +51,29 @@ CFG`,
 		},
 		Exit: -1,
 	})
+
+	// O Include é seguido, inclusive para FORA de ~/.ssh, com expansão de `~`. Um
+	// ProxyCommand escondido no arquivo incluído é a evasão que motivou o parser
+	// de config efetivo — e o achado aponta para o arquivo INCLUÍDO, não para o
+	// que fez o Include.
+	Register(Scenario{
+		ID:     "SC3-proxycommand-em-include",
+		Desc:   "ProxyCommand escondido num arquivo que o ~/.ssh/config inclui fora de ~/.ssh",
+		Images: matriz,
+		Plant: `mkdir -p /root/.ssh /root/.config
+cat > /root/.ssh/config <<'CFG'
+Include ~/.config/ssh-extra
+CFG
+cat > /root/.config/ssh-extra <<'EXTRA'
+Host alvo
+    ProxyCommand /tmp/.implant %h
+EXTRA`,
+		Expect: []Expect{
+			{ID: "persist.ssh_client_exec", Sev: "CRITICAL"},
+			// O achado aponta para o arquivo INCLUÍDO — a prova de que o Include
+			// foi seguido, não o config principal.
+			{ID: "persist.ssh_client_exec", Evidence: "/root/.config/ssh-extra"},
+		},
+		Exit: 2,
+	})
 }

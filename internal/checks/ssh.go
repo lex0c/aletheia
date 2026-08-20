@@ -47,11 +47,19 @@ var sshClientExec = check.Check{
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
 		for _, d := range f.SSHClientExec {
-			bin := primeiroToken(d.Command)
+			// O ALVO EFETIVO, não o primeiro token: `ProxyCommand /usr/bin/env
+			// /opt/.agent` roda /opt/.agent, e classificar /usr/bin/env como
+			// "binário de sistema" seria a evasão por wrapper.
+			bin := facts.AlvoEfetivoDeExec(d.Command)
 			ev := []string{
 				d.Directive + ": " + d.Command,
 				"executa quando o usuário conecta, sem tocar em nada com dono root",
 				"arquivo: " + d.File + ":" + strconv.Itoa(d.Line) + donoStr(d.User),
+			}
+			if d.Directive == "LocalCommand" {
+				ev = append(ev, "LocalCommand só roda com PermitLocalCommand yes — "+
+					"ativação "+d.Ativacao+" (mas `ssh -o PermitLocalCommand=yes` "+
+					"liga na linha de comando)")
 			}
 
 			// A severidade sai da FORMA do comando. Baixa-e-executa e /dev/tcp

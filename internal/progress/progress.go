@@ -5,7 +5,7 @@
 // de rede ela parece um programa pendurado. Este pacote pinta um batimento no
 // stderr enquanto isso corre.
 //
-// Três regras que o tornam seguro:
+// Quatro regras que o tornam seguro:
 //
 //   - só stderr. O stdout carrega o relatório e o JSONL, e um caractere de
 //     controle no meio de um JSONL o corromperia. Nada aqui toca no stdout.
@@ -14,6 +14,9 @@
 //     que mantém `wtf --oneline` limpo para quem ordena por exit code.
 //   - some antes do relatório. Stop apaga a linha, então o relatório nasce numa
 //     tela limpa.
+//   - cor só como reforço, e sob a MESMA política do relatório (TTY, TERM útil,
+//     NO_COLOR ausente). Quem decide é o CLI, que passa o bit pronto; aqui só se
+//     obedece. Sem cor, sai exatamente o mesmo texto.
 //
 // ASCII de propósito: a VM que mais precisa disto boota num console serial, e
 // braille não desenha lá. `\r` e `\033[K` são vt100, que o serial entende.
@@ -33,6 +36,7 @@ import (
 type Reporter struct {
 	w       io.Writer
 	tty     bool
+	cor     bool // realce ANSI liberado pelo CLI (ver corHabilitada)
 	start   time.Time
 	largura int // colunas do terminal, para truncar e não quebrar a linha
 
@@ -50,10 +54,14 @@ type Reporter struct {
 // New cria o reporter. Ele só faz algo se w for um terminal e disabled for
 // falso; caso contrário todos os métodos são no-op e nenhum byte sai.
 //
+// cor é a decisão do CLI sobre realce ANSI, a mesma que pinta o relatório. Ela
+// nunca liga sozinha o desenho: um reporter sem terminal continua mudo, com cor
+// pedida ou não.
+//
 // A detecção de terminal é da biblioteca padrão: um char device é console ou
 // pty, um pipe/arquivo não é. Sem dependência externa, que é invariante deste
 // projeto.
-func New(w io.Writer, start time.Time, disabled bool) *Reporter {
+func New(w io.Writer, start time.Time, disabled, cor bool) *Reporter {
 	r := &Reporter{w: w, start: start, stage: "coletando", largura: larguraTerminal(), done: make(chan struct{})}
 	if !disabled {
 		if fh, ok := w.(*os.File); ok {
@@ -62,6 +70,7 @@ func New(w io.Writer, start time.Time, disabled bool) *Reporter {
 			}
 		}
 	}
+	r.cor = cor && r.tty
 	if r.tty {
 		r.wg.Add(1)
 		go r.loop()
@@ -152,7 +161,10 @@ func (r *Reporter) draw() {
 	}
 	seg := int(time.Since(r.start).Seconds())
 	l1 := fmt.Sprintf("%c %s… %ds", giro[frame%len(giro)], stage, seg)
-	l2 := "  " + encurtarCauda(det, larg-3) // a cauda (o arquivo) é o que interessa
+	// A cauda (o arquivo) é o que interessa. Trunca ANTES de pintar: escape não
+	// ocupa coluna, mas encurtarCauda conta RUNAS — medir o texto já pintado
+	// cortaria no meio da sequência e deixaria o terminal cinza a partir dali.
+	l2 := "  " + r.secundaria(encurtarCauda(det, larg-3))
 
 	// Duas linhas, com o cursor voltando à primeira. Truncadas para caber na
 	// largura: linha que passa da coluna quebra, e aí o `\033[A` sobe para o
@@ -168,6 +180,24 @@ func (r *Reporter) draw() {
 	b.WriteString(l2)
 	b.WriteString("\033[K")
 	fmt.Fprint(r.w, b.String())
+}
+
+// secundaria pinta o caminho de cinza (SGR 90) — o mesmo "fraco" do relatório,
+// para que as duas superfícies tenham UMA hierarquia só. O rótulo do estágio
+// fica na cor normal porque é o sinal primário: é ele que diz onde a coleta
+// está. O detalhe é reforço, e recua.
+//
+// Cinza e não dim (SGR 2): muitos terminais renderizam dim idêntico ao normal, e
+// aí a hierarquia some justamente onde importa. O reset vem antes do \033[K de
+// quem chama, então o apagar-até-o-fim nunca carrega atributo.
+//
+// Detalhe vazio não vira escape: o estágio que não varre diretório precisa sair
+// como linha em branco de verdade, não como par de sequências invisíveis.
+func (r *Reporter) secundaria(s string) string {
+	if !r.cor || s == "" {
+		return s
+	}
+	return "\x1b[90m" + s + "\x1b[0m"
 }
 
 // larguraTerminal devolve as colunas do terminal via COLUMNS, ou 80. Sem ioctl

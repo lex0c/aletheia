@@ -74,7 +74,7 @@ func runCollect(args []string) int {
 	e.CodigoTudo = *allFS
 
 	aoInterromper()
-	prog := progress.New(os.Stderr, time.Now(), *noProg)
+	prog := progress.New(os.Stderr, time.Now(), *noProg, corHabilitada(os.Stderr))
 	e.Progress = prog
 	defer prog.Stop()
 	coletaInicio := time.Now()

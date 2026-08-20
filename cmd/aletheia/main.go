@@ -432,7 +432,7 @@ func runWtf(args []string) int {
 	// encontrado". (Faltava: o comentário de Env prometia isto e o código não
 	// cumpria — só o scan ligava o WalkDeadline.)
 	e.WalkDeadline = start.Add(*budget * 3 / 4)
-	prog := progress.New(os.Stderr, start, *noProg)
+	prog := progress.New(os.Stderr, start, *noProg, corHabilitada(os.Stderr))
 	e.Progress = prog
 	defer prog.Stop()
 	f := facts.Collect(e)
@@ -543,7 +543,7 @@ func runScan(args []string, wtf bool) int {
 	if *fsBudget > 0 {
 		e.WalkDeadline = time.Now().Add(*fsBudget)
 	}
-	prog := progress.New(os.Stderr, time.Now(), *noProg)
+	prog := progress.New(os.Stderr, time.Now(), *noProg, corHabilitada(os.Stderr))
 	e.Progress = prog
 	defer prog.Stop()
 	coletaInicio := time.Now()
@@ -720,7 +720,7 @@ func runBaseline(args []string) int {
 	e := env.Probe(env.Options{Root: *root, Version: version})
 	defer e.Close()
 	aoInterromper()
-	prog := progress.New(os.Stderr, time.Now(), *noProg)
+	prog := progress.New(os.Stderr, time.Now(), *noProg, corHabilitada(os.Stderr))
 	e.Progress = prog
 	defer prog.Stop()
 	f := facts.Collect(e)

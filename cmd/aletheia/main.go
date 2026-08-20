@@ -36,6 +36,14 @@ import (
 // produziu cada achado (runbook §39.3).
 var version = "dev"
 
+// kernelFloor é o piso de RUNTIME deste binário: o kernel mínimo que o toolchain
+// Go atual sustenta (Go >= 1.24 exige Linux 3.2). É declarado — não escondido —
+// porque a física manda na promessa: num kernel mais antigo o binário NÃO roda,
+// e alegar 2.6.32 era herança errada. Um host de RHEL 6 ainda pode ser ANALISADO
+// pela imagem (`--root`, do lado limpo); rodar aqui dentro, não. Sobe junto com
+// o toolchain — se o mínimo do Go mudar, esta string muda com ele.
+const kernelFloor = "Linux 3.2"
+
 // selfMarker: qualquer arquivo que contenha esta string é uma cópia desta
 // ferramenta, ou algo que se declara detector. Um scanner que carrega os
 // próprios indicadores sinaliza a si mesmo se não tiver isso.
@@ -266,7 +274,8 @@ func main() {
 		os.Exit(runChecks(os.Args[2:]))
 	case "version":
 		e := env.Probe(env.Options{Version: version})
-		fmt.Printf("aletheia %s\n%s\nsha256=%s\n", version, e.ToolPath, e.ToolSHA256)
+		fmt.Printf("aletheia %s\n%s\nsha256=%s\nkernel mínimo (runtime): %s\n",
+			version, e.ToolPath, e.ToolSHA256, kernelFloor)
 		return
 	case "-h", "--help", "help":
 		fmt.Print(usage)

@@ -80,8 +80,13 @@ verify: lint test build
 	@echo "OK: estático, sem dependência dinâmica"
 	@sha256sum dist/aletheia
 
-# dist cross-compila. O eixo que varia é ARQUITETURA, não distro — e o piso é
-# kernel 2.6.32 (RHEL/CentOS 6+); RHEL 5 fica com o script shell.
+# dist cross-compila. O eixo que varia é ARQUITETURA, não distro — e o piso de
+# RUNTIME é Linux 3.2: é o mínimo do toolchain Go atual (>= 1.24). Alegar 2.6.32
+# (RHEL 6) era herança e estava FISICAMENTE errado — o runtime do Go não sustenta
+# mais esse kernel desde a 1.24, e o cenário 90-kernel-2.6 já dizia isso. RHEL 6
+# ainda pode ser ANALISADO via imagem (`--root`, do lado limpo); o que não roda
+# é o binário DENTRO de um 2.6.32. Para isso seria preciso um build separado com
+# Go <= 1.23.x — só vale a pena com um usuário real de RHEL 6 na mesa.
 # dist DEPENDE de verify: sem isso, um GOOS herdado do ambiente produzia
 # executáveis PE chamados aletheia-linux-* com manifesto sha256 de aparência
 # autoritativa.

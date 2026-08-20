@@ -252,7 +252,7 @@ func init() {
 // reportaria limpo — o limite documentado, que exige o rootkit real.
 func init() {
 	Register(Scenario{
-		ID:               "RK3-full-stealth-multivetor",
+		ID:               "RK3-multivetor-cegueira-parcial",
 		Desc:             "full-stealth multivetor: cega o cross-view de socket, é pego em módulo/pid/ftrace, e NÃO alega host íntegro",
 		Mode:             VM,
 		Kernel:           "lts",

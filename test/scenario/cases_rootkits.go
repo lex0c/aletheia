@@ -30,12 +30,22 @@ func init() {
 		// list e do /sys/module), esconde processo por um sinal mágico e eleva
 		// privilégio por outro. É o rootkit de referência.
 		//
-		// CONTRATO (piso — DEVE disparar):
-		//   cross.module_view   o módulo some de /proc/modules mas o ftrace
-		//                       (available_filter_functions) ainda o retém
-		//   cross.hidden_pid    o PID escondido aparece na varredura direta de
-		//                       /proc mas não na getdents hookada
-		//   kernel.ftrace_hook  os hooks (getdents/kill) em enabled_functions
+		// CONTRATO por rota, e a severidade é do MECANISMO — o Diamorphine
+		// clássico patcha a sys_call_table, NÃO usa ftrace:
+		//   PISO (DEVE disparar)
+		//     cross.hidden_pid   o PID escondido responde a stat direto e não à
+		//                        listagem de /proc — vale qualquer que seja a
+		//                        técnica de ocultação
+		//   DEPENDE DA VERSÃO/KERNEL
+		//     cross.module_view  dispara SE a versão deixar rastro no ftrace
+		//                        (available_filter_functions) e some do /proc/modules
+		//     kernel.ftrace_hook  SÓ se a versão hooka por ftrace. A que patcha a
+		//                        sys_call_table direto NÃO aparece aqui — e, num
+		//                        kernel 6.x com despacho por switch, esse patch é
+		//                        no-op e a ocultação de getdents nem funciona,
+		//                        mudando o quadro inteiro
+		// Ou seja: ftrace_hook NÃO é piso; é sinal quando o mecanismo é ftrace. O
+		// cenário real decide empiricamente o que sobra no kernel escolhido.
 		// Quebra da CONFIANÇA: quando um destes dispara, a ausência dos outros
 		// deixa de valer (invalidarAusencias).
 		//
@@ -101,17 +111,18 @@ func init() {
 		//
 		// PARCIALMENTE MEDIDO: a propriedade central — cega um eixo, é pego em
 		// outro pela evasão incompleta, e NÃO alega host íntegro — já roda no
-		// RK3-full-stealth-multivetor (cases_ocultacao.go), com os PADRÕES de
+		// RK3-multivetor-cegueira-parcial (cases_ocultacao.go), com os PADRÕES de
 		// evasão do Singularity carregados juntos (socknd+modhide+pidhide): ele
 		// afirma ForbidOutput "RESULT: OK" + cobertura rebaixada, sem precisar do
 		// rootkit real. O que SOBRA Untestable é só o extremo: a versão que
 		// também falsifica o ftrace de forma consistente, onde não resta
 		// divergência nenhuma e a ferramenta reportaria limpo — o limite que
 		// exige o Singularity de verdade num kernel 6.x casado.
-		Untestable: "os PADRÕES de evasão já são medidos no RK3-full-stealth-" +
-			"multivetor. Só o extremo full-stealth que falsifica TAMBÉM o ftrace " +
-			"(sem divergência residual) exige o Singularity real num kernel 6.x — " +
-			"aí o contrato é o LIMITE (reportar limpo é o ponto cego documentado).",
+		Untestable: "os PADRÕES de evasão já são medidos no " +
+			"RK3-multivetor-cegueira-parcial. Só o extremo full-stealth que " +
+			"falsifica TAMBÉM o ftrace (sem divergência residual) exige o " +
+			"Singularity real num kernel 6.x — aí o contrato é o LIMITE (reportar " +
+			"limpo é o ponto cego documentado).",
 	})
 
 	// --- eBPF: atribuição parcial e lacuna FixMapa declarada. ---

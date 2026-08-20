@@ -13,6 +13,100 @@ func init() {
 	check.Register(sshForcedCommand)
 	check.Register(sshdBackdoor)
 	check.Register(sshKeyInventory)
+	check.Register(sshClientExec)
+}
+
+// sshClientExec — runbook §7.7.
+//
+// O config do CLIENTE ssh executa comando: ProxyCommand e LocalCommand rodam ao
+// conectar, e `Match exec` roda a cada invocação que casa o Host. É persistência
+// de USUÁRIO — nada com dono root —, e o inventário do sshd (chaves,
+// ForceCommand) não a vê. Quem escreve `~/.ssh/config` da vítima roda código
+// toda vez que ela dá `ssh`.
+//
+// O discriminador é o COMANDO, não a diretiva: ProxyCommand legítimo é comum
+// (jump host com `ssh`/`nc`/`corkscrew`, cloudflared). O que separa é para onde
+// o comando aponta e a forma dele.
+var sshClientExec = check.Check{
+	ID:       "persist.ssh_client_exec",
+	Ref:      "7.7",
+	Title:    "config do cliente ssh executa comando ao conectar",
+	Group:    "persist",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Wtf:      true,
+	FalsePositives: []string{
+		"ProxyCommand é comum e legítimo: jump host por `ssh -W`, `nc`/`ncat`, " +
+			"`corkscrew`, `cloudflared access ssh`. Por isso o comando que aponta " +
+			"para um binário de sistema conhecido fica em INFO, não em aviso",
+		"o achado é sobre a FORMA do comando, não sobre a diretiva existir: um " +
+			"ProxyCommand em /usr/bin não vira aviso; um em /tmp, no home ou que " +
+			"baixa-e-executa, sim",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		var r check.Result
+		for _, d := range f.SSHClientExec {
+			bin := primeiroToken(d.Command)
+			ev := []string{
+				d.Directive + ": " + d.Command,
+				"executa quando o usuário conecta, sem tocar em nada com dono root",
+				"arquivo: " + d.File + ":" + strconv.Itoa(d.Line) + donoStr(d.User),
+			}
+
+			// A severidade sai da FORMA do comando. Baixa-e-executa e /dev/tcp
+			// são o pior; caminho gravável/temporário é o segundo; binário de
+			// sistema conhecido é só inventário.
+			sev := check.SevInfo
+			if motivo, s, susp := execSuspect(d.Command); susp {
+				sev = s
+				ev = append(ev, motivo)
+			} else if motivo, ruim := suspectDir(bin); ruim {
+				sev = check.SevCritical
+				ev = append(ev, "o comando roda de "+bin+" — "+motivo)
+			} else if !caminhoDeSistema(bin) {
+				sev = check.SevWarn
+				ev = append(ev, "o comando ("+bin+") não é um binário de caminho "+
+					"de sistema: um ProxyCommand legítimo costuma ser ssh/nc em /usr")
+			} else {
+				ev = append(ev, "aponta para binário de sistema conhecido: "+
+					"inventariado, não acusado")
+			}
+
+			fd := self.F(sev, d.User+":"+strconv.Itoa(d.Line), "", ev...)
+			fd.Quando, fd.QuandoFonte = d.ModUTC, "mtime do config"
+			fd.NextSteps = []string{
+				"leia o comando inteiro: sudo sed -n " + strconv.Itoa(d.Line) +
+					"p " + check.Arg(d.File),
+				"o ctime do arquivo data a inserção mesmo com conteúdo que parece antigo",
+			}
+			r.Findings = append(r.Findings, fd)
+		}
+		r.Partial = append(r.Partial, f.PersistDenied["ssh"]...)
+		return r
+	},
+}
+
+// caminhoDeSistema diz se o binário está num diretório de programa do sistema.
+// Comando sem barra (resolvido pelo PATH) conta como de sistema: um ProxyCommand
+// `ssh -W %h:%p` é a forma canônica do jump host.
+func caminhoDeSistema(bin string) bool {
+	if bin == "" || !strings.Contains(bin, "/") {
+		return true
+	}
+	for _, p := range []string{"/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/", "/usr/local/bin/", "/usr/local/sbin/"} {
+		if strings.HasPrefix(bin, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func donoStr(user string) string {
+	if user == "" {
+		return " (config de sistema)"
+	}
+	return " (usuário " + user + ")"
 }
 
 // sshForcedCommand — runbook §7.5.

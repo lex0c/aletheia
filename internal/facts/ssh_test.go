@@ -167,3 +167,67 @@ func TestSshdConfigIlegivelNaoViraHostSemSSH(t *testing.T) {
 			"'esta máquina não tem sshd' e 'não consegui ler quem entra nela'")
 	}
 }
+
+// O parser do config de cliente: a diretiva certa vira comando, e o que NÃO
+// executa (ProxyCommand none, LocalCommand sem PermitLocalCommand) fica de fora.
+func TestParseClientConfig(t *testing.T) {
+	cfg := "" +
+		"Host bom\n" +
+		"    ProxyCommand ssh -W %h:%p bastion\n" +
+		"Host ruim\n" +
+		"    ProxyCommand /tmp/.beacon %h\n" +
+		"Host desligado\n" +
+		"    ProxyCommand none\n" +
+		"Host local-inerte\n" +
+		"    LocalCommand /tmp/x\n" + // sem PermitLocalCommand: não executa
+		"Host local-vivo\n" +
+		"    PermitLocalCommand yes\n" +
+		"    LocalCommand /tmp/y\n" +
+		"Match exec \"/tmp/decide.sh %h\"\n"
+
+	got := AnalisaConfigClienteParaTeste("/root/.ssh/config", "root", []byte(cfg))
+
+	quer := map[string]string{
+		"ProxyCommand": "ssh -W %h:%p bastion", // o primeiro ProxyCommand achado
+		"LocalCommand": "/tmp/y",               // só o que tem a permissão
+		"Match exec":   "/tmp/decide.sh %h",    // desaspado
+	}
+	viu := map[string]int{}
+	for _, d := range got {
+		viu[d.Directive]++
+	}
+	// ProxyCommand aparece 2x (ssh e /tmp/.beacon), nunca o `none`.
+	if viu["ProxyCommand"] != 2 {
+		t.Errorf("ProxyCommand: quer 2 (o `none` não conta), viu %d", viu["ProxyCommand"])
+	}
+	if viu["LocalCommand"] != 1 {
+		t.Errorf("LocalCommand: quer 1 (o inerte sem PermitLocalCommand fica fora), viu %d", viu["LocalCommand"])
+	}
+	if viu["Match exec"] != 1 {
+		t.Errorf("Match exec: quer 1, viu %d", viu["Match exec"])
+	}
+	// a desaspagem do Match exec
+	for _, d := range got {
+		if d.Directive == "Match exec" && d.Command != quer["Match exec"] {
+			t.Errorf("Match exec desaspado: quer %q, viu %q", quer["Match exec"], d.Command)
+		}
+	}
+}
+
+// matchExec pega o comando depois de `exec`, com e sem aspas.
+func TestMatchExec(t *testing.T) {
+	casos := []struct {
+		in, quer string
+		ok       bool
+	}{
+		{`host bastion exec "/opt/gate %h"`, "/opt/gate %h", true},
+		{`exec /usr/bin/decide`, "/usr/bin/decide", true},
+		{`host foo`, "", false}, // sem exec
+	}
+	for _, c := range casos {
+		got, ok := matchExec(c.in)
+		if ok != c.ok || (ok && got != c.quer) {
+			t.Errorf("matchExec(%q) = (%q,%v), quer (%q,%v)", c.in, got, ok, c.quer, c.ok)
+		}
+	}
+}

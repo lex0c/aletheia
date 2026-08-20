@@ -65,6 +65,163 @@ type SSHConfig struct {
 func collectSSH(f *Facts, e *env.Env) {
 	collectSSHConfig(f, e)
 	collectAuthorizedKeys(f, e)
+	collectSSHClientConfig(f, e)
+}
+
+// SSHClientExec é uma diretiva do config do CLIENTE ssh que EXECUTA um comando —
+// no fluxo de conexão, não de login. É a persistência de usuário que o inventário
+// do sshd (chaves, ForceCommand) não alcança: quem controla `~/.ssh/config` roda
+// código toda vez que a vítima dá `ssh`, sem tocar em nada com dono root.
+//
+//	ProxyCommand      roda o comando para ABRIR o transporte da conexão
+//	LocalCommand      roda o comando LOCAL ao conectar (só com PermitLocalCommand)
+//	Match exec        roda o comando para DECIDIR se o bloco Match se aplica —
+//	                  e isso acontece a CADA invocação do ssh que casa o Host
+type SSHClientExec struct {
+	File      string `json:"file"`
+	User      string `json:"user,omitempty"` // dono do config; "" = de sistema
+	Line      int    `json:"line"`
+	Directive string `json:"directive"` // ProxyCommand | LocalCommand | Match exec
+	Command   string `json:"command"`
+	ModUTC    string `json:"mod_utc,omitempty"`
+}
+
+// diretivaExecCliente reconhece a diretiva de execução numa linha de config de
+// cliente e devolve (rótulo, comando). O ProxyCommand com `none` e o
+// PermitLocalCommand não executam nada por si — o primeiro é o "desligado"
+// explícito, o segundo é só a permissão. Match é tratado à parte porque o
+// comando fica entre aspas depois de `exec`.
+func diretivaExecCliente(k, v string) (string, string, bool) {
+	switch strings.ToLower(k) {
+	case "proxycommand":
+		if v == "" || strings.EqualFold(v, "none") {
+			return "", "", false
+		}
+		return "ProxyCommand", v, true
+	case "localcommand":
+		if v == "" {
+			return "", "", false
+		}
+		return "LocalCommand", v, true
+	}
+	return "", "", false
+}
+
+// matchExec extrai o comando de uma linha `Match ... exec "cmd" ...`. O critério
+// `exec` roda um comando para decidir se o bloco vale, então ele executa em toda
+// invocação do ssh que chega até ali — é a forma mais silenciosa das três.
+func matchExec(v string) (string, bool) {
+	campos := strings.Fields(v)
+	for i, c := range campos {
+		if !strings.EqualFold(c, "exec") {
+			continue
+		}
+		resto := strings.TrimSpace(strings.Join(campos[i+1:], " "))
+		if resto == "" {
+			return "", false
+		}
+		// exec "cmd com espaço" ou exec cmd — o sshd aceita as duas formas.
+		if resto[0] == '"' {
+			if fim := strings.IndexByte(resto[1:], '"'); fim >= 0 {
+				return resto[1 : 1+fim], true
+			}
+			return resto[1:], true
+		}
+		return campos[i+1], true
+	}
+	return "", false
+}
+
+// collectSSHClientConfig lê o config do CLIENTE: o de sistema (/etc/ssh/ssh_config
+// e ssh_config.d) e o de cada usuário (~/.ssh/config). Só o que EXECUTA entra —
+// o resto do config de cliente não é sinal de comprometimento.
+//
+// LocalCommand só roda com `PermitLocalCommand yes`, e por isso a permissão é
+// rastreada por arquivo: sem ela, um LocalCommand é inerte e vira ruído se
+// acusado. ProxyCommand e Match exec executam sem depender de outra diretiva.
+func collectSSHClientConfig(f *Facts, e *env.Env) {
+	sistema := []string{"/etc/ssh/ssh_config"}
+	for _, n := range f.listarNegando(e, "ssh", "/etc/ssh/ssh_config.d") {
+		if strings.HasSuffix(n, ".conf") {
+			sistema = append(sistema, "/etc/ssh/ssh_config.d/"+n)
+		}
+	}
+	for _, p := range sistema {
+		if b, ok := f.lerNegando(e, "ssh", p); ok {
+			parseClientConfig(f, e, p, "", b)
+		}
+	}
+
+	for _, home := range homeDirs(e) {
+		u := home[strings.LastIndexByte(home, '/')+1:]
+		p := home + "/.ssh/config"
+		b, err := e.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		parseClientConfig(f, e, p, u, b)
+	}
+}
+
+// parseClientConfig varre um arquivo de config de cliente e stampa o mtime. A
+// varredura em si é pura (analisaConfigCliente), para ser testável sem env — a
+// mesma razão do ParseAuthorizedKeyParaTeste.
+func parseClientConfig(f *Facts, e *env.Env, arquivo, user string, b []byte) {
+	f.SSHClientExec = append(f.SSHClientExec,
+		analisaConfigCliente(arquivo, user, modUTC(e, arquivo), b)...)
+}
+
+// AnalisaConfigClienteParaTeste expõe o parser puro do config de cliente.
+func AnalisaConfigClienteParaTeste(arquivo, user string, b []byte) []SSHClientExec {
+	return analisaConfigCliente(arquivo, user, "", b)
+}
+
+// analisaConfigCliente é o parser PURO. `PermitLocalCommand yes` habilita o
+// LocalCommand DAQUELE arquivo em diante — o sshd o lê por arquivo, e um
+// LocalCommand sem a permissão não executa.
+func analisaConfigCliente(arquivo, user, mod string, b []byte) []SSHClientExec {
+	var out []SSHClientExec
+	permiteLocal := false
+	for i, raw := range strings.Split(string(b), "\n") {
+		ln := strings.TrimSpace(raw)
+		if ln == "" || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(ln, " ")
+		if !ok {
+			if k, v, ok = strings.Cut(ln, "\t"); !ok {
+				k, v = ln, ""
+			}
+		}
+		v = strings.TrimSpace(v)
+
+		if strings.EqualFold(k, "permitlocalcommand") {
+			permiteLocal = strings.EqualFold(v, "yes")
+			continue
+		}
+		if strings.EqualFold(k, "match") {
+			if cmd, ok := matchExec(v); ok {
+				out = append(out, SSHClientExec{
+					File: arquivo, User: user, Line: i + 1,
+					Directive: "Match exec", Command: cmd, ModUTC: mod,
+				})
+			}
+			continue
+		}
+		rotulo, cmd, ok := diretivaExecCliente(k, v)
+		if !ok {
+			continue
+		}
+		// LocalCommand inerte sem a permissão: não é execução, não é achado.
+		if rotulo == "LocalCommand" && !permiteLocal {
+			continue
+		}
+		out = append(out, SSHClientExec{
+			File: arquivo, User: user, Line: i + 1,
+			Directive: rotulo, Command: cmd, ModUTC: mod,
+		})
+	}
+	return out
 }
 
 // maxArquivosSSH limita a cadeia de Include. Um ciclo já é barrado por

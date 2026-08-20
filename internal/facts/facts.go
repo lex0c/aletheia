@@ -52,12 +52,13 @@ type Facts struct {
 	Units       []Unit       `json:"units,omitempty"`
 	// NSSModules são as fontes do /etc/nsswitch.conf e a lib que cada uma
 	// carrega — um libnss_ sem dono é backdoor carregado em toda resolução.
-	NSSModules    []NSSModule    `json:"nss_modules,omitempty"`
-	ToolArtifacts []ToolArtifact `json:"tool_artifacts,omitempty"`
-	Cron          []CronEntry    `json:"cron,omitempty"`
-	SSH           SSHConfig      `json:"ssh"`
-	SSHKeys       []SSHKey       `json:"ssh_keys,omitempty"`
-	Triggers      []Trigger      `json:"triggers,omitempty"`
+	NSSModules    []NSSModule     `json:"nss_modules,omitempty"`
+	ToolArtifacts []ToolArtifact  `json:"tool_artifacts,omitempty"`
+	Cron          []CronEntry     `json:"cron,omitempty"`
+	SSH           SSHConfig       `json:"ssh"`
+	SSHKeys       []SSHKey        `json:"ssh_keys,omitempty"`
+	SSHClientExec []SSHClientExec `json:"ssh_client_exec,omitempty"`
+	Triggers      []Trigger       `json:"triggers,omitempty"`
 	// ConfiancaDeHost são as entradas .rhosts/hosts.equiv — login sem senha
 	// host-based (ATT&CK T1021.004).
 	ConfiancaDeHost []ConfiancaDeHost `json:"host_trust,omitempty"`

@@ -225,3 +225,64 @@ func init() {
 		Exit:             2,
 	})
 }
+
+// --- RK3: full-stealth multivetor (os padrões do Singularity), a prova de
+// HONESTIDADE. ---
+//
+// O Singularity ataca as TESTEMUNHAS: esconde de /proc, /proc/net, module list,
+// sysfs, SOCK_DIAG, ftrace ao mesmo tempo. O contrato dele (cases_rootkits.go)
+// não é detecção — é o LIMITE: quando o kernel mente consistentemente em TODAS
+// as fontes, o cross-view cega e não há divergência para achar. A ferramenta
+// perde a APARÊNCIA, mas NÃO pode alegar host íntegro.
+//
+// Este cenário reproduz os padrões de evasão de que já disponho — carregados
+// JUNTOS, como um rootkit multivetor faria — e mede a honestidade:
+//   - eixo CEGADO: socknd esconder=2 esconde o socket de /proc/net E do
+//     SOCK_DIAG. As duas visões concordam, e cross.socket_view NÃO acha nada.
+//     A ferramenta é honestamente cega a esse socket.
+//   - eixos PEGOS: a evasão é INCOMPLETA nos outros — modhide/pidhide não
+//     falsificam o ftrace, então cross.module_view, kernel.ftrace_hook e
+//     cross.hidden_pid disparam. É a "única salvação" do contrato.
+//   - HONESTIDADE: uma inconsistência quebra a confiança de TUDO. Mesmo cega num
+//     eixo, a ferramenta NÃO imprime RESULT: OK — a cobertura é rebaixada e o
+//     veredito é CRITICAL.
+//
+// O que fica FORA (o Untestable de verdade): a versão que também falsifica o
+// ftrace de forma consistente. Aí não sobra divergência nenhuma e a ferramenta
+// reportaria limpo — o limite documentado, que exige o rootkit real.
+func init() {
+	Register(Scenario{
+		ID:               "RK3-full-stealth-multivetor",
+		Desc:             "full-stealth multivetor: cega o cross-view de socket, é pego em módulo/pid/ftrace, e NÃO alega host íntegro",
+		Mode:             VM,
+		Kernel:           "lts",
+		ModulosOcultacao: true,
+		Setup: `mkdir -p /sys/kernel/tracing
+			mount -t tracefs tracefs /sys/kernel/tracing
+			insmod /modulos/inet_diag.ko
+			insmod /modulos/tcp_diag.ko
+			insmod /modulos/socknd.ko esconder=2
+			insmod /modulos/modhide.ko esconder=2
+			sh -c '/helper sleep 300 & exec /helper sleep 300' &
+			P=$!
+			sleep 0.5
+			insmod /modulos/pidhide.ko oculto=$P`,
+		Expect: []Expect{
+			// A evasão incompleta: o ftrace delata o que /proc/modules e o
+			// SOCK_DIAG esconderam.
+			{ID: "cross.module_view", Sev: "CRITICAL", Subject: "modhide"},
+			{ID: "kernel.ftrace_hook", Sev: "CRITICAL", Evidence: "esconde CONEXÃO"},
+			{ID: "cross.hidden_pid", Sev: "CRITICAL"},
+		},
+		// O eixo CEGADO: a duplo-ocultação de socket funcionou, e a ferramenta é
+		// honestamente cega — cross.socket_view NÃO pode produzir achado. Se ele
+		// disparar, ou a evasão ficou incompleta ou o check ganhou sinal novo.
+		Forbid: []string{"cross.socket_view"},
+		// A HONESTIDADE, afirmada como negativa de saída: mesmo vencida na
+		// aparência de um eixo, a ferramenta NÃO pode certificar o host limpo.
+		ForbidOutput:     []string{"RESULT: OK"},
+		ExpectOutput:     []string{"O KERNEL SE CONTRADISSE"},
+		MustBeIncomplete: true,
+		Exit:             2,
+	})
+}

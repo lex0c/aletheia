@@ -95,18 +95,23 @@ func init() {
 		//   - O que a ferramenta DEVE fazer mesmo perdendo: NÃO afirmar "limpo".
 		//     A quebra de confiança por inconsistência de kernel deve rebaixar a
 		//     cobertura — ausência de achado deixa de significar ausência.
-		// Quando este cenário rodar de verdade, o alvo NÃO é Expect de detecção:
-		// é ForbidOutput de qualquer alegação de host íntegro + Expect da
-		// cobertura REBAIXADA. É o adversário que prova o limite, não a força.
+		// O alvo NÃO é Expect de detecção: é ForbidOutput de qualquer alegação de
+		// host íntegro + Expect da cobertura REBAIXADA. É o adversário que prova o
+		// limite, não a força.
 		//
-		// RECEITA: VM com kernel 6.x (o Singularity é específico de versão),
-		// insmod com as evasões ligadas por etapas — medir a detecção some fonte
-		// a fonte. É o cenário mais caro e o mais importante do benchmark de
-		// rootkit.
-		Untestable: "exige o Singularity num kernel 6.x casado, com as evasões " +
-			"ligadas por etapas; é o adversário que ATACA o cross-view, então o " +
-			"contrato é o LIMITE medido (não alegar íntegro; rebaixar cobertura), " +
-			"não detecção. Caro e específico de versão — vm-matrix dedicado.",
+		// PARCIALMENTE MEDIDO: a propriedade central — cega um eixo, é pego em
+		// outro pela evasão incompleta, e NÃO alega host íntegro — já roda no
+		// RK3-full-stealth-multivetor (cases_ocultacao.go), com os PADRÕES de
+		// evasão do Singularity carregados juntos (socknd+modhide+pidhide): ele
+		// afirma ForbidOutput "RESULT: OK" + cobertura rebaixada, sem precisar do
+		// rootkit real. O que SOBRA Untestable é só o extremo: a versão que
+		// também falsifica o ftrace de forma consistente, onde não resta
+		// divergência nenhuma e a ferramenta reportaria limpo — o limite que
+		// exige o Singularity de verdade num kernel 6.x casado.
+		Untestable: "os PADRÕES de evasão já são medidos no RK3-full-stealth-" +
+			"multivetor. Só o extremo full-stealth que falsifica TAMBÉM o ftrace " +
+			"(sem divergência residual) exige o Singularity real num kernel 6.x — " +
+			"aí o contrato é o LIMITE (reportar limpo é o ponto cego documentado).",
 	})
 
 	// --- eBPF: atribuição parcial e lacuna FixMapa declarada. ---

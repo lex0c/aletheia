@@ -14,7 +14,7 @@ import (
 	"github.com/lex0c/aletheia/internal/report"
 )
 
-// O amostrador do `watch` — SPEC §6.2.
+// O amostrador do `watch` — SPEC 6.2.
 //
 // Dois casos que nenhum retrato pega, por construção:
 //

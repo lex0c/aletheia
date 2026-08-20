@@ -10,7 +10,7 @@ import (
 
 func init() { check.Register(socketDeBackdoor) }
 
-// socketDeBackdoor — runbook §7.2, §4.2.
+// socketDeBackdoor — runbook §7.2, §14.
 //
 // A ativação por socket é do systemd, é legítima, e é o esconderijo perfeito: o
 // PID 1 escuta a porta, e o processo do invasor SÓ NASCE quando alguém conecta.
@@ -21,7 +21,7 @@ func init() { check.Register(socketDeBackdoor) }
 //
 // O que resta é o DISCO, e ali a forma é clara: uma unit `.socket` expondo uma
 // porta, apontando para um serviço que executa um binário que nenhum pacote
-// entregou. É o mesmo cruzamento do §4.2, feito sobre o que está parado.
+// entregou. É o mesmo cruzamento do §14, feito sobre o que está parado.
 //
 // Vale igual para `.path`: a unit dispara na alteração de um arquivo, e o
 // gatilho é o mesmo tipo de espera.

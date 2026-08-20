@@ -35,7 +35,7 @@ func init() {
 // sem propriedade de pacote, "processo com conexão de saída" descreve metade de
 // um servidor normal.
 
-// escutaSemDono — runbook §4.2, §24.
+// escutaSemDono — runbook §14, §24.
 //
 // Uma porta aberta para fora por um binário que nenhum pacote entregou. É a
 // forma do backdoor de escuta — o oposto do shell reverso, e o que sobra quando
@@ -154,7 +154,7 @@ var escutaSemDono = check.Check{
 	},
 }
 
-// saidaSemDono — runbook §4.3, §24.
+// saidaSemDono — runbook §2.1, §24.
 //
 // Conexão estabelecida para endereço público, saindo de um binário que nenhum
 // pacote entregou. É a forma do canal de comando e controle.

@@ -112,8 +112,8 @@ var unitSemDono = check.Check{
 				fd.Quando, fd.QuandoFonte = u.ModUTC, "mtime do arquivo da unit"
 				fd.NextSteps = []string{
 					"remova a UNIT antes de matar o processo — com Restart o systemd " +
-						"o ressuscita em segundos (runbook §19)",
-					"preserve o binário " + alvo + " antes de qualquer coisa (runbook §6)",
+						"o ressuscita em segundos",
+					"preserve o binário " + alvo + " antes de qualquer coisa",
 				}
 				r.Findings = append(r.Findings, fd)
 			}
@@ -178,7 +178,7 @@ var unitExecSuspect = check.Check{
 				fd.NextSteps = []string{
 					"a config EFETIVA inclui drop-ins: `systemctl cat " + u.Name + "`",
 					"remova a persistência ANTES de matar o processo, senão o systemd " +
-						"o ressuscita (runbook §19)",
+						"o ressuscita",
 				}
 				r.Findings = append(r.Findings, fd)
 			}
@@ -266,7 +266,7 @@ var unitTimerFrequent = check.Check{
 	FalsePositives: []string{
 		"monitoração e coleta de métrica rodam em intervalo curto por projeto. " +
 			"São poucas e têm nome conhecido — e vêm de pacote, não de /etc",
-		"o intervalo por si não acusa nada: ele diz ONDE procurar na §2.7, " +
+		"o intervalo por si não acusa nada: ele diz ONDE procurar, " +
 			"correlacionando com conexão no mesmo período",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
@@ -285,14 +285,14 @@ var unitTimerFrequent = check.Check{
 				"arquivo: " + u.Path,
 			}
 			ev = append(ev, unitContext(u)...)
-			ev = append(ev, "correlacione com conexão nesse mesmo intervalo (runbook §2.7): "+
+			ev = append(ev, "correlacione com conexão nesse mesmo intervalo: "+
 				"o beacon só é visível na janela estendida, não no retrato")
 
 			fd := self.F(check.SevWarn, u.Name, "", ev...)
 			fd.Quando, fd.QuandoFonte = u.ModUTC, "mtime do arquivo da unit"
 			fd.NextSteps = []string{
 				"veja o que ele dispara: a unit de mesmo nome com sufixo .service",
-				"amostre a rede pelo intervalo do timer, não por instantes (runbook §2.7)",
+				"amostre a rede pelo intervalo do timer, não por instantes",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -448,7 +448,7 @@ func execSuspect(cmd string) (string, check.Severity, bool) {
 		}
 	}
 	if strings.Contains(low, "/dev/tcp/") {
-		return "usa /dev/tcp: shell reverso embutido, sem binário externo (runbook §3.16)",
+		return "usa /dev/tcp: shell reverso embutido, sem binário externo",
 			check.SevCritical, true
 	}
 	if motivo, ok := trapDeShell(low); ok {

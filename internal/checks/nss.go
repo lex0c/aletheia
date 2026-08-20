@@ -94,7 +94,7 @@ var nssModuleSemDono = check.Check{
 			}
 			fd := self.F(check.SevCritical, "libnss_"+m.Fonte, "", ev...)
 			fd.NextSteps = []string{
-				"preserve " + strings.Join(orfaos, ", ") + " antes de qualquer coisa (runbook §6)",
+				"preserve " + strings.Join(orfaos, ", ") + " antes de qualquer coisa",
 				"remova a fonte `" + m.Fonte + "` do /etc/nsswitch.conf — enquanto " +
 					"ela estiver lá, toda resolução recarrega o módulo",
 				"a lib é carregada por PROCESSOS JÁ EM EXECUÇÃO: reinicie os daemons " +

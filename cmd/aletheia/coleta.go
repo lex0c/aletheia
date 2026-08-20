@@ -163,7 +163,7 @@ func resumoDaColeta(w io.Writer, e *env.Env, f *facts.Facts, arquivo, hash strin
 	// ANOTE ESTE NÚMERO FORA DO HOST. É o que separa "este é o dump que eu
 	// coletei" de "este é um arquivo que apareceu com esse nome" — e a única
 	// cópia dele que o alvo não alcança é a que sai daqui para o seu caderno.
-	fmt.Fprintf(w, "sha256 %s   ← anote no war log (runbook §39.3)\n", hash)
+	fmt.Fprintf(w, "sha256 %s   ← anote no war log\n", hash)
 
 	faltando := env.Cap(0)
 	for _, n := range env.TodasAsCaps() {
@@ -240,6 +240,7 @@ func runAnalyze(args []string) int {
 		jsonOut  = fs.String("json", "", "escrever JSONL em FILE ('-' = stdout)")
 		verbose  = fs.Bool("v", false, "evidência por achado")
 		verbose2 = fs.Bool("vv", false, "+ INFO e detalhe de cobertura")
+		coverage = fs.Bool("coverage", false, "mostrar a seção de cobertura (causas e gaps)")
 		base     = fs.String("baseline", "", "comparar com a baseline em FILE")
 		iocFile  = fs.String("ioc", "", "casar os indicadores DESTE incidente, do arquivo FILE")
 		since    = fs.String("since", "", "janela de investigação, ancorada na COLETA")
@@ -327,6 +328,7 @@ func runAnalyze(args []string) int {
 		jsonOut:  *jsonOut,
 		jsonFH:   jsonFH,
 		verbose:  nivel(*verbose, *verbose2),
+		coverage: *coverage,
 		analise: &report.AnaliseInfo{
 			Arquivo:      fs.Arg(0),
 			ColetadoEm:   d.Ambiente.CollectedAt,
@@ -383,10 +385,11 @@ type saida struct {
 	ioc      *ioc.Lista
 	// jsonOut é o caminho, só para decidir se o relatório humano vai para
 	// stderr; jsonFH é o destino JÁ ABERTO, antes da parte cara.
-	jsonOut string
-	jsonFH  *os.File
-	verbose int
-	analise *report.AnaliseInfo
+	jsonOut  string
+	jsonFH   *os.File
+	verbose  int
+	coverage bool
+	analise  *report.AnaliseInfo
 }
 
 func emitir(r *check.Report, f *facts.Facts, e *env.Env, o saida) int {
@@ -403,7 +406,7 @@ func emitir(r *check.Report, f *facts.Facts, e *env.Env, o saida) int {
 		humanOut = os.Stderr
 	}
 	report.Human(humanOut, r, f, e, report.Options{
-		Verbose: o.verbose, Baseline: bl, IOC: infoIOC(o.ioc),
+		Verbose: o.verbose, Coverage: o.coverage, Baseline: bl, IOC: infoIOC(o.ioc),
 		Janela: jn, Analise: o.analise, Color: corHabilitada(humanOut),
 	})
 

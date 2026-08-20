@@ -93,9 +93,9 @@ var modprobeInstall = check.Check{
 			fd.NextSteps = []string{
 				"`modprobe --show-depends " + m.Module + "` mostra o que a diretiva " +
 					"faz de verdade, já resolvendo o encadeamento",
-				"o ctime do arquivo data a inserção (runbook §9)",
+				"o ctime do arquivo data a inserção",
 				"a mesma diretiva na frota é provisionamento; num host só, é " +
-					"alteração (runbook §23)",
+					"alteração",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

@@ -45,14 +45,14 @@ var escalating = map[string]string{
 	"dac_override":    "ignora permissão de arquivo: lê e escreve qualquer coisa",
 	"dac_read_search": "lê qualquer arquivo do sistema, inclusive /etc/shadow",
 	"sys_admin":       "quase root: mount, namespace, e mais",
-	"sys_ptrace":      "injeta código em qualquer processo (runbook §3.16)",
-	"sys_module":      "carrega módulo de kernel: é a porta do rootkit (runbook §35.3)",
+	"sys_ptrace":      "injeta código em qualquer processo",
+	"sys_module":      "carrega módulo de kernel: é a porta do rootkit",
 	"sys_rawio":       "acesso direto a /dev/mem e a portas de E/S",
-	"bpf":             "carrega programa eBPF: rootkit sem módulo e sem arquivo (runbook §35.4)",
+	"bpf":             "carrega programa eBPF: rootkit sem módulo e sem arquivo",
 	"perfmon":         "instrumenta o kernel inteiro",
-	"net_admin":       "reconfigura rede e firewall: derruba a própria contenção (runbook §18)",
-	"audit_control":   "desliga o auditd — anti-forense (runbook §21)",
-	"linux_immutable": "remove chattr +i: desprotege o que foi travado (runbook §21)",
+	"net_admin":       "reconfigura rede e firewall: derruba a própria contenção",
+	"audit_control":   "desliga o auditd — anti-forense",
+	"linux_immutable": "remove chattr +i: desprotege o que foi travado",
 	"mac_admin":       "reconfigura SELinux/AppArmor",
 	"mac_override":    "ignora SELinux/AppArmor",
 	"syslog":          "lê o log do kernel, que entrega endereços para derrotar o KASLR",
@@ -136,9 +136,9 @@ var capsUnexpected = check.Check{
 			fd := self.F(check.SevWarn, "pid="+strconv.Itoa(p.PID), "", ev...)
 			fd.NextSteps = []string{
 				"descubra QUEM concedeu: `getcap` no binário, ou AmbientCapabilities/" +
-					"CapabilityBoundingSet na unit (runbook §7.2)",
+					"CapabilityBoundingSet na unit",
 				"se ninguém concedeu de propósito, trate como escalada de privilégio " +
-					"e reveja a §7.9 (usuários e sudo)",
+					"e reveja usuários e sudo",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -164,7 +164,7 @@ var tracer = check.Check{
 	FalsePositives: []string{
 		"depurador e profiler usam ptrace — é a função deles. gdb, strace, ltrace, " +
 			"lldb, dlv e perf aparecem aqui e estão fazendo o trabalho normal",
-		"o próprio `gcore` que o runbook manda rodar na §6 aparece aqui enquanto " +
+		"o próprio `gcore` que o runbook manda rodar aparece aqui enquanto " +
 			"o dump está em andamento: pode ser a SUA coleta",
 		"CRIU e alguns supervisores fazem ptrace em operação legítima",
 	},
@@ -199,9 +199,8 @@ var tracer = check.Check{
 			fd := self.F(sev, "pid="+strconv.Itoa(p.PID), "", ev...)
 			fd.NextSteps = []string{
 				"a memória do alvo pode ter sido reescrita: o binário em disco não " +
-					"prova mais nada sobre o que está rodando (runbook §3.16)",
-				"`kernel.yama.ptrace_scope=1` impede ptrace fora da relação pai/filho " +
-					"(runbook §34)",
+					"prova mais nada sobre o que está rodando",
+				"`kernel.yama.ptrace_scope=1` impede ptrace fora da relação pai/filho",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

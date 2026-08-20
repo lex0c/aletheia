@@ -65,7 +65,7 @@ var memfdExec = check.Check{
 			}
 			fd.Irreversible = true
 			fd.NextSteps = []string{
-				"NÃO mate antes de preservar: o binário só existe neste processo (runbook §6)",
+				"NÃO mate antes de preservar: o binário só existe neste processo",
 				preservarPID(e, p.PID),
 			}
 			r.Findings = append(r.Findings, fd)
@@ -125,7 +125,7 @@ var exeDeleted = check.Check{
 			}
 			fd.Irreversible = true
 			fd.NextSteps = []string{
-				"o binário continua íntegro em /proc/" + strconv.Itoa(p.PID) + "/exe (runbook §3.14)",
+				"o binário continua íntegro em /proc/" + strconv.Itoa(p.PID) + "/exe",
 				preservarPID(e, p.PID),
 			}
 			r.Findings = append(r.Findings, fd)
@@ -195,7 +195,7 @@ var kthreadDisguise = check.Check{
 			}
 			fd.Irreversible = true
 			fd.NextSteps = []string{
-				"o nome mente, o exe não (runbook §3.3)",
+				"o nome mente, o exe não",
 				preservarPID(e, p.PID),
 			}
 			r.Findings = append(r.Findings, fd)

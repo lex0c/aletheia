@@ -115,9 +115,9 @@ var vigiaDeArquivo = check.Check{
 			fd := self.F(sev, "pid="+strconv.Itoa(v.PID), "", ev...)
 			fd.Ator = v.Exe
 			fd.NextSteps = []string{
-				"a ORDEM importa (runbook §19): remova a persistência e este " +
+				"a ORDEM importa: remova a persistência e este " +
 					"observador ANTES de apagar o que ele vigia, ou o arquivo volta",
-				"sudo cp " + check.Arg(v.Exe) + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
+				"sudo cp " + check.Arg(v.Exe) + " \"$IR/\"   # a amostra, antes de qualquer coisa",
 				"`sudo ls -l /proc/" + strconv.Itoa(v.PID) + "/fd` e o fdinfo de cada " +
 					"descritor mostram TODOS os alvos, inclusive os que não puderam ser nomeados",
 			}

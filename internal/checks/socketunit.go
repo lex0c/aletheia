@@ -99,7 +99,7 @@ var socketDeBackdoor = check.Check{
 			fd := self.F(sev, u.Name, "", ev...)
 			fd.Irreversible = true
 			fd.NextSteps = []string{
-				"sudo cp " + check.Arg(exe) + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
+				"sudo cp " + check.Arg(exe) + " \"$IR/\"   # a amostra, antes de qualquer coisa",
 				"desabilite o SOCKET antes do serviço: parar só o serviço deixa o " +
 					"gatilho armado, e a próxima conexão o traz de volta",
 				"a porta não aparece como dele em nenhuma varredura: procure o " +

@@ -100,8 +100,8 @@ var rotacaoComBuraco = check.Check{
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"o que estava naquela geração não volta daqui: procure no servidor " +
-					"de log central, se houver (runbook §21)",
-				"o ctime do diretório /var/log data a remoção (runbook §9)",
+					"de log central, se houver",
+				"o ctime do diretório /var/log data a remoção",
 				"confirme com o time se alguém moveu log à mão durante a resposta — " +
 					"isso produz a mesma forma",
 			}
@@ -204,8 +204,8 @@ var sessaoSemRegistro = check.Check{
 		fd.Irreversible = true
 		fd.NextSteps = []string{
 			"as sessões abertas AGORA são a única fonte que sobrou: registre " +
-				"usuário, terminal e origem antes de qualquer coisa (runbook §13)",
-			"o ctime de /var/log/wtmp data o zeramento (runbook §9)",
+				"usuário, terminal e origem antes de qualquer coisa",
+			"o ctime de /var/log/wtmp data o zeramento",
 			"procure o mesmo horário no journal e no log da aplicação: apagar um " +
 				"arquivo não apaga os outros",
 		}

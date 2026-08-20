@@ -118,9 +118,9 @@ var fronteiraDeContainer = check.Check{
 					"do host não tem caminho legítimo comum",
 			)
 			fd.NextSteps = []string{
-				"sudo cp " + check.Arg(p.Exe) + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
+				"sudo cp " + check.Arg(p.Exe) + " \"$IR/\"   # a amostra, antes de qualquer coisa",
 				"`docker ps -a --no-trunc` e cruze o hash do caminho com a imagem de origem",
-				"quem tem acesso ao socket do docker tem root no host (runbook §7.9): " +
+				"quem tem acesso ao socket do docker tem root no host: " +
 					"confira o grupo `docker` antes de concluir que houve escape",
 			}
 			r.Findings = append(r.Findings, fd)
@@ -156,9 +156,9 @@ var fronteiraDeContainer = check.Check{
 				"processos de contêiner neste host, por runtime: "+resumoDeRuntimes(f),
 				"o binário deles vem de camada de imagem, e a pergunta \"que pacote do "+
 					"host entregou isto?\" não se aplica — por isso eles ficam FORA "+
-					"do §24, e a exclusão está declarada na cobertura",
+					"da base de pacotes, e a exclusão está declarada na cobertura",
 				"para varrer o que roda DENTRO deles, aponte a ferramenta para a imagem: "+
-					"`aletheia scan --root` sobre o rootfs exportado (runbook §35.6)",
+					"`aletheia scan --root` sobre o rootfs exportado",
 			))
 		}
 		return r

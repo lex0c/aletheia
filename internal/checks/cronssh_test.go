@@ -60,7 +60,7 @@ func TestCronFrequentSoDisparaEmIntervaloCurto(t *testing.T) {
 	if len(r.Findings) != 1 {
 		t.Fatalf("achados = %d, quer 1", len(r.Findings))
 	}
-	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "§2.7") {
+	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "correlacion") {
 		t.Error("o achado precisa mandar correlacionar com a janela estendida")
 	}
 }

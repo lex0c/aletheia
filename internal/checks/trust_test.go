@@ -113,7 +113,7 @@ func TestWebPrependDisparaMesmoComCaminhoNormal(t *testing.T) {
 	if len(r.Findings) != 1 {
 		t.Fatalf("achados = %d, quer 1 (none e memory_limit não contam)", len(r.Findings))
 	}
-	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "§16") {
+	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "webshell não acha") {
 		t.Error("o achado precisa dizer por que o grep de webshell não acha nada")
 	}
 }

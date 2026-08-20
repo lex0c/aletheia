@@ -189,7 +189,7 @@ func padroesDeGit(c *CensoDeGit) []Padrao {
 			Detalhe: "hook roda em `commit`, `checkout`, `merge` e `push` sem " +
 				"ninguém pedir, e não é commitado: não aparece em revisão de " +
 				"código nem em diff. Num servidor que atualiza por `git pull`, " +
-				"é persistência que sobrevive ao redeploy (§7.12)",
+				"é persistência que sobrevive ao redeploy",
 		})
 	}
 

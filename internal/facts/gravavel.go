@@ -126,7 +126,7 @@ func donoConfiavel(f *Facts, e *env.Env) bool {
 	}
 	if !achou {
 		f.partial("gravavel", "nenhum caminho de sistema legível para aferir a "+
-			"propriedade: a pergunta do §36.4 não foi respondida")
+			"propriedade: a pergunta não foi respondida")
 	}
 	return achou
 }

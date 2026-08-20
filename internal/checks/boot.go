@@ -62,7 +62,7 @@ var cmdlineEnfraquecida = check.Check{
 			"e são a norma em parte das frotas — por isso a mitigação sai como INFO",
 		"provisionamento (Ansible, cloud-init, imagem dourada) põe estes mesmos " +
 			"parâmetros na configuração de propósito: o mesmo valor em vários hosts " +
-			"da frota é provisionamento, num só é alteração (runbook §23)",
+			"da frota é provisionamento, num só é alteração",
 		"BOOT SEM BOOTLOADER — QEMU com `-append`, iPXE, kexec, contêiner — não " +
 			"tem configuração para comparar. A divergência só é afirmada quando " +
 			"alguma configuração foi de fato LIDA; sem ela, o que sai é lacuna",
@@ -264,7 +264,7 @@ var enfraquecimentos = []regraDeBoot{
 	},
 	{
 		Chave: "audit", Valores: []string{"0"}, Sev: check.SevWarn,
-		Efeito: "desliga a auditoria desde o boot: as regras da §11 não gravam nada, " +
+		Efeito: "desliga a auditoria desde o boot: as regras de auditoria não gravam nada, " +
 			"e a ausência de registro passa a ser explicada pela configuração",
 	},
 	{
@@ -402,7 +402,7 @@ func pesoDoInit(alvo string, semDono map[string]bool) (check.Severity, string, b
 func passosDeBoot(token string, fontes []string) []string {
 	passos := []string{
 		"compare com outro host da frota: o mesmo parâmetro em vários é " +
-			"provisionamento, num só é alteração (runbook §23)",
+			"provisionamento, num só é alteração",
 	}
 	for _, fonte := range dedupOrdenado(fontes) {
 		if strings.HasPrefix(fonte, "/proc/") {

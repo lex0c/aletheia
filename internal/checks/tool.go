@@ -57,7 +57,7 @@ var toolArtifact = check.Check{
 		"TODAS as famílias do catálogo são ferramentas legítimas de uso duplo. " +
 			"tailscale, rclone, cloudflared e RMM rodam em produção por bons " +
 			"motivos — o achado diz que a CAPACIDADE está presente, não que houve " +
-			"abuso. Capacidade não é prova de uso (runbook §5.10)",
+			"abuso. Capacidade não é prova de uso",
 		"config órfã sobrevive à desinstalação: o diretório pode ser resto de " +
 			"algo removido meses atrás. A data de modificação separa os dois casos",
 		"reconhecer pelo NOME é trivial de burlar — renomear o binário derrota " +
@@ -92,7 +92,7 @@ var toolArtifact = check.Check{
 			fd := self.F(sevDoRisco(fam.Risk), nome, "", ev...)
 			fd.NextSteps = []string{
 				"LEIA a config: o destino, a conta e a chave estão nela, e valem " +
-					"como IOC de frota melhor que hash (runbook §23)",
+					"como IOC de frota melhor que hash",
 				"confirme com o time se alguém instalou isto de propósito antes de " +
 					"tratar como achado",
 			}
@@ -124,8 +124,7 @@ var toolBinary = check.Check{
 		"as famílias são legítimas: um host que roda tailscale ou faz backup com " +
 			"rclone dispara aqui todo dia, e está certo. O achado muda o ESCOPO da " +
 			"investigação, não o veredito",
-		"renomear o binário derrota este check por completo. Ele é o atalho da " +
-			"§5.10, não a detecção — o implante renomeado é pego pela FORMA " +
+		"renomear o binário derrota este check por completo. Ele é um atalho, não a detecção — o implante renomeado é pego pela FORMA " +
 			"(fd, direção, disfarce), não pelo nome",
 		"sem root o exe de processo alheio é ilegível, e só a rota de unit responde",
 	},
@@ -193,8 +192,8 @@ var toolBinary = check.Check{
 			}
 			fd := self.F(sevDoRisco(a.fam.Risk), nome, "", ev...)
 			fd.NextSteps = []string{
-				"a §5.10 com o nome em mãos muda a PRIORIDADE do resto da resposta",
-				"se ninguém instalou isto, o próximo passo é a persistência (runbook §7), " +
+				"o nome em mãos muda a PRIORIDADE do resto da resposta",
+				"se ninguém instalou isto, o próximo passo é a persistência, " +
 					"não o processo",
 			}
 			r.Findings = append(r.Findings, fd)

@@ -75,7 +75,7 @@ var macRebaixado = check.Check{
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"`ausearch -m AVC` mostra o que TERIA sido negado desde o boot, e é " +
-					"onde o implante aparece (runbook §21)",
+					"onde o implante aparece",
 				"NÃO religue antes de preservar: `setenforce 1` muda o estado e pode " +
 					"matar o que se quer observar",
 				"o uptime do host delimita a janela: a mudança é posterior a ele",

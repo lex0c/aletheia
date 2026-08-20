@@ -72,7 +72,7 @@ var consultaAoAudit = check.Check{
 		}
 		passos = append(passos,
 			"o que amarra o vetor: um EXECVE de sh/curl/bash cujo PAI é o processo "+
-				"da aplicação prova o pulo RCE → comando (runbook §11)",
+				"da aplicação prova o pulo RCE → comando",
 			"e o auid liga a ação de root de volta a quem entrou — ele não muda "+
 				"com su nem sudo")
 
@@ -117,28 +117,28 @@ var logDaNuvem = check.Check{
 			"este host parece ser uma instância de "+provedor+", e o log de auditoria "+
 				"do provedor está FORA do alcance de quem tem root aqui dentro",
 			"é a única fonte que o atacante não apaga do host — e a que responde "+
-				"'a credencial da instância foi usada de fora?' (runbook §10.5)",
+				"'a credencial da instância foi usada de fora?'",
 			"esta ferramenta não fala com a rede: consultar a API avisaria o "+
-				"atacante (runbook §2.1)")
+				"atacante")
 		switch provedor {
 		case "GCP":
 			fd.NextSteps = []string{
 				"gcloud logging read " + check.Arg(`resource.labels.instance_id="`+host+`" AND timestamp>="`+desde+`"`) + " --limit 200",
 				"gcloud logging read " + check.Arg(`protoPayload.authenticationInfo.principalEmail=~"`+host+`"`) + " --freshness=7d",
 				"e o uso da credencial DA INSTÂNCIA fora dela: procure a service " +
-					"account do host em chamadas que não partiram dele (§10.5)",
+					"account do host em chamadas que não partiram dele",
 			}
 		case "AWS":
 			fd.NextSteps = []string{
 				"aws cloudtrail lookup-events --start-time " + check.Arg(desde) + " --max-results 200",
 				`aws cloudtrail lookup-events --lookup-attributes AttributeKey=Username,AttributeValue=<role-da-instância>`,
 				"a role da instância usada de um IP que não é o dela é roubo de " +
-					"credencial de metadata (§10.5)",
+					"credencial de metadata",
 			}
 		default:
 			fd.NextSteps = []string{
 				"puxe o log de auditoria do provedor para a janela a partir de " + desde,
-				"e confira se a credencial da instância foi usada de fora dela (§10.5)",
+				"e confira se a credencial da instância foi usada de fora dela",
 			}
 		}
 		r.Findings = append(r.Findings, fd)
@@ -177,7 +177,7 @@ var integridadeDoCodigo = check.Check{
 			"um `git status` limpo NÃO significa código íntegro — ele só enxerga "+
 				"alteração não commitada",
 			"esta ferramenta não roda o git do host: um binário trojanizado "+
-				"responderia 'limpo' (SPEC 4, runbook §5.9)")
+				"responderia 'limpo'")
 		var passos []string
 		for _, repo := range repos {
 			passos = append(passos,
@@ -189,7 +189,7 @@ var integridadeDoCodigo = check.Check{
 		passos = append(passos,
 			"os três pontos cegos do status: commitou (as datas mentem — "+
 				"GIT_AUTHOR_DATE é variável de ambiente), fez amend (o histórico "+
-				"foi reescrito) e usou .gitignore (§16)")
+				"foi reescrito) e usou .gitignore")
 		fd.NextSteps = passos
 		r.Findings = append(r.Findings, fd)
 		return r
@@ -221,16 +221,16 @@ var volumeDeSaida = check.Check{
 				" endereço(s) público(s): "+strings.Join(corta(destinos, 5), " · "),
 			"ela sabe PARA ONDE o host falou; não sabe QUANTO saiu — o host não "+
 				"conta bytes por conexão, e a resposta está em contadores e em "+
-				"fontes fora do alcance de uma varredura única (runbook §37.2)",
+				"fontes fora do alcance de uma varredura única",
 			"e o teto do que PODE ter saído é o alcance da credencial deste host, "+
-				"não o tráfego observado (§37.1)")
+				"não o tráfego observado")
 		fd.NextSteps = []string{
 			"vnstat -h · sar -n DEV 1 5 · cat /proc/net/dev   # o que o host contou sem querer",
 			"conntrack -L | grep -E '" + strings.Join(corta(destinos, 3), "|") + "'   # bytes por fluxo, se o conntrack estiver ativo",
 			"o log do balanceador, do proxy e do provedor têm o volume REAL: eles " +
-				"ficam fora do host, e o root daqui não os apaga (§37.6)",
+				"ficam fora do host, e o root daqui não os apaga",
 			"se houver banco, a exfiltração pode não ter virado arquivo nenhum: " +
-				"olhe o log de queries (§37.5)",
+				"olhe o log de queries",
 		}
 		r.Findings = append(r.Findings, fd)
 		return r

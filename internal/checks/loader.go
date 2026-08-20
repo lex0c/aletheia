@@ -61,12 +61,12 @@ var ldPreloadGlobal = check.Check{
 		fd := self.F(check.SevCritical, "/etc/ld.so.preload", "", ev...)
 		fd.Irreversible = true
 		fd.NextSteps = []string{
-			"preserve a lib ANTES de remover a linha: ela é a amostra (runbook §6)",
+			"preserve a lib ANTES de remover a linha: ela é a amostra",
 			"sudo cp /etc/ld.so.preload \"$IR/\" && for l in $(cat /etc/ld.so.preload); do sudo cp \"$l\" \"$IR/\"; done",
 			"confira o que ela esconde comparando com binário ESTÁTICO: `ls` contra " +
-				"`busybox ls` no mesmo diretório discordam se há rootkit (runbook §7.8)",
+				"`busybox ls` no mesmo diretório discordam se há rootkit",
 			"deste ponto em diante, resultado vindo de binário do host não vale como " +
-				"prova — repita a análise sobre a imagem montada (runbook §35.6)",
+				"prova — repita a análise sobre a imagem montada",
 		}
 		r.Findings = append(r.Findings, fd)
 		r.Partial = append(r.Partial, f.PersistDenied["loader"]...)
@@ -113,7 +113,7 @@ var ldSoConfOdd = check.Check{
 			fd.NextSteps = []string{
 				"confira quem pode escrever ali: `ls -ld` no diretório e nos pais",
 				"se ninguém instalou nada nesse caminho de propósito, trate como " +
-					"persistência de userland (runbook §7.8)",
+					"persistência de userland",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -155,8 +155,8 @@ var envPreload = check.Check{
 				"efeito equivalente ao /etc/ld.so.preload, num arquivo de configuração comum",
 			}...)
 			fd.NextSteps = []string{
-				"trate a biblioteca apontada como amostra antes de remover a linha (runbook §6)",
-				"procure a mesma variável em ~/.bashrc, ~/.profile e drop-in de unit (runbook §7.6, §7.2)",
+				"trate a biblioteca apontada como amostra antes de remover a linha",
+				"procure a mesma variável em ~/.bashrc, ~/.profile e drop-in de unit",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

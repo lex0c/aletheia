@@ -108,7 +108,7 @@ var socketDivergente = check.Check{
 			fd := self.F(check.SevCritical, s.Proto+" "+s.Local, "", ev...)
 			fd.NextSteps = []string{
 				"o `ss`, o `netstat` e esta ferramenta leem a tabela que OMITIU " +
-					"isto: trate toda ausência desta execução como não-resposta (§35.8)",
+					"isto: trate toda ausência desta execução como não-resposta",
 			}
 			if s.Inode != 0 {
 				fd.NextSteps = append(fd.NextSteps,
@@ -194,7 +194,7 @@ var pidOculto = check.Check{
 					strconv.Itoa(h.PID) + "/cmdline",
 				preservarPID(e, h.PID),
 				"ocultação de processo é a assinatura do rootkit: a partir daqui, " +
-					"analise a imagem DE FORA (runbook §35.6)",
+					"analise a imagem DE FORA",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -301,12 +301,12 @@ var moduloDivergente = check.Check{
 				d,
 				"as duas interfaces expõem a MESMA informação: divergir significa " +
 					"que uma delas foi manipulada",
-				"é a forma do LKM que se desencadeia da lista para sumir (runbook §35.3)",
+				"é a forma do LKM que se desencadeia da lista para sumir",
 			}...)
 			fd.NextSteps = []string{
 				"compare com um kernel do mesmo pacote em host limpo",
 				"a partir daqui, resultado vindo deste host não vale como prova: " +
-					"analise a imagem DE FORA (runbook §35.6)",
+					"analise a imagem DE FORA",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -318,14 +318,13 @@ var moduloDivergente = check.Check{
 					"que se desencadeia da lista para sumir do /proc/modules não " +
 					"limpa esse registro",
 				"e é a interface que o crossview de sysfs não alcança — ali o " +
-					"módulo escondido é indistinguível de um embutido no kernel " +
-					"(runbook §35.3)",
+					"módulo escondido é indistinguível de um embutido no kernel",
 			}...)
 			fd.NextSteps = []string{
 				"`grep \"[<nome>]\" /sys/kernel/tracing/available_filter_functions` " +
 					"lista as funções que o módulo escondido ainda expõe",
 				"a partir daqui, resultado vindo deste host não vale como prova: " +
-					"analise a imagem DE FORA (runbook §35.6)",
+					"analise a imagem DE FORA",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

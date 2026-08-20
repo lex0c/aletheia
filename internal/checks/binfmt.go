@@ -219,7 +219,7 @@ var binfmtConfig = check.Check{
 			fd.NextSteps = []string{
 				"guarde o arquivo antes de mexer: sudo cp " + check.Arg(c.Fonte) + " \"$IR/\"",
 				"compare com outro host da frota: o mesmo .conf em vários é " +
-					"provisionamento; em um só, é alteração (runbook §23)",
+					"provisionamento; em um só, é alteração",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

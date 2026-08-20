@@ -49,7 +49,7 @@ var codigoBackdoor = check.Check{
 			"2 MB também fica de fora, e esse SIM a cobertura declara",
 		"reconhecer por padrão é trivial de burlar. O que separa backdoor de " +
 			"uso legítimo é o arquivo ter MUDADO — cruze com o mtime e com o " +
-			"git (runbook §16)",
+			"git",
 		"três construções REBAIXAM de crítico para aviso, e cada uma é um " +
 			"buraco declarado: (a) entrada presa a uma allowlist literal " +
 			"(`switch` de `case` literais, `in_array` de lista fixa) — se a " +
@@ -109,12 +109,12 @@ var codigoBackdoor = check.Check{
 				"leia o trecho: um sink sobre $_GET/$_POST/req/request roda o que o " +
 					"atacante enviar",
 				"o ctime do arquivo data quando a linha entrou, mesmo que o resto " +
-					"pareça antigo (runbook §9)",
+					"pareça antigo",
 				"se o diretório é um repo git, `git log -p -- " + check.Arg(cs.Path) +
 					"` mostra o commit que a acrescentou — e `git diff` o que não foi " +
-					"commitado (runbook §16)",
+					"commitado",
 				"procure o mesmo padrão nos outros hosts da frota: num só é " +
-					"comprometimento, em vários pode ser código legítimo esquisito (§23)",
+					"comprometimento, em vários pode ser código legítimo esquisito",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

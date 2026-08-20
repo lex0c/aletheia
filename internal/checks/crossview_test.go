@@ -71,7 +71,7 @@ func TestModuloDivergenteReportaSoUmaDirecao(t *testing.T) {
 	if len(r.Findings) != 1 || r.Findings[0].Sev != check.SevCritical {
 		t.Fatalf("achados = %v", r.Findings)
 	}
-	if !strings.Contains(strings.Join(r.Findings[0].NextSteps, " "), "§35.6") {
+	if !strings.Contains(strings.Join(r.Findings[0].NextSteps, " "), "DE FORA") {
 		t.Error("depois disto, resultado vindo do host não vale: precisa mandar analisar de fora")
 	}
 }

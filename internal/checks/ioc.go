@@ -128,9 +128,9 @@ func (b *caçaIOC) registrar(ind ioc.Indicador, valor, sujeito, onde string) {
 	fd.Irreversible = true
 	fd.NextSteps = []string{
 		"trate este host como parte do MESMO incidente: o indicador veio dele",
-		"preserve antes de mexer — a ordem da §19 vale aqui como em qualquer " +
+		"preserve antes de mexer — a ordem de preservação vale aqui como em qualquer " +
 			"achado crítico",
-		"procure o mesmo indicador nos hosts restantes: é a agregação da §23, " +
+		"procure o mesmo indicador nos hosts restantes: é a agregação de frota, " +
 			"e o `id` deste achado é a chave",
 	}
 	b.achados = append(b.achados, fd)

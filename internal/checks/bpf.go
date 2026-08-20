@@ -197,11 +197,10 @@ var bpfSemDono = check.Check{
 			}
 			if len(candidatos) > 0 {
 				passos = append(passos, "comece pelos candidatos acima: `sudo ls -l "+
-					"/proc/<pid>/exe` e `sudo ls -l /proc/<pid>/fd` de cada um "+
-					"(runbook §3.8)")
+					"/proc/<pid>/exe` e `sudo ls -l /proc/<pid>/fd` de cada um")
 			} else {
 				passos = append(passos, "procure quem o segura: um processo com socket "+
-					"aberto que não explique o que faz (runbook §3.8)")
+					"aberto que não explique o que faz")
 			}
 			fd.NextSteps = append(passos,
 				"NÃO reinicie o host antes de decidir: o reboot é o que apaga a "+
@@ -248,7 +247,7 @@ var bpfInventario = check.Check{
 	Optional: env.CapRoot,
 	Wtf:      false, // é contexto para investigar, não indicador de incêndio
 	FalsePositives: []string{
-		"não é achado: é o quadro que a §35 manda montar. systemd moderno, " +
+		"não é achado: é o quadro que se deve montar. systemd moderno, " +
 			"cilium, falco, tetragon, bpftrace e agente comercial carregam " +
 			"programa eBPF por desenho — o que a ferramenta não sabe é quais " +
 			"deles este time reconhece",
@@ -323,7 +322,7 @@ var bpfInventario = check.Check{
 				"ou anexo legado respondem por eles")
 		}
 		ev = append(ev, "a ferramenta não sabe quais destes o time reconhece: "+
-			"esse é o trabalho humano que a §35 pede")
+			"esse é o trabalho humano necessário")
 		if f.Host.EmContainer {
 			// O espaço de ids é global: de dentro de um contêiner o que se
 			// enumera é o kernel do host. Sem esta linha o operador leria a
@@ -413,12 +412,12 @@ var bpfOculto = check.Check{
 					"perguntar pelo id e pedir a lista são caminhos diferentes dentro " +
 						"do kernel: divergir significa que um deles foi manipulado",
 					"é a mesma forma do PID que responde a stat e não aparece na " +
-						"listagem de /proc (runbook §32)",
+						"listagem de /proc",
 				}...)
 				fd.Irreversible = true
 				fd.NextSteps = []string{
 					"a partir daqui, NADA que dependa deste kernel vale como prova: " +
-						"analise a imagem DE FORA (runbook §35.6)",
+						"analise a imagem DE FORA",
 					"guarde o id e o processo que o cita antes de qualquer outra coisa",
 				}
 				r.Findings = append(r.Findings, fd)
@@ -449,7 +448,7 @@ var bpfOculto = check.Check{
 				"`cat /sys/kernel/tracing/enabled_functions` guardado agora é a " +
 					"prova: ela some no reboot",
 				"analise a imagem DE FORA: o kernel deste host não é fonte " +
-					"confiável (runbook §35.6)",
+					"confiável",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

@@ -76,10 +76,10 @@ var All = []Family{
 		Name: "GSocket / gs-netcat",
 		Risk: RiskAlto,
 		Nota: "canal por rede global de relay, SEM IP fixo de C2: bloquear IP não " +
-			"resolve (runbook §18.1), só egress default-deny corta (§34.3). Conecta " +
-			"nos dois sentidos sem porta aberta, então não procure listener (§2) — " +
+			"resolve, só egress default-deny corta. Conecta " +
+			"nos dois sentidos sem porta aberta, então não procure listener — " +
 			"procure a SAÍDA. Shell, transferência de arquivo e port-forward entram " +
-			"no escopo por padrão (§37, §12.2)",
+			"no escopo por padrão",
 		Env:   []string{"GSOCKET_", "GS_"},
 		Paths: []string{"~/.config/gsocket", "~/.gsocket", "/etc/gsocket"},
 		Bins:  []string{"gs-netcat", "gsocket", "gs-sftp", "gs-mount"},
@@ -103,9 +103,9 @@ var All = []Family{
 		Nota: "scanner de DESCOBERTA de rede: varre faixa inteira, identifica " +
 			"serviço e sistema operacional e monta inventário. Num host de gestão " +
 			"é a função dele; numa VM de aplicação invadida é reconhecimento " +
-			"interno pronto (§23). Ele usa SYN e socket RAW, então a varredura " +
+			"interno pronto. Ele usa SYN e socket RAW, então a varredura " +
 			"quase não deixa conexão ESTABELECIDA para se ver depois — procure o " +
-			"socket de pacote (§2.6) e a CAPABILITY de rede (§3.7), e trate o " +
+			"socket de pacote e a CAPABILITY de rede, e trate o " +
 			"resultado do scan como EXFILTRADO: o inventário sobe para o serviço",
 		Env:   []string{"RUNZERO_"},
 		Paths: []string{"/opt/runzero", "/etc/runzero", "/var/log/runzero.log", "/var/log/runzero.err"},
@@ -123,8 +123,8 @@ var All = []Family{
 		Name: "ngrok",
 		Risk: RiskMedio,
 		Nota: "túnel de INGRESSO: expõe serviço interno para a internet sem abrir " +
-			"porta. Procurar listener (runbook §2) não acha — o rastro é a saída " +
-			"persistente, e a conta usada é IOC de frota (§23)",
+			"porta. Procurar listener não acha — o rastro é a saída " +
+			"persistente, e a conta usada é IOC de frota",
 		Env:   []string{"NGROK_"},
 		Paths: []string{"~/.ngrok2", "~/.config/ngrok", "/etc/ngrok.yml"},
 		Bins:  []string{"ngrok"},
@@ -133,7 +133,7 @@ var All = []Family{
 		Name: "cloudflared",
 		Risk: RiskMedio,
 		Nota: "túnel de ingresso pela Cloudflare: mesmo efeito do ngrok, invisível " +
-			"para varredura de porta. O token identifica a conta e vale como IOC (§23)",
+			"para varredura de porta. O token identifica a conta e vale como IOC",
 		Env:   []string{"TUNNEL_TOKEN", "CLOUDFLARED_"},
 		Paths: []string{"~/.cloudflared", "/etc/cloudflared"},
 		Bins:  []string{"cloudflared"},
@@ -143,7 +143,7 @@ var All = []Family{
 		Risk: RiskMedio,
 		Nota: "proxy reverso que atravessa NAT: o cliente sai, e o servidor do " +
 			"atacante publica a porta. Como o ngrok, não deixa listener local para " +
-			"a §2 encontrar",
+			"o `ss` encontrar",
 		Paths: []string{"/etc/frp", "~/.frpc", "~/.config/frp"},
 		Bins:  []string{"frpc", "frps"},
 	},
@@ -151,8 +151,8 @@ var All = []Family{
 		Name: "Tailscale",
 		Risk: RiskMedio,
 		Nota: "VPN de malha. Uso legítimo é comum; como persistência, dá acesso " +
-			"contínuo por rede paralela que o firewall de borda não vê (§18, §34.3). " +
-			"A chave de autenticação é IOC de frota (§23)",
+			"contínuo por rede paralela que o firewall de borda não vê. " +
+			"A chave de autenticação é IOC de frota",
 		Env:   []string{"TS_AUTHKEY"},
 		Paths: []string{"/var/lib/tailscale", "~/.config/tailscale"},
 		Bins:  []string{"tailscaled", "tailscale"},
@@ -163,7 +163,7 @@ var All = []Family{
 		Name: "rclone",
 		Risk: RiskMedio,
 		Nota: "cliente de armazenamento em nuvem, e a ferramenta padrão de " +
-			"exfiltração em massa: com ele presente, a §37 sai de 'improvável' e " +
+			"exfiltração em massa: com ele presente, a exfiltração sai de 'improvável' e " +
 			"vira 'presumir até provar o contrário'. O DESTINO está na config, não " +
 			"no binário — leia o rclone.conf",
 		Env:   []string{"RCLONE_CONFIG"},
@@ -178,9 +178,9 @@ var All = []Family{
 	{
 		Name: "XMRig",
 		Risk: RiskAlto,
-		Nota: "minerador. É oportunista, não dirigido (runbook §39.1) — mas a rota " +
+		Nota: "minerador. É oportunista, não dirigido — mas a rota " +
 			"de entrada que ele usou é a mesma que outro usaria, e o load do host " +
-			"já denuncia. A carteira e o pool na config são IOC de frota (§23)",
+			"já denuncia. A carteira e o pool na config são IOC de frota",
 		Paths: []string{"/etc/xmrig", "~/.xmrig.json", "~/.config/xmrig"},
 		Bins:  []string{"xmrig", "xmrigDaemon", "xmr-stak"},
 	},

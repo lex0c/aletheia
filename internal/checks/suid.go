@@ -158,17 +158,16 @@ var suidInesperado = check.Check{
 				" tamanho="+strconv.FormatInt(s.Size, 10))
 			if s.ModUTC != "" {
 				ev = append(ev, "modificado em "+s.ModUTC+
-					" — compare com a janela do incidente (runbook §9)")
+					" — compare com a janela do incidente")
 			}
 
 			fd := self.F(sev, s.Path, "", ev...)
 			fd.Quando, fd.QuandoFonte = s.ModUTC, "mtime do arquivo"
 			fd.Irreversible = true
 			fd.NextSteps = []string{
-				"sudo cp " + check.Arg(s.Path) + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
+				"sudo cp " + check.Arg(s.Path) + " \"$IR/\"   # a amostra, antes de qualquer coisa",
 				"`chmod u-s,g-s " + s.Path + "` tira o poder sem apagar a prova",
-				"o mesmo caminho na frota diz se é padrão da casa ou incidente " +
-					"(runbook §23)",
+				"o mesmo caminho na frota diz se é padrão da casa ou incidente",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

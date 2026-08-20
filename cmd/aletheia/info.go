@@ -547,7 +547,7 @@ func escreverCensoDeGit(w io.Writer, c *info.CensoDeGit) {
 	if c.IndexUTC != "" || c.HeadUTC != "" {
 		fmt.Fprintf(w, "TEMPO · índice escrito em %s · HEAD movido em %s\n",
 			report.Safe(nz(c.IndexUTC, "sem data")), report.Safe(nz(c.HeadUTC, "sem data")))
-		fmt.Fprintln(w, "  compare com a janela do incidente (runbook §9)")
+		fmt.Fprintln(w, "  compare com a janela do incidente")
 		fmt.Fprintln(w)
 	}
 

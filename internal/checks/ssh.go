@@ -89,9 +89,9 @@ var sshForcedCommand = check.Check{
 			fd.Quando, fd.QuandoFonte = k.ModUTC, "mtime do authorized_keys"
 			fd.NextSteps = []string{
 				"a impressão digital é IOC de frota: procure a MESMA chave nos " +
-					"outros hosts antes de concluir o alcance (runbook §23)",
+					"outros hosts antes de concluir o alcance",
 				"o ctime do arquivo data a inserção mesmo que o conteúdo pareça " +
-					"antigo (runbook §5.2)",
+					"antigo",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -172,7 +172,7 @@ var sshdBackdoor = check.Check{
 				"declarado em: " + strings.Join(c.Files, " "),
 			}...)
 			fd.NextSteps = []string{
-				"leia as chaves no caminho declarado, não no padrão (runbook §7.5)",
+				"leia as chaves no caminho declarado, não no padrão",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -235,14 +235,14 @@ var sshKeyInventory = check.Check{
 			}
 			if ks[0].ModUTC != "" {
 				ev = append(ev, "arquivo "+ks[0].File+" modificado em "+ks[0].ModUTC+
-					" — o ctime data a inserção mesmo que a chave pareça antiga (§5.2)")
+					" — o ctime data a inserção mesmo que a chave pareça antiga")
 			}
 
 			fd := self.F(check.SevManual, u, "", ev...)
 			fd.NextSteps = []string{
 				"pergunte ao time: alguma dessas chaves não é de ninguém?",
 				"a mesma impressão digital em vários hosts é a mesma pessoa — é o " +
-					"melhor IOC de frota que existe (runbook §23)",
+					"melhor IOC de frota que existe",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

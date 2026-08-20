@@ -43,6 +43,13 @@ func render(r *check.Report, v int) string {
 	return b.String()
 }
 
+// renderCob renderiza com a seção de cobertura VISÍVEL (--coverage).
+func renderCob(r *check.Report) string {
+	var b bytes.Buffer
+	Human(&b, r, testFacts(), testEnv(), Options{Coverage: true})
+	return b.String()
+}
+
 // O load só significa algo com o número de CPUs junto: 8.02 é catastrófico em
 // 2 cpu e normal em 16. Sem o contexto, o alerta vira ruído justamente no sinal
 // de minerador, que é o comprometimento nº 1 em VM de nuvem.
@@ -96,32 +103,33 @@ func TestCompactoNaoCresceComOIncidente(t *testing.T) {
 	}
 }
 
-// O bloco de ação adapta: com crítico, é a ordem do runbook §19, e o passo
-// irreversível vem primeiro.
-func TestBlocoDeAcaoPriorizaPreserve(t *testing.T) {
+// O bloco verboso de ação saiu da view. O que FICA é a salvaguarda que a pressa
+// destrói: um achado irreversível (memfd, binário apagado) tem UMA cópia, e ela
+// some no kill. A view avisa; os comandos, por achado, ficam no -v.
+func TestSalvaguardaDePreservacao(t *testing.T) {
 	fd := f("proc.memfd_exec", "3.16", "pid=6574", check.SevCritical)
 	fd.Irreversible = true
 	fd.NextSteps = []string{"sudo cp /proc/6574/exe \"$IR/pid-6574.bin\""}
 	r := &check.Report{Findings: []check.Finding{fd}, Coverage: check.Coverage{Total: 1, Complete: 1}}
 	out := render(r, 0)
 
-	if !strings.Contains(out, "AGORA, nesta ordem") {
-		t.Errorf("com crítico, o bloco de ação é obrigatório:\n%s", out)
+	if !strings.Contains(out, "preserve ANTES de matar") {
+		t.Errorf("achado irreversível precisa avisar para preservar antes de matar:\n%s", out)
 	}
-	iPreserve := strings.Index(out, "cp /proc/6574/exe")
-	iIsolar := strings.Index(out, "isolar na camada de REDE")
-	if iPreserve < 0 || iIsolar < 0 || iPreserve > iIsolar {
-		t.Error("preservar vem ANTES de isolar: é o único passo irreversível se pulado")
+	// O bloco verboso antigo NÃO volta.
+	if strings.Contains(out, "AGORA, nesta ordem") || strings.Contains(out, "isolar na camada de REDE") {
+		t.Errorf("o bloco verboso saiu da view:\n%s", out)
 	}
-	if !strings.Contains(out, "irreversível") {
-		t.Error("o passo irreversível precisa estar marcado como tal")
+	// O comando de preservação continua acessível — no -v.
+	if !strings.Contains(render(r, 1), "cp /proc/6574/exe") {
+		t.Error("o comando de preservação precisa continuar no -v")
 	}
 }
 
-func TestBlocoDeAcaoSomeSemAchado(t *testing.T) {
+func TestSalvaguardaSomeSemIrreversivel(t *testing.T) {
 	out := render(&check.Report{Coverage: check.Coverage{Total: 3, Complete: 3}}, 0)
-	if strings.Contains(out, "AGORA, nesta ordem") {
-		t.Error("sem achado não há ordem de ação a sugerir")
+	if strings.Contains(out, "preserve ANTES de matar") {
+		t.Error("sem achado irreversível não há o que preservar antes de matar")
 	}
 }
 
@@ -133,9 +141,6 @@ func TestOKNuncaAfirmaHostLimpo(t *testing.T) {
 	}
 	if !strings.Contains(out, "NÃO prova que o host está limpo") {
 		t.Errorf("OK sem a ressalva é a leitura errada que a ferramenta existe para evitar:\n%s", out)
-	}
-	if !strings.Contains(out, "35.8") {
-		t.Error("a ressalva precisa apontar a seção do runbook que a sustenta")
 	}
 }
 
@@ -165,9 +170,37 @@ func TestAritmeticaDaCoberturaFecha(t *testing.T) {
 		Partial:    []check.Partial{{ID: "a"}, {ID: "b"}},
 		NotChecked: []check.NotChecked{{ID: "c", Reason: "sem root"}},
 	}}
-	out := render(r, 0)
+	out := renderCob(r)
 	if !strings.Contains(out, "3/6 completos") || !strings.Contains(out, "2 parciais") || !strings.Contains(out, "1 não verificados") {
 		t.Errorf("a linha de cobertura precisa fechar a conta (completos/parciais/não verificados):\n%s", out)
+	}
+}
+
+// A SEÇÃO de cobertura é oculta por padrão (UX), MAS o NÚMERO fica no resumo —
+// é a invariante da ferramenta: um OK nunca pode esconder "olhei 19 de 104".
+func TestCoberturaOcultaMasNumeroFica(t *testing.T) {
+	r := &check.Report{Coverage: check.Coverage{
+		Total: 104, Complete: 19,
+		Partial: []check.Partial{{ID: "a", Reasons: []string{"sem root"}}},
+	}}
+	out := render(r, 0)
+	if strings.Contains(out, "COBERTURA") {
+		t.Errorf("a SEÇÃO de cobertura deve ficar oculta por padrão:\n%s", out)
+	}
+	if !strings.Contains(out, "cobertura 19/104") {
+		t.Errorf("o NÚMERO de cobertura DEVE ficar no resumo (invariante):\n%s", out)
+	}
+	if !strings.Contains(out, "--coverage") {
+		t.Errorf("cobertura incompleta e oculta precisa da dica --coverage:\n%s", out)
+	}
+	if strings.Contains(render(r, 1), "COBERTURA") {
+		t.Error("o -v sozinho NÃO liga a seção (é evidência, outro eixo)")
+	}
+	if !strings.Contains(render(r, 2), "COBERTURA") {
+		t.Error("-vv (o 'mostra tudo') DEVE ligar a seção")
+	}
+	if !strings.Contains(renderCob(r), "COBERTURA") {
+		t.Error("--coverage deve mostrar a seção")
 	}
 }
 
@@ -177,7 +210,7 @@ func TestLacunaDeColetaTemLinhaPropria(t *testing.T) {
 		Total: 3, Complete: 3,
 		CollectorGaps: []string{"proc: 250 processos com fds ilegíveis (sem permissão)"},
 	}}
-	out := render(r, 0)
+	out := renderCob(r)
 	if !strings.Contains(out, "coleta") || !strings.Contains(out, "250 processos") {
 		t.Errorf("a lacuna de coleta precisa de linha própria:\n%s", out)
 	}
@@ -216,9 +249,13 @@ func TestPromocaoIrreversivelNaoDependeDoTextoDoComando(t *testing.T) {
 	fd.Irreversible = true
 	fd.NextSteps = []string{"sudo dd if=/proc/42/mem of=$IR/x bs=1M count=1"}
 	r := &check.Report{Findings: []check.Finding{fd}, Coverage: check.Coverage{Total: 1, Complete: 1}}
-	out := render(r, 0)
-	if !strings.Contains(out, "irreversível") || !strings.Contains(out, "dd if=/proc/42/mem") {
-		t.Errorf("comando totalmente diferente deve ser promovido pelo campo:\n%s", out)
+	// A salvaguarda dispara pelo CAMPO Irreversible, não por casar o texto: um
+	// comando totalmente diferente ainda avisa. O comando em si fica no -v.
+	if !strings.Contains(render(r, 0), "preserve ANTES de matar") {
+		t.Error("a promoção deve ser pelo campo, não pelo texto do comando")
+	}
+	if !strings.Contains(render(r, 1), "dd if=/proc/42/mem") {
+		t.Error("o comando de preservação precisa estar no -v")
 	}
 }
 
@@ -394,27 +431,6 @@ func TestCabecalhoMostraCotaDeCPU(t *testing.T) {
 	}
 }
 
-// Num implante de verdade três checks disparam no MESMO pid, e cada um
-// contribui o mesmo `cp /proc/N/exe`. O bloco de ação existe para ser a lista
-// curta do que fazer agora — repetir a linha o transforma numa parede.
-func TestBlocoDeAcaoNaoRepeteOMesmoComando(t *testing.T) {
-	mk := func(id string) check.Finding {
-		fd := f(id, "17", "pid=20", check.SevCritical)
-		fd.Irreversible = true
-		fd.NextSteps = []string{"NÃO mate antes de preservar", `sudo cp /proc/20/exe "$IR/pid-20.bin"`}
-		return fd
-	}
-	r := &check.Report{
-		Findings: []check.Finding{mk("correlate.revshell"), mk("proc.kthread_disguise"),
-			mk("proc.suspicious_path")},
-		Coverage: check.Coverage{Total: 3, Complete: 3},
-	}
-	out := render(r, 0)
-	if n := strings.Count(out, "cp /proc/20/exe"); n != 1 {
-		t.Errorf("o mesmo comando apareceu %d vezes:\n%s", n, out)
-	}
-}
-
 // A correlação precisa aparecer no relatório, não só no modelo: é ela que
 // transforma quatro fatos soltos numa história. E cada achado aparece uma vez
 // só — correlacionado OU na compactação por ID, nunca nos dois.
@@ -444,53 +460,6 @@ func TestRelatorioMostraAlvoCorrelacionado(t *testing.T) {
 	// O alvo com um sinal só continua na lista.
 	if !strings.Contains(out, "pid=77") {
 		t.Errorf("o alvo com um sinal só precisa continuar aparecendo:\n%s", out)
-	}
-}
-
-// A deduplicação do bloco de ação é pelo COMANDO, não pela linha: dois checks
-// contribuem o mesmo `cp` com comentários diferentes, e comparar a linha
-// inteira deixava os dois passarem. Foi assim que o defeito voltou depois de
-// corrigido — pela porta do comentário.
-func TestDedupeDoBlocoIgnoraComentario(t *testing.T) {
-	mk := func(id, passo string) check.Finding {
-		fd := f(id, "7", "/usr/local/sbin/x", check.SevCritical)
-		fd.Irreversible = true
-		fd.NextSteps = []string{passo}
-		return fd
-	}
-	r := &check.Report{
-		Findings: []check.Finding{
-			mk("a.b", `sudo cp /usr/local/sbin/x "$IR/"   # o binário é a amostra`),
-			mk("c.d", `sudo cp /usr/local/sbin/x "$IR/"   # a amostra, antes de tudo`),
-		},
-		Coverage: check.Coverage{Total: 2, Complete: 2},
-	}
-	if n := strings.Count(render(r, 0), "cp /usr/local/sbin/x"); n != 1 {
-		t.Errorf("o mesmo comando apareceu %d vezes", n)
-	}
-}
-
-// Quando o primeiro comando de um achado já apareceu, ele precisa contribuir
-// com o PRÓXIMO distinto — não ficar de fora. O passo que se perdia era
-// justamente o `gcore`, que é o único jeito de preservar a memória.
-func TestAcoesNaoPerdemComandoDistinto(t *testing.T) {
-	r := &check.Report{Findings: []check.Finding{
-		{ID: "a", Sev: check.SevCritical, Subject: "pid=10", Irreversible: true,
-			NextSteps: []string{`sudo cp /proc/10/exe "$IR/pid-10.bin"`}},
-		{ID: "b", Sev: check.SevCritical, Subject: "pid=10", Irreversible: true,
-			NextSteps: []string{
-				`sudo cp /proc/10/exe "$IR/pid-10.bin"`,
-				`sudo gcore -o "$IR/pid-10.core" 10`,
-			}},
-	}}
-	var b strings.Builder
-	Human(&b, r, testFacts(), testEnv(), Options{})
-	out := b.String()
-	if !strings.Contains(out, "gcore") {
-		t.Errorf("o comando distinto do segundo achado se perdeu:\n%s", out)
-	}
-	if strings.Count(out, "cp /proc/10/exe") != 1 {
-		t.Errorf("o comando repetido precisa aparecer UMA vez:\n%s", out)
 	}
 }
 
@@ -641,7 +610,7 @@ func TestBlocoDeKernelContraditorioDizOQueFazer(t *testing.T) {
 		KernelTrustBroken: []string{"um PID responde a /proc/<pid> e não apareceu na listagem"},
 	}
 	var b bytes.Buffer
-	writeResult(&b, r)
+	writeResult(&b, temaPara(false), r)
 	got := b.String()
 
 	for _, quer := range []string{

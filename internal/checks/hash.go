@@ -79,7 +79,7 @@ var arquivoDePacoteAlterado = check.Check{
 					sev = check.SevCritical
 					ev = append(ev, "MAS ele EXECUTA: acrescentar uma linha aqui é "+
 						"persistência que mantém o dono de pacote e passa por toda "+
-						"auditoria que só pergunta pela origem (runbook §7.7)")
+						"auditoria que só pergunta pela origem")
 				}
 			}
 			// Biblioteca substituída é a forma do Ebury e do HiddenWasp: o
@@ -88,17 +88,17 @@ var arquivoDePacoteAlterado = check.Check{
 			if strings.HasSuffix(d.Path, ".so") || strings.Contains(d.Path, ".so.") {
 				ev = append(ev, "e é uma BIBLIOTECA: trocá-la põe código do invasor "+
 					"dentro de todo processo que linkar contra ela, sem nenhum "+
-					"processo novo aparecer (runbook §7.8)")
+					"processo novo aparecer")
 			}
 
 			fd := self.F(sev, d.Path, "", ev...)
 			fd.Irreversible = true
 			fd.NextSteps = []string{
-				"sudo cp " + check.Arg(d.Path) + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
+				"sudo cp " + check.Arg(d.Path) + " \"$IR/\"   # a amostra, antes de qualquer coisa",
 				"baixe o pacote " + d.Pacote + " de um espelho e compare os dois " +
 					"binários FORA deste host",
 				"a partir daqui, resposta vinda deste host não vale como prova: " +
-					"o que responde por ela pode ser o arquivo trocado (runbook §35.6)",
+					"o que responde por ela pode ser o arquivo trocado",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -180,7 +180,7 @@ var dataFalsificada = check.Check{
 			fd.Quando, fd.QuandoFonte = t.MetaUTC, "ctime do arquivo (a data que o touch não muda)"
 			fd.NextSteps = []string{
 				"a data de METADADOS é a que vale para a linha do tempo: " +
-					t.MetaUTC + " (runbook §9)",
+					t.MetaUTC,
 				"procure o que mais mudou nessa mesma janela — falsificação " +
 					"costuma vir em lote",
 			}

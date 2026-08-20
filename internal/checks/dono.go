@@ -216,7 +216,7 @@ var donoSemConta = check.Check{
 				"`find / -xdev -" + rotulo[:1] + "id " + strconv.Itoa(d.ID) +
 					" -ls` dá a lista inteira, que este resumo não guarda",
 				"o ctime desses arquivos data quando a identidade ainda existia, " +
-					"e apagar a linha de " + tabela + " não apaga isso (runbook §9)",
+					"e apagar a linha de " + tabela + " não apaga isso",
 			}
 			if !d.Grupo {
 				fd.NextSteps = append(fd.NextSteps,

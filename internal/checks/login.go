@@ -56,7 +56,7 @@ var inventarioDeLogin = check.Check{
 	Requires: env.CapFilesystem,
 	Wtf:      false, // é contexto para investigar, não indicador de incêndio
 	FalsePositives: []string{
-		"não é achado: é o quadro que a §13 manda montar. A ferramenta não sabe " +
+		"não é achado: é o quadro que se deve montar. A ferramenta não sabe " +
 			"quem deveria ter entrado, de onde, nem a que horas — só o time sabe",
 		"o wtmp é ROTACIONADO: o que estiver em wtmp.1 e nos comprimidos não " +
 			"aparece aqui, e um invasor que apaga rastro apaga justamente este " +
@@ -122,7 +122,7 @@ var inventarioDeLogin = check.Check{
 			fd.NextSteps = []string{
 				"confirme com o time cada ORIGEM que ninguém reconhecer",
 				"`last -f /var/log/wtmp.1` e os rotacionados cobrem o período " +
-					"anterior a este (runbook §13)",
+					"anterior a este",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -281,11 +281,11 @@ var forcaBrutaComSucesso = check.Check{
 			fd.Quando, fd.QuandoFonte = quandoEntrou(ss), "registro de login bem-sucedido"
 			fd.Irreversible = true
 			fd.NextSteps = []string{
-				"este endereço e este horário são o começo da linha do tempo (runbook §16)",
+				"este endereço e este horário são o começo da linha do tempo",
 				"tudo que a conta " + ss[0].user + " fez a partir daí precisa ser " +
 					"revisto: chave SSH, sudo, agendamento e histórico de shell",
 				"procure a MESMA origem nos outros hosts antes de concluir o " +
-					"alcance (runbook §23)",
+					"alcance",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -327,9 +327,9 @@ var forcaBrutaComSucesso = check.Check{
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"a credencial de " + u + " deve ser tratada como conhecida: rotacione " +
-					"antes de reconectar qualquer coisa (runbook §16)",
+					"antes de reconectar qualquer coisa",
 				"as origens acima valem como IOC de frota: procure as mesmas nos " +
-					"outros hosts (runbook §23)",
+					"outros hosts",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

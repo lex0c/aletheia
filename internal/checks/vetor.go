@@ -166,7 +166,7 @@ var backendExposto = check.Check{
 			}
 			fd := self.F(check.SevWarn, a.ip+":"+strconv.Itoa(a.porta), "", ev...)
 			fd.NextSteps = []string{
-				"o bind correto para backend atrás de proxy é 127.0.0.1 (runbook §15)",
+				"o bind correto para backend atrás de proxy é 127.0.0.1",
 				"confirme de fora: o que responde nesta porta a partir de outro host?",
 				"enquanto isso, a proteção que mora no proxy — WAF, autenticação, " +
 					"limite de taxa — não vale para quem chega direto",
@@ -264,12 +264,12 @@ var vetorPorUsuario = check.Check{
 					"serviços que escutam COM O MESMO uid, e portanto são candidatos "+
 						"a porta de entrada: "+strings.Join(corta(svc, 4), " · "),
 					"os serviços de OUTRO usuário provavelmente não são o vetor: um "+
-						"RCE neles daria o uid deles, não este (runbook §14)")
+						"RCE neles daria o uid deles, não este")
 			} else {
 				ev = append(ev,
 					"NENHUM serviço escuta com este uid neste host: a entrada "+
 						"provavelmente não foi por rede local — olhe credencial "+
-						"válida, movimentação lateral e agendamento (runbook §12)")
+						"válida, movimentação lateral e agendamento")
 			}
 			r.Findings = append(r.Findings, self.F(check.SevInfo,
 				"uid "+strconv.Itoa(uid), "", ev...))

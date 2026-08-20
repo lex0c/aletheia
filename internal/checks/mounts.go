@@ -98,7 +98,7 @@ var montagemSobreSistema = check.Check{
 					"montagem)",
 				"`cat /proc/self/mountinfo` guardado agora é a prova: ela some no reboot",
 				"a partir daqui, listagem de arquivo deste caminho não vale como " +
-					"prova (runbook §35.6)",
+					"prova",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

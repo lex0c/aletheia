@@ -121,7 +121,7 @@ var taintSemDono = check.Check{
 					"module .* tainted'` nomeia o módulo, enquanto o buffer o tiver",
 				"compare a lista de módulos com a de um host irmão do mesmo papel",
 				"procure o arquivo do módulo fora do lugar: /tmp, /dev/shm, " +
-					"/var/tmp e o home de quem tem sudo (runbook §7.12)",
+					"/var/tmp e o home de quem tem sudo",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -144,8 +144,7 @@ var taintSemDono = check.Check{
 					"a remoção",
 			}...)
 			fd.NextSteps = []string{
-				"`dmesg | grep -i rmmod` e o histórico de shell de quem tem sudo " +
-					"(runbook §21)",
+				"`dmesg | grep -i rmmod` e o histórico de shell de quem tem sudo",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

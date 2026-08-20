@@ -46,7 +46,7 @@ func (t Tema) pintaSev(s check.Severity, txt string) string {
 	case check.SevWarn:
 		return "\x1b[33m" + txt + "\x1b[0m" // amarelo
 	default:
-		return "\x1b[2m" + txt + "\x1b[0m" // esmaecido
+		return "\x1b[90m" + txt + "\x1b[0m" // cinza
 	}
 }
 
@@ -64,11 +64,16 @@ func (t Tema) negrito(s string) string {
 	return "\x1b[1m" + s + "\x1b[0m"
 }
 
+// fraco é a informação SECUNDÁRIA — evidência, ação, contagem, cobertura. Usa
+// cinza (SGR 90, "bright black"), não dim (SGR 2): dim é do espec antigo mas
+// muitos terminais o renderizam IDÊNTICO ao normal, então a hierarquia some
+// justamente onde importa. Cinza é o que git/npm usam para dica, é visível de
+// verdade, e degrada para normal no terminal que não o conhece.
 func (t Tema) fraco(s string) string {
 	if !t.cor {
 		return s
 	}
-	return "\x1b[2m" + s + "\x1b[0m"
+	return "\x1b[90m" + s + "\x1b[0m"
 }
 
 // regua é a linha separadora — ASCII puro, para não virar lixo em console antigo.

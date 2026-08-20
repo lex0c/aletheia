@@ -116,7 +116,7 @@ var shellDeServico = check.Check{
 				ev = append(ev, "e o shell gerou: "+strings.Join(filhos, " · "))
 			}
 			if hasPTY(p) {
-				ev = append(ev, "com PTY: há um humano digitando do outro lado (runbook §13)")
+				ev = append(ev, "com PTY: há um humano digitando do outro lado")
 			}
 
 			fd := self.F(check.SevCritical, "pid="+strconv.Itoa(p.PID), "", ev...)
@@ -124,9 +124,9 @@ var shellDeServico = check.Check{
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"a linhagem é a evidência: preserve a árvore inteira antes de matar " +
-					"qualquer um (runbook §6)",
+					"qualquer um",
 				preservarPID(e, p.PID),
-				"o PAI é o vetor de entrada: a §16 começa por ele, não pelo shell",
+				"o PAI é o vetor de entrada: a linha do tempo começa por ele, não pelo shell",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -184,7 +184,7 @@ var ptyDeServico = check.Check{
 			}
 			if p.StartUTC != "" {
 				ev = append(ev, "início="+p.StartUTC+" — confira contra o horário de "+
-					"trabalho e o wtmp (runbook §13)")
+					"trabalho e o wtmp")
 			}
 
 			fd := self.F(check.SevWarn, "pid="+strconv.Itoa(p.PID), "", ev...)
@@ -192,7 +192,7 @@ var ptyDeServico = check.Check{
 			fd.NextSteps = []string{
 				"pergunte ao time se alguém estava trabalhando como este usuário " +
 					"nesse horário",
-				"o histórico dessa sessão está no home da conta (runbook §13)",
+				"o histórico dessa sessão está no home da conta",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

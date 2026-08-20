@@ -576,7 +576,7 @@ func (e *Env) probeCaps() {
 				"builtin, e consultá-los faria o kernel AUTOCARREGAR módulo (request_module) "+
 				"— alteração de estado do host, que esta ferramenta evita. Use "+
 				"--allow-kernel-autoload para permitir; sem isso, a divergência /proc/net × "+
-				"netlink do §35.5 NÃO foi verificada")
+				"netlink NÃO foi verificada")
 		case e.PermitirAutoload:
 			// Com o autoload LIBERADO, o programa que o kernel executa para
 			// carregar o módulo volta a importar: um /proc/sys/kernel/modprobe

@@ -48,7 +48,7 @@ var socketDeCaptura = check.Check{
 	Optional: env.CapRoot,
 	Wtf:      false, // é contexto para investigar, não indicador de incêndio
 	FalsePositives: []string{
-		"não é achado: é o quadro que a §2.6 manda montar. Cliente de DHCP, " +
+		"não é achado: é o quadro que se deve montar. Cliente de DHCP, " +
 			"wpa_supplicant, NetworkManager e ferramenta de diagnóstico usam " +
 			"exatamente isto — num desktop com wifi são três, sempre de root",
 		"ETH_P_ALL não é assinatura de sniffer sozinho: o cliente de DHCP da ISC " +

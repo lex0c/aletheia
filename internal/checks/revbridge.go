@@ -127,11 +127,11 @@ var revshellBridge = check.Check{
 				fd.Irreversible = true
 				fd.NextSteps = []string{
 					"NÃO mate antes de preservar: o canal vive nos DOIS processos, e " +
-						"matar um destrói o que o outro explica (runbook §6)",
+						"matar um destrói o que o outro explica",
 					preservarPID(e, s.PID),
 					preservarPID(e, bpid),
 					"isolar na camada de REDE, não no host — e não bloqueie só o IP: " +
-						"C2 por relay não tem IP fixo (runbook §18)",
+						"C2 por relay não tem IP fixo",
 				}
 				r.Findings = append(r.Findings, fd)
 			}

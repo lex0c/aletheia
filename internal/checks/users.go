@@ -60,9 +60,9 @@ var uidZero = check.Check{
 			fd := self.F(check.SevCritical, a.Name, "", ev...)
 			fd.NextSteps = []string{
 				"o ctime de /etc/passwd data a criação, mesmo que a conta pareça " +
-					"antiga (runbook §9)",
+					"antiga",
 				"procure a mesma conta na frota: criação em vários hosts é campanha, " +
-					"não incidente isolado (runbook §23)",
+					"não incidente isolado",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -118,7 +118,7 @@ var semSenha = check.Check{
 			fd := self.F(sev, a.Name, "", ev...)
 			fd.NextSteps = []string{
 				"`passwd -l " + a.Name + "` tranca a conta sem removê-la",
-				"o ctime de /etc/shadow data a alteração (runbook §9)",
+				"o ctime de /etc/shadow data a alteração",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -172,7 +172,7 @@ var contaDeServicoComShell = check.Check{
 			fd := self.F(check.SevWarn, a.Name, "", ev...)
 			fd.NextSteps = []string{
 				"compare com outro host da frota: a mesma conta com nologin lá " +
-					"confirma a alteração aqui (runbook §23)",
+					"confirma a alteração aqui",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -388,9 +388,9 @@ var sudoSemSenha = check.Check{
 				"`sudo -l -U " + quem + "` mostra o que a regra concede de verdade, " +
 					"já resolvendo alias e herança de grupo",
 				"o ctime do arquivo data a inserção mesmo que o conteúdo pareça " +
-					"antigo (runbook §9)",
+					"antigo",
 				"compare com outro host da frota: a mesma regra em vários é " +
-					"provisionamento; em um só, é alteração (runbook §23)",
+					"provisionamento; em um só, é alteração",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

@@ -40,7 +40,7 @@ var credencialEmArquivo = check.Check{
 	Optional: env.CapRoot,
 	Wtf:      false, // é alcance, não incêndio
 	FalsePositives: []string{
-		"não é achado: é o raio de alcance, para dimensionar a §23. Servidor de " +
+		"não é achado: é o raio de alcance, para dimensionar o incidente. Servidor de " +
 			"aplicação TEM credencial de aplicação — é assim que ele funciona",
 		"permissão frouxa tem explicação legítima quando o arquivo é lido por " +
 			"vários serviços do mesmo host, e o desenho previu isso",
@@ -81,15 +81,14 @@ var credencialEmArquivo = check.Check{
 			if s.ModUTC != "" {
 				ev = append(ev, "modificada em "+s.ModUTC)
 			}
-			ev = append(ev, "o alcance dela é o que um invasor herda ao chegar aqui "+
-				"(runbook §23)")
+			ev = append(ev, "o alcance dela é o que um invasor herda ao chegar aqui")
 
 			fd := self.F(sev, s.Path, "", ev...)
 			fd.NextSteps = []string{
 				"se o host for tratado como comprometido, esta credencial também é: " +
 					"rotacione antes de reconectar qualquer coisa",
 				"o registro de uso da nuvem diz se ela foi USADA de outro lugar, e é " +
-					"a única fonte que responde isso (runbook §10.4)",
+					"a única fonte que responde isso",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

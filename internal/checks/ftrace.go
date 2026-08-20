@@ -167,7 +167,7 @@ var hookDeEnumeracao = check.Check{
 				"pergunte ao time se alguém está diagnosticando este host com " +
 					"bpftrace, perf ou agente que use eBPF",
 				"a partir daqui, NADA que dependa da função interceptada vale como " +
-					"prova vindo deste host: analise a imagem DE FORA (runbook §35.6)",
+					"prova vindo deste host: analise a imagem DE FORA",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -193,7 +193,7 @@ var funcoesDeEnumeracao = map[string]string{
 	"packet_rcv":    "captura de pacote: interceptar isto esconde TRÁFEGO de quem escuta",
 	"tpacket_rcv":   "captura de pacote: interceptar isto esconde TRÁFEGO de quem escuta",
 
-	"kill":                "envio de sinal: é o canal de comando de rootkit que não abre porta (runbook §35.3)",
+	"kill":                "envio de sinal: é o canal de comando de rootkit que não abre porta",
 	"kill_something_info": "envio de sinal: é o canal de comando de rootkit que não abre porta",
 
 	"proc_readdir":   "listagem de /proc: interceptar isto esconde PROCESSO",

@@ -81,9 +81,9 @@ var contaSemShadow = check.Check{
 				"`getent shadow " + a.Name + "` confirma a ausência já resolvendo " +
 					"diretório central, se houver",
 				"o ctime de /etc/passwd data a inserção, mesmo que a conta pareça " +
-					"antiga (runbook §9)",
+					"antiga",
 				"procure a mesma conta na frota: em vários hosts é provisionamento, " +
-					"num só é incidente (runbook §23)",
+					"num só é incidente",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

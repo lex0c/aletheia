@@ -96,9 +96,9 @@ var helperDoKernel = check.Check{
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"guarde o valor atual antes de mexer: `cat " + h.Fonte + "`",
-				"sudo cp " + check.Arg(h.Alvo) + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
+				"sudo cp " + check.Arg(h.Alvo) + " \"$IR/\"   # a amostra, antes de qualquer coisa",
 				"compare com outro host da frota: o mesmo valor em vários é " +
-					"provisionamento; em um só, é alteração (runbook §23)",
+					"provisionamento; em um só, é alteração",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

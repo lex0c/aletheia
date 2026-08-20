@@ -61,7 +61,7 @@ COMANDOS
 
 FLAGS DE scan E wtf
   --root PATH   analisar uma imagem montada read-only em vez do host vivo.
-                Ali o kernel é o SEU: ocultamento de arquivo não acontece (§35.6)
+                Ali o kernel é o SEU: ocultamento de arquivo não acontece
   --json FILE   JSONL; "-" = stdout. NUNCA afetado pela verbosidade
   --baseline F  compara com a baseline em F: o que já estava lá desce um nível
                 de severidade e CONTINUA no relatório, com a data
@@ -75,10 +75,10 @@ FLAGS DE scan E wtf
 
 FLAGS DE scan
   --ioc FILE    casa os indicadores DESTE incidente contra o que foi coletado
-                (§23). Aceita "ips: [a, b]", bloco com "- item", ou um indicador
+               . Aceita "ips: [a, b]", bloco com "- item", ou um indicador
                 por linha; o tipo é deduzido pela forma quando não vem dito.
                 Achado por indicador é CRÍTICO — e vale o que a lista valer
-  --since S     janela de investigação (§9): instante (2026-04-30T18:00Z,
+  --since S     janela de investigação: instante (2026-04-30T18:00Z,
                 2026-04-30) ou duração (72h, 7d). O que tem data e cai FORA sai
                 do relatório e é CONTADO; o que não tem data FICA
   --only G,G    escopo por subsistema: proc net persist priv integrity kernel app cloud ioc
@@ -91,6 +91,7 @@ FLAGS DE scan
                 declarados; contêiner rodando, >2 MB e ofuscado seguem de fora.
                 Mais caro — combine com --fs-budget e --ignore
   --mode M      auto | manual
+  --coverage    mostrar a seção de cobertura (causas e gaps); o NÚMERO já fica no resumo
   -v, -vv       evidência por achado / + INFO e detalhe de cobertura
 
 FLAGS DE watch
@@ -161,7 +162,7 @@ FLAGS DE preserve
                 apagado, e é a ÚNICA cópia quando ele veio de memfd. Repetível
   --file PATH   preserva um arquivo comum. Repetível
   --bpf ID      preserva o bytecode do programa eBPF: não existe arquivo para
-                copiar, e ele some no próximo boot (§8). Repetível
+                copiar, e ele some no próximo boot. Repetível
   --mem         dump do que só existe na MEMÓRIA dos --pid: regiões anônimas
                 (código injetado) E o código de arquivo APAGADO ainda mapeado
                 (dlopen+unlink), que o disco não tem mais. Sem ptrace: não para o
@@ -176,7 +177,7 @@ FLAGS DE preserve
                 interface" mistura enlaces no mesmo arquivo, e um pcap rotulado
                 errado é decodificado com confiança total a partir do byte errado
   --host IP     filtro: só este endereço, como origem OU destino. IP, não nome:
-                resolver DNS avisa o atacante (§2.1)
+                resolver DNS avisa o atacante
   --port N      filtro: só esta porta, em TCP e em UDP
   --proto P     filtro: tcp | udp | icmp
   --all         capturar SEM filtro. Precisa ser pedido: tráfego bruto carrega
@@ -193,7 +194,7 @@ FLAGS DE preserve
   incompleta.
 
   Se houver eBPF hostil em xdp/tc, a captura MENTE: o pacote é escondido antes
-  do socket (§35.4). O modo promíscuo não é ligado — seria alterar o estado da
+  do socket. O modo promíscuo não é ligado — seria alterar o estado da
   interface, e a §2.6 trata interface promíscua como achado.
 
   O manifesto traz o hash da ORIGEM e o da CÓPIA. Divergência não é erro de
@@ -217,12 +218,12 @@ EXIT CODES
 
 LIMITES — leia antes de confiar num resultado limpo
   * "RESULT: OK" significa que nenhum indicador COBERTO disparou. Não é prova
-    de host limpo: rootkit em kernel mente para todos os checks (runbook §35).
+    de host limpo: rootkit em kernel mente para todos os checks.
   * Read-only: não mata processo, não apaga arquivo, não altera regra ou serviço.
     Só o subcomando preserve escreve, e apenas em --out.
-  * Sem rede e sem DNS: consulta avisa o atacante (runbook §2.1).
+  * Sem rede e sem DNS: consulta avisa o atacante.
   * Este binário vira artefato na sua timeline: é um ELF estático, fora de
-    pacote, com ctime de agora. Registre caminho e hash no war log (§39.3).
+    pacote, com ctime de agora. Registre caminho e hash no war log.
 `
 
 func main() {
@@ -321,20 +322,20 @@ func relatarTempoDeColeta(e *env.Env, f *facts.Facts, inicio, fim time.Time) {
 	if total < 3*time.Second {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "\ncoleta levou %s — onde o tempo foi:\n", total.Round(time.Second))
+	var partes []string
 	for _, t := range e.Timings(fim) {
 		if t.Dur < 100*time.Millisecond {
 			continue
 		}
-		linha := fmt.Sprintf("  %-24s %s", t.Nome, t.Dur.Round(time.Millisecond))
+		p := t.Nome + " " + t.Dur.Round(time.Millisecond).String()
 		if t.Nome == "varredura de filesystem" && f.SuidArquivos > 0 {
-			linha += fmt.Sprintf("  (%d arquivos em %d diretórios)", f.SuidArquivos, f.SuidDirs)
+			p += fmt.Sprintf(" (%d arq)", f.SuidArquivos)
 		}
-		fmt.Fprintln(os.Stderr, linha)
+		partes = append(partes, p)
 	}
+	fmt.Fprintf(os.Stderr, "\ncoleta %s — %s\n", total.Round(time.Second), strings.Join(partes, " · "))
 	if f.SuidArquivos > 200000 {
-		fmt.Fprintln(os.Stderr, "  → varredura pesada. `scan --fs-budget 30s` a limita "+
-			"no tempo, e a lacuna do que faltou é declarada")
+		fmt.Fprintln(os.Stderr, "  → varredura pesada; `scan --fs-budget 30s` limita no tempo")
 	}
 }
 
@@ -452,7 +453,7 @@ func runWtf(args []string) int {
 	if *oneline {
 		report.Oneline(out, r)
 	} else {
-		report.Wtf(out, r, f, e, elapsed, len(check.All()), bl)
+		report.Wtf(out, r, f, e, elapsed, len(check.All()), bl, corHabilitada(out))
 	}
 
 	return writeJSONL(jsonFH, r.Exit(), r, f, e, bl, nil, nil)
@@ -468,6 +469,7 @@ func runScan(args []string, wtf bool) int {
 		jsonOut  = fs.String("json", "", "escrever JSONL em FILE ('-' = stdout)")
 		verbose  = fs.Bool("v", false, "evidência por achado")
 		verbose2 = fs.Bool("vv", false, "+ INFO e detalhe de cobertura")
+		coverage = fs.Bool("coverage", false, "mostrar a seção de cobertura (causas e gaps)")
 		base     = fs.String("baseline", "", "comparar com a baseline em FILE")
 		iocFile  = fs.String("ioc", "", "casar os indicadores DESTE incidente, do arquivo FILE")
 		since    = fs.String("since", "", "janela de investigação: instante (2026-04-30T18:00Z) ou duração (72h, 7d)")
@@ -567,15 +569,19 @@ func runScan(args []string, wtf bool) int {
 	// dois tornava `scan --json - > out.jsonl` um arquivo inválido, que é como a
 	// agregação de frota consome a saída.
 	prog.Stop() // a linha some antes do relatório nascer
-	relatarTempoDeColeta(e, f, coletaInicio, coletaFim)
-	return emitir(r, f, e, saida{
+	code = emitir(r, f, e, saida{
 		baseline: *base,
 		janela:   janela,
 		ioc:      lista,
 		jsonOut:  *jsonOut,
 		jsonFH:   jsonFH,
 		verbose:  nivel(*verbose, *verbose2),
+		coverage: *coverage,
 	})
+	// O timing vem DEPOIS do relatório: a identidade do host é a primeira coisa
+	// que o operador quer ver, não o profiling da coleta. Vira rodapé no stderr.
+	relatarTempoDeColeta(e, f, coletaInicio, coletaFim)
+	return code
 }
 
 // aplicarJanela recorta o relatório e monta o que precisa ser DITO sobre o

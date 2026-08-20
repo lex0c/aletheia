@@ -111,10 +111,10 @@ var hookDeInterpretador = check.Check{
 
 			fd := self.F(pior, fonte, "", ev...)
 			fd.NextSteps = []string{
-				"leia o ALVO antes de remover a variável: é ele que executa, e é a amostra (runbook §6)",
+				"leia o ALVO antes de remover a variável: é ele que executa, e é a amostra",
 				"`grep -rn " + hs[0].Key + " /etc /home` — quem define uma costuma definir mais de uma",
 				"em servidor de produção, pergunte que deploy precisa disto: a resposta " +
-					"costuma ser nenhuma (runbook §7.8)",
+					"costuma ser nenhuma",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

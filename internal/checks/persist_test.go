@@ -246,7 +246,7 @@ func TestTimerSoDisparaEmIntervaloCurto(t *testing.T) {
 	if len(r.Findings) != 1 || r.Findings[0].Subject != "b.timer" {
 		t.Fatalf("achados = %v — só o intervalo curto é a forma do beacon", r.Findings)
 	}
-	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "§2.7") {
+	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "correlacion") {
 		t.Error("o achado precisa mandar correlacionar com a janela estendida")
 	}
 }
@@ -286,7 +286,7 @@ func TestEnvToolMarkerEntregaAFamilia(t *testing.T) {
 		t.Fatalf("achados = %d, quer 1 (uma família por processo)", len(r.Findings))
 	}
 	ev := strings.Join(r.Findings[0].Evidence, " ")
-	for _, quer := range []string{"GSocket", "relay", "§18.1"} {
+	for _, quer := range []string{"GSocket", "relay"} {
 		if !strings.Contains(ev, quer) {
 			t.Errorf("falta %q — o nome só vale se disser o que ele MUDA:\n%s", quer, ev)
 		}

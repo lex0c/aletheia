@@ -157,7 +157,7 @@ var persistRedundant = check.Check{
 				ev = append(ev, "  "+m+": "+strings.Join(porMec[m], " · "))
 			}
 			ev = append(ev, "software de pacote se agenda de UM jeito. Persistir-se de "+
-				"vários é proteção contra a SUA limpeza (runbook §19)")
+				"vários é proteção contra a SUA limpeza")
 			if !f.Pkg.Consultavel {
 				ev = append(ev, "atenção: não foi possível confirmar se algum pacote "+
 					"reivindica este alvo ("+f.Pkg.Motivo+")")
@@ -172,9 +172,9 @@ var persistRedundant = check.Check{
 			fd := self.F(sev, alvo, "", ev...)
 			fd.NextSteps = []string{
 				"remova TODOS os mecanismos antes de matar o processo: sobrando um, " +
-					"ele volta (runbook §19)",
-				"a lista acima é o roteiro de limpeza — e depois dela, `atq` (runbook §7.4)",
-				"sudo cp " + check.Arg(alvo) + " \"$IR/\"   # o binário é a amostra (runbook §6)",
+					"ele volta",
+				"a lista acima é o roteiro de limpeza — e depois dela, `atq`",
+				"sudo cp " + check.Arg(alvo) + " \"$IR/\"   # o binário é a amostra",
 			}
 			fd.Irreversible = true
 			r.Findings = append(r.Findings, fd)

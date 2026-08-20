@@ -437,7 +437,7 @@ func montarCaptura(ligada bool, iface, host string, porta int, proto string,
 		a, err := netip.ParseAddr(host)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "preserve --pcap: --host %q não é um endereço IP. "+
-				"Nome não é aceito de propósito: resolver DNS avisa o atacante (§2.1)\n", host)
+				"Nome não é aceito de propósito: resolver DNS avisa o atacante\n", host)
 			return nil, 3
 		}
 		o.Filtro.Host = a
@@ -477,11 +477,11 @@ func avisoDaCaptura(w io.Writer, o pcap.Opcoes) {
 	fmt.Fprintf(w, "CAPTURANDO em %s por %s · %s\n",
 		report.Safe(o.Iface), o.Duracao, report.Safe(o.Filtro.Descricao()))
 	fmt.Fprintln(w, "  Se houver eBPF hostil em xdp/tc, ESTA CAPTURA MENTE: o pacote é")
-	fmt.Fprintln(w, "  escondido antes de chegar ao socket (§35.4). Captura confiável é")
-	fmt.Fprintln(w, "  espelhamento FORA desta máquina (§2.6).")
+	fmt.Fprintln(w, "  escondido antes de chegar ao socket. Captura confiável é")
+	fmt.Fprintln(w, "  espelhamento FORA desta máquina.")
 	fmt.Fprintln(w, "  O .pcap sai BRUTO: em tráfego sem TLS ele contém credencial em claro.")
 	fmt.Fprintln(w, "  Enquanto isto roda, um scan neste host vê um socket AF_PACKET — é este")
-	fmt.Fprintln(w, "  processo, e não um sniffer (§2.6). O modo promíscuo NÃO foi ligado.")
+	fmt.Fprintln(w, "  processo, e não um sniffer. O modo promíscuo NÃO foi ligado.")
 	fmt.Fprintln(w)
 }
 

@@ -88,7 +88,7 @@ var confiancaHostBased = check.Check{
 			fd.NextSteps = []string{
 				"leia o arquivo: cada linha é um host (ou host+usuário) que entra sem senha",
 				"host-based trust depende de rsh/rlogin ou de pam_rhosts — confira se " +
-					"o serviço está ativo (runbook §7.5); mesmo inativo, o arquivo é " +
+					"o serviço está ativo; mesmo inativo, o arquivo é " +
 					"reativado ao subir o serviço",
 				"se ninguém reconhecer as máquinas listadas, remova o arquivo e rotacione " +
 					"o acesso da conta",
@@ -153,7 +153,7 @@ var caPlantada = check.Check{
 			fd.NextSteps = []string{
 				"pergunte ao time de quem é esta CA antes de tratar como achado",
 				"se ninguém a instalou, TODO tráfego TLS deste host desde a data " +
-					"acima é suspeito — inclusive update de pacote (runbook §16)",
+					"acima é suspeito — inclusive update de pacote",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -227,8 +227,8 @@ var hostsOverride = check.Check{
 			fd := self.F(sev, dominios[0], "", ev...)
 			fd.NextSteps = []string{
 				"confira se há CA plantada junto: as duas coisas formam um MITM " +
-					"completo e silencioso (runbook §7.12)",
-				"o ctime do arquivo data a alteração (runbook §9)",
+					"completo e silencioso",
+				"o ctime do arquivo data a alteração",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -279,7 +279,7 @@ var cloudMetadata = check.Check{
 		ev := []string{
 			"este host executa script vindo do metadata da instância",
 			"nenhum check deste catálogo alcança isso: não há arquivo, cron nem unit",
-			"roda como ROOT a cada boot — inclusive depois de trocar o disco (runbook §27)",
+			"roda como ROOT a cada boot — inclusive depois de trocar o disco",
 		}
 		if len(agentes) > 0 {
 			ev = append(ev, "quem executa: "+strings.Join(dedupeStr(agentes), " "))
@@ -293,8 +293,8 @@ var cloudMetadata = check.Check{
 			"GCP: curl -s -H 'Metadata-Flavor: Google' " +
 				"'http://169.254.169.254/computeMetadata/v1/instance/attributes/startup-script'",
 			"AWS: curl -s http://169.254.169.254/latest/user-data",
-			"a alteração aparece no audit da nuvem (runbook §10.4); se a credencial " +
-				"da instância vazou, confira ANTES de declarar o host limpo (§10.5)",
+			"a alteração aparece no audit da nuvem; se a credencial " +
+				"da instância vazou, confira ANTES de declarar o host limpo",
 		}
 		r.Findings = append(r.Findings, fd)
 		return r

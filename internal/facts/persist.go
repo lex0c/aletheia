@@ -73,7 +73,7 @@ type Unit struct {
 	Kind string `json:"kind"` // service | timer | socket | path | mount | …
 
 	// Scope separa unit de sistema de unit de USUÁRIO: a segunda roda no login
-	// e é o esconderijo da §7.3.
+	// e é um esconderijo comum.
 	Scope string `json:"scope"` // system | user
 
 	// Vendor marca a unit que veio de pacote (/usr/lib, /lib) contra a que
@@ -624,7 +624,7 @@ func collectUnits(f *Facts, e *env.Env) {
 	homes := homeDirs(e)
 	if len(homes) == 0 {
 		f.denyPersist("unit", "/etc/passwd ilegível ou vazio: nenhum home foi "+
-			"vasculhado, e unit de usuário é o esconderijo da §7.3")
+			"vasculhado, e unit de usuário é um esconderijo comum")
 	}
 	var negados []string
 	for _, home := range homes {

@@ -88,7 +88,7 @@ func Processo(f *facts.Facts, pid int) *Dossie {
 	if p.Exe != "" && argv0 != "" && !mesmaCoisa(p.Exe, argv0) {
 		identidade = append(identidade, Linha{"⚠ divergência",
 			"o nome que ele se dá não bate com o executável",
-			"o `ps` mostra o argv, que o processo escolhe; o exe é o que o kernel diz (§3.3)"})
+			"o `ps` mostra o argv, que o processo escolhe; o exe é o que o kernel diz"})
 	}
 	d.bloco("IDENTIDADE", identidade...)
 
@@ -98,7 +98,7 @@ func Processo(f *facts.Facts, pid int) *Dossie {
 		Linha{"estado", p.State, notaDoEstado(p.State)},
 		Linha{"threads", numeroOuVazio(p.Threads), ""},
 		Linha{"teto de processos", tetoTexto(p.NProcMax), "RLIMIT_NPROC conta processos E threads do uid"},
-		Linha{"cgroup", p.Cgroup, "é o que diz QUAL serviço o gerou, mesmo depois de daemonizar (§3.11)"},
+		Linha{"cgroup", p.Cgroup, "é o que diz QUAL serviço o gerou, mesmo depois de daemonizar"},
 	)
 
 	// Linhagem: o pai é o vetor de entrada, e a §16 do runbook começa por ele.
@@ -114,7 +114,7 @@ func Processo(f *facts.Facts, pid int) *Dossie {
 			nz(pp.Exe, pp.Comm) + " · " + linhaCurta(pp), ""})
 		pai = pp.PPID
 	}
-	d.bloco("LINHAGEM (o pai é o vetor de entrada, §16)", linhagem...)
+	d.bloco("LINHAGEM (o pai é o vetor de entrada)", linhagem...)
 
 	// Rede: é aqui que "com quem ele fala" deixa de ser um `lsof` na mão.
 	var rede []Linha
@@ -198,7 +198,7 @@ func IP(f *facts.Facts, addr string) *Dossie {
 	for _, h := range f.Hosts {
 		if h.IP == addr {
 			disco = append(disco, Linha{"/etc/hosts", h.IP + " " + strings.Join(h.Names, " "),
-				"um nome apontado para cá NÃO passa por DNS (§7.12)"})
+				"um nome apontado para cá NÃO passa por DNS"})
 			d.Achou = true
 		}
 	}
@@ -211,7 +211,7 @@ func IP(f *facts.Facts, addr string) *Dossie {
 	for _, k := range f.Destinos {
 		if strings.Contains(k.Host, addr) {
 			disco = append(disco, Linha{"known_hosts", k.Arquivo,
-				"este host JÁ se conectou lá: é alcance, e entra na §12.4"})
+				"este host JÁ se conectou lá: é alcance lateral"})
 			d.Achou = true
 		}
 	}
@@ -220,7 +220,7 @@ func IP(f *facts.Facts, addr string) *Dossie {
 	if !d.Achou {
 		d.Sinais = append(d.Sinais, "nenhum socket, nome ou chave menciona este "+
 			"endereço nesta coleta. Conexão de vida curta não aparece num retrato "+
-			"único — para isso existe o `watch` (§2.7)")
+			"único — para isso existe o `watch`")
 		return d
 	}
 	if escopo == string(facts.ScopePublic) {
@@ -228,8 +228,8 @@ func IP(f *facts.Facts, addr string) *Dossie {
 	}
 	d.Proximo = []string{
 		"aletheia scan --ioc <(echo ips: [" + check.Arg(addr) + "])   # o mesmo endereço no resto do que foi coletado",
-		"e nos OUTROS hosts da frota: é assim que se acha a segunda máquina (§23)",
-		"o volume que passou não está no host: veja `aletheia checks | grep exfil` (§37.2)",
+		"e nos OUTROS hosts da frota: é assim que se acha a segunda máquina",
+		"o volume que passou não está no host: veja `aletheia checks | grep exfil`",
 	}
 	return d
 }
@@ -280,11 +280,11 @@ func Porta(f *facts.Facts, n int) *Dossie {
 		d.Sinais = append(d.Sinais, "todas as "+strconv.Itoa(locais)+" conexões "+
 			"estabelecidas vêm do LOOPBACK: na prática quem usa este serviço está "+
 			"dentro do host. Se ele escuta fora do loopback, quem vier de fora fala "+
-			"direto com ele e não passa pelo proxy (§15)")
+			"direto com ele e não passa pelo proxy")
 	}
 	d.Proximo = []string{
 		"aletheia info process <pid>   # o dossiê de quem abriu",
-		"e a pergunta do §14: que outros serviços rodam com o MESMO usuário? " +
+		"e a pergunta: que outros serviços rodam com o MESMO usuário? " +
 			"só eles podem ser o mesmo vetor",
 	}
 	return d
@@ -316,14 +316,14 @@ func Arquivo(f *facts.Facts, caminho string) *Dossie {
 			proc2 = append(proc2, Linha{"pacote", o.Pacote, "quem entregou este arquivo"})
 		} else {
 			proc2 = append(proc2, Linha{"pacote", "NENHUM",
-				"nenhum pacote reivindica este arquivo (§24): a pergunta vira 'quem instalou?'"})
+				"nenhum pacote reivindica este arquivo: a pergunta vira 'quem instalou?'"})
 		}
 	}
 	for _, h := range f.HashDiff {
 		if h.Path == caminho {
 			d.Achou = true
 			proc2 = append(proc2, Linha{"hash", "NÃO confere com o que o pacote " + h.Pacote + " declara",
-				"o arquivo foi alterado depois de instalado (§24)"})
+				"o arquivo foi alterado depois de instalado"})
 		}
 	}
 	for _, ok := range f.HashOK {
@@ -345,7 +345,7 @@ func Arquivo(f *facts.Facts, caminho string) *Dossie {
 		}
 		if s.CapPerm != 0 {
 			poder = append(poder, Linha{"capabilities", "0x" + strconv.FormatUint(s.CapPerm, 16),
-				"capability em xattr substitui o SUID e não aparece num `find -perm` (§3.7)"})
+				"capability em xattr substitui o SUID e não aparece num `find -perm`"})
 		}
 	}
 	for _, a := range f.Atributos {
@@ -359,7 +359,7 @@ func Arquivo(f *facts.Facts, caminho string) *Dossie {
 				atributos = append(atributos, "só anexa (a)")
 			}
 			poder = append(poder, Linha{"atributo de inode", strings.Join(atributos, ", "),
-				"o imutável faz a remoção FALHAR até alguém rodar chattr -i (§21)"})
+				"o imutável faz a remoção FALHAR até alguém rodar chattr -i"})
 		}
 	}
 	d.bloco("PODER E TRAVAS", poder...)
@@ -377,7 +377,7 @@ func Arquivo(f *facts.Facts, caminho string) *Dossie {
 		}
 		executadoPorRoot = append(executadoPorRoot, Linha{a.Origem, a.Onde, nota})
 	}
-	d.bloco("O ROOT EXECUTA ISTO (§36.4)", executadoPorRoot...)
+	d.bloco("O ROOT EXECUTA ISTO", executadoPorRoot...)
 
 	var agendado []Linha
 	for i := range f.Cron {
@@ -404,7 +404,7 @@ func Arquivo(f *facts.Facts, caminho string) *Dossie {
 	}
 	d.Proximo = []string{
 		"sudo aletheia preserve --out \"$IR\" --file " + check.Arg(caminho),
-		"e as datas: o ctime não é falsificável com `touch`, o mtime é (§5.2)",
+		"e as datas: o ctime não é falsificável com `touch`, o mtime é",
 	}
 	return d
 }
@@ -412,19 +412,19 @@ func Arquivo(f *facts.Facts, caminho string) *Dossie {
 func sinaisDoProcesso(p *facts.Process) []string {
 	var out []string
 	if p.ExeMemfd {
-		out = append(out, "execução FILELESS: o binário nunca esteve em disco (§3.16)")
+		out = append(out, "execução FILELESS: o binário nunca esteve em disco")
 	}
 	if p.ExeDeleted && !p.ExeMemfd {
 		out = append(out, "o executável foi APAGADO do disco e o processo continua "+
-			"rodando: matá-lo destrói a única cópia (§3.14)")
+			"rodando: matá-lo destrói a única cópia")
 	}
 	if p.TracerPID != 0 {
 		out = append(out, "está sob ptrace do pid "+strconv.Itoa(p.TracerPID)+
-			": alguém controla a memória dele (§3.7)")
+			": alguém controla a memória dele")
 	}
 	if len(p.MapsRWX) > 0 {
 		out = append(out, strconv.Itoa(len(p.MapsRWX))+" região(ões) de memória "+
-			"gravável e executável (§3.10)")
+			"gravável e executável")
 	}
 	if p.NProcMax > 0 && p.Threads >= p.NProcMax {
 		out = append(out, "as threads DESTE processo já alcançam o teto do uid: "+
@@ -436,9 +436,9 @@ func sinaisDoProcesso(p *facts.Process) []string {
 func notaDoExe(p *facts.Process) string {
 	switch {
 	case p.ExeMemfd:
-		return "memória anônima: nunca houve arquivo (§3.16)"
+		return "memória anônima: nunca houve arquivo"
 	case p.ExeDeleted:
-		return "APAGADO do disco, ainda aberto pelo processo (§3.14)"
+		return "APAGADO do disco, ainda aberto pelo processo"
 	case p.ExeDenied:
 		return "ilegível sem privilégio: rode como root"
 	}

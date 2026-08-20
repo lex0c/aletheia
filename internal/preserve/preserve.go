@@ -324,7 +324,7 @@ func notaDaCaptura(i pcap.Interface, o pcap.Opcoes, st pcap.Estatisticas) string
 		strconv.Itoa(st.Descartados) + " descartados pelo kernel"
 	n += " · " + st.Parou
 	if i.Promiscua {
-		n += " · a interface JÁ ESTAVA em modo promíscuo antes desta captura (§2.6): " +
+		n += " · a interface JÁ ESTAVA em modo promíscuo antes desta captura: " +
 			"isto não foi feito por esta ferramenta"
 	}
 	if st.SemRelogioDoKernel {

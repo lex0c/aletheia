@@ -82,9 +82,9 @@ var initramfsHook = check.Check{
 			fd.NextSteps = []string{
 				"guarde o arquivo antes de mexer: sudo cp " + check.Arg(a.Path) + " \"$IR/\"",
 				"compare com outro host da frota: o mesmo hook em vários é " +
-					"provisionamento; em um só, é alteração (runbook §23)",
+					"provisionamento; em um só, é alteração",
 				"e confira a IMAGEM já gerada — este check lê os scripts de geração, " +
-					"não o initramfs compactado (runbook §29)",
+					"não o initramfs compactado",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

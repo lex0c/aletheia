@@ -73,8 +73,7 @@ var chavePrivadaSemSenha = check.Check{
 			if c.ModUTC != "" {
 				ev = append(ev, "modificada em "+c.ModUTC)
 			}
-			ev = append(ev, "o alcance dela é o que um invasor herda ao chegar aqui "+
-				"(runbook §23)")
+			ev = append(ev, "o alcance dela é o que um invasor herda ao chegar aqui")
 
 			fd := self.F(sev, c.Path, "", ev...)
 			fd.Quando, fd.QuandoFonte = c.ModUTC, "mtime do arquivo de chave"
@@ -111,7 +110,7 @@ var alcanceDoHost = check.Check{
 	Optional: env.CapRoot,
 	Wtf:      false,
 	FalsePositives: []string{
-		"não é achado: é o raio de alcance, para dimensionar a §23. Um bastion " +
+		"não é achado: é o raio de alcance, para dimensionar o incidente. Um bastion " +
 			"tem centenas de destinos legitimamente",
 		"`HashKnownHosts` embaralha o nome do destino, e é o padrão em várias " +
 			"distribuições. Nessas o destino não é recuperável — mas a CONTAGEM " +
@@ -165,12 +164,12 @@ var alcanceDoHost = check.Check{
 					"dizendo o tamanho do alcance")
 			}
 			ev = append(ev, "é isto que dimensiona a busca na frota: um invasor que "+
-				"chegou aqui herda o caminho para cada um deles (runbook §23)")
+				"chegou aqui herda o caminho para cada um deles")
 
 			fd := self.F(check.SevManual, a, "", ev...)
 			fd.NextSteps = []string{
 				"cada destino precisa ser varrido também, e com a MESMA janela de " +
-					"tempo (runbook §23)",
+					"tempo",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -241,8 +240,8 @@ var historicoDesligado = check.Check{
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"o que já foi digitado NÃO está aqui: procure em wtmp, no journal e " +
-					"no que a auditoria tiver (runbook §13)",
-				"o ctime do link data a decisão de apagar o rastro (runbook §9)",
+					"no que a auditoria tiver",
+				"o ctime do link data a decisão de apagar o rastro",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -276,8 +275,7 @@ var historicoDesligado = check.Check{
 					"se o arquivo existe",
 			)
 			fd.NextSteps = []string{
-				"o que foi digitado não está aqui: procure no journal e na auditoria " +
-					"(runbook §13)",
+				"o que foi digitado não está aqui: procure no journal e na auditoria",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -306,7 +304,7 @@ var historicoDesligado = check.Check{
 				}
 				fd := self.F(check.SevWarn, t.File, "", ev...)
 				fd.NextSteps = []string{
-					"o ctime do arquivo data a inserção (runbook §9)",
+					"o ctime do arquivo data a inserção",
 					"pergunte ao time: desligar histórico é prática de quem digita " +
 						"segredo, e também de quem não quer deixar rastro",
 				}

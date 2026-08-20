@@ -48,7 +48,7 @@ var semDonoDePacote = check.Check{
 		"software instalado por outro gerenciador (snap, flatpak, pip, npm, cargo) " +
 			"não aparece na base do sistema e cai aqui legitimamente",
 		"a pergunta é feita só sobre o que está RODANDO ou AGENDADO. Um binário " +
-			"largado em disco e nunca executado não entra — isso é a §8, e ela " +
+			"largado em disco e nunca executado não entra — isso " +
 			"exige varredura de filesystem",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
@@ -103,8 +103,8 @@ var semDonoDePacote = check.Check{
 			fd.NextSteps = []string{
 				"pergunte QUEM instalou antes de tratar como achado: instalação " +
 					"manual legítima é comum",
-				"sudo cp " + check.Arg(o.Path) + " \"$IR/\"   # a amostra, antes de qualquer coisa (runbook §6)",
-				"com o binário em mãos, a §5.10 diz a FAMÍLIA — e o nome muda a " +
+				"sudo cp " + check.Arg(o.Path) + " \"$IR/\"   # a amostra, antes de qualquer coisa",
+				"com o binário em mãos, o catálogo diz a FAMÍLIA — e o nome muda a " +
 					"prioridade do resto da resposta",
 			}
 			r.Findings = append(r.Findings, fd)

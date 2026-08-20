@@ -104,7 +104,7 @@ var auditoriaNeutralizada = check.Check{
 			)
 			fd.Irreversible = true
 			fd.NextSteps = []string{
-				"o ctime do arquivo data o desligamento (runbook §9)",
+				"o ctime do arquivo data o desligamento",
 				"tudo que aconteceu depois dessa data não tem registro de execução",
 				"NÃO religue antes de preservar: `auditctl -e 1` muda o estado que " +
 					"é a própria evidência",

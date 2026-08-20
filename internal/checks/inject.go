@@ -46,7 +46,7 @@ var mapsRWXAnon = check.Check{
 			"empacotado cai aqui",
 		"BLIND SPOT do descarte acima: código injetado DENTRO de uma JVM ou de um " +
 			"processo Node não é visto por este check. Para esses, o sinal é o " +
-			"proc.tracer e a §29 (dump de memória)",
+			"proc.tracer e o dump de memória",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
@@ -109,14 +109,14 @@ var mapsRWXAnon = check.Check{
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"o código só existe na memória deste processo: matá-lo destrói a " +
-					"única cópia (runbook §29)",
+					"única cópia",
 				// `--mem` dumpa as regiões ANÔNIMAS sem ptrace — sem parar o
 				// processo e sem escrever TracerPid, que é o que o `gcore`
 				// recomendado aqui antes fazia. As regiões rwx entram primeiro,
 				// caso o teto corte a coleta.
 				preservarPID(e, p.PID, "--mem"),
-				"o binário em disco não explica o que está rodando — compare com " +
-					"a §24 antes de concluir que o pacote está íntegro",
+				"o binário em disco não explica o que está rodando — compare com a base de pacotes " +
+					"antes de concluir que o pacote está íntegro",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -195,7 +195,7 @@ var mapsExecAnon = check.Check{
 			"sistema, dono de pacote). Num não-JIT, região executável rotulada conta " +
 			"como qualquer injeção — o rótulo roubado não protege",
 		"BLIND SPOT: em runtime com JIT de kernel antigo, injeção DENTRO dele " +
-			"não é distinguível daqui — o sinal para esses é o proc.tracer e a §29",
+			"não é distinguível daqui — o sinal para esses é o proc.tracer e o dump de memória",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
@@ -293,10 +293,10 @@ var mapsExecAnon = check.Check{
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"o código só existe na memória deste processo: matá-lo destrói a " +
-					"única cópia (runbook §29)",
+					"única cópia",
 				preservarPID(e, p.PID, "--mem"),
 				"compare a região com o que o binário em disco explica antes de " +
-					"concluir que o pacote está íntegro (runbook §24)",
+					"concluir que o pacote está íntegro",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -393,7 +393,7 @@ var mapeamentoApagado = check.Check{
 						check.SevWarn,
 						"biblioteca carregada de memória anônima (memfd): este código "+
 							"NUNCA esteve em disco, e não há o que o find ache nem o "+
-							"que o pacote compare (runbook §3.16)"))
+							"que o pacote compare"))
 					continue
 				}
 				if m.Verificado && m.Recriado {
@@ -433,7 +433,7 @@ var mapeamentoApagado = check.Check{
 			)
 			fd.NextSteps = []string{
 				"o que está em disco NÃO é o que está rodando: hash de arquivo não " +
-					"responde por estes processos (runbook §24)",
+					"responde por estes processos",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -476,7 +476,7 @@ func achadoDeMapaApagado(self check.Check, e *env.Env, p *facts.Process,
 	fd.Irreversible = true
 	fd.NextSteps = []string{
 		"o arquivo não existe mais: a cópia está na memória do processo, e " +
-			"matá-lo a destrói (runbook §6)",
+			"matá-lo a destrói",
 		// `--mem` passou a capturar o SEGMENTO DE CÓDIGO do arquivo apagado
 		// direto de /proc/<pid>/mem, além das regiões anônimas: a aquisição do
 		// payload deixou de ser manual.
@@ -606,8 +606,8 @@ var nsDivergent = check.Check{
 			fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 			fd.NextSteps = []string{
 				"olhe de DENTRO: sudo nsenter -t " + strconv.Itoa(p.PID) + " -a ls -la /",
-				"o `find` da §8 e o `ss` da §2 não enxergam o que está aqui — descarte " +
-					"isto antes de concluir rootkit (runbook §35)",
+				"o `find` e o `ss` de fora não enxergam o que está aqui — descarte " +
+					"isto antes de concluir rootkit",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

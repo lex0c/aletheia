@@ -90,11 +90,11 @@ var suspiciousPath = check.Check{
 			fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 			fd.Irreversible = true
 			fd.NextSteps = []string{
-				"preserve o binário ANTES de qualquer coisa (runbook §6) — em tmpfs " +
+				"preserve o binário ANTES de qualquer coisa — em tmpfs " +
 					"ele some no reboot, e em /tmp o systemd-tmpfiles o apaga sozinho",
 				preservarPID(e, p.PID),
 				"identifique a FAMÍLIA antes de mitigar: o nome da ferramenta define o " +
-					"raio de alcance (runbook §5.10)",
+					"raio de alcance",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

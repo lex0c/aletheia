@@ -20,6 +20,12 @@ type Options struct {
 	Verbose int  // 0 = decisão, 1 = investigação, 2 = + INFO e detalhe
 	Color   bool // reservado; o padrão é texto puro para caber em ticket
 
+	// Coverage mostra a SEÇÃO de cobertura (as causas e os gaps de coleta). Por
+	// padrão ela fica oculta — mas o NÚMERO (cobertura X/Y) continua no resumo
+	// do topo e alimenta o veredito INCOMPLETE e o "não prova host limpo". A
+	// invariante "não olhei ≠ não há" vive no número; só o detalhe é opcional.
+	Coverage bool
+
 	// Baseline descreve a referência usada, quando houve uma. Nil = nenhuma.
 	Baseline *BaselineInfo
 
@@ -111,7 +117,7 @@ type BaselineInfo struct {
 // incidente.
 func Human(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, o Options) {
 	t := temaPara(o.Color)
-	writeHeader(w, f, e)
+	writeHeader(w, t, f, e)
 	writeAnalise(w, o.Analise)
 	writeBaseline(w, o.Baseline)
 	writeJanela(w, o.Janela)
@@ -120,11 +126,15 @@ func Human(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, o Options) 
 	// O CORPO é a lista de decisão: veredito, uma linha por entidade que precisa
 	// de atenção (id local, entidade, o que é — sem §ref, sem prosa), o contexto
 	// resumido e o que fazer AGORA. O operador escaneia, não lê.
-	writeSumario(w, t, r)
+	// A SEÇÃO de cobertura sai com --coverage OU com -vv (o "mostra tudo"). O -v
+	// sozinho NÃO a liga — ele é evidência por achado, um eixo diferente. O
+	// número fica sempre no resumo: o default é enxuto sem esconder a invariante.
+	mostrarCob := o.Coverage || o.Verbose >= 2
+	writeSumario(w, t, r, mostrarCob)
 	itens := itensDeFoco(r)
 	writeFoco(w, t, itens)
 	writeContext(w, t, r)
-	writeNextSteps(w, r)
+	writeNextSteps(w, t, r)
 
 	// O DETALHE — evidência por entidade — é do investigador, e só sai no -v,
 	// abaixo da régua. O default fica escaneável.
@@ -136,43 +146,52 @@ func Human(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, o Options) 
 		writeVerbose(w, t, r, o)
 	}
 
-	writeCoverage(w, t, r, o)
-	writeResult(w, r)
+	if mostrarCob {
+		writeCoverage(w, t, r, o)
+	}
+	writeResult(w, t, r)
 }
 
-func writeHeader(w io.Writer, f *facts.Facts, e *env.Env) {
+func writeHeader(w io.Writer, t Tema, f *facts.Facts, e *env.Env) {
 	h := f.Host
-	var b strings.Builder
-	b.WriteString(Safe(nz(h.Hostname, "host-desconhecido")))
+	// O HOSTNAME é a identidade — a primeira pergunta do operador ("que host é
+	// este?"). Vem em NEGRITO; kernel, OS e uptime são contexto e saem
+	// esmaecidos. O load é contexto também, mas vira SINAL quando alto (>1.5×
+	// cpu): aí sai em amarelo, porque é o rastro nº 1 de minerador — e SEMPRE
+	// com o número de cpus, que 8.02 é catástrofe em 2 cpu e normal em 16.
+	var ctx []string
 	if h.Kernel != "" {
-		b.WriteString(" · " + Safe(h.Kernel))
+		ctx = append(ctx, Safe(h.Kernel))
 	}
 	if h.OS != "" {
-		b.WriteString(" · " + Safe(h.OS))
+		ctx = append(ctx, Safe(h.OS))
 	}
 	if h.Virt != "" {
-		b.WriteString(" · " + Safe(h.Virt))
+		ctx = append(ctx, Safe(h.Virt))
 	}
 	if h.Uptime != "" {
-		b.WriteString(" · up " + Safe(h.Uptime))
+		ctx = append(ctx, "up "+Safe(h.Uptime))
+	}
+	linha := t.negrito(Safe(nz(h.Hostname, "host-desconhecido")))
+	if len(ctx) > 0 {
+		linha += t.fraco(" · " + strings.Join(ctx, " · "))
 	}
 	if h.Load1 > 0 || h.NumCPU > 0 {
-		// load SEMPRE com o número de CPUs: 8.02 é catastrófico em 2 cpu e
-		// normal em 16. Sem o contexto, o alerta vira ruído justamente no
-		// sinal de minerador.
-		l := fmt.Sprintf(" · load %.2f (%d cpu%s)", h.Load1, h.NumCPU, cotaStr(h))
+		lc := fmt.Sprintf("load %.2f (%d cpu%s)", h.Load1, h.NumCPU, cotaStr(h))
 		if h.NumCPU > 0 && h.Load1 > float64(h.NumCPU)*1.5 {
-			l += " ⚠"
+			linha += " · " + t.pintaSev(check.SevWarn, lc+" ⚠")
+		} else {
+			linha += t.fraco(" · " + lc)
 		}
-		b.WriteString(l)
 	}
-	fmt.Fprintln(w, b.String())
+	fmt.Fprintln(w, linha)
 
-	// Safe também na versão da ferramenta: num `analyze`, ela vem do DUMP —
-	// que é dado do alvo, e portanto escolhido por quem controlava o host.
-	fmt.Fprintf(w, "relógio %s · %s · modo %s · aletheia %s\n",
+	// A linha de meta — relógio, instante, modo, versão — é toda secundária.
+	// Safe na versão: num `analyze` ela vem do DUMP, dado escolhido por quem
+	// controlava o host.
+	fmt.Fprintln(w, t.fraco(fmt.Sprintf("relógio %s · %s · modo %s · aletheia %s",
 		e.Clock, e.Now.Format("2006-01-02T15:04:05Z"), e.Source,
-		Safe(nz(e.ToolVersion, "dev")))
+		Safe(nz(e.ToolVersion, "dev")))))
 	fmt.Fprintln(w)
 }
 
@@ -234,7 +253,7 @@ func writeVerbose(w io.Writer, t Tema, r *check.Report, o Options) {
 			fmt.Fprintln(w)
 			lastSev = first.Sev
 		}
-		cab := t.etiqueta(first.Sev) + "  " + t.negrito(Safe(first.ID))
+		cab := t.pintaSev(first.Sev, t.etiqueta(first.Sev)) + "  " + t.negrito(Safe(first.ID))
 		if g.N() > 1 {
 			cab += t.fraco(" ×" + strconv.Itoa(g.N()))
 		}
@@ -258,12 +277,12 @@ func writeVerbose(w io.Writer, t Tema, r *check.Report, o Options) {
 					fmt.Fprintf(w, "       %s\n", t.fraco("…"))
 					break
 				}
-				fmt.Fprintln(w, "       "+t.fraco(Safe(corta(ev, 110))))
+				fmt.Fprintln(w, "       "+Safe(ev))
 			}
 		}
 		// A AÇÃO fica (é operacional), uma vez por check. FP só no -vv.
 		for _, ns := range first.NextSteps {
-			fmt.Fprintln(w, "   -> "+Safe(ns))
+			fmt.Fprintln(w, t.fraco("   -> "+Safe(ns)))
 		}
 		if o.Verbose >= 2 && len(first.FalsePositives) > 0 {
 			fmt.Fprintln(w, "   "+t.fraco("FP: "+Safe(strings.Join(first.FalsePositives, " · "))))
@@ -274,66 +293,32 @@ func writeVerbose(w io.Writer, t Tema, r *check.Report, o Options) {
 
 // writeNextSteps adapta: com crítico, é a ordem do runbook §19; só com aviso,
 // vira "revise antes de agir"; sem nada, some.
-func writeNextSteps(w io.Writer, r *check.Report) {
-	crit, warn, _, _ := r.Counts()
-	if crit == 0 && warn == 0 {
-		return
-	}
-
-	if crit == 0 {
-		fmt.Fprintln(w, "Revise os avisos antes de agir.")
-		fmt.Fprintln(w)
-		return
-	}
-
-	fmt.Fprintln(w, "AGORA, nesta ordem:")
-	n := 1
-	// O passo irreversível vem primeiro. A seleção é pelo campo Irreversible,
-	// não por casar o texto do comando: acoplar por string faz uma reescrita
-	// inocente silenciar o passo que não pode ser pulado, com todos os testes
-	// continuando verdes.
-	// Deduplicado por COMANDO, não por achado: num implante de verdade, três
-	// checks disparam no mesmo PID e cada um contribui o mesmo `cp /proc/N/exe`.
-	// Repetir a linha três vezes transforma uma lista de ações numa parede — e
-	// o bloco existe justamente para ser a lista curta do que fazer AGORA.
-	// A chave da deduplicação é o COMANDO, não a linha: dois checks podem
-	// contribuir o mesmo `cp` com comentários diferentes, e comparar a linha
-	// inteira deixaria os dois passarem. Foi como este defeito voltou depois de
-	// corrigido — pela porta do comentário.
-	var cmds []string
-	vistos := map[string]bool{}
+func writeNextSteps(w io.Writer, t Tema, r *check.Report) {
+	// O bloco verboso de ação saiu da view — ele repetia o mesmo `cp` por achado
+	// e virava parede. Fica SÓ a salvaguarda que a pressa destrói: preservar a
+	// amostra ANTES de matar o processo. memfd e binário apagado têm UMA cópia,
+	// e ela some no kill; os comandos, por achado, estão no -v.
+	//
+	// O gatilho é o campo Irreversible, não o texto do comando: acoplar por
+	// string faria uma reescrita inocente calar o passo que não pode ser pulado,
+	// com todos os testes verdes.
+	temIrrev := false
 	for _, fd := range r.Irreversible() {
 		for _, ns := range fd.NextSteps {
-			if !strings.HasPrefix(ns, "sudo ") {
-				continue
+			if strings.HasPrefix(ns, "sudo ") {
+				temIrrev = true
+				break
 			}
-			chave := strings.TrimSpace(ns)
-			if i := strings.Index(chave, "#"); i > 0 {
-				chave = strings.TrimSpace(chave[:i])
-			}
-			if vistos[chave] {
-				// `continue`, não `break`: o achado ainda pode contribuir com um
-				// comando DIFERENTE mais adiante na lista dele. Interromper aqui
-				// fazia um achado cujo primeiro passo já apareceu não contribuir
-				// com nada — e o passo perdido costuma ser o `gcore`, que é o
-				// único jeito de preservar a memória antes de matar.
-				continue
-			}
-			vistos[chave] = true
-			cmds = append(cmds, ns)
+		}
+		if temIrrev {
 			break
 		}
 	}
-	for i, c := range cmds {
-		if i >= 3 {
-			fmt.Fprintf(w, "     (…e mais %d comandos de preservação — veja -v)\n", len(cmds)-3)
-			break
-		}
-		fmt.Fprintf(w, "  %d. %s   ← irreversível se pulado\n", n, Safe(c))
-		n++
+	if !temIrrev {
+		return
 	}
-	fmt.Fprintf(w, "  %d. isolar na camada de REDE, não no host\n", n)
-	fmt.Fprintf(w, "  %d. remover persistência ANTES de matar\n", n+1)
+	fmt.Fprintln(w, t.negrito("preserve ANTES de matar")+
+		t.fraco(" — há passo irreversível; aletheia help"))
 	fmt.Fprintln(w)
 }
 
@@ -357,17 +342,10 @@ func writeCoverage(w io.Writer, t Tema, r *check.Report, o Options) {
 	}
 	fmt.Fprintln(w, cab)
 
-	// -v: a lista por check, completa (a auditoria a fundo).
+	// -v: agrupado, não uma parede. parcial inverte para CAUSA -> checks; coleta
+	// agrupa por coletor e colapsa a cláusula que se repete. Ver cobertura.go.
 	if o.Verbose > 0 {
-		for _, nc := range c.NotChecked {
-			fmt.Fprintf(w, "  não verificado  %s — %s\n", Safe(nc.ID), Safe(nc.Reason))
-		}
-		for _, g := range dedupe(c.CollectorGaps) {
-			fmt.Fprintln(w, "  coleta          "+Safe(g))
-		}
-		for _, p := range c.Partial {
-			fmt.Fprintf(w, "  parcial         %s — %s\n", Safe(p.ID), Safe(strings.Join(p.Reasons, " · ")))
-		}
+		writeCoberturaDetalhe(w, t, c, o.Verbose)
 		fmt.Fprintln(w)
 		return
 	}
@@ -438,15 +416,22 @@ func mencionaRoot(s string) bool {
 		strings.Contains(l, "permiss") || strings.Contains(l, "privilég")
 }
 
-func writeResult(w io.Writer, r *check.Report) {
+func writeResult(w io.Writer, t Tema, r *check.Report) {
 	crit, warn, manual, _ := r.Counts()
 	v := r.Verdict()
-	fmt.Fprintf(w, "RESULT: %s", v)
+	// Mesma cor do veredito do topo: OK verde, WARNING amarelo, CRITICAL
+	// vermelho. Só em TTY — em arquivo/pipe sai "RESULT: X" cru, e a unicidade
+	// dessa linha (uma só, no fim) continua sendo a invariante anti-forja.
+	vc := t.pintaSev(sevDoVerdict(v), v)
+	if v == "OK" {
+		vc = t.verde(v)
+	}
+	fmt.Fprintf(w, "RESULT: %s", vc)
 
 	switch v {
 	case "OK":
 		fmt.Fprintf(w, " — %d/%d checks. Nenhum indicador coberto disparou.\n", r.Coverage.Complete, r.Coverage.Total)
-		fmt.Fprintln(w, "        Isto NÃO prova que o host está limpo (runbook §35.8).")
+		fmt.Fprintln(w, "        Isto NÃO prova que o host está limpo.")
 	case "INCOMPLETE":
 		miss := r.Coverage.Total - r.Coverage.Complete
 		switch {
@@ -456,7 +441,7 @@ func writeResult(w io.Writer, r *check.Report) {
 			fmt.Fprintf(w, " — 0 achados, mas a coleta não conseguiu ler tudo (%d lacunas).\n",
 				len(r.Coverage.CollectorGaps))
 		}
-		fmt.Fprintln(w, "        Isto NÃO é o mesmo que host limpo (runbook §35.8).")
+		fmt.Fprintln(w, "        Isto NÃO é o mesmo que host limpo.")
 	default:
 		// A contagem já saiu no sumário do topo; aqui a linha fecha o veredito
 		// sem repeti-la. (crit/warn/manual ficam para o -v da automação via JSONL.)
@@ -490,7 +475,7 @@ func writeResult(w io.Writer, r *check.Report) {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "  Daqui em diante nenhuma conclusão NEGATIVA deste host vale sobre este")
 		fmt.Fprintln(w, "  host. Varra a IMAGEM de fora (`aletheia scan --root`), onde o kernel")
-		fmt.Fprintln(w, "  é o seu, e adquira a memória pelo hipervisor se ele existir (§35.6).")
+		fmt.Fprintln(w, "  é o seu, e adquira a memória pelo hipervisor se ele existir.")
 	}
 }
 

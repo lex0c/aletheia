@@ -81,7 +81,7 @@ var procLdPreload = check.Check{
 					// A variável é HERDADA: quem a definiu costuma ser o pai, e
 					// é lá que está o gatilho.
 					ev = append(ev, "ppid="+strconv.Itoa(p.PPID)+
-						" — a variável é herdada: o gatilho costuma estar no pai (runbook §7.6)")
+						" — a variável é herdada: o gatilho costuma estar no pai")
 				}
 				if n := descendentesComEnv(f, p.PID, k, v); n > 0 {
 					ev = append(ev, strconv.Itoa(n)+" processos descendentes herdaram: "+
@@ -91,7 +91,7 @@ var procLdPreload = check.Check{
 				fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 				fd.Irreversible = true
 				fd.NextSteps = []string{
-					"preserve a lib antes de matar o processo: ela é a amostra (runbook §6)",
+					"preserve a lib antes de matar o processo: ela é a amostra",
 					"sudo cp " + check.Arg(v) + " \"$IR/\"",
 					"ache quem DEFINIU: environ do pai, ~/.bashrc, /etc/environment, drop-in de unit",
 				}
@@ -196,10 +196,10 @@ var envToolMarker = check.Check{
 				fd := self.F(sevDoRisco(fam.Risk), "pid="+strconv.Itoa(p.PID), "", ev...)
 				fd.Quando, fd.QuandoFonte = p.StartUTC, "início do processo"
 				fd.NextSteps = []string{
-					"leia a §5.10 com o nome em mãos: ele muda a PRIORIDADE do resto " +
+					"o nome em mãos muda a PRIORIDADE do resto " +
 						"da resposta, não só o diagnóstico",
 					"capacidade não é prova de uso — o veredito de exfiltração continua " +
-						"sendo a §37.7, e pode ser INDETERMINADO",
+						"em aberto, e pode ser INDETERMINADO",
 				}
 				r.Findings = append(r.Findings, fd)
 				reportados[fam.Name] = true

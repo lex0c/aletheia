@@ -26,22 +26,24 @@ const maxWtfLinhas = 8
 // o `scan` quando ele REALMENTE acrescenta — mandar o operador repetir trabalho
 // que não muda nada é o mesmo tipo de mentira que a ferramenta evita nos
 // achados.
-func Wtf(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, elapsed time.Duration, catalogo int, bl *BaselineInfo) {
-	writeWtfHeader(w, f, e)
+func Wtf(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, elapsed time.Duration, catalogo int, bl *BaselineInfo, cor bool) {
+	t := temaPara(cor)
+	writeWtfHeader(w, t, f, e)
 	writeBaseline(w, bl)
 
 	sobra := catalogo - r.Coverage.Total
 
 	if len(r.Findings) == 0 {
-		fmt.Fprintf(w, "✓ nenhum indicador decisivo em %d checks (%s)\n", r.Coverage.Total, dur(elapsed))
-		fmt.Fprintln(w, "  isto NÃO significa host limpo (runbook §35.8)."+maisChecks(sobra))
+		fmt.Fprintln(w, t.verde(fmt.Sprintf("✓ nenhum indicador decisivo em %d checks (%s)",
+			r.Coverage.Total, dur(elapsed))))
+		fmt.Fprintln(w, t.fraco("  isto NÃO significa host limpo."+maisChecks(sobra)))
 		fmt.Fprintln(w)
 	} else {
-		writeWtfFindings(w, r)
+		writeWtfFindings(w, t, r)
 	}
 
-	writeWtfGaps(w, r)
-	writeWtfResult(w, r, elapsed, sobra)
+	writeWtfGaps(w, t, r)
+	writeWtfResult(w, t, r, elapsed, sobra)
 }
 
 func maisChecks(sobra int) string {
@@ -51,34 +53,41 @@ func maisChecks(sobra int) string {
 	return " Para o resto: aletheia scan (+" + strconv.Itoa(sobra) + " checks)"
 }
 
-func writeWtfHeader(w io.Writer, f *facts.Facts, e *env.Env) {
+func writeWtfHeader(w io.Writer, t Tema, f *facts.Facts, e *env.Env) {
 	h := f.Host
-	var b strings.Builder
-	b.WriteString(Safe(nz(h.Hostname, "host-desconhecido")))
+	// Mesma hierarquia do scan: hostname em NEGRITO (a identidade), kernel/virt/
+	// uptime em cinza (contexto). O load é contexto até ficar alto — aí é o
+	// rastro nº 1 de minerador e sai em amarelo. Sempre com o nº de cpus: 8.02
+	// é catástrofe em 2 e rotina em 16.
+	var ctx []string
 	if h.Kernel != "" {
-		b.WriteString(" · " + Safe(h.Kernel))
+		ctx = append(ctx, Safe(h.Kernel))
 	}
 	if h.Virt != "" {
-		b.WriteString(" · " + Safe(h.Virt))
+		ctx = append(ctx, Safe(h.Virt))
 	}
 	if h.Uptime != "" {
-		b.WriteString(" · up " + Safe(h.Uptime))
+		ctx = append(ctx, "up "+Safe(h.Uptime))
+	}
+	linha := t.negrito(Safe(nz(h.Hostname, "host-desconhecido")))
+	if len(ctx) > 0 {
+		linha += t.fraco(" · " + strings.Join(ctx, " · "))
 	}
 	if h.NumCPU > 0 {
-		// Minerador aparece aqui na hora, e é o comprometimento nº 1 em VM de
-		// nuvem. Sempre com o número de CPUs: 8.02 é catástrofe em 2 e rotina
-		// em 16.
-		b.WriteString(fmt.Sprintf(" · load %.2f %.2f %.2f (%d cpu%s)",
-			h.Load1, h.Load5, h.Load15, h.NumCPU, cotaStr(h)))
+		lc := fmt.Sprintf("load %.2f %.2f %.2f (%d cpu%s)",
+			h.Load1, h.Load5, h.Load15, h.NumCPU, cotaStr(h))
 		if h.Load1 > float64(h.NumCPU)*1.5 {
-			b.WriteString(" ⚠")
+			linha += " · " + t.pintaSev(check.SevWarn, lc+" ⚠")
+		} else {
+			linha += t.fraco(" · " + lc)
 		}
 	}
-	fmt.Fprintln(w, b.String())
+	fmt.Fprintln(w, linha)
 
-	// Relógio primeiro: sem ele, todo horário abaixo é frágil (runbook §9).
-	fmt.Fprintf(w, "relógio %s · %s · %s\n\n",
-		e.Clock, e.Now.Format("2006-01-02T15:04:05Z"), contagens(f))
+	// Relógio primeiro: sem ele, todo horário abaixo é frágil. Linha secundária.
+	fmt.Fprintln(w, t.fraco(fmt.Sprintf("relógio %s · %s · %s",
+		e.Clock, e.Now.Format("2006-01-02T15:04:05Z"), contagens(f))))
+	fmt.Fprintln(w)
 }
 
 // contagens é o enquadramento que sai de graça da mesma coleta.
@@ -96,7 +105,7 @@ func contagens(f *facts.Facts) string {
 		len(f.Processes), estab, pub)
 }
 
-func writeWtfFindings(w io.Writer, r *check.Report) {
+func writeWtfFindings(w io.Writer, t Tema, r *check.Report) {
 	// Alvo com mais de um sinal vira UMA linha com a contagem. Numa tela só, é
 	// a diferença entre "por onde começo" e uma lista para rolar.
 	grupos, resto := r.Correlate()
@@ -120,12 +129,17 @@ func writeWtfFindings(w io.Writer, r *check.Report) {
 		// resumo nenhum. Nesse caso o `: ` sai junto: dois-pontos sem nada
 		// depois parece saída truncada por defeito. As seções continuam ali, e
 		// são elas que dizem o que olhar.
-		cab := fmt.Sprintf("%s %-12s %d sinais",
-			g.Sev().Mark(), Safe(g.Subject), len(g.Findings))
+		mark := g.Sev().Mark()
+		cab := fmt.Sprintf("%s %-12s %d sinais", mark, Safe(g.Subject), len(g.Findings))
 		if s := corta(Safe(resumoTitulos(g)), 70-len([]rune(cab))); s != "" {
 			cab += ": " + s
 		}
-		fmt.Fprintln(w, pad(cab, 72)+"§"+strings.Join(g.Refs(), " §"))
+		// A marca colore por severidade sem quebrar o alinhamento: o pad conta o
+		// texto PLANO, e a cor entra depois, trocando o prefixo. O §ref recua
+		// para cinza (é atalho de lookup, não a decisão).
+		linha := t.pintaSev(g.Sev(), mark) + strings.TrimPrefix(pad(cab, 72), mark) +
+			t.fraco("§"+strings.Join(g.Refs(), " §"))
+		fmt.Fprintln(w, linha)
 	}
 
 	// O denominador conta só o que SERIA impresso: usar len(r.Findings) incluiria
@@ -149,8 +163,9 @@ func writeWtfFindings(w io.Writer, r *check.Report) {
 		linhas++
 		n++
 
-		fmt.Fprintln(w, pad(fmt.Sprintf("%s %-12s %s",
-			fd.Sev.Mark(), Safe(fd.Subject), Safe(fd.Title)), 74)+"§"+Safe(fd.Ref))
+		mark := fd.Sev.Mark()
+		plano := pad(fmt.Sprintf("%s %-12s %s", mark, Safe(fd.Subject), Safe(fd.Title)), 74)
+		fmt.Fprintln(w, t.pintaSev(fd.Sev, mark)+strings.TrimPrefix(plano, mark)+t.fraco("§"+Safe(fd.Ref)))
 
 		// Só o crítico ganha evidência: o wtf decide POR ONDE COMEÇAR, e
 		// detalhar o aviso rouba a tela do que precisa de ação agora.
@@ -161,13 +176,13 @@ func writeWtfFindings(w io.Writer, r *check.Report) {
 			if i >= 2 {
 				break
 			}
-			fmt.Fprintln(w, "             "+Safe(ev))
+			fmt.Fprintln(w, "             "+t.fraco(Safe(ev)))
 		}
 		// O passo irreversível — e só ele. O resto é trabalho do scan.
 		if fd.Irreversible {
 			for _, ns := range fd.NextSteps {
 				if strings.HasPrefix(ns, "sudo ") {
-					fmt.Fprintln(w, "             → "+Safe(ns))
+					fmt.Fprintln(w, "             "+t.fraco("→ "+Safe(ns)))
 					break
 				}
 			}
@@ -204,7 +219,7 @@ func resumoTitulos(g check.SubjectGroup) string {
 // Lacuna de COLETA não entra na mesma soma: ela já vem prefixada pelo coletor
 // ("proc: …"), e resumir por prefixo produziria "net: 1 · proc: 4" — que não
 // informa nada. Vira contagem, e o detalhe fica com o scan.
-func writeWtfGaps(w io.Writer, r *check.Report) {
+func writeWtfGaps(w io.Writer, t Tema, r *check.Report) {
 	c := r.Coverage
 	motivos := append(reasonsOf(c.NotChecked), partialReasons(c)...)
 
@@ -220,8 +235,10 @@ func writeWtfGaps(w io.Writer, r *check.Report) {
 	if len(parts) == 0 {
 		return
 	}
-	fmt.Fprintln(w, "não verificado: "+Safe(strings.Join(parts, " · "))+
-		"  —  `aletheia scan` detalha")
+	// Linha secundária, mas NÃO opcional: é ela que impede a tela de ser lida
+	// como "host limpo". Cinza, sem sumir.
+	fmt.Fprintln(w, t.fraco("não verificado: "+Safe(strings.Join(parts, " · "))+
+		"  —  `aletheia scan` detalha"))
 }
 
 func partialReasons(c check.Coverage) []string {
@@ -234,8 +251,13 @@ func partialReasons(c check.Coverage) []string {
 
 // writeWtfResult é obrigatório e sempre diz que isto NÃO foi varredura. É o
 // comando com maior risco de ser lido como "host limpo".
-func writeWtfResult(w io.Writer, r *check.Report, elapsed time.Duration, sobra int) {
-	fmt.Fprintf(w, "RESULT: %s — %d checks em %s.", r.Verdict(), r.Coverage.Total, dur(elapsed))
+func writeWtfResult(w io.Writer, t Tema, r *check.Report, elapsed time.Duration, sobra int) {
+	v := r.Verdict()
+	vc := t.pintaSev(sevDoVerdict(v), v)
+	if v == "OK" {
+		vc = t.verde(v)
+	}
+	fmt.Fprintf(w, "RESULT: %s — %d checks em %s.", vc, r.Coverage.Total, dur(elapsed))
 	if sobra > 0 {
 		fmt.Fprintf(w, " Isto NÃO é varredura: rode `aletheia scan` (+%d checks)", sobra)
 	} else {

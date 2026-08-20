@@ -125,7 +125,7 @@ var moduloSemArquivo = check.Check{
 			}
 			if !m.NoSys {
 				ev = append(ev, "e ele NÃO aparece em /sys/module: as duas interfaces "+
-					"do kernel discordam sobre a existência dele (§35.5)")
+					"do kernel discordam sobre a existência dele")
 			}
 			ev = append(ev, contextoDeProtecao(f)...)
 
@@ -136,12 +136,12 @@ var moduloSemArquivo = check.Check{
 			fd.Irreversible = true
 			fd.NextSteps = []string{
 				"NÃO descarregue antes de preservar: o código só existe dentro do " +
-					"kernel, e o rmmod o destrói (runbook §19)",
+					"kernel, e o rmmod o destrói",
 				"sudo cp /proc/kcore \"$IR/\"   # o kernel inteiro, se houver espaço; " +
 					"a região do módulo está em /sys/module/" + m.Nome + "/sections/",
 				"sudo cat " + check.Arg("/sys/module/"+m.Nome+"/sections/.text") + "   # onde ele foi carregado",
 				"a partir daqui, a análise honesta é DE FORA: um módulo hostil " +
-					"mente para todos os outros checks (runbook §35.6)",
+					"mente para todos os outros checks",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

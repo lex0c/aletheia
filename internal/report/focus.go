@@ -145,7 +145,7 @@ func idsDistintos(fs []check.Finding) []string {
 // caveats, e a unicidade dele é uma invariante anti-forja — o alvo não pode
 // plantar uma segunda linha "RESULT:" pela evidência. Aqui o veredito aparece
 // como palavra em destaque, que serve ao olho sem colidir com aquela linha.
-func writeSumario(w io.Writer, t Tema, r *check.Report) {
+func writeSumario(w io.Writer, t Tema, r *check.Report, mostrarCob bool) {
 	crit, warn, manual, _ := r.Counts()
 	v := r.Verdict()
 	titulo := "== " + v + " =="
@@ -156,8 +156,15 @@ func writeSumario(w io.Writer, t Tema, r *check.Report) {
 	}
 	fmt.Fprintln(w, titulo)
 	cov := r.Coverage
-	fmt.Fprintf(w, "%d críticos · %d avisos · %d contexto · cobertura %d/%d\n\n",
+	linha := fmt.Sprintf("%d críticos · %d avisos · %d contexto · cobertura %d/%d",
 		crit, warn, manual, cov.Complete, cov.Total)
+	// Cobertura oculta E incompleta: o número FICA (é a invariante), e uma dica
+	// discreta diz como abrir o detalhe. Completa, ou já visível: sem ruído.
+	if !mostrarCob && cov.Complete < cov.Total {
+		linha += t.fraco(" · --coverage detalha")
+	}
+	fmt.Fprintln(w, linha)
+	fmt.Fprintln(w)
 }
 
 func sevDoVerdict(v string) check.Severity {

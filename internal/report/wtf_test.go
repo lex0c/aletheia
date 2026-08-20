@@ -25,7 +25,7 @@ func renderWtf(r *check.Report, f *facts.Facts) string {
 	if f == nil {
 		f = &facts.Facts{}
 	}
-	Wtf(&b, r, f, wtfEnv(), 57*time.Millisecond, r.Coverage.Total, nil)
+	Wtf(&b, r, f, wtfEnv(), 57*time.Millisecond, r.Coverage.Total, nil, false)
 	return b.String()
 }
 
@@ -208,6 +208,28 @@ func TestOnelineEscapaControleDeTerminal(t *testing.T) {
 	}
 }
 
+// O wtf agora colore (só em TTY), então o texto puro — o que vai para pipe,
+// arquivo e ticket — precisa continuar com ZERO escape. Duas coisas dependem
+// disso: o alvo não pode plantar uma sequência pela evidência, e a linha do
+// RESULT não pode ser forjada. Com cor=false, nenhum byte ESC pode sair.
+func TestWtfSemCorNaoInjetaNoTerminal(t *testing.T) {
+	r := &check.Report{
+		Coverage: check.Coverage{Total: 5, Complete: 4},
+		Findings: []check.Finding{{
+			ID: "x.y", Sev: check.SevCritical, Ref: "3.16",
+			Subject:   "pid=1\x1b[2J\x1b[H",
+			Title:     "t\x1b[31mforjado",
+			Evidence:  []string{"ev\x1b[Hcru"},
+			NextSteps: []string{"sudo cp /x\x1b[2J"}, Irreversible: true,
+		}},
+	}
+	var b bytes.Buffer
+	Wtf(&b, r, &facts.Facts{}, wtfEnv(), time.Second, 5, nil, false)
+	if strings.Contains(b.String(), "\x1b") {
+		t.Errorf("wtf sem cor precisa ter ZERO ESC:\n%q", b.String())
+	}
+}
+
 // O rodapé não pode mandar o operador repetir trabalho. Enquanto o catálogo
 // inteiro couber no orçamento do wtf, "rode aletheia scan" é uma instrução que
 // não muda nada — o mesmo tipo de afirmação vazia que a ferramenta recusa nos
@@ -216,7 +238,7 @@ func TestRodapeSoMandaRodarScanQuandoEleAcrescenta(t *testing.T) {
 	rel := func(catalogo int) string {
 		var b bytes.Buffer
 		r := &check.Report{Coverage: check.Coverage{Total: 10, Complete: 10}}
-		Wtf(&b, r, &facts.Facts{}, wtfEnv(), 57*time.Millisecond, catalogo, nil)
+		Wtf(&b, r, &facts.Facts{}, wtfEnv(), 57*time.Millisecond, catalogo, nil, false)
 		return b.String()
 	}
 
@@ -286,7 +308,7 @@ func TestWtfComAlvoLongoNaoDeixaDoisPontosVazio(t *testing.T) {
 		},
 	}
 	var b bytes.Buffer
-	Wtf(&b, r, &facts.Facts{}, wtfEnv(), time.Second, r.Coverage.Total, nil)
+	Wtf(&b, r, &facts.Facts{}, wtfEnv(), time.Second, r.Coverage.Total, nil, false)
 
 	for _, l := range strings.Split(b.String(), "\n") {
 		if !strings.Contains(l, "sinais") {

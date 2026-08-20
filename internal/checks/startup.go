@@ -22,7 +22,7 @@ func init() {
 // webPrepend — runbook §7.12.
 //
 // `auto_prepend_file` faz o PHP executar um arquivo ANTES de cada requisição,
-// em qualquer rota. O docroot fica limpo, o grep de webshell da §16 não acha
+// em qualquer rota. O docroot fica limpo, o grep de webshell não acha
 // nada, e o backdoor roda em 100% dos acessos.
 //
 // Aqui o sinal é a DIRETIVA, não o comando: diferente dos outros gatilhos, o
@@ -60,7 +60,7 @@ var webPrepend = check.Check{
 				ev := []string{
 					k + " = " + v,
 					"o PHP executa este arquivo em TODA requisição, em qualquer rota",
-					"o docroot fica limpo: a busca por webshell da §16 não acha nada",
+					"o docroot fica limpo: a busca por webshell não acha nada",
 					"arquivo: " + t.File + ":" + strconv.Itoa(ln.N),
 				}
 				sev := check.SevWarn
@@ -72,9 +72,9 @@ var webPrepend = check.Check{
 
 				fd := self.F(sev, v, "", ev...)
 				fd.NextSteps = []string{
-					"leia o arquivo apontado como se fosse malware (runbook §5)",
+					"leia o arquivo apontado como se fosse malware",
 					"um módulo carregado no nginx ou no apache tem o mesmo efeito um " +
-						"nível abaixo (runbook §7.12)",
+						"nível abaixo",
 				}
 				r.Findings = append(r.Findings, fd)
 			}
@@ -179,7 +179,7 @@ var shellStartup = check.Check{
 				fd.Quando, fd.QuandoFonte = t.ModUTC, "mtime do arquivo de gatilho"
 				fd.NextSteps = []string{
 					"`tail -20` em cada arquivo de inicialização vale mais que grep: " +
-						"o acréscimo fica no fim (runbook §7.6)",
+						"o acréscimo fica no fim",
 					"o diff contra /etc/skel mostra tudo que foi acrescentado desde a " +
 						"instalação, sem precisar de baseline",
 				}
@@ -235,8 +235,7 @@ var bashEnv = check.Check{
 				fd.Quando, fd.QuandoFonte = t.ModUTC, "mtime do arquivo de gatilho"
 				fd.NextSteps = []string{
 					"leia o arquivo apontado: ele roda em toda execução não interativa",
-					"procure o mesmo padrão em /etc/environment e em drop-in de unit " +
-						"(runbook §7.8, §7.2)",
+					"procure o mesmo padrão em /etc/environment e em drop-in de unit",
 				}
 				r.Findings = append(r.Findings, fd)
 			}
@@ -441,9 +440,9 @@ var triggerExec = check.Check{
 				fd.Quando, fd.QuandoFonte = t.ModUTC, "mtime do arquivo de gatilho"
 				fd.NextSteps = []string{
 					"o ctime do arquivo data a ativação, mesmo que o conteúdo pareça " +
-						"antigo (runbook §5.2, §9)",
+						"antigo",
 					"script em /etc/init.d ainda vira unit pelo systemd-sysv-generator " +
-						"e NÃO aparece em /etc/systemd/system (runbook §7.7)",
+						"e NÃO aparece em /etc/systemd/system",
 				}
 				r.Findings = append(r.Findings, fd)
 			}
@@ -514,8 +513,8 @@ var pamExec = check.Check{
 				fd.Quando, fd.QuandoFonte = t.ModUTC, "mtime do arquivo de gatilho"
 				fd.NextSteps = []string{
 					"o caminho de autenticação vê a senha: trate como comprometimento " +
-						"de credencial até provar o contrário (runbook §23)",
-					"compare os módulos com os do pacote antes de concluir (runbook §24)",
+						"de credencial até provar o contrário",
+					"compare os módulos com os do pacote antes de concluir",
 				}
 				r.Findings = append(r.Findings, fd)
 			}

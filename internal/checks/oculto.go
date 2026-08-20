@@ -47,7 +47,7 @@ var execEmDiretorioOculto = check.Check{
 		"sessão gráfica cria `.X11-unix`, `.ICE-unix` e `.font-unix`, e os três " +
 			"guardam SOCKET e não executável: não caem aqui",
 		"o achado é sobre o que está PARADO em disco. Se aquilo estiver rodando, " +
-			"o §3.16 e o §8 já falam por outro caminho, e a correlação junta os dois",
+			"outros checks já falam por outro caminho, e a correlação junta os dois",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
@@ -98,8 +98,8 @@ var execEmDiretorioOculto = check.Check{
 			fd := self.F(check.SevWarn, d, "", ev...)
 			fd.Irreversible = true
 			fd.NextSteps = []string{
-				"sudo cp -a " + check.Arg(d) + " \"$IR/\"   # o diretório inteiro, antes de qualquer coisa (runbook §6)",
-				"o ctime do diretório data a criação do esconderijo (runbook §9)",
+				"sudo cp -a " + check.Arg(d) + " \"$IR/\"   # o diretório inteiro, antes de qualquer coisa",
+				"o ctime do diretório data a criação do esconderijo",
 				"o conteúdo some no próximo boot se for tmpfs: preservar agora é a " +
 					"única chance",
 			}

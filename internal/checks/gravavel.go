@@ -59,7 +59,7 @@ var rootExecutaGravavel = check.Check{
 			"em qualquer servidor — a rota existe, e acusá-la produziria ruído em " +
 			"série. O que este check afirma é sobre ARQUIVO",
 		"a leitura é do que está ESCRITO na linha de comando: PATH hijack e " +
-			"wildcard injection (as duas outras rotas da §36.4) não aparecem " +
+			"wildcard injection (as duas outras rotas) não aparecem " +
 			"aqui, porque exigiriam adivinhar o PATH de um processo que ainda " +
 			"não existe",
 	},
@@ -99,7 +99,7 @@ var rootExecutaGravavel = check.Check{
 				ev = append(ev, d)
 			}
 			ev = append(ev, "não é vulnerabilidade de software: é permissão, e a "+
-				"correção é dono root:root com modo 755 (runbook §36.4)")
+				"correção é dono root:root com modo 755")
 
 			fd := self.F(sev, a.Caminho, "", ev...)
 			fd.Ator = a.Caminho
@@ -107,7 +107,7 @@ var rootExecutaGravavel = check.Check{
 				"quem é o dono, e ele deveria ser: stat -c '%U %G %a' " + check.Arg(a.Caminho),
 				"sudo chown root:root " + check.Arg(a.Caminho) + " && sudo chmod 755 " + check.Arg(a.Caminho),
 				"o mesmo vale para o DIRETÓRIO e para tudo que o script chamar sem " +
-					"caminho absoluto (runbook §36.4)",
+					"caminho absoluto",
 			}
 			r.Findings = append(r.Findings, fd)
 		}

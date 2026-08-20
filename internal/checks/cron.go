@@ -60,9 +60,9 @@ var cronSuspect = check.Check{
 			fd.Quando, fd.QuandoFonte = c.ModUTC, "mtime do arquivo de cron"
 			fd.NextSteps = []string{
 				"remova a persistência ANTES de matar o processo: o cron o recria " +
-					"na próxima execução (runbook §19)",
+					"na próxima execução",
 				"depois de limpar, `atq` é obrigatório — o `at` dispara UMA vez no " +
-					"futuro e não aparece em varredura de periodicidade (runbook §7.4)",
+					"futuro e não aparece em varredura de periodicidade",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -88,7 +88,7 @@ var cronFrequent = check.Check{
 		"monitoração, coleta de métrica e renovação de certificado rodam em " +
 			"intervalo curto por projeto. São poucas, vêm de pacote e você as " +
 			"conhece pelo nome",
-		"o intervalo sozinho não acusa nada: ele diz ONDE procurar na §2.7, " +
+		"o intervalo sozinho não acusa nada: ele diz ONDE procurar, " +
 			"correlacionando com conexão no mesmo período",
 		"o agendador da própria distribuição é pulado: `run-parts` sobre " +
 			"/etc/periodic ou /etc/cron.* é plumbing, e o Alpine entrega " +
@@ -124,13 +124,13 @@ var cronFrequent = check.Check{
 				"arquivo: " + c.File + linhaDe(c.Line),
 			}
 			ev = append(ev, cronContexto(c)...)
-			ev = append(ev, "correlacione com conexão nesse mesmo intervalo (runbook §2.7): "+
+			ev = append(ev, "correlacione com conexão nesse mesmo intervalo: "+
 				"o beacon só é visível na janela estendida, não no retrato")
 
 			fd := self.F(check.SevWarn, cronSubject(c), "", ev...)
 			fd.Quando, fd.QuandoFonte = c.ModUTC, "mtime do arquivo de cron"
 			fd.NextSteps = []string{
-				"amostre a rede pelo intervalo do agendamento, não por instantes (runbook §2.7)",
+				"amostre a rede pelo intervalo do agendamento, não por instantes",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -196,9 +196,9 @@ var atJob = check.Check{
 			fd := self.F(sev, "at:"+baseDe(c.File), "", ev...)
 			fd.Quando, fd.QuandoFonte = c.ModUTC, "mtime do job de at"
 			fd.NextSteps = []string{
-				"leia o job inteiro: ele carrega o ambiente de quem o criou (runbook §7.4)",
+				"leia o job inteiro: ele carrega o ambiente de quem o criou",
 				"depois de qualquer limpeza, `atq` de novo: é o gatilho que sobrevive " +
-					"à validação da §22",
+					"à validação",
 			}
 			r.Findings = append(r.Findings, fd)
 		}
@@ -231,7 +231,7 @@ func cronContexto(c *facts.CronEntry) []string {
 	}
 	if c.Reboot {
 		ev = append(ev, "@reboot: sobrevive a restart, e não tem periodicidade "+
-			"para a §2.7 correlacionar")
+			"para correlacionar")
 	}
 	if c.ModUTC != "" {
 		ev = append(ev, "arquivo modificado em "+c.ModUTC)

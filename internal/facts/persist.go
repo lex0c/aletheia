@@ -592,79 +592,17 @@ func collectUnits(f *Facts, e *env.Env) {
 			}
 			vistos[id] = true
 		}
-		ents, err := e.ReadDir(d.dir)
-		if err != nil {
-			if env.EhLacuna(err) {
-				f.denyPersist("unit", d.dir+" não pôde ser listado ("+
-					env.MotivoDoErro(err)+"): as units declaradas nesta árvore NÃO "+
-					"foram avaliadas — uma unit de persistência plantada aqui passaria")
-			}
-			continue
-		}
-		for _, ent := range ents {
-			name := ent.Name()
-			full := d.dir + "/" + name
-
-			// *.wants/ e *.requires/ contêm os symlinks que HABILITAM.
-			if ent.IsDir() {
-				switch {
-				case strings.HasSuffix(name, ".wants"), strings.HasSuffix(name, ".requires"):
-					nomes, errL := e.ReadDirNamesErr(full)
-					if env.EhLacuna(errL) {
-						f.denyPersist("unit", full+" não pôde ser listado ("+
-							env.MotivoDoErro(errL)+"): quais units esta árvore HABILITA NÃO foi lido")
-					}
-					for _, ln := range nomes {
-						wants[ln] = append(wants[ln], full+"/"+ln)
-					}
-				case strings.HasSuffix(name, ".d"):
-					// drop-ins: alteram a unit sem tocar no arquivo dela
-					target := strings.TrimSuffix(name, ".d")
-					nomes, errL := e.ReadDirNamesErr(full)
-					if env.EhLacuna(errL) {
-						f.denyPersist("unit", full+" não pôde ser listado ("+
-							env.MotivoDoErro(errL)+"): um drop-in plantado aqui NÃO foi avaliado")
-					}
-					for _, c := range nomes {
-						if !strings.HasSuffix(c, ".conf") {
-							continue
-						}
-						if len(units) >= maxUnits {
-							truncated = true
-							break
-						}
-						u := parseUnitFile(f, e, full+"/"+c, d.scope, d.vendor)
-						u.Name = target
-						u.DropInFor = target
-						u.Kind = kindOf(target)
-						units = append(units, u)
-					}
-				}
-				continue
-			}
-			if !isUnitName(name) {
-				continue
-			}
-			if len(units) >= maxUnits {
-				truncated = true
-				continue
-			}
-			// Máscara ANTES do parse: link para /dev/null (clássica) ou arquivo
-			// vazio desliga a unit. Detectar aqui, sem chamar o ReadFile, evita
-			// que o /dev/null (ErrNaoEhArquivo, que é lacuna) vire gap FALSO — a
-			// unit sairia Masked E "não consegui ler" ao mesmo tempo. Máscara é
-			// config conhecida, não uma falha de leitura.
-			if detectarMascara(e, full) {
-				units = append(units, Unit{
-					Path: full, Name: name, Scope: d.scope,
-					Vendor: d.vendor, Kind: kindOf(name), Masked: true,
-				})
-				continue
-			}
-			u := parseUnitFile(f, e, full, d.scope, d.vendor)
-			u.Name = name
-			u.Kind = kindOf(name)
-			units = append(units, u)
+		// A varredura de UMA árvore — arquivos de unit, drop-ins .d/ e a
+		// habilitação *.wants//*.requires/ — é idêntica para a árvore de sistema
+		// e para o load path de user por-home; ver coletarDirDeUnits. Antes o
+		// user tinha uma cópia pela metade (só arquivos isUnitName), e por isso
+		// não via nem drop-in nem máscara de unit de usuário.
+		trunc, lerr := coletarDirDeUnits(f, e, d.dir, d.scope, d.vendor, &units, wants)
+		truncated = truncated || trunc
+		if env.EhLacuna(lerr) {
+			f.denyPersist("unit", d.dir+" não pôde ser listado ("+
+				env.MotivoDoErro(lerr)+"): as units declaradas nesta árvore NÃO "+
+				"foram avaliadas — uma unit de persistência plantada aqui passaria")
 		}
 	}
 
@@ -693,26 +631,15 @@ func collectUnits(f *Facts, e *env.Env) {
 	for _, home := range homes {
 		for _, sub := range userSubdirs {
 			dir := home + "/" + sub
-			if _, negado := lookup(e, dir); negado {
+			// MESMA varredura da árvore de sistema: arquivos, drop-in .d/ e
+			// máscara. Sem isto o user via só arquivos isUnitName — um
+			// ~/.config/systemd/user/foo.service.d/ passava invisível.
+			trunc, lerr := coletarDirDeUnits(f, e, dir, "user", false, &units, wants)
+			truncated = truncated || trunc
+			if env.EhLacuna(lerr) {
+				// Existe e não listou (permissão/corrida): resume entre os homes,
+				// senão escanear sem root vira uma linha por home 0700.
 				negados = append(negados, dir)
-				continue
-			}
-			nomes, errL := e.ReadDirNamesErr(dir)
-			if env.EhLacuna(errL) {
-				// lookup passou mas a listagem falhou (corrida/EIO): trate como
-				// negado, para não afirmar "nenhuma unit de usuário aqui".
-				negados = append(negados, dir)
-				continue
-			}
-			for _, name := range nomes {
-				if !isUnitName(name) || len(units) >= maxUnits {
-					truncated = truncated || len(units) >= maxUnits
-					continue
-				}
-				u := parseUnitFile(f, e, dir+"/"+name, "user", false)
-				u.Name = name
-				u.Kind = kindOf(name)
-				units = append(units, u)
 			}
 		}
 	}
@@ -753,6 +680,93 @@ func collectUnits(f *Facts, e *env.Env) {
 		f.partial("persist", "systemd presente e nenhuma unit foi legível: "+
 			"os checks de unit não avaliaram nada")
 	}
+}
+
+// coletarDirDeUnits varre UM diretório do load path do systemd: os arquivos de
+// unit, os drop-ins em *.d/ (que ALTERAM a unit sem tocar no arquivo dela) e a
+// habilitação em *.wants//*.requires/. É o mesmo caminho para a árvore de
+// sistema e para o load path de user por-home (~/.config/systemd/user etc.) —
+// e é justamente por NÃO ser compartilhado antes que o user só via arquivos
+// isUnitName: um `~/.config/systemd/user/foo.service.d/10-x.conf` ou uma unit
+// de usuário mascarada com /dev/null passavam invisíveis. Ausência do diretório
+// é resposta (silêncio); só a listagem NEGADA vira lacuna declarada. Devolve
+// true se o teto de units foi atingido nesta árvore.
+func coletarDirDeUnits(f *Facts, e *env.Env, dir, scope string, vendor bool, units *[]Unit, wants map[string][]string) (bool, error) {
+	ents, err := e.ReadDir(dir)
+	if err != nil {
+		// Ausência do diretório é resposta (silêncio); existir-e-não-listar é
+		// lacuna. QUEM chama decide como reportar: a árvore de sistema tem ~10
+		// diretórios e reporta por-diretório; o load path de user tem um por
+		// home e RESUME, senão escanear sem root vira uma linha por home 0700.
+		return false, err
+	}
+	truncated := false
+	for _, ent := range ents {
+		name := ent.Name()
+		full := dir + "/" + name
+
+		// *.wants/ e *.requires/ contêm os symlinks que HABILITAM.
+		if ent.IsDir() {
+			switch {
+			case strings.HasSuffix(name, ".wants"), strings.HasSuffix(name, ".requires"):
+				nomes, errL := e.ReadDirNamesErr(full)
+				if env.EhLacuna(errL) {
+					f.denyPersist("unit", full+" não pôde ser listado ("+
+						env.MotivoDoErro(errL)+"): quais units esta árvore HABILITA NÃO foi lido")
+				}
+				for _, ln := range nomes {
+					wants[ln] = append(wants[ln], full+"/"+ln)
+				}
+			case strings.HasSuffix(name, ".d"):
+				// drop-ins: alteram a unit sem tocar no arquivo dela
+				target := strings.TrimSuffix(name, ".d")
+				nomes, errL := e.ReadDirNamesErr(full)
+				if env.EhLacuna(errL) {
+					f.denyPersist("unit", full+" não pôde ser listado ("+
+						env.MotivoDoErro(errL)+"): um drop-in plantado aqui NÃO foi avaliado")
+				}
+				for _, c := range nomes {
+					if !strings.HasSuffix(c, ".conf") {
+						continue
+					}
+					if len(*units) >= maxUnits {
+						truncated = true
+						break
+					}
+					u := parseUnitFile(f, e, full+"/"+c, scope, vendor)
+					u.Name = target
+					u.DropInFor = target
+					u.Kind = kindOf(target)
+					*units = append(*units, u)
+				}
+			}
+			continue
+		}
+		if !isUnitName(name) {
+			continue
+		}
+		if len(*units) >= maxUnits {
+			truncated = true
+			continue
+		}
+		// Máscara ANTES do parse: link para /dev/null (clássica) ou arquivo
+		// vazio desliga a unit. Detectar aqui, sem chamar o ReadFile, evita
+		// que o /dev/null (ErrNaoEhArquivo, que é lacuna) vire gap FALSO — a
+		// unit sairia Masked E "não consegui ler" ao mesmo tempo. Máscara é
+		// config conhecida, não uma falha de leitura.
+		if detectarMascara(e, full) {
+			*units = append(*units, Unit{
+				Path: full, Name: name, Scope: scope,
+				Vendor: vendor, Kind: kindOf(name), Masked: true,
+			})
+			continue
+		}
+		u := parseUnitFile(f, e, full, scope, vendor)
+		u.Name = name
+		u.Kind = kindOf(name)
+		*units = append(*units, u)
+	}
+	return truncated, nil
 }
 
 // isNotExist trata a ausência como resposta, não como falha: a maioria dos

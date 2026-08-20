@@ -445,3 +445,54 @@ func TestMerge_PathProprioNaoResolveContraPadrao(t *testing.T) {
 		t.Fatalf("com PATH próprio o nome nu fica cru (não modelamos esse PATH), veio %q", alvo)
 	}
 }
+
+// #5 (FN): unit de USUÁRIO por-home era coletada com um caminhador pela metade
+// (só arquivos isUnitName), então um drop-in em ~/.config/systemd/user/agent.service.d/
+// passava invisível — persistência que roda no login do usuário. Agora o user
+// usa a MESMA varredura da árvore de sistema (coletarDirDeUnits): o ExecStartPre
+// do drop-in tem de chegar à base efetiva.
+func TestUserUnit_DropinEhVistoEEfetivo(t *testing.T) {
+	us := coletarUnits(t, map[string]string{
+		"etc/passwd": "root:x:0:0::/root:/bin/sh\nana:x:1000:1000::/home/ana:/bin/sh\n",
+		"home/ana/.config/systemd/user/agent.service":             "[Service]\nExecStart=/usr/bin/agent\n",
+		"home/ana/.config/systemd/user/agent.service.d/10-x.conf": "[Service]\nExecStartPre=/tmp/.evil\n",
+	}, nil)
+	// A base e o drop-in são units efetivas SEPARADAS (o merge não funde os
+	// slices — os checks iteram todas as Efetiva()). O que importa: o
+	// ExecStartPre=/tmp/.evil do drop-in está visível e efetivo. Antes da
+	// varredura compartilhada o drop-in de user nem era coletado.
+	temBase, temPre := false, false
+	for _, u := range us {
+		if u.Scope != "user" || u.Name != "agent.service" || !u.Efetiva() {
+			continue
+		}
+		if u.DropInFor == "" {
+			temBase = true
+		}
+		for _, ex := range u.Exec {
+			if ex.Key == "ExecStartPre" && strings.Contains(ex.Cmd, "/tmp/.evil") {
+				temPre = true
+			}
+		}
+	}
+	if !temBase {
+		t.Fatalf("base de usuário agent.service não coletada/efetiva: %+v", us)
+	}
+	if !temPre {
+		t.Fatalf("o drop-in de usuário .service.d/ (ExecStartPre=/tmp/.evil) devia estar visível e efetivo: %+v", us)
+	}
+}
+
+// #5 (o mesmo caminhador traz a máscara): uma unit de usuário linkada a
+// /dev/null é DESLIGADA. Antes o loop de user chamava parseUnitFile direto (sem
+// detectarMascara) e ela não saía Masked; agora sai.
+func TestUserUnit_MascaraEhVista(t *testing.T) {
+	us := coletarUnits(t,
+		map[string]string{"etc/passwd": "ana:x:1000:1000::/home/ana:/bin/sh\n"},
+		map[string]string{"home/ana/.config/systemd/user/agent.service": "/dev/null"},
+	)
+	m := acharUnit(us, "/home/ana/.config/systemd/user/agent.service")
+	if m == nil || !m.Masked || m.Efetiva() {
+		t.Fatalf("máscara /dev/null de unit de usuário devia sair Masked e não-efetiva: %+v", m)
+	}
+}

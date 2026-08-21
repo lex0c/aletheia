@@ -22,7 +22,7 @@ func TestUnitParseBindPaths(t *testing.T) {
 	e := env.Probe(env.Options{Root: raiz, Version: "test"})
 	t.Cleanup(func() { e.Close() })
 
-	u := parseUnitFile(&Facts{}, e, "/svc.service", "system", false)
+	u := parseUnitFile(&Facts{}, e, "/svc.service", "system", kindOf("/svc.service"), false)
 	if len(u.Binds) != 3 {
 		t.Fatalf("binds = %+v, queria 3", u.Binds)
 	}
@@ -50,7 +50,7 @@ func TestUnitBindVazioReseta(t *testing.T) {
 	e := env.Probe(env.Options{Root: raiz, Version: "test"})
 	t.Cleanup(func() { e.Close() })
 
-	if u := parseUnitFile(&Facts{}, e, "/svc.service", "system", false); len(u.Binds) != 0 {
+	if u := parseUnitFile(&Facts{}, e, "/svc.service", "system", kindOf("/svc.service"), false); len(u.Binds) != 0 {
 		t.Errorf("bind vazio tem de resetar: %+v", u.Binds)
 	}
 }
@@ -65,7 +65,7 @@ func TestUnitBindRespeitaSecao(t *testing.T) {
 	e := env.Probe(env.Options{Root: raiz, Version: "test"})
 	t.Cleanup(func() { e.Close() })
 
-	if u := parseUnitFile(&Facts{}, e, "/svc.service", "system", false); len(u.Binds) != 0 {
+	if u := parseUnitFile(&Facts{}, e, "/svc.service", "system", kindOf("/svc.service"), false); len(u.Binds) != 0 {
 		t.Errorf("bind de seção ignorada entrou no modelo: %+v", u.Binds)
 	}
 }

@@ -329,7 +329,7 @@ func TestExecSearchPathResolveNomeNu(t *testing.T) {
 		[]byte("[Service]\nExecSearchPath=/tmp/.cache/bin\nExecStart=agent --daemon\nRestart=always\n"), 0o644)
 	e := env.Probe(env.Options{Root: raiz, Version: "test"})
 	t.Cleanup(func() { e.Close() })
-	u := parseUnitFile(&Facts{}, e, "/svc.service", "system", false)
+	u := parseUnitFile(&Facts{}, e, "/svc.service", "system", kindOf("/svc.service"), false)
 	if len(u.Exec) != 1 || u.Exec[0].Cmd != "/tmp/.cache/bin/agent --daemon" {
 		t.Fatalf("nome nu deve resolver contra ExecSearchPath: %+v", u.Exec)
 	}

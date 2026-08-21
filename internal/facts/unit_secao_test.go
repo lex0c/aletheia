@@ -70,6 +70,28 @@ func TestUnitSecaoDecideSeADiretivaVale(t *testing.T) {
 			conteudo:  "[Service]\nExecStart=/tmp/.implant\nExecStart=\n",
 			querExecs: 0,
 		},
+		// A SEGUNDA METADE do bypass, e ela sobreviveu ao primeiro conserto.
+		//
+		// Olhar a seção isolada fechava X-, Unit e Install — e deixava abertas
+		// as seções de OUTROS TIPOS, que também carregam contexto de execução.
+		// O atacante só trocou `[X-Aletheia]` por `[Socket]`. Numa .service,
+		// `[Socket]` é tão ignorado pelo systemd quanto `[X-Foo]`: opção
+		// específica de um tipo vive na seção DAQUELE tipo.
+		{
+			nome:      "reset em [Socket] dentro de .service não tem efeito",
+			conteudo:  "[Service]\nExecStart=/tmp/.implant\n\n[Socket]\nExecStart=\n",
+			querExecs: 1, querCmd: "/tmp/.implant",
+		},
+		{
+			nome:      "reset em [Mount] dentro de .service não tem efeito",
+			conteudo:  "[Service]\nExecStart=/tmp/.implant\n\n[Mount]\nExecStart=\n",
+			querExecs: 1, querCmd: "/tmp/.implant",
+		},
+		{
+			nome:      "reset em [Timer] dentro de .service não tem efeito",
+			conteudo:  "[Service]\nExecStart=/tmp/.implant\n\n[Timer]\nExecStart=\n",
+			querExecs: 1, querCmd: "/tmp/.implant",
+		},
 	}
 	for _, c := range casos {
 		raiz := t.TempDir()
@@ -77,7 +99,7 @@ func TestUnitSecaoDecideSeADiretivaVale(t *testing.T) {
 			t.Fatal(err)
 		}
 		e := env.Probe(env.Options{Root: raiz, Version: "test"})
-		u := parseUnitFile(&Facts{}, e, "/svc.service", "system", false)
+		u := parseUnitFile(&Facts{}, e, "/svc.service", "system", "service", false)
 		e.Close()
 
 		if len(u.Exec) != c.querExecs {
@@ -101,7 +123,7 @@ func TestUnitEnvironmentRespeitaSecao(t *testing.T) {
 	e := env.Probe(env.Options{Root: raiz, Version: "test"})
 	t.Cleanup(func() { e.Close() })
 
-	u := parseUnitFile(&Facts{}, e, "/svc.service", "system", false)
+	u := parseUnitFile(&Facts{}, e, "/svc.service", "system", kindOf("/svc.service"), false)
 	if len(u.Environment) != 0 {
 		t.Errorf("Environment de seção ignorada entrou no modelo: %+v", u.Environment)
 	}
@@ -118,11 +140,63 @@ func TestUnitSecoesProprias(t *testing.T) {
 	e := env.Probe(env.Options{Root: raiz, Version: "test"})
 	t.Cleanup(func() { e.Close() })
 
-	if u := parseUnitFile(&Facts{}, e, "/t.timer", "system", false); len(u.OnCalendar) != 1 ||
+	if u := parseUnitFile(&Facts{}, e, "/t.timer", "system", kindOf("/t.timer"), false); len(u.OnCalendar) != 1 ||
 		len(u.WantedBy) != 1 {
 		t.Errorf("timer perdeu agenda ou habilitação: %+v", u)
 	}
-	if u := parseUnitFile(&Facts{}, e, "/p.path", "system", false); len(u.WatchPaths) != 1 {
+	if u := parseUnitFile(&Facts{}, e, "/p.path", "system", kindOf("/p.path"), false); len(u.WatchPaths) != 1 {
 		t.Errorf("path perdeu o alvo observado: %+v", u)
+	}
+}
+
+// E o outro lado do corte por tipo: a seção do PRÓPRIO tipo continua valendo
+// inteira. Sem esta metade o conserto cegaria .socket, .mount e .swap, que têm
+// contexto de execução legítimo — trocar um FN por outro.
+func TestUnitSecaoDoProprioTipoContinuaValendo(t *testing.T) {
+	casos := []struct{ arquivo, tipo, conteudo string }{
+		{"/x.socket", "socket", "[Socket]\nListenStream=1234\nExecStartPre=/tmp/.i\n"},
+		{"/x.mount", "mount", "[Mount]\nExecStartPre=/tmp/.i\n"},
+		{"/x.swap", "swap", "[Swap]\nExecStartPre=/tmp/.i\n"},
+	}
+	for _, c := range casos {
+		raiz := t.TempDir()
+		if err := os.WriteFile(filepath.Join(raiz, filepath.Base(c.arquivo)), []byte(c.conteudo), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		e := env.Probe(env.Options{Root: raiz, Version: "test"})
+		u := parseUnitFile(&Facts{}, e, c.arquivo, "system", c.tipo, false)
+		e.Close()
+		if len(u.Exec) != 1 {
+			t.Errorf("[%s] a seção do próprio tipo tem de valer: %+v", c.arquivo, u.Exec)
+		}
+	}
+	// E a .socket ganha o Listen, que só existe nela.
+	raiz := t.TempDir()
+	os.WriteFile(filepath.Join(raiz, "x.socket"), []byte("[Socket]\nListenStream=1234\n"), 0o644)
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	defer e.Close()
+	if u := parseUnitFile(&Facts{}, e, "/x.socket", "system", "socket", false); len(u.Listen) != 1 {
+		t.Errorf("Listen* na .socket: %+v", u.Listen)
+	}
+}
+
+// Drop-in herda o tipo do DIRETÓRIO (`foo.service.d/`), não do nome do .conf.
+// Sem isso todo drop-in cairia no caminho de tipo desconhecido, e o bypass
+// voltaria pela porta mais usada de todas.
+func TestUnitDropinHerdaTipoDoDiretorio(t *testing.T) {
+	raiz := t.TempDir()
+	dir := filepath.Join(raiz, "etc/systemd/system/agent.service.d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "10-x.conf"), []byte(
+		"[Service]\nExecStart=/tmp/.implant\n\n[Socket]\nExecStart=\n"), 0o644)
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	defer e.Close()
+
+	u := parseUnitFile(&Facts{}, e, "/etc/systemd/system/agent.service.d/10-x.conf",
+		"system", kindOf("agent.service"), false)
+	if len(u.Exec) != 1 || u.Exec[0].Cmd != "/tmp/.implant" {
+		t.Errorf("drop-in de .service não pode aceitar reset em [Socket]: %+v", u.Exec)
 	}
 }

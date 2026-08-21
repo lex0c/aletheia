@@ -25,7 +25,7 @@ func TestParseUnitEnvironmentFile(t *testing.T) {
 
 	e := env.Probe(env.Options{Root: raiz, Version: "test"})
 	defer e.Close()
-	u := parseUnitFile(&Facts{}, e, "/etc/systemd/system/x.service", "system", false)
+	u := parseUnitFile(&Facts{}, e, "/etc/systemd/system/x.service", "system", kindOf("/etc/systemd/system/x.service"), false)
 
 	var achou bool
 	for _, s := range u.Environment {
@@ -54,7 +54,7 @@ func TestEnvironmentFileIlegivelDeclaraLacuna(t *testing.T) {
 
 	e := env.Probe(env.Options{Root: raiz, Version: "test"})
 	defer e.Close()
-	u := parseUnitFile(&Facts{}, e, "/etc/systemd/system/x.service", "system", false)
+	u := parseUnitFile(&Facts{}, e, "/etc/systemd/system/x.service", "system", kindOf("/etc/systemd/system/x.service"), false)
 	if len(u.EnvFilesIlegiveis) == 0 {
 		t.Error("EnvironmentFile ilegível tinha de ser registrado para virar lacuna")
 	}

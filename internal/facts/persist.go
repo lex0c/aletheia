@@ -784,7 +784,7 @@ func coletarDirDeUnits(f *Facts, e *env.Env, dir, scope string, vendor bool, uni
 						truncated = true
 						break
 					}
-					u := parseUnitFile(f, e, full+"/"+c, scope, vendor)
+					u := parseUnitFile(f, e, full+"/"+c, scope, kindOf(target), vendor)
 					u.Name = target
 					u.DropInFor = target
 					u.Kind = kindOf(target)
@@ -812,7 +812,7 @@ func coletarDirDeUnits(f *Facts, e *env.Env, dir, scope string, vendor bool, uni
 			})
 			continue
 		}
-		u := parseUnitFile(f, e, full, scope, vendor)
+		u := parseUnitFile(f, e, full, scope, kindOf(name), vendor)
 		u.Name = name
 		u.Kind = kindOf(name)
 		*units = append(*units, u)
@@ -1355,8 +1355,8 @@ func detectarMascara(e *env.Env, path string) bool {
 	return fi.Mode().IsRegular() && fi.Size() == 0
 }
 
-func parseUnitFile(f *Facts, e *env.Env, path, scope string, vendor bool) Unit {
-	u := Unit{Path: path, Scope: scope, Vendor: vendor}
+func parseUnitFile(f *Facts, e *env.Env, path, scope, tipo string, vendor bool) Unit {
+	u := Unit{Path: path, Scope: scope, Kind: tipo, Vendor: vendor}
 	if fi, err := e.Lstat(path); err == nil {
 		u.ModUTC = fi.ModTime().UTC().Format(time.RFC3339)
 	}
@@ -1416,7 +1416,7 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope string, vendor bool) Unit {
 			continue
 		}
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if !diretivaValeNaSecao(secao, k) {
+		if !diretivaValeNaSecao(u.Kind, secao, k) {
 			continue
 		}
 
@@ -1633,30 +1633,52 @@ func firstNCaminhos(v []string, n int) string {
 	return strings.Join(v[:n], ", ") + " e mais " + strconv.Itoa(len(v)-n)
 }
 
-// diretivaValeNaSecao diz se o systemd aplicaria esta diretiva nesta seção.
+// diretivaValeNaSecao diz se o systemd aplicaria esta diretiva, NESTA seção, num
+// arquivo DESTE tipo.
 //
-// O corte é por FAMÍLIA de seção, não por lista exaustiva de opções: o que
-// precisa ser impedido é a diretiva atravessar para uma seção onde o systemd a
-// ignora — e é justamente ali que o reset por atribuição vazia vira bypass.
+// O tipo entra por um motivo medido: sem ele, o corte fechava só metade do
+// bypass. A primeira versão olhava a seção isolada, e como `[Socket]` também
+// carrega contexto de execução, bastou ao atacante trocar a seção inventada por
+// uma real:
 //
-//	execução   Service, Socket, Mount, Swap compartilham o contexto de
-//	           execução (Exec*, Environment*, RootDirectory/Image, User…)
-//	Install    só WantedBy/RequiredBy
-//	Timer      só as diretivas de agenda
-//	Socket     Listen* (além do contexto de execução)
-//	Path       as diretivas de observação
+//	[Service]
+//	ExecStart=/tmp/.implant
 //
-// Unit, X-* e qualquer seção desconhecida não contribuem com nada do que este
-// parser modela. Para X-* isso é o contrato do systemd; para a desconhecida é a
-// escolha conservadora — concordar com o alvo, que também a ignora.
-func diretivaValeNaSecao(secao, k string) bool {
+//	[Socket]
+//	ExecStart=
+//
+// Numa `.service`, `[Socket]` é tão ignorado pelo systemd quanto `[X-Foo]` — as
+// opções específicas de um tipo vivem na SEÇÃO DAQUELE TIPO. Medido contra o
+// binário depois do primeiro conserto: a unit com `[Socket] ExecStart=` saía em
+// silêncio, e a de controle, CRITICAL. Fechar uma porta e deixar quatro do lado
+// não é fechar.
+//
+// A regra passa a ser: a seção precisa ser a do PRÓPRIO tipo (ou [Install],
+// que é comum a todos). O que a seção do tipo aceita continua sendo por
+// família, porque Service, Socket, Mount e Swap de fato compartilham o contexto
+// de execução — cada um na sua seção.
+//
+// Unit, X-* e seção desconhecida não contribuem com nada do que este parser
+// modela. Para X-* isso é o contrato do systemd; para a desconhecida é a escolha
+// conservadora — concordar com o alvo, que também a ignora.
+//
+// Tipo vazio (não deu para deduzir do nome nem do diretório do drop-in) cai no
+// comportamento antigo, por seção. É o único caminho em que o bypass sobrevive,
+// e ele exige um nome de arquivo que o próprio systemd não carregaria.
+func diretivaValeNaSecao(tipo, secao, k string) bool {
+	if secao == "Install" {
+		return k == "WantedBy" || k == "RequiredBy"
+	}
+	// A seção do tipo é a única que configura o tipo. Sem tipo conhecido,
+	// aceita-se qualquer seção de execução, como antes.
+	if tipo != "" && !strings.EqualFold(secao, tipo) {
+		return false
+	}
 	switch secao {
 	case "Service", "Mount", "Swap":
 		return ehDiretivaDeExecucao(k)
 	case "Socket":
 		return ehDiretivaDeExecucao(k) || strings.HasPrefix(k, "Listen")
-	case "Install":
-		return k == "WantedBy" || k == "RequiredBy"
 	case "Timer":
 		switch k {
 		case "OnCalendar", "OnUnitActiveSec", "OnUnitInactiveSec",

@@ -366,10 +366,14 @@ func TestLinhaCompridaNaBaseDeHashViraLacunaENaoFimDeArquivo(t *testing.T) {
 	}
 }
 
-// O cluster de ctime: um ctime compartilhado por clusterBulk+ arquivos é
-// build/extração em massa (o falso positivo de contêiner), não timestomping —
-// que é feito arquivo a arquivo e deixa ctime isolado.
-func TestSemClustersDeBuild(t *testing.T) {
+// O cluster de ctime é MEDIDO aqui e pesado no check.
+//
+// A versão anterior descartava o candidato nesta camada, e isso criou a evasão
+// mais barata do catálogo: o ctime é truncado a segundos, então `touch -d` em
+// quatro arquivos no mesmo segundo apagava a evidência inteira antes de
+// qualquer check olhar — sem lacuna, sem rastro. Medir e deixar o peso para
+// quem tem os outros sinais é o que devolve a decisão a quem pode tomá-la.
+func TestMarcaClustersDeCtime(t *testing.T) {
 	// 4 arquivos com o MESMO ctime (o instante da extração da imagem) + 1
 	// isolado (o backdoor tocado depois).
 	cand := []Timestomp{
@@ -379,22 +383,31 @@ func TestSemClustersDeBuild(t *testing.T) {
 		{Path: "/etc/apt/apt.conf.d/docker-autoremove", MetaUTC: "2026-08-19T17:00:03Z"},
 		{Path: "/usr/local/sbin/.backdoor", MetaUTC: "2026-08-19T17:05:41Z"},
 	}
-	got := semClustersDeBuild(cand)
-	if len(got) != 1 || got[0].Path != "/usr/local/sbin/.backdoor" {
-		t.Fatalf("o bloco de build tinha de ser suprimido e só o isolado ficar: %+v", got)
+	got := marcaClustersDeCtime(cand)
+	if len(got) != 5 {
+		t.Fatalf("nenhum candidato pode ser descartado nesta camada: %+v", got)
+	}
+	for _, c := range got {
+		quer := 4
+		if c.Path == "/usr/local/sbin/.backdoor" {
+			quer = 1
+		}
+		if c.Cluster != quer {
+			t.Errorf("%s: Cluster=%d, queria %d", c.Path, c.Cluster, quer)
+		}
 	}
 }
 
 // O A4 planta DOIS timestomps (ctime da hora do plant): um cluster de 2 fica
-// ABAIXO do limite e sobrevive — a detecção do timestomp real num contêiner não
-// pode ser cegada pela supressão do bloco de build.
-func TestA4NaoEhSuprimidoPorClusterPequeno(t *testing.T) {
-	cand := []Timestomp{
+// ABAIXO do limite do check e continua valendo integralmente.
+func TestA4TemClusterPequeno(t *testing.T) {
+	cand := marcaClustersDeCtime([]Timestomp{
 		{Path: "/usr/local/sbin/dbus-broker-helper", MetaUTC: "2026-08-19T17:05:41Z"},
 		{Path: "/etc/systemd/system/dbus-broker-helper.service", MetaUTC: "2026-08-19T17:05:41Z"},
-	}
-	got := semClustersDeBuild(cand)
-	if len(got) != 2 {
-		t.Fatalf("dois timestomps são cluster pequeno e têm de sobreviver: %+v", got)
+	})
+	for _, c := range cand {
+		if c.Cluster != 2 {
+			t.Errorf("%s: Cluster=%d, queria 2", c.Path, c.Cluster)
+		}
 	}
 }

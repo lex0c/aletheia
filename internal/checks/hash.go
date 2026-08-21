@@ -143,6 +143,7 @@ var dataFalsificada = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+		var emLote []string
 		for i := range f.Timestomps {
 			t := &f.Timestomps[i]
 			ev := []string{
@@ -173,7 +174,37 @@ var dataFalsificada = check.Check{
 			}
 			ev = append(ev, motivo)
 
-			fd := self.F(check.SevCritical, t.Path, "", ev...)
+			// O LOTE REBAIXA, e não apaga — a diferença é a evasão mais barata
+			// que este catálogo já teve.
+			//
+			// Extração em massa (camada de contêiner, tar -x, restauração)
+			// carimba o mesmo ctime em tudo, e foi o que fez este check gritar
+			// doze CRITICAL numa debian:12 saudável. A resposta anterior era
+			// descartar o candidato ainda na coleta, e o ctime é truncado a
+			// SEGUNDOS: `touch -d` em quatro arquivos no mesmo segundo apagava a
+			// evidência sem deixar lacuna. Custo do atacante: um comando.
+			//
+			// Aqui o lote vira contexto e o achado continua existindo, com a
+			// severidade dizendo o que se sabe. E corroboração FORTE ignora o
+			// lote: um binário SETUID ou que está rodando AGORA não vira ruído
+			// de build por ter vizinhos com o mesmo carimbo.
+			sev := check.SevCritical
+			if t.Cluster >= clusterBulk {
+				if forte := corroboraApesarDoLote(f, t.Path); forte != "" {
+					ev = append(ev, forte, "outros "+strconv.Itoa(t.Cluster-1)+
+						" arquivos compartilham este ctime, mas a corroboração acima "+
+						"não se explica por extração em lote")
+				} else {
+					// UMA linha para o lote inteiro, não uma por arquivo. Numa
+					// debian:12 saudável são dez, e dez linhas dizendo "isto é a
+					// camada da imagem" afogam a seção que existe para ser lida.
+					// É o mesmo formato da isenção de JIT.
+					emLote = append(emLote, t.Path)
+					continue
+				}
+			}
+
+			fd := self.F(sev, t.Path, "", ev...)
 			// A de METADADOS, não a de modificação: o mtime é justamente o que foi
 			// falsificado, e datar o achado por ele colocaria o implante na janela
 			// que o invasor escolheu.
@@ -184,6 +215,20 @@ var dataFalsificada = check.Check{
 				"procure o que mais mudou nessa mesma janela — falsificação " +
 					"costuma vir em lote",
 			}
+			r.Findings = append(r.Findings, fd)
+		}
+		if n := len(emLote); n > 0 {
+			// CONTEXTO, e não lacuna. A distinção é a mesma do resto da base: não
+			// é "não consegui olhar", é "olhei e a explicação de rotina cobre".
+			// Fosse lacuna, todo contêiner sairia INCOMPLETE para sempre, que é a
+			// forma de treinar o operador a ignorar o veredito.
+			fd := self.F(check.SevInfo, "lote de ctime", "",
+				strconv.Itoa(n)+" arquivo(s) com data divergente compartilham o MESMO "+
+					"ctime ao segundo: "+firstN(emLote, 3),
+				"é a forma de extração em massa — camada de contêiner, tar -x, "+
+					"restauração de backup —, não de falsificação individual",
+				"NÃO estão suprimidos por completo: bit setuid ou processo rodando a "+
+					"partir do arquivo vencem o lote e voltam a produzir achado próprio")
 			r.Findings = append(r.Findings, fd)
 		}
 		r.Partial = append(r.Partial, f.PersistDenied["pkg"]...)
@@ -294,3 +339,35 @@ func gatilhoDeExecucao(p string) bool {
 	}
 	return false
 }
+
+// corroboraApesarDoLote são os sinais que VENCEM a heurística de extração em
+// massa.
+//
+// O arquivoComPoder já é exigente, mas ele inclui coisas que a construção de
+// uma imagem toca legitimamente — o hook de apt do próprio Docker foi o falso
+// positivo que motivou o filtro de lote. Aqui a régua é mais alta: privilégio no
+// próprio arquivo, ou o arquivo em EXECUÇÃO agora. Build de imagem não deixa
+// processo rodando, e não põe bit setuid em arquivo de configuração.
+func corroboraApesarDoLote(f *facts.Facts, p string) string {
+	for i := range f.Suid {
+		if f.Suid[i].Path == p {
+			return "e o arquivo tem bit SETUID: extração em lote não concede privilégio"
+		}
+	}
+	for i := range f.Processes {
+		if f.Processes[i].Exe == p {
+			return "e há processo RODANDO a partir dele (pid=" +
+				strconv.Itoa(f.Processes[i].PID) + "): build de imagem não deixa processo vivo"
+		}
+	}
+	return ""
+}
+
+// clusterBulk é quantos arquivos com o MESMO ctime já contam como operação em
+// massa (build de imagem, tar -x, rsync) em vez de backdating. O A4 planta DOIS
+// timestomps (ctime da hora do plant); o falso positivo de contêiner são doze
+// (ctime da extração). Quatro separa os dois com folga dos dois lados.
+//
+// O limiar mora no CHECK, não na coleta: ele é uma decisão de peso, e decisão de
+// peso pertence a quem tem os outros sinais na mão.
+const clusterBulk = 4

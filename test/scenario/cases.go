@@ -103,12 +103,29 @@ func init() {
 			// é o uso principal deste cenário.
 			"persist.suid_unowned", "persist.modprobe_install",
 			"persist.unit_socket_unowned", "integrity.pkgdb_tampered",
-			"integrity.pkg_file_modified", "integrity.timestomp",
+			"integrity.pkg_file_modified",
 			"integrity.immutable_flag", "priv.sudo_nopasswd",
 			"net.egress_unowned", "net.listener_unowned",
 			"kernel.mount_over_system", "kernel.ftrace_hook",
 			"auth.bruteforce_success", "antiforense.shell_history",
 			"cred.ssh_private_key",
+		},
+		// O timestomp sai do Forbid por SEVERIDADE, não por inteiro.
+		//
+		// Um contêiner tem dezenas de arquivos com ctime > mtime: a camada é
+		// extraída depois do mtime, e alguns deles são alvo de persistência
+		// legítimo (hook de apt, pam.d, /etc/profile). Isso é CONTEXTO — sai
+		// como uma linha INFO agregada dizendo "N arquivos compartilham o mesmo
+		// ctime ao segundo: extração em massa".
+		//
+		// Proibir o ID inteiro obrigaria a escolher entre duas coisas ruins:
+		// apagar o sinal na coleta (que era o comportamento anterior, e fazia
+		// `touch -d` em quatro arquivos no mesmo segundo limpar o rastro) ou
+		// deixar o contêiner limpo gritar. O que este cenário protege é
+		// silêncio de AÇÃO, e é isso que fica travado.
+		ForbidFinding: []Expect{
+			{ID: "integrity.timestomp", Sev: "CRITICAL"},
+			{ID: "integrity.timestomp", Sev: "WARN"},
 		},
 		Exit: 0,
 		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
@@ -446,12 +463,18 @@ func init() {
 			// é o uso principal deste cenário.
 			"persist.suid_unowned", "persist.modprobe_install",
 			"persist.unit_socket_unowned", "integrity.pkgdb_tampered",
-			"integrity.pkg_file_modified", "integrity.timestomp",
+			"integrity.pkg_file_modified",
 			"integrity.immutable_flag", "priv.sudo_nopasswd",
 			"net.egress_unowned", "net.listener_unowned",
 			"kernel.mount_over_system", "kernel.ftrace_hook",
 			"auth.bruteforce_success", "antiforense.shell_history",
 			"cred.ssh_private_key",
+		},
+		// Mesma razão do 00-limpo: ctime em lote é contexto da imagem, e o que
+		// este cenário protege é silêncio de AÇÃO.
+		ForbidFinding: []Expect{
+			{ID: "integrity.timestomp", Sev: "CRITICAL"},
+			{ID: "integrity.timestomp", Sev: "WARN"},
 		},
 		Exit: 0,
 		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.

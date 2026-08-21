@@ -262,6 +262,14 @@ type Timestomp struct {
 	ModUTC  string `json:"mtime_utc"`
 	MetaUTC string `json:"ctime_utc"`
 	DeltaH  int    `json:"delta_hours"`
+	// Cluster é quantos candidatos compartilham este ctime, ao SEGUNDO.
+	//
+	// É medida, não decisão: quem pesa é o check. A versão anterior decidia
+	// aqui — descartava o candidato quando o cluster passava do teto — e isso
+	// criou a evasão mais barata do catálogo: `touch -d` em quatro arquivos no
+	// mesmo segundo apagava o sinal inteiro, sem lacuna nenhuma. O próprio
+	// commit que introduziu o filtro já reconhecia a brecha.
+	Cluster int `json:"ctime_cluster,omitempty"`
 }
 
 // coletarTimestomp compara as duas datas nos arquivos SEM dono de pacote.
@@ -313,25 +321,7 @@ func coletarTimestomp(f *Facts, e *env.Env) {
 		}
 		cand = append(cand, t)
 	}
-	f.Timestomps = semClustersDeBuild(cand)
-}
-
-// semClustersDeBuild remove os candidatos cujo ctime é compartilhado por
-// clusterBulk+ arquivos — o bloco de build/extração, não backdating. Puro, para
-// ser testável sem tocar em ctime de arquivo de verdade.
-func semClustersDeBuild(cand []Timestomp) []Timestomp {
-	porCtime := map[string]int{}
-	for _, t := range cand {
-		porCtime[t.MetaUTC]++
-	}
-	var out []Timestomp
-	for _, t := range cand {
-		if porCtime[t.MetaUTC] >= clusterBulk {
-			continue
-		}
-		out = append(out, t)
-	}
-	return out
+	f.Timestomps = marcaClustersDeCtime(cand)
 }
 
 // minTimestompH é a folga. Instalação, cópia e build produzem diferenças de
@@ -339,15 +329,28 @@ func semClustersDeBuild(cand []Timestomp) []Timestomp {
 // e cujos metadados foram tocados agora.
 const minTimestompH = 48
 
-// clusterBulk é quantos arquivos com o MESMO ctime já contam como operação em
-// massa (build de imagem, tar -x, rsync) em vez de backdating. O A4 planta DOIS
-// timestomps (ctime da hora do plant); o falso positivo de contêiner são doze
-// (ctime da extração). Quatro separa os dois com folga dos dois lados.
+// marcaClustersDeCtime anota quantos candidatos compartilham cada ctime.
 //
-// O limite: um atacante que timestompa 4+ arquivos NO MESMO SEGUNDO por script
-// seria perdido — mas esse padrão É a forma do bloco, e o preço de não o perder
-// é gritar em todo contêiner, que ensina o operador a ignorar o check.
-const clusterBulk = 4
+// Em contêiner, tarball e restauração de backup, a extração toca centenas de
+// arquivos no mesmo instante — foi o que fez este check gritar doze CRITICAL
+// numa debian:12 saudável. O tamanho do cluster é o que separa isso de
+// falsificação individual.
+//
+// MEDE, e não descarta. O filtro anterior removia o candidato e o achado
+// desaparecia antes de qualquer check olhar: quatro `touch -d` no mesmo segundo
+// — o ctime é truncado a segundos — apagavam a evidência sem deixar lacuna.
+// Quem decide o peso disso é o check, que tem os outros sinais na mão e pode
+// deixar a correlação vencer a heurística.
+func marcaClustersDeCtime(cand []Timestomp) []Timestomp {
+	porCtime := map[string]int{}
+	for _, t := range cand {
+		porCtime[t.MetaUTC]++
+	}
+	for i := range cand {
+		cand[i].Cluster = porCtime[cand[i].MetaUTC]
+	}
+	return cand
+}
 
 type hashRef struct {
 	hash string

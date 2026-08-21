@@ -118,8 +118,19 @@ type Classe struct {
 	//
 	// O índice colapsa por ID, e para quase toda família isso é o certo: duas
 	// leituras da mesma unit são a mesma unit. Para o cron não é — duas linhas
-	// idênticas fazem o job rodar DUAS VEZES, e passar de uma para duas era
-	// invisível porque o valor fundido é igual ao original.
+	// idênticas fazem o job rodar DUAS VEZES.
+	//
+	// A primeira versão resolvia isso com um campo de CARDINALIDADE do ID
+	// (`_repeticoes`), e ela colidia num caso só um pouco mais interessante:
+	//
+	//	antes:  A A B        depois:  B B A
+	//	  cmd = A,B  n=3       cmd = A,B  n=3     → nenhum drift
+	//
+	// A tinha duas execuções e passou a ter uma; B fez o contrário. O código
+	// existia para preservar multiplicidade e a perdia, porque contava
+	// ENTIDADES enquanto os valores viravam conjunto. Agora a multiplicidade
+	// mora no próprio valor: os campos viram MULTICONJUNTO ordenado, `A,A,B`
+	// contra `A,B,B`, e a cardinalidade sai de graça.
 	Multiplicidade bool
 
 	// Incompleta é a pergunta que a família faz aos fatos de UM lado: "o
@@ -171,10 +182,6 @@ type Classe struct {
 	// normalização — ver Entidade.
 	Extrair func(*facts.Facts) []Entidade
 }
-
-// campoRepeticoes é onde a multiplicidade mora, quando a família a declara.
-// O nome começa com `_` para não colidir com campo de extrator nenhum.
-const campoRepeticoes = "_repeticoes"
 
 // Kind é o que aconteceu com uma entidade.
 const (
@@ -404,16 +411,7 @@ func indexar(c Classe, f *facts.Facts) (map[string]Entidade, int) {
 			continue
 		}
 		if ja, dup := out[e.ID]; dup {
-			e = fundir(ja, e)
-			if c.Multiplicidade {
-				n, _ := strconv.Atoi(e.Campos[campoRepeticoes])
-				if n == 0 {
-					n = 1
-				}
-				e.Campos[campoRepeticoes] = strconv.Itoa(n + 1)
-			}
-		} else if c.Multiplicidade {
-			e.Campos[campoRepeticoes] = "1"
+			e = fundir(ja, e, c.Multiplicidade)
 		}
 		out[e.ID] = e
 	}
@@ -439,19 +437,24 @@ func chavesDaUniao(a, b map[string]string) []string {
 // fundir junta duas entidades de mesmo ID num valor ESTÁVEL: campo divergente
 // vira a lista ordenada dos valores. Sem isto, a ordem da coleta decidiria qual
 // das duas venceu, e a mesma máquina daria drift contra si mesma.
-func fundir(a, b Entidade) Entidade {
+func fundir(a, b Entidade, multiplo bool) Entidade {
 	out := Entidade{ID: a.ID, Campos: map[string]string{}, Alvos: unirAlvos(a.Alvos, b.Alvos)}
 	for k, v := range a.Campos {
 		out.Campos[k] = v
 	}
 	for k, v := range b.Campos {
-		if ja, existe := out.Campos[k]; existe && ja != v {
-			partes := append(strings.Split(ja, "\x1f"), v)
-			sort.Strings(partes)
-			out.Campos[k] = strings.Join(partes, "\x1f")
+		ja, existe := out.Campos[k]
+		// MULTICONJUNTO quando a família declara Multiplicidade: valor repetido
+		// entra DE NOVO, e `A,A,B` deixa de ser igual a `A,B,B`. Sem isso, dois
+		// valores iguais colapsavam e a repetição sumia — que é o oposto do que
+		// a declaração pede.
+		if !existe || (ja == v && !multiplo) {
+			out.Campos[k] = v
 			continue
 		}
-		out.Campos[k] = v
+		partes := append(strings.Split(ja, "\x1f"), v)
+		sort.Strings(partes)
+		out.Campos[k] = strings.Join(partes, "\x1f")
 	}
 	return out
 }

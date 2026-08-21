@@ -162,12 +162,10 @@ var agendamento = Classe{
 	Lacunas:   []string{"cron"},
 	Exaustiva: true,
 	// DUAS LINHAS IDÊNTICAS NÃO SÃO A MESMA LINHA: o cron executa o job duas
-	// vezes. O índice colapsa por ID e o valor fundido é igual ao original, então
-	// passar de uma para duas era invisível — ver Classe.Multiplicidade.
+	// vezes. Com Multiplicidade, os campos viram multiconjunto e a repetição
+	// mora no próprio valor — `A,A,B` contra `A,B,B`. Ver Classe.Multiplicidade.
 	Multiplicidade: true,
-	Decide: map[string]bool{
-		"cmd": true, "user": true, "schedule": true, "_repeticoes": true,
-	},
+	Decide:         map[string]bool{"cmd": true, "user": true, "schedule": true},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.Cron))
 		for i := range f.Cron {
@@ -206,8 +204,17 @@ var regraDeSudo = Classe{
 	// A lacuna `users` mede a coisa certa: o coletor declara "/etc/sudoers
 	// ilegível" quando de fato não conseguiu ler. Onde a procuração e o fato
 	// discordam, vence o fato.
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"users"},
+	Requires: env.CapFilesystem,
+	// A árvore INTEIRA precisa ter sido lida: uma regra que não abriu faz o
+	// conjunto deixar de ser exaustivo, e o sinal desta família é a presença.
+	// Consumir a chave `users` misturava isso com o shadow ilegível.
+	Incompleta: func(f *facts.Facts) string {
+		if f.SudoersLido {
+			return ""
+		}
+		return "a árvore de sudoers não foi lida inteira: o conjunto de regras NÃO " +
+			"é exaustivo deste lado"
+	},
 	Exaustiva: true,
 	// SEM campo que decide, e de propósito: aqui a identidade É o texto da
 	// regra, então não existe campo que possa mudar sem virar outra entidade.
@@ -324,10 +331,27 @@ func Tipos() []string {
 // escalada, e nenhuma delas tem forma suspeita quando olhada parada — `deploy`
 // com shell `/bin/bash` é normal em metade dos hosts do mundo.
 var conta = Classe{
-	Tipo:      "conta",
-	Titulo:    "conta local",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"users"},
+	Tipo:     "conta",
+	Titulo:   "conta local",
+	Requires: env.CapFilesystem,
+	// NÃO consome a chave `users`, e este é o terceiro caso da mesma lição:
+	// chave de lacuna larga demais para servir de dependência.
+	//
+	// `users` cobre /etc/passwd, /etc/shadow, /etc/group e a árvore de sudoers.
+	// Sem root o shadow é SEMPRE ilegível, então a chave está sempre suja — e
+	// consumi-la suprimia `surgiu`/`sumiu` desta família em todo host sem root.
+	// Uma conta uid 0 acrescentada entre dois retratos ficava calada porque
+	// OUTRO arquivo não abriu, com o /etc/passwd perfeitamente legível.
+	//
+	// A presença de uma conta vem do passwd. Os campos que vêm do shadow já são
+	// observacionais (ver Observacional abaixo), que é a granularidade certa
+	// para eles.
+	Incompleta: func(f *facts.Facts) string {
+		if f.PasswdLido {
+			return ""
+		}
+		return "/etc/passwd não foi lido: a lista de contas NÃO é conhecida deste lado"
+	},
 	Exaustiva: true,
 	Decide: map[string]bool{
 		"uid": true, "gid": true, "shell": true, "home": true,
@@ -367,10 +391,18 @@ var conta = Classe{
 // O grupo importa pelos MEMBROS: entrar em `docker`, `sudo` ou `wheel` é
 // escalada que não muda nada no /etc/passwd e não cria processo nenhum.
 var grupo = Classe{
-	Tipo:      "grupo",
-	Titulo:    "grupo local",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"users"},
+	Tipo:     "grupo",
+	Titulo:   "grupo local",
+	Requires: env.CapFilesystem,
+	// Mesma razão da família de contas: a chave `users` está suja sem root por
+	// causa do shadow, e entrar em `docker` ou `wheel` é escalada que o
+	// /etc/group registra sozinho.
+	Incompleta: func(f *facts.Facts) string {
+		if f.GroupLido {
+			return ""
+		}
+		return "/etc/group não foi lido: a lista de grupos NÃO é conhecida deste lado"
+	},
 	Exaustiva: true,
 	Decide:    map[string]bool{"membros": true, "gid": true},
 	Extrair: func(f *facts.Facts) []Entidade {
@@ -674,6 +706,14 @@ var confiancaDeCertificado = Classe{
 	//	spki         DECIDE: é a chave. Não muda numa renovação, então mudar
 	//	             significa que a autoridade é outra.
 	//	fingerprint  CORROBORA: muda na renovação, que é rotina.
+	//
+	// DÍVIDA DECLARADA: "mesma chave = mesma autoridade" não é universal. Um
+	// certificado pode manter a chave e mudar `NameConstraints`,
+	// `BasicConstraints`, `KeyUsage` ou políticas — e aí a autoridade que ele
+	// concede é outra sem a chave mexer. Hoje isso altera só o fingerprint, que
+	// vai para a contagem e não vira achado. Fechar exigiria modelar as
+	// extensões que importam, e isso é família própria; enquanto não existe, o
+	// limite fica escrito aqui em vez de descoberto no incidente.
 	Decide: map[string]bool{"spki": true, "emissor": true, "auto_assinado": true},
 	// Dump gravado antes destes campos existirem não os traz. Vazio aqui é
 	// "não observado" e não "sem chave" — embora o SchemaVersion já recuse

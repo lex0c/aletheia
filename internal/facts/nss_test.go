@@ -3,6 +3,7 @@ package facts
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/lex0c/aletheia/internal/env"
@@ -89,5 +90,42 @@ func TestCollectNSSSegueSearchDirsDoLoader(t *testing.T) {
 	m, ok := nssPorFonte(f, "impl")
 	if !ok || len(m.Paths) != 1 || m.Paths[0] != "/opt/.lib/libnss_impl.so.2" {
 		t.Fatalf("lib em dir do ld.so.conf deve ser localizada: %+v", f.NSSModules)
+	}
+}
+
+// O BLOCO DE AÇÃO ENTRA NA CADEIA, normalizado.
+//
+// Ele decide se a próxima fonte chega a ser consultada — `[NOTFOUND=return]`
+// encerra onde `[NOTFOUND=continue]` prossegue, e `[SUCCESS=merge]` faz duas
+// fontes responderem juntas. Descartá-lo fazia duas configurações de
+// comportamento diferente virarem o mesmo fato.
+//
+// E a forma é canônica: `[ SUCCESS = return ]` e `[success=return]` são a MESMA
+// configuração escrita de dois jeitos, e uma reformatação do arquivo não pode
+// virar drift.
+func TestCadeiaNSSPreservaAcoes(t *testing.T) {
+	casos := []struct {
+		linha string
+		quer  []string
+	}{
+		{"passwd: files sss", []string{"files", "sss"}},
+		{"passwd: files [NOTFOUND=return] sss",
+			[]string{"files", "[notfound=return]", "sss"}},
+		{"passwd: files [ SUCCESS = merge ] sss",
+			[]string{"files", "[success=merge]", "sss"}},
+		{"group: files [!UNAVAIL=return]", []string{"files", "[!unavail=return]"}},
+	}
+	for _, c := range casos {
+		e := raizNSS(t, map[string]string{"etc/nsswitch.conf": c.linha + "\n"})
+		f := &Facts{}
+		collectNSS(f, e)
+		if len(f.NSSServicos) != 1 {
+			t.Errorf("%q: serviços = %+v", c.linha, f.NSSServicos)
+			continue
+		}
+		got := strings.Join(f.NSSServicos[0].Cadeia, " ")
+		if quer := strings.Join(c.quer, " "); got != quer {
+			t.Errorf("%q\n  cadeia = %q\n  queria   %q", c.linha, got, quer)
+		}
 	}
 }

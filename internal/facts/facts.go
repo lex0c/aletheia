@@ -136,7 +136,42 @@ import (
 //	     porque o truque mora numa linha de COMENTÁRIO, que Lines descarta. Num
 //	     dump v7 o campo vem 0, e 0 significa "este arquivo foi lido e não tem
 //	     escape nenhum" para `antiforense.hidden_text`.
-const SchemaVersion = 10
+//	9  A COMPARAÇÃO entre dois retratos (internal/drift) passou a existir, e ela
+//	   pergunta coisas que nenhum check perguntava. Num dump v8 as quatro
+//	   respostas vêm no zero-value, e zero-value aqui significa a coisa errada:
+//
+//	   SocketsIncompletos  quais tabelas de /proc/net NÃO saíram inteiras. Vazio
+//	     num dump v8 significa "todas saíram", e uma tabela truncada faz uma
+//	     porta que continua lá aparecer como REMOVIDA.
+//	   ShadowLido  se /etc/shadow foi lido. Falso num dump v8 é indistinguível
+//	     de "não foi lido", o que é o lado seguro — mas Account.SemSenha
+//	     continua vindo `false` para toda conta, e `false` ali significava as
+//	     duas coisas ao mesmo tempo.
+//	   CACert.SPKI/Fingerprint  a chave e o certificado. Vazios num dump v8, e
+//	     sem eles trocar uma CA por outra com o MESMO DN não muda nada que a
+//	     comparação olhe: a autoridade de confiança do host inteiro troca em
+//	     silêncio.
+//	   NSSServicos  a cadeia de resolução NA ORDEM, com os blocos de ação. Vazia
+//	     num dump v8, e sem ela `passwd: files sss` e `passwd: sss files` são o
+//	     mesmo fato — as mesmas fontes, e a autoridade sobre quem é usuário
+//	     trocada de lado.
+//	10 ModulosLidos  separa "li /proc/modules" de "li a árvore /lib/modules",
+//	   que compartilhavam a chave de lacuna `modulo`. Falso num dump v9 faz a
+//	   família de módulos ser recusada por inteiro — o lado seguro, e ainda
+//	   assim uma perda: a lacuna da árvore só nasce QUANDO HÁ MÓDULO CARREGADO,
+//	   então carregar um módulo apagava a comparação que o denunciaria.
+//	11 PasswdLido, GroupLido e SudoersLido  o mesmo remédio para a chave `users`,
+//	   que cobria QUATRO arquivos com privilégios diferentes. Num dump v10 os
+//	   três vêm falsos, e as famílias de conta, grupo e regra de sudo recusam a
+//	   comparação inteira — de novo o lado seguro, e de novo uma perda: sem root
+//	   o shadow é sempre ilegível, então a chave estava sempre suja e uma conta
+//	   uid 0 NOVA ficava calada porque outro arquivo não abriu.
+//
+//	   NSSService.Cadeia mudou de SEMÂNTICA no mesmo número: ela passou a
+//	   incluir os blocos de ação (`[notfound=return]`), que decidem se a próxima
+//	   fonte é consultada. Num dump v10 a cadeia vem sem eles, e duas
+//	   configurações de comportamento diferente seriam o mesmo fato.
+const SchemaVersion = 11
 
 // Facts é o retrato do host.
 type Facts struct {
@@ -209,6 +244,26 @@ type Facts struct {
 	Pkg             PkgDB             `json:"pkg"`
 	Ownership       []Ownership       `json:"ownership,omitempty"`
 	Accounts        []Account         `json:"accounts,omitempty"`
+	// PasswdLido, GroupLido, ShadowLido e SudoersLido são QUATRO fatos, e não
+	// um, porque as quatro leituras têm privilégio e destino diferentes — e as
+	// quatro compartilhavam a MESMA chave de lacuna (`users`).
+	//
+	// O efeito de compartilhar era um falso negativo grave: sem root o shadow é
+	// SEMPRE ilegível, então a chave `users` está sempre suja, e uma família que
+	// a consumisse parava de reportar CONTA NOVA por causa disso. Uma conta uid
+	// 0 acrescentada entre dois retratos — o achado mais direto que existe —
+	// ficava calada porque outro arquivo não abriu.
+	//
+	// A presença de uma conta vem do /etc/passwd; a de um grupo, do /etc/group;
+	// a senha vazia, do /etc/shadow; a regra, da árvore de sudoers. Cada família
+	// pergunta pela SUA fonte.
+	PasswdLido bool `json:"passwd_read,omitempty"`
+	GroupLido  bool `json:"group_read,omitempty"`
+	// SudoersLido é falso quando QUALQUER arquivo da árvore de include não pôde
+	// ser lido: aí a lista de regras deixa de ser exaustiva, e comparar dois
+	// retratos com conjuntos diferentes inventa "regra removida".
+	SudoersLido bool `json:"sudoers_read,omitempty"`
+
 	// ShadowLido diz se /etc/shadow pôde ser lido. Sem ele, Account.SemSenha e
 	// Account.Bloqueada vêm no zero-value `false` para TODA conta — e `false`
 	// ali significa "não sei", não "tem senha". A lacuna é declarada sob

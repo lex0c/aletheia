@@ -426,31 +426,61 @@ func TestFamiliaEfemeraSoReportaMudanca(t *testing.T) {
 // senha — enquanto a cobertura da MESMA execução dizia que a comparação era
 // assimétrica.
 func TestAssimetriaNaoInventaMudancaDeCampo(t *testing.T) {
-	conta := func(semSenha bool) *facts.Facts {
-		return &facts.Facts{Accounts: []facts.Account{
-			{Name: "deploy", UID: 1000, SemSenha: semSenha}}}
-	}
-	comRoot := conta(true)
-	semRoot := conta(false)
-	semRoot.PersistDenied = map[string][]string{"users": {"/etc/shadow ilegível"}}
+	// Classe SINTÉTICA, e de propósito: o que se testa aqui é o MECANISMO —
+	// assimetria derruba o `mudou` —, e amarrá-lo a uma família real faria o
+	// teste morrer quando aquela família mudasse de dependência. Foi o que
+	// aconteceu: `conta` deixou de consumir a chave `users` (ela cobre quatro
+	// arquivos com privilégios diferentes) e este teste passou a medir outra
+	// coisa. O caso concreto que o originou está logo abaixo, no seu lugar.
+	original := classes
+	defer func() { classes = original }()
+	classes = []Classe{{
+		Tipo: "t", Titulo: "t", Requires: env.CapFilesystem, Exaustiva: true,
+		Lacunas: []string{"x"}, Decide: map[string]bool{"campo": true},
+		Extrair: func(f *facts.Facts) []Entidade {
+			v := "com-privilegio"
+			if len(f.PersistDenied["x"]) > 0 {
+				v = "sem-privilegio"
+			}
+			return []Entidade{{ID: "e", Campos: map[string]string{"campo": v}}}
+		},
+	}}
+	comAcesso := &facts.Facts{}
+	semAcesso := &facts.Facts{PersistDenied: map[string][]string{"x": {"não deu"}}}
 
 	d := Comparar(
-		Lado{F: comRoot, Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
-		Lado{F: semRoot, Caps: env.CapFilesystem, Host: "h", Quando: "2026-01-02T00:00:00Z"})
-
-	for _, m := range d.Mudancas {
-		if m.Tipo == "conta" {
-			t.Errorf("a diferença de ALCANCE virou mudança de campo: %s %s %q -> %q",
-				m.ID, m.Campo, m.Antes, m.Depois)
-		}
+		Lado{F: comAcesso, Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: semAcesso, Caps: tudoVisivel, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	if len(d.Mudancas) != 0 {
+		t.Errorf("a diferença de ALCANCE virou mudança de campo: %+v", d.Mudancas)
 	}
-	for _, c := range d.Cobertura {
-		if c.Tipo != "conta" {
-			continue
+	if c := d.Cobertura[0]; c.Simetrico || !c.SemMudou {
+		t.Errorf("a família precisa sair declarada como assimétrica e sem `mudou`: %+v", c)
+	}
+}
+
+// E o caso concreto que originou a regra, agora no nível certo: os campos que
+// vêm do /etc/shadow são OBSERVACIONAIS, e a família de contas não depende mais
+// da chave larga. Root de um lado e não-root do outro não pode virar "a conta
+// deixou de estar sem senha".
+func TestShadowIlegivelDeUmLadoNaoViraMudancaDeSenha(t *testing.T) {
+	conta := func(lido, semSenha bool) *facts.Facts {
+		f := &facts.Facts{
+			PasswdLido: true,
+			ShadowLido: lido,
+			Accounts:   []facts.Account{{Name: "deploy", UID: 1000, SemSenha: semSenha}},
 		}
-		if c.Simetrico || !c.SemMudou {
-			t.Errorf("a família precisa sair declarada como assimétrica e sem "+
-				"`mudou`: %+v", c)
+		if !lido {
+			f.PersistDenied = map[string][]string{"users": {"/etc/shadow ilegível"}}
+		}
+		return f
+	}
+	d := Comparar(
+		Lado{F: conta(true, true), Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: conta(false, false), Caps: env.CapFilesystem, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	for _, m := range d.Mudancas {
+		if m.Campo == "sem_senha" || m.Campo == "bloqueada" {
+			t.Errorf("campo do shadow comparado sem o shadow: %+v", m)
 		}
 	}
 }
@@ -536,6 +566,32 @@ func TestNSS1OrdemDaCadeiaEhMudanca(t *testing.T) {
 	}
 	if !achou {
 		t.Fatalf("inverter a cadeia troca quem responde primeiro: %+v", d.Mudancas)
+	}
+}
+
+// NSS3: as mesmas fontes, na mesma ordem, e a AÇÃO trocada. `[NOTFOUND=return]`
+// encerra a consulta onde `[NOTFOUND=continue]` passa para a próxima fonte —
+// mesmo arquivo, comportamento efetivo diferente.
+//
+// A primeira versão descartava os blocos de ação por "não serem fonte". Verdade,
+// e irrelevante: apagar semântica antes de comparar é o oposto do que esta
+// representação existe para fazer.
+func TestNSS3AcaoTrocadaEhMudanca(t *testing.T) {
+	nss := func(acao string) *facts.Facts {
+		return &facts.Facts{NSSServicos: []facts.NSSService{{
+			Nome: "passwd", Cadeia: []string{"files", acao, "sss"}}}}
+	}
+	d := Comparar(
+		Lado{F: nss("[notfound=return]"), Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: nss("[notfound=continue]"), Caps: tudoVisivel, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	var achou bool
+	for _, m := range d.Mudancas {
+		if m.Tipo == "nss_servico" && m.Campo == "cadeia" {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Fatalf("a ação decide se a próxima fonte é consultada: %+v", d.Mudancas)
 	}
 }
 
@@ -653,12 +709,81 @@ func TestCRON1DuasLinhasIdenticasSaoDuasExecucoes(t *testing.T) {
 		Lado{F: &facts.Facts{Cron: []facts.CronEntry{job, job}}, Caps: tudoVisivel, Host: "h", Quando: "2026-01-02T00:00:00Z"})
 	var achou bool
 	for _, m := range d.Mudancas {
-		if m.Tipo == "cron" && m.Campo == campoRepeticoes {
+		if m.Tipo == "cron" && m.Campo == "cmd" {
 			achou = true
 		}
 	}
 	if !achou {
 		t.Fatalf("de uma execução para duas é mudança: %+v", d.Mudancas)
+	}
+}
+
+// CRON2: a multiplicidade tem de sobreviver a uma TROCA de proporção, e não só
+// à contagem total.
+//
+// A primeira versão guardava a cardinalidade do ID num campo próprio, e colidia
+// aqui: `A A B` e `B B A` têm três entradas cada, e os valores viravam
+// conjunto — `A,B` dos dois lados. A tinha duas execuções e passou a ter uma; B
+// fez o contrário; e o drift não via nada. O código existia justamente para
+// preservar multiplicidade.
+func TestCRON2ProporcaoTrocadaEhMudanca(t *testing.T) {
+	job := func(cmd string) facts.CronEntry {
+		return facts.CronEntry{File: "/etc/cron.d/x", Kind: "dropin", User: "root",
+			Schedule: "17 3 * * *", Cmd: cmd}
+	}
+	antes := &facts.Facts{Cron: []facts.CronEntry{job("A"), job("A"), job("B")}}
+	depois := &facts.Facts{Cron: []facts.CronEntry{job("B"), job("B"), job("A")}}
+	d := Comparar(
+		Lado{F: antes, Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: depois, Caps: tudoVisivel, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	var achou bool
+	for _, m := range d.Mudancas {
+		if m.Tipo == "cron" && m.Campo == "cmd" {
+			achou = true
+			if m.Antes == m.Depois {
+				t.Errorf("o multiconjunto precisa distinguir as proporções: %q", m.Antes)
+			}
+		}
+	}
+	if !achou {
+		t.Fatalf("A caiu de duas execuções para uma e B subiu: %+v", d.Mudancas)
+	}
+}
+
+// CONTA NOVA É VISTA MESMO SEM /etc/shadow.
+//
+// A chave de lacuna `users` cobre passwd, shadow, group e sudoers. Sem root o
+// shadow é SEMPRE ilegível, então a chave está sempre suja — e a família de
+// contas, que a consumia, parava de reportar `surgiu` em todo host sem root.
+// Uma conta uid 0 acrescentada entre dois retratos, com o /etc/passwd
+// perfeitamente legível, ficava calada porque OUTRO arquivo não abriu.
+func TestContaNovaEhVistaMesmoSemShadow(t *testing.T) {
+	semShadow := func(nomes ...string) *facts.Facts {
+		f := &facts.Facts{
+			PasswdLido:    true,
+			GroupLido:     true,
+			PersistDenied: map[string][]string{"users": {"/etc/shadow ilegível"}},
+		}
+		for i, n := range nomes {
+			f.Accounts = append(f.Accounts, facts.Account{Name: n, UID: 1000 + i})
+			f.Grupos = append(f.Grupos, facts.Grupo{Name: n, GID: 1000 + i})
+		}
+		return f
+	}
+	d := Comparar(
+		Lado{F: semShadow("deploy"), Caps: env.CapFilesystem, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: semShadow("deploy", "backdoor"), Caps: env.CapFilesystem, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	achou := map[string]bool{}
+	for _, m := range d.Mudancas {
+		if m.Kind == Surgiu {
+			achou[m.Tipo] = true
+		}
+	}
+	for _, tipo := range []string{"conta", "grupo"} {
+		if !achou[tipo] {
+			t.Errorf("`%s` nova precisa aparecer: a presença vem de um arquivo que "+
+				"FOI lido, e a lacuna é de outro. Mudanças: %+v", tipo, d.Mudancas)
+		}
 	}
 }
 

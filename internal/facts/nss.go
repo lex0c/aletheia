@@ -27,6 +27,21 @@ import (
 
 // NSSModule é uma fonte declarada no nsswitch.conf e as bibliotecas candidatas
 // que ela poderia carregar.
+// normalizaAcaoNSS junta um bloco de ação num token só, em forma canônica:
+// minúsculas, sem espaço interno. `[ SUCCESS = return ]` e `[success=return]`
+// são a MESMA configuração escrita de dois jeitos, e uma reformatação do
+// arquivo não pode virar drift.
+func normalizaAcaoNSS(toks []string) string {
+	junto := strings.Join(toks, "")
+	var b strings.Builder
+	for _, r := range strings.ToLower(junto) {
+		if r != ' ' && r != '\t' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // NSSService é a configuração EFETIVA de um database do nsswitch: a cadeia de
 // fontes NA ORDEM em que a glibc as consulta.
 //
@@ -34,8 +49,10 @@ import (
 // a ordem é a autoridade. Ela não sobrevive ao NSSModule, que agrupa por fonte.
 type NSSService struct {
 	Nome string `json:"name"`
-	// Cadeia preserva a ordem e NÃO inclui os blocos de ação (`[NOTFOUND=return]`),
-	// que não são fonte.
+	// Cadeia preserva a ORDEM e inclui os blocos de ação, normalizados
+	// (`[notfound=return]`). Eles não são fonte, e mesmo assim decidem: são
+	// eles que dizem se a próxima fonte chega a ser consultada, e um
+	// `[success=merge]` faz duas responderem juntas.
 	Cadeia []string `json:"chain"`
 }
 
@@ -91,17 +108,34 @@ func collectNSS(f *Facts, e *env.Env) {
 		// colchete para não confundir o conteúdo dele com nome de módulo.
 		dentroColchete := false
 		var cadeia []string
+		var acao []string
 		for _, tok := range strings.Fields(resto) {
 			if dentroColchete {
+				acao = append(acao, tok)
 				if strings.HasSuffix(tok, "]") {
 					dentroColchete = false
+					cadeia = append(cadeia, normalizaAcaoNSS(acao))
+					acao = nil
 				}
 				continue
 			}
 			if strings.HasPrefix(tok, "[") {
 				if !strings.HasSuffix(tok, "]") {
 					dentroColchete = true
+					acao = []string{tok}
+					continue
 				}
+				// O BLOCO DE AÇÃO ENTRA NA CADEIA, e não é fonte.
+				//
+				// Ele foi descartado na primeira versão, sob o argumento de que
+				// "não é módulo". Verdade, e irrelevante: `[NOTFOUND=return]` e
+				// `[NOTFOUND=continue]` decidem se a PRÓXIMA fonte chega a ser
+				// consultada, e `[SUCCESS=merge]` faz duas fontes responderem
+				// juntas. Duas configurações com as mesmas fontes, na mesma
+				// ordem, e comportamento efetivo diferente saíam idênticas —
+				// que é apagar a semântica antes de comparar, exatamente o que
+				// esta representação existe para não fazer.
+				cadeia = append(cadeia, normalizaAcaoNSS([]string{tok}))
 				continue
 			}
 			fonte := tok

@@ -90,6 +90,12 @@ FLAGS DE scan E wtf
   --json FILE   JSONL; "-" = stdout. NUNCA afetado pela verbosidade
   --baseline F  compara com a baseline em F: o que já estava lá desce um nível
                 de severidade e CONTINUA no relatório, com a data
+  --drift F     compara com o RETRATO em F (um dump do collect): o que MUDOU
+                desde ele. Eixo diferente do --baseline — aquele fala do
+                ACHADO ("já estava na lista?"), este fala do OBJETO ("a unit
+                executa outra coisa agora?"). Um achado velho sobre um objeto
+                que mudou ontem sai marcado, e a severidade NÃO sobe: "mudou
+                desde ontem" tem a forma de um deploy
   --no-progress cala o batimento da coleta. Ele já só aparece em terminal —
                 pipe e 2>arquivo nunca o recebem —, esta flag desliga na mão
   --ignore PATH exclui um caminho da varredura de filesystem (repetível): não
@@ -536,6 +542,7 @@ func runScan(args []string, wtf bool) int {
 		verbose2 = fs.Bool("vv", false, "+ INFO e detalhe de cobertura")
 		coverage = fs.Bool("coverage", false, "mostrar a seção de cobertura (causas e gaps)")
 		base     = fs.String("baseline", "", "comparar com a baseline em FILE")
+		driftDe  = fs.String("drift", "", "comparar com o RETRATO anterior em FILE: o que mudou desde ele")
 		iocFile  = fs.String("ioc", "", "casar os indicadores DESTE incidente, do arquivo FILE")
 		since    = fs.String("since", "", "janela de investigação: instante (2026-04-30T18:00Z) ou duração (72h, 7d)")
 		noProg   = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
@@ -605,6 +612,20 @@ func runScan(args []string, wtf bool) int {
 	coletaInicio := time.Now()
 	f := facts.Collect(e)
 	coletaFim := time.Now()
+
+	// DEPOIS do relógio de coleta parar, e isso não é detalhe: o número que o
+	// `relatarTempoDeColeta` imprime existe para dizer quanto tempo a
+	// ferramenta ficou TOCANDO a máquina comprometida, e é por ele que se
+	// julga o rastro deixado na timeline. Ler e comparar um retrato anterior —
+	// um arquivo de até 512 MB, que pode nem estar no host — não é tempo no
+	// host, e contá-lo ali fazia o número medir outra coisa.
+	//
+	// O drift entra ANTES DOS CHECKS porque ele é um FATO: os checks de drift o
+	// leem como leem qualquer outro, e a correlação liga o que mudou aos
+	// achados que falam da mesma coisa.
+	if code := aplicarDrift(*driftDe, f, e.Caps, e.Now.UTC().Format(time.RFC3339)); code != 0 {
+		return code
+	}
 
 	sel := check.Selection{Mode: *mode, Wtf: wtf}
 	if *only != "" {

@@ -74,18 +74,37 @@ type CoberturaDrift struct {
 	Tipo   string
 	Titulo string
 
-	// SemSurgiu/SemSumiu dizem que aquela direção foi SUPRIMIDA por não ser
+	// SemSurgiu/SemSumiu/SemMudou dizem qual leitura foi SUPRIMIDA por não ser
 	// confiável nesta comparação.
 	SemSurgiu bool
 	SemSumiu  bool
+	// SemMudou é a terceira, e ela custou uma afirmação falsa para aparecer.
+	//
+	// A versão anterior suprimia só as duas presenças, sob o argumento de que
+	// "mudou exige a entidade presente nos DOIS lados, então nenhum pode não
+	// tê-la olhado". A frase confunde PRESENÇA DA ENTIDADE com OBSERVABILIDADE
+	// DO CAMPO: um campo pode ser ilegível com a entidade bem visível.
+	//
+	//	ANTES  (root)     conta deploy  sem_senha=true
+	//	DEPOIS (sem root) conta deploy  sem_senha=false   ← não leu o shadow
+	//	                  → "a conta deixou de estar sem senha"
+	//
+	// Por isso ela acompanha a ASSIMETRIA, e só ela: quando os dois lados
+	// enxergaram o mesmo, a fidelidade dos campos é a mesma nos dois e `mudou`
+	// continua valendo — que é o que faz a comparação servir sem root.
+	SemMudou bool
 	// Simetrico é falso quando um lado viu menos que o outro.
 	Simetrico bool
 
 	Motivos []string
 }
 
-// Restrita diz se alguma direção foi suprimida.
-func (c CoberturaDrift) Restrita() bool { return c.SemSurgiu || c.SemSumiu }
+// Restrita diz se alguma leitura foi suprimida.
+func (c CoberturaDrift) Restrita() bool { return c.SemSurgiu || c.SemSumiu || c.SemMudou }
+
+// Muda diz se sobrou alguma leitura. Uma família em que as três caíram não
+// respondeu nada, e o silêncio dela não pode ser lido como "nada mudou".
+func (c CoberturaDrift) Muda() bool { return !c.SemSurgiu || !c.SemSumiu || !c.SemMudou }
 
 // MudancaDrift é uma entidade que surgiu, sumiu ou teve um campo alterado.
 type MudancaDrift struct {
@@ -104,6 +123,10 @@ type MudancaDrift struct {
 	// Decide diz que esta mudança é, por si, o evento de segurança — e não
 	// uma pista sobre ele.
 	Decide bool
+
+	// Alvos são os sujeitos que esta mudança responde: é por eles que o motor
+	// liga a mudança aos achados que falam da mesma coisa.
+	Alvos []string
 }
 
 // TemDrift diz se houve comparação. Sem ela, os checks de drift não têm o que

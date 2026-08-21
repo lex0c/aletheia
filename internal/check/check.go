@@ -139,6 +139,11 @@ type Finding struct {
 	// baseline foi informada — sem ela, tudo seria "novo" e a marca não
 	// informaria nada.
 	Novo bool `json:"new,omitempty"`
+	// Driftou marca o achado cujo OBJETO mudou desde o retrato anterior — não o
+	// achado, o objeto. A distinção é o que a baseline não consegue expressar:
+	// um achado que já estava na baseline (não é novo) sobre uma unit cujo
+	// ExecStart mudou ontem descreve outra coisa. Ver marcarDrift.
+	Driftou bool `json:"drifted,omitempty"`
 	// FalsePositives é copiado do check para o achado: o operador precisa
 	// saber o que descartar ANTES de investigar.
 	FalsePositives []string `json:"false_positives,omitempty"`

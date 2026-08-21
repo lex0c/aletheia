@@ -77,6 +77,16 @@ import (
 type Entidade struct {
 	ID     string
 	Campos map[string]string
+
+	// Alvos são os SUJEITOS que esta entidade responde no relatório — o nome da
+	// unit, o caminho do arquivo, o usuário da regra. É por eles que o motor
+	// liga uma mudança aos achados que falam da mesma coisa.
+	//
+	// Sem isso, drift e checks viveriam em dois relatórios paralelos sobre o
+	// mesmo host: um dizendo "isto está errado", outro dizendo "isto mudou", e
+	// o operador juntando na cabeça — que é exatamente o que a resolução de
+	// ator já existe para não pedir.
+	Alvos []string
 }
 
 // Classe é uma família de entidades e tudo que se precisa saber para
@@ -104,9 +114,37 @@ type Classe struct {
 	// lados. Só ela admite "sumiu" — ver a segunda regra no topo do arquivo.
 	Exaustiva bool
 
+	// Efemera é a família cuja PRESENÇA é volátil nos dois sentidos: o que não
+	// aparece num retrato não deixou de existir, e o que aparece no outro não
+	// nasceu ali. Só `mudou` vale.
+	//
+	// Programa em execução é o caso: um `sleep` de cron rodando na segunda
+	// coleta e não na primeira não é um programa novo no host — é o relógio.
+	// Reportá-lo encheria todo servidor movimentado de "surgiu", e a família
+	// perderia o único sinal que ela tem de verdade, que é o MESMO executável
+	// passando a rodar sob outra identidade.
+	//
+	// É a mesma regra do Exaustiva, pelo outro lado: ali "sumiu" não é
+	// confiável, aqui nenhuma das duas presenças é.
+	Efemera bool
+
 	// Decide são os campos cuja mudança É o evento de segurança, e não uma
 	// pista sobre ele. `ExecStart` de uma unit é isto; o mtime dela não é.
 	Decide map[string]bool
+
+	// Observacional são os campos em que VAZIO significa "não foi observado", e
+	// não "não existe".
+	//
+	// É a regra "sumir ≠ não olhar" descida ao nível do campo, e ela nasceu de
+	// um caso concreto: o dono de um socket em escuta (`comm`, `uid`) sai vazio
+	// quando o processo é de outro usuário e não se está como root. Entre dois
+	// retratos, a mesma porta atendida pelo mesmo programa aparecia mudando de
+	// `sshd` para vazio — porque numa das coletas o dono não pôde ser lido.
+	//
+	// A transição de/para vazio nestes campos é CONTADA e não vira achado. Em
+	// campo comum ela continua valendo, e tem de valer: `options` de uma chave
+	// de SSH indo para vazio é justamente o achado mais importante da família.
+	Observacional map[string]bool
 
 	// Extrair produz as entidades a partir dos fatos. É aqui que mora a
 	// normalização — ver Entidade.
@@ -179,6 +217,12 @@ func Comparar(antes, depois Lado) facts.Drift {
 func comparabilidadeDe(c Classe, antes, depois Lado) facts.CoberturaDrift {
 	cob := facts.CoberturaDrift{Tipo: c.Tipo, Titulo: c.Titulo, Simetrico: true}
 
+	if c.Efemera {
+		cob.SemSurgiu, cob.SemSumiu = true, true
+		cob.Motivos = append(cob.Motivos, "a PRESENÇA desta família é volátil nos "+
+			"dois sentidos: o que não aparece num retrato não deixou de existir. Só "+
+			"a mudança de campo em entidade presente nas duas pontas é reportada")
+	}
 	faltaAntes := c.Requires &^ antes.Caps
 	faltaDepois := c.Requires &^ depois.Caps
 	if comum := faltaAntes & faltaDepois; comum != 0 {
@@ -190,14 +234,14 @@ func comparabilidadeDe(c Classe, antes, depois Lado) facts.CoberturaDrift {
 			"e só a mudança de campo em entidade presente nas duas pontas é confiável")
 	}
 	if so := faltaAntes &^ faltaDepois; so != 0 {
-		cob.Simetrico = false
+		cob.Simetrico, cob.SemMudou = false, true
 		cob.SemSurgiu = true
 		cob.Motivos = append(cob.Motivos, "o retrato ANTES foi feito sem "+
 			strings.Join(so.Names(), "+")+" e o DEPOIS não: o que aparecer como NOVO "+
 			"pode ser coisa que sempre esteve lá e ninguém olhou")
 	}
 	if so := faltaDepois &^ faltaAntes; so != 0 {
-		cob.Simetrico = false
+		cob.Simetrico, cob.SemMudou = false, true
 		cob.SemSumiu = true
 		cob.Motivos = append(cob.Motivos, "o retrato DEPOIS foi feito sem "+
 			strings.Join(so.Names(), "+")+" e o ANTES não: o que aparecer como REMOVIDO "+
@@ -215,11 +259,11 @@ func comparabilidadeDe(c Classe, antes, depois Lado) facts.CoberturaDrift {
 			cob.Motivos = append(cob.Motivos, "os dois retratos declararam lacuna em `"+
 				k+"`: o alcance da coleta foi parcial nos dois")
 		case la:
-			cob.Simetrico, cob.SemSurgiu = false, true
+			cob.Simetrico, cob.SemSurgiu, cob.SemMudou = false, true, true
 			cob.Motivos = append(cob.Motivos, "só o retrato ANTES declarou lacuna em `"+
 				k+"`: o que aparecer como NOVO pode ser o que ele não conseguiu ler")
 		case ld:
-			cob.Simetrico, cob.SemSumiu = false, true
+			cob.Simetrico, cob.SemSumiu, cob.SemMudou = false, true, true
 			cob.Motivos = append(cob.Motivos, "só o retrato DEPOIS declarou lacuna em `"+
 				k+"`: o que aparecer como REMOVIDO pode ser o que ele não conseguiu ler")
 		}
@@ -246,8 +290,13 @@ func compararClasse(c Classe, cob facts.CoberturaDrift, ma, mb map[string]Entida
 			}
 			d.Mudancas = append(d.Mudancas, facts.MudancaDrift{
 				Tipo: c.Tipo, Titulo: c.Titulo, ID: id, Kind: Surgiu,
-				Decide: true, Campos: ordenar(eb.Campos),
+				Decide: true, Campos: ordenar(eb.Campos), Alvos: eb.Alvos,
 			})
+			continue
+		}
+		if cob.SemMudou {
+			// ASSIMETRIA: um lado enxergou mais que o outro, e a diferença de
+			// FIDELIDADE aparece como mudança de campo. Ver CoberturaDrift.SemMudou.
 			continue
 		}
 		// A UNIÃO das chaves, e não só as do DEPOIS.
@@ -262,18 +311,25 @@ func compararClasse(c Classe, cob facts.CoberturaDrift, ma, mb map[string]Entida
 			if va == vb {
 				continue
 			}
+			if c.Observacional[campo] && (va == "" || vb == "") {
+				// Não se distingue "o dono mudou" de "o dono não foi lido desta
+				// vez". A contagem sai no número; a afirmação, não.
+				d.Contadas++
+				continue
+			}
 			if !c.Decide[campo] {
 				// TERCEIRA FAIXA: nem imprime individualmente, sai o número.
 				// Truncar em silêncio lê-se como "cobri tudo".
 				d.Contadas++
 				continue
 			}
-			// "mudou" sobrevive a qualquer restrição de direção: ele exige a
-			// entidade presente nos DOIS lados, então nenhum dos dois pode ter
-			// deixado de olhá-la.
+			// "mudou" sobrevive a restrição SIMÉTRICA — os dois lados
+			// enxergaram com a mesma fidelidade —, e não à assimétrica, que é
+			// filtrada acima.
 			d.Mudancas = append(d.Mudancas, facts.MudancaDrift{
 				Tipo: c.Tipo, Titulo: c.Titulo, ID: id, Kind: Mudou,
 				Campo: campo, Antes: va, Depois: vb, Decide: true,
+				Alvos: eb.Alvos,
 			})
 		}
 	}
@@ -286,7 +342,7 @@ func compararClasse(c Classe, cob facts.CoberturaDrift, ma, mb map[string]Entida
 		}
 		d.Mudancas = append(d.Mudancas, facts.MudancaDrift{
 			Tipo: c.Tipo, Titulo: c.Titulo, ID: id, Kind: Sumiu,
-			Decide: true, Campos: ordenar(ea.Campos),
+			Decide: true, Campos: ordenar(ea.Campos), Alvos: ea.Alvos,
 		})
 	}
 }
@@ -334,7 +390,7 @@ func chavesDaUniao(a, b map[string]string) []string {
 // vira a lista ordenada dos valores. Sem isto, a ordem da coleta decidiria qual
 // das duas venceu, e a mesma máquina daria drift contra si mesma.
 func fundir(a, b Entidade) Entidade {
-	out := Entidade{ID: a.ID, Campos: map[string]string{}}
+	out := Entidade{ID: a.ID, Campos: map[string]string{}, Alvos: unirAlvos(a.Alvos, b.Alvos)}
 	for k, v := range a.Campos {
 		out.Campos[k] = v
 	}
@@ -347,6 +403,19 @@ func fundir(a, b Entidade) Entidade {
 		}
 		out.Campos[k] = v
 	}
+	return out
+}
+
+func unirAlvos(a, b []string) []string {
+	vistos := map[string]bool{}
+	var out []string
+	for _, v := range append(append([]string{}, a...), b...) {
+		if v != "" && !vistos[v] {
+			vistos[v] = true
+			out = append(out, v)
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 

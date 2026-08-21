@@ -288,6 +288,7 @@ func runAnalyze(args []string) int {
 		verbose2 = fs.Bool("vv", false, "+ INFO e detalhe de cobertura")
 		coverage = fs.Bool("coverage", false, "mostrar a seção de cobertura (causas e gaps)")
 		base     = fs.String("baseline", "", "comparar com a baseline em FILE")
+		driftDe  = fs.String("drift", "", "comparar com o RETRATO anterior em FILE")
 		iocFile  = fs.String("ioc", "", "casar os indicadores DESTE incidente, do arquivo FILE")
 		since    = fs.String("since", "", "janela de investigação, ancorada na COLETA")
 	)
@@ -366,6 +367,14 @@ func runAnalyze(args []string) int {
 	}
 
 	declararLacunaDeIOC(f, lista)
+	// A comparação usa os CAPS DA COLETA, e não os de quem analisa: a mesma
+	// regra que impede a análise de melhorar a cobertura vale aqui, e sem ela
+	// um dump feito sem root, analisado numa estação com root, pareceria
+	// comparável com um retrato completo.
+	capsDoDump, _ := env.CapsDeNomes(d.Ambiente.Caps)
+	if code := aplicarDrift(*driftDe, f, capsDoDump, d.Ambiente.CollectedAt); code != 0 {
+		return code
+	}
 
 	r := check.Run(selected, f, e)
 	return emitir(r, f, e, saida{

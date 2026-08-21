@@ -1,6 +1,7 @@
 package drift
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -215,8 +216,24 @@ func TestTodaClasseDeclaraDoQueDepende(t *testing.T) {
 		if c.Extrair == nil || c.Titulo == "" || c.Tipo == "" {
 			t.Errorf("%s: classe incompleta", c.Tipo)
 		}
-		if len(c.Decide) == 0 {
-			t.Errorf("%s: nenhum campo decide — a família inteira viraria contagem", c.Tipo)
+		// A EXIGÊNCIA É DA FAMÍLIA EFÊMERA, e só dela.
+		//
+		// A catraca cobrava `Decide` de todas, e o efeito foi o contrário do
+		// pretendido: duas famílias cujo sinal é a PRESENÇA ganharam um campo
+		// constante ("presente": "sim") só para passar aqui. Campo que nunca
+		// muda declarado como campo que decide é catraca satisfeita com
+		// mentira.
+		//
+		// Quem precisa mesmo é a efêmera: nela as duas presenças estão
+		// suprimidas por definição, então sem `Decide` ela não consegue
+		// reportar coisa nenhuma — seria comparação que nunca fala.
+		if c.Efemera && len(c.Decide) == 0 {
+			t.Errorf("%s: é efêmera e não tem campo que decide — as duas presenças "+
+				"já estão suprimidas, então ela nunca reportaria nada", c.Tipo)
+		}
+		if c.Efemera && c.Exaustiva {
+			t.Errorf("%s: efêmera E exaustiva se contradizem — uma diz que a "+
+				"presença não é confiável, a outra que ela é completa", c.Tipo)
 		}
 	}
 }
@@ -238,6 +255,17 @@ func TestTodoCampoQueDecideEhExtraido(t *testing.T) {
 			Text: "root ALL=(ALL) ALL"}},
 		SSHKeys: []facts.SSHKey{{User: "root", File: "/root/.ssh/authorized_keys",
 			Type: "ssh-ed25519", Fingerprint: "SHA256:x"}},
+		Accounts:    []facts.Account{{Name: "root", UID: 0}},
+		Grupos:      []facts.Grupo{{Name: "sudo", GID: 27, Members: []string{"ana"}}},
+		HooksInterp: []facts.HookInterp{{Fonte: "/etc/environment", Key: "PERL5OPT", Value: "-Mx"}},
+		Suid:        []facts.SuidFile{{Path: "/usr/bin/sudo", Setuid: true}},
+		Sockets:     []facts.Socket{{Proto: "tcp", State: "LISTEN", LocalIP: "0.0.0.0", LocalPort: 22, Comm: "sshd"}},
+		Carregados:  []facts.ModuloCarregado{{Nome: "overlay", Arquivo: "/lib/modules/x/overlay.ko"}},
+		Binfmt:      []facts.BinfmtRegistro{{Nome: "qemu-arm", Interpreter: "/usr/bin/qemu-arm"}},
+		CACerts:     []facts.CACert{{File: "/etc/ssl/certs/ca.pem", Subject: "CN=x", Issuer: "CN=x"}},
+		NSSModules:  []facts.NSSModule{{Fonte: "passwd", Paths: []string{"/lib/libnss_files.so.2"}}},
+		Processes:   []facts.Process{{PID: 1, Exe: "/usr/lib/systemd/systemd", UID: 0}},
+		Boot:        []facts.LinhaDeBoot{{Fonte: "/proc/cmdline", Valor: "ro quiet", Rodando: true}},
 	}
 	for _, c := range classes {
 		ents := c.Extrair(f)
@@ -246,10 +274,19 @@ func TestTodoCampoQueDecideEhExtraido(t *testing.T) {
 				"conferir esta família em silêncio", c.Tipo)
 			continue
 		}
-		for campo := range c.Decide {
-			if _, ok := ents[0].Campos[campo]; !ok {
-				t.Errorf("%s: `%s` decide a severidade e NÃO é extraído — mudança "+
-					"nele não produziria drift nem lacuna", c.Tipo, campo)
+		// TODA entidade, e não só a primeira: a exigência é que a família seja
+		// HOMOGÊNEA. Foi este teste que pegou o defeito de modelagem —
+		// `precarga` misturava ld.so.preload com hook de interpretador, e
+		// `confianca` misturava CA com NSS. Além de o Decide virar uma união
+		// que não vale para nenhum dos dois, a lacuna de UM coletor suprimia a
+		// direção do OUTRO. Viraram famílias separadas.
+		for i, e := range ents {
+			for campo := range c.Decide {
+				if _, ok := e.Campos[campo]; !ok {
+					t.Errorf("%s: a entidade %d (%s) não carrega `%s`, que decide — "+
+						"ou a família é heterogênea, ou a mudança nesse campo não "+
+						"produziria drift nem lacuna", c.Tipo, i, e.ID, campo)
+				}
 			}
 		}
 	}
@@ -291,5 +328,144 @@ func TestEntidadeSemIdentidadeSaiNaCobertura(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(d.Cobertura[0].Motivos, " "), "sem identidade estável") {
 		t.Errorf("a entidade descartada precisa sair dita: %+v", d.Cobertura[0].Motivos)
+	}
+}
+
+// CAMPO OBSERVACIONAL: vazio ali significa "não foi observado", e não "não
+// existe". É a regra "sumir ≠ não olhar" descida ao nível do campo.
+//
+// O caso que a criou: o dono de um socket em escuta sai vazio quando o processo
+// é de outro usuário e não se está como root. A mesma porta atendida pelo mesmo
+// programa aparecia mudando de `sshd` para vazio — porque numa das coletas o
+// dono não pôde ser lido.
+func TestCampoObservacionalNaoInventaMudanca(t *testing.T) {
+	c := Classe{
+		Tipo: "t", Titulo: "t", Requires: env.CapFilesystem, Exaustiva: true,
+		Decide:        map[string]bool{"dono": true, "comum": true},
+		Observacional: map[string]bool{"dono": true},
+	}
+	comp := func(a, b map[string]string) []facts.MudancaDrift {
+		var d facts.Drift
+		compararClasse(c, facts.CoberturaDrift{Simetrico: true},
+			map[string]Entidade{"x": {ID: "x", Campos: a}},
+			map[string]Entidade{"x": {ID: "x", Campos: b}}, &d)
+		return d.Mudancas
+	}
+	// Observado num lado e não no outro: não é mudança.
+	if m := comp(map[string]string{"dono": "sshd"}, map[string]string{"dono": ""}); len(m) != 0 {
+		t.Errorf("vazio em campo observacional é falta de observação: %+v", m)
+	}
+	if m := comp(map[string]string{"dono": ""}, map[string]string{"dono": "sshd"}); len(m) != 0 {
+		t.Errorf("e vale nos dois sentidos: %+v", m)
+	}
+	// Observado nos DOIS e diferente: é mudança, e das boas.
+	if m := comp(map[string]string{"dono": "sshd"}, map[string]string{"dono": "nc"}); len(m) != 1 {
+		t.Errorf("dono trocado é o achado que a família existe para dar: %+v", m)
+	}
+	// E em campo COMUM, ir para vazio continua sendo mudança — tem de ser:
+	// `options` de uma chave de SSH indo para vazio é o achado mais importante
+	// da família de chaves.
+	if m := comp(map[string]string{"comum": "restrict"}, map[string]string{"comum": ""}); len(m) != 1 {
+		t.Errorf("em campo comum, ir para vazio É mudança: %+v", m)
+	}
+}
+
+// FAMÍLIA EFÊMERA: a presença é volátil nos DOIS sentidos, e só `mudou` vale.
+//
+// Um `sleep` de cron rodando na segunda coleta e não na primeira não é um
+// programa novo no host — é o relógio.
+func TestFamiliaEfemeraSoReportaMudanca(t *testing.T) {
+	original := classes
+	defer func() { classes = original }()
+	classes = []Classe{{
+		Tipo: "t", Titulo: "t", Requires: env.CapFilesystem, Efemera: true,
+		Decide: map[string]bool{"uids": true},
+		Extrair: func(f *facts.Facts) []Entidade {
+			var out []Entidade
+			for i := range f.Processes {
+				out = append(out, Entidade{ID: f.Processes[i].Exe,
+					Campos: map[string]string{"uids": strconv.Itoa(f.Processes[i].UID)}})
+			}
+			return out
+		},
+	}}
+	antes := &facts.Facts{Processes: []facts.Process{{Exe: "/a", UID: 0}}}
+	depois := &facts.Facts{Processes: []facts.Process{
+		{Exe: "/a", UID: 1000}, {Exe: "/efemero", UID: 0}}}
+	d := Comparar(lado(antes, tudoVisivel), lado(depois, tudoVisivel))
+	if len(d.Mudancas) != 1 || d.Mudancas[0].Kind != Mudou {
+		t.Fatalf("só a mudança de identidade conta numa família efêmera: %+v", d.Mudancas)
+	}
+	if !d.Cobertura[0].Restrita() {
+		t.Error("e a cobertura precisa DIZER que as duas presenças foram suprimidas")
+	}
+}
+
+// A ASSIMETRIA DERRUBA TAMBÉM O `MUDOU`, e este teste é a prova que faltava.
+//
+// A versão anterior suprimia só as duas presenças, sob um comentário que
+// afirmava: "mudou sobrevive a todas: exige a entidade presente nos DOIS lados,
+// então nenhum pode não tê-la olhado". A frase confunde PRESENÇA DA ENTIDADE
+// com OBSERVABILIDADE DO CAMPO — e `sem_senha` sai do /etc/shadow, que precisa
+// de root:
+//
+//	ANTES  (root)     conta deploy  sem_senha=true
+//	DEPOIS (sem root) conta deploy  sem_senha=false   ← não leu o shadow
+//
+// A ferramenta afirmava, com todas as letras, que a conta deixou de estar sem
+// senha — enquanto a cobertura da MESMA execução dizia que a comparação era
+// assimétrica.
+func TestAssimetriaNaoInventaMudancaDeCampo(t *testing.T) {
+	conta := func(semSenha bool) *facts.Facts {
+		return &facts.Facts{Accounts: []facts.Account{
+			{Name: "deploy", UID: 1000, SemSenha: semSenha}}}
+	}
+	comRoot := conta(true)
+	semRoot := conta(false)
+	semRoot.PersistDenied = map[string][]string{"users": {"/etc/shadow ilegível"}}
+
+	d := Comparar(
+		Lado{F: comRoot, Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: semRoot, Caps: env.CapFilesystem, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+
+	for _, m := range d.Mudancas {
+		if m.Tipo == "conta" {
+			t.Errorf("a diferença de ALCANCE virou mudança de campo: %s %s %q -> %q",
+				m.ID, m.Campo, m.Antes, m.Depois)
+		}
+	}
+	for _, c := range d.Cobertura {
+		if c.Tipo != "conta" {
+			continue
+		}
+		if c.Simetrico || !c.SemMudou {
+			t.Errorf("a família precisa sair declarada como assimétrica e sem "+
+				"`mudou`: %+v", c)
+		}
+	}
+}
+
+// E o outro lado, que é o que faz a comparação servir sem root: limitação
+// SIMÉTRICA não derruba o `mudou`. Os dois lados enxergaram com a mesma
+// fidelidade, então a diferença é do host e não de quem olhou.
+func TestLimitacaoSimetricaPreservaOMudou(t *testing.T) {
+	conta := func(shell string) *facts.Facts {
+		return &facts.Facts{
+			Accounts:      []facts.Account{{Name: "deploy", UID: 1000, Shell: shell}},
+			PersistDenied: map[string][]string{"users": {"/etc/shadow ilegível"}},
+		}
+	}
+	d := Comparar(
+		Lado{F: conta("/usr/sbin/nologin"), Caps: env.CapFilesystem, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: conta("/bin/bash"), Caps: env.CapFilesystem, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	var achou bool
+	for _, m := range d.Mudancas {
+		if m.Tipo == "conta" && m.Campo == "shell" {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Fatalf("shell que deixa de ser nologin é o achado, e as duas pontas "+
+			"olharam igual: %+v", d.Mudancas)
 	}
 }

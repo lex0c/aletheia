@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/lex0c/aletheia/internal/check"
+	"github.com/lex0c/aletheia/internal/drift"
 	"github.com/lex0c/aletheia/internal/facts"
 )
 
@@ -92,6 +93,36 @@ func TestDriftSozinhoNuncaEhCritico(t *testing.T) {
 		r := driftUnit.Run(driftUnit, comDrift(m), testEnv())
 		if len(r.Findings) != 1 || r.Findings[0].Sev != check.SevWarn {
 			t.Errorf("%s: severidade = %v", kind, r.Findings[0].Sev)
+		}
+	}
+}
+
+// TODA FAMÍLIA DE DRIFT PRECISA SER LIDA POR ALGUM CHECK.
+//
+// É o par da catraca que já existe para lacunas ("toda lacuna emitida é lida
+// por alguém"), e ela existe pelo mesmo motivo: uma família comparada e nunca
+// consumida é trabalho que vira silêncio. Foi exatamente o que aconteceu ao
+// acrescentar as classes da segunda leva — o motor passou a comparar conta,
+// porta, módulo e CA, e nenhum check lia nada disso. O relatório saía limpo
+// sobre mudanças que a ferramenta tinha na mão.
+func TestTodaFamiliaDeDriftEhLida(t *testing.T) {
+	for _, tipo := range drift.Tipos() {
+		m := facts.MudancaDrift{
+			Tipo: tipo, Titulo: tipo, ID: "alvo-de-teste", Kind: "surgiu",
+			Decide: true, Campos: []string{"x=1"},
+		}
+		var achados int
+		for _, c := range check.All() {
+			if !c.Drift {
+				continue
+			}
+			r := c.Run(c, comDrift(m), testEnv())
+			achados += len(r.Findings)
+		}
+		// O check de cobertura sempre emite um; o que se exige é MAIS que ele.
+		if achados < 2 {
+			t.Errorf("a família `%s` é comparada pelo motor e NENHUM check a lê: "+
+				"a mudança seria computada e nunca reportada", tipo)
 		}
 	}
 }

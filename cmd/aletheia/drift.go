@@ -243,3 +243,33 @@ func ordemDosRetratos(antes, depois drift.Lado) int {
 		antes.Quando, depois.Quando, nz(antes.Host, "?"), nz(depois.Host, "?"))
 	return 0
 }
+
+// aplicarDrift é o `--drift` do scan e do analyze: carrega o retrato anterior,
+// compara com o estado desta execução e deixa o resultado nos fatos.
+//
+// Existe num lugar só pela mesma razão que o `emitir` existe: um passo
+// acrescentado num caminho e esquecido no outro produziria dois relatórios
+// diferentes para os mesmos fatos, e a diferença apareceria como conclusão.
+//
+// Devolve código != 0 quando a comparação não deve acontecer — e a recusa é
+// ANTES dos checks, porque um drift invertido é pior que drift nenhum.
+func aplicarDrift(caminho string, f *facts.Facts, caps env.Cap, quando string) int {
+	if caminho == "" {
+		return 0
+	}
+	antes, _, code := ladoDeDump(caminho)
+	if code != 0 {
+		return code
+	}
+	host := ""
+	if f != nil {
+		host = f.Host.Hostname
+	}
+	depois := drift.Lado{F: f, Caps: caps, Host: host, Quando: quando}
+	if code := ordemDosRetratos(antes, depois); code != 0 {
+		return code
+	}
+	d := drift.Comparar(antes, depois)
+	f.DriftDados = &d
+	return 0
+}

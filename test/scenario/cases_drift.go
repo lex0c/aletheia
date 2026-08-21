@@ -164,3 +164,103 @@ printf '17 3 * * * root /usr/bin/env true\n' > /etc/cron.d/depois
 		MaxWarn:      SemAvisos,
 	})
 }
+
+// DR4: a segunda leva de famílias, e a CORRELAÇÃO.
+//
+// O plantio muda sete superfícies que o retrato anterior conhecia, e nenhuma
+// delas depende de o kernel do contêiner cooperar. Duas coisas são provadas
+// aqui e em nenhum outro lugar:
+//
+//	toda família comparada é LIDA por algum check — o motor passou a comparar
+//	conta, porta, módulo e CA antes de existir check para elas, e o relatório
+//	saía limpo sobre mudanças que a ferramenta tinha na mão
+//
+//	a mudança encontra o ACHADO que fala da mesma coisa — a conta uid 0 dispara
+//	priv.uid_zero por conta própria, e o drift precisa marcá-la em vez de
+//	produzir um segundo relatório paralelo sobre a mesma linha
+const driftSegundaLeva = `
+mkdir -p /boot/grub /etc/ssl/certs
+printf 'menuentry x {\n\tlinux /vmlinuz root=/dev/sda1 ro quiet\n}\n' > /boot/grub/grub.cfg
+printf 'passwd: files\ngroup: files\nhosts: files dns\n' > /etc/nsswitch.conf
+cp /bin/sleep /usr/local/bin/agente 2>/dev/null || cp /bin/sleep /usr/bin/agente
+/helper listen 127.0.0.1:9101 &
+sleep 0.3
+
+/aletheia collect --out /tmp/antes.json >/dev/null 2>&1
+
+# --- daqui para baixo, o que mudou ---
+
+# 1. CONTA com uid 0. Dispara priv.uid_zero por conta própria: é o par que a
+#    correlação precisa para provar que ela liga as duas leituras.
+printf 'suporte:x:0:0:suporte:/root:/bin/sh\n' >> /etc/passwd
+
+# 2. GRUPO: alguém entra num grupo que equivale a root
+printf 'plugdev:x:46:suporte\n' >> /etc/group
+
+# 3. PRÉ-CARGA: uma linha que injeta código em todo processo dinâmico do host
+printf '/tmp/.libx.so\n' > /etc/ld.so.preload
+
+# 4. BIT SETUID num binário que não tinha
+chmod u+s /usr/bin/agente 2>/dev/null || chmod u+s /usr/local/bin/agente
+
+# 5. PORTA nova em escuta
+/helper listen 127.0.0.1:9102 &
+
+# 6. LINHA DE COMANDO DO KERNEL: o que o kernel foi mandado ser
+printf 'menuentry x {\n\tlinux /vmlinuz root=/dev/sda1 ro quiet apparmor=0\n}\n' > /boot/grub/grub.cfg
+
+# 7. NSS: uma lib nova no caminho de toda resolução de nome e de usuário
+printf 'passwd: files extra\ngroup: files\nhosts: files dns\n' > /etc/nsswitch.conf
+
+# 8. O MESMO programa passa a rodar TAMBÉM sob outra identidade. É a forma que
+#    a família de programa existe para pegar — e a única que sobrevive à
+#    volatilidade da presença.
+#    O su fica em SEGUNDO PLANO inteiro, e nao o comando dentro dele: com o
+#    ampersand do lado de dentro, o filho morre junto com o shell do su.
+su -s /bin/sh nobody -c '/helper sleep 600' &
+sleep 1.5`
+
+func init() {
+	Register(Scenario{
+		ID:     "DR4-drift-das-sete-superficies",
+		Desc:   "sete superfícies mudadas, e a mudança encontrando o achado que fala dela",
+		Images: matriz,
+		// SYS_PTRACE porque a família de programa depende de LER o exe de
+		// processo alheio, e o contêiner não a tem por padrão: sem ela, root
+		// dentro do contêiner recebe EACCES em /proc/<pid>/exe de outro
+		// usuário, e o coletor declara `exe_denied` — que é a resposta certa e
+		// deixa o processo sem identidade estável para comparar.
+		Caps:  []string{"SYS_PTRACE"},
+		Plant: driftSegundaLeva,
+		Cmd:   "drift",
+		// --all-checks porque a correlação só existe quando os DOIS lados estão
+		// no mesmo relatório: o achado que acusa e a mudança que o data.
+		Args: []string{"-vv", "--all-checks", "/tmp/antes.json"},
+		Expect: []Expect{
+			{ID: "priv.account_drift", Subject: "suporte"},
+			{ID: "priv.account_drift", Subject: "plugdev"},
+			{ID: "persist.preload_drift", Evidence: "/tmp/.libx.so"},
+			{ID: "integrity.suid_drift", Evidence: "setuid"},
+			{ID: "net.listen_drift", Evidence: "9102"},
+			{ID: "kernel.surface_drift", Evidence: "apparmor=0"},
+			{ID: "integrity.trust_drift", Evidence: "extra"},
+			{ID: "proc.program_drift", Evidence: "uids"},
+
+			// A CORRELAÇÃO: o achado que já existia sobre a conta uid 0 sai
+			// MARCADO com a mudança que o data.
+			{ID: "priv.uid_zero", Subject: "suporte",
+				Evidence: "E O OBJETO DESTE ACHADO MUDOU"},
+		},
+		ExpectOutput: []string{"mudou desde o retrato"},
+		Exit:         2,
+		// MEDIDO: doze. O teto esteve em 24 sob o mesmo comentário — doze de
+		// folga não travam ruído nenhum, e chamar de "medido" um número que
+		// ninguém mediu é a mesma classe de afirmação falsa que o resto desta
+		// base persegue.
+		//
+		// Os doze incluem DOIS de proc.program_drift, e os dois são
+		// consequência real do plantio: o su roda o helper E um shell sob
+		// nobody, então os dois executáveis passam a ter outro uid no conjunto.
+		MaxWarn: 12,
+	})
+}

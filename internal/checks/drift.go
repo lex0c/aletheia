@@ -14,6 +14,13 @@ func init() {
 	check.Register(driftCron)
 	check.Register(driftSudo)
 	check.Register(driftChaveSSH)
+	check.Register(driftDeConta)
+	check.Register(driftDePrecarga)
+	check.Register(driftDeSuid)
+	check.Register(driftDePorta)
+	check.Register(driftDeKernel)
+	check.Register(driftDeConfianca)
+	check.Register(driftDePrograma)
 	check.Register(driftCobertura)
 }
 
@@ -443,10 +450,11 @@ var driftCobertura = check.Check{
 				"exige a entidade presente nas duas pontas")
 		}
 		if d.Contadas > 0 {
-			ev = append(ev, strconv.Itoa(d.Contadas)+" mudança(s) em campos que NÃO "+
-				"decidem privilégio (hash, mtime, tamanho) não foram impressas uma a "+
-				"uma — o número está aqui porque corte silencioso se lê como "+
-				"\"cobri tudo\"")
+			ev = append(ev, strconv.Itoa(d.Contadas)+" mudança(s) não foram impressas "+
+				"uma a uma: campo que NÃO decide privilégio (hash, mtime, tamanho) e "+
+				"campo OBSERVACIONAL que apareceu ou sumiu do retrato (o dono de um "+
+				"socket, que sem root não se lê). O número está aqui porque corte "+
+				"silencioso se lê como \"cobri tudo\"")
 		}
 		sev := check.SevInfo
 		if len(assimetricas) > 0 {
@@ -456,9 +464,13 @@ var driftCobertura = check.Check{
 			sev = check.SevWarn
 			ev = append(ev, "e estas famílias foram comparadas entre retratos de "+
 				"ALCANCE DIFERENTE: "+strings.Join(assimetricas, ", "))
+			ev = append(ev, "e para elas NADA foi reportado: com alcance diferente, "+
+				"a diferença de FIDELIDADE aparece como mudança — uma conta cujo "+
+				"`sem_senha` só o lado com root conseguiu ler mudaria de valor sem "+
+				"nada ter acontecido")
 			ev = append(ev, "isto é consertável, e vale consertar: recolha as duas "+
-				"pontas com o mesmo privilégio. Enquanto durar, uma direção da "+
-				"comparação está suprimida e o silêncio dela não é resposta")
+				"pontas com o mesmo privilégio. Enquanto durar, o silêncio destas "+
+				"famílias não é resposta")
 		}
 		if len(motivos) > 0 {
 			ev = append(ev, "por família:")
@@ -485,4 +497,250 @@ func primeiroCampo(id string) string {
 		return id[:i]
 	}
 	return id
+}
+
+// mudancasDeVarios junta as famílias que respondem à MESMA pergunta do
+// operador. Um check por família daria treze entradas no catálogo para
+// perguntas que ninguém faz separadas — "quem alcança privilégio mudou?" não é
+// duas perguntas por conta que sejam duas tabelas no /etc.
+func mudancasDeVarios(f *facts.Facts, tipos ...string) []facts.MudancaDrift {
+	var out []facts.MudancaDrift
+	for _, t := range tipos {
+		out = append(out, mudancasDe(f, t)...)
+	}
+	return out
+}
+
+// achadosDeDrift é o corpo comum: uma família de mudanças, uma nota que explica
+// o que aquela superfície concede, e os passos.
+func achadosDeDrift(self check.Check, f *facts.Facts, ms []facts.MudancaDrift,
+	nota string, passos []string) check.Result {
+	var r check.Result
+	for _, m := range ms {
+		fd := achadoDeDrift(self, f, m, nota)
+		fd.NextSteps = passos
+		r.Findings = append(r.Findings, fd)
+	}
+	return r
+}
+
+// driftDeConta — runbook §7.9.
+var driftDeConta = check.Check{
+	ID:       "priv.account_drift",
+	Ref:      "7.9",
+	Title:    "conta ou grupo mudou desde o retrato anterior",
+	Group:    "priv",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Drift:    true,
+	FalsePositives: []string{
+		"pacote que instala serviço CRIA conta de sistema: `_apt`, `systemd-oom`, " +
+			"`nginx`. É a causa mais comum de conta nova num host mantido, e o " +
+			"nome costuma ser o do pacote",
+		"entrada e saída de gente do time mexem em grupo o tempo todo. O que " +
+			"decide é o time reconhecer o nome — e QUAL grupo: `docker`, `sudo` e " +
+			"`wheel` equivalem a root, e o `priv.root_group` diz isso no mesmo " +
+			"relatório",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		return achadosDeDrift(self, f, mudancasDeVarios(f, "conta", "grupo"),
+			"conta e grupo são a forma mais antiga de persistência que existe, e a "+
+				"que menos muda num servidor: shell que deixa de ser `nologin`, uid "+
+				"que vira 0, senha que fica vazia, alguém entrando em `docker` — "+
+				"nenhuma dessas tem forma suspeita quando olhada parada",
+			[]string{
+				"confirme com quem administra o host: conta e grupo têm dono declarado",
+				"`getent passwd`/`getent group` mostram o efetivo, já com NSS aplicado",
+				"o ctime de /etc/passwd, /etc/shadow e /etc/group data a escrita",
+			})
+	},
+}
+
+// driftDePrecarga — runbook §7.6.
+var driftDePrecarga = check.Check{
+	ID:       "persist.preload_drift",
+	Ref:      "7.6",
+	Title:    "pré-carga de código mudou desde o retrato anterior",
+	Group:    "persist",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Drift:    true,
+	FalsePositives: []string{
+		"pré-carga tem uso legítimo e antigo: agente de APM, `libeatmydata` em " +
+			"build, `faketime` em teste, e o sandbox do Firefox num desktop. O que " +
+			"decide é o time reconhecer a lib — e onde ela mora",
+		"`PERL5OPT` e parentes aparecem em ambiente de CI e de build por " +
+			"configuração, não por ataque",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		return achadosDeDrift(self, f, mudancasDeVarios(f, "precarga", "hook_interp"),
+			"uma linha em /etc/ld.so.preload injeta código em TODO processo dinâmico "+
+				"do host — inclusive nos que a resposta a incidente vai rodar. É a "+
+				"superfície de maior alcance por byte escrito que existe em Linux",
+			[]string{
+				"leia a lib apontada como se fosse malware, e confira o dono do pacote",
+				"o binário desta ferramenta é estático de propósito: o que ela vê NÃO " +
+					"passou por essa injeção",
+			})
+	},
+}
+
+// driftDeSuid — runbook §7.10.
+var driftDeSuid = check.Check{
+	ID:       "integrity.suid_drift",
+	Ref:      "7.10",
+	Title:    "bit de privilégio mudou desde o retrato anterior",
+	Group:    "integrity",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Drift:    true,
+	FalsePositives: []string{
+		"atualização de pacote reescreve o binário e traz o bit de volta: o " +
+			"conjunto setuid de fábrica é estável, mas o mtime e o tamanho dele " +
+			"mudam junto com o pacote — e é essa coincidência que separa " +
+			"atualização de `chmod u+s`",
+		"instalação de software que precisa de privilégio (contêiner sem " +
+			"userns, ferramenta de rede) acrescenta setuid de propósito",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		return achadosDeDrift(self, f, mudancasDe(f, "suid"),
+			"`chmod u+s` não altera conteúdo, não altera dono e não aparece em "+
+				"verificação de hash nenhuma: a mudança do MODO é a única coisa que "+
+				"denuncia essa porta",
+			[]string{
+				"`ls -l` e `getcap` no caminho: o bit e a capability contam histórias " +
+					"diferentes",
+				"se o tamanho e o mtime NÃO mudaram junto, não foi atualização de pacote",
+			})
+	},
+}
+
+// driftDePorta — runbook §7.2.
+var driftDePorta = check.Check{
+	ID:       "net.listen_drift",
+	Ref:      "7.2",
+	Title:    "porta em escuta mudou desde o retrato anterior",
+	Group:    "net",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive,
+	Requires: env.CapProcfs,
+	Optional: env.CapRoot,
+	Drift:    true,
+	FalsePositives: []string{
+		"aplicação implantada abre porta: é o que ela existe para fazer. O que " +
+			"decide é o time reconhecer a porta e o programa que a atende",
+		"porta que SOME é reinício de serviço tanto quanto desligamento: entre " +
+			"dois retratos, um serviço parado no segundo aparece igual a um " +
+			"serviço removido",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		return achadosDeDrift(self, f, mudancasDe(f, "porta"),
+			"o que ESCUTA é a diferença entre um host que fala e um host que "+
+				"atende: porta nova é superfície nova, e a MESMA porta atendida por "+
+				"outro programa é outra coisa inteiramente",
+			[]string{
+				"`ss -lntp` mostra quem atende agora; o `aletheia info port N` diz o " +
+					"que o número significa",
+				"se o programa mudou e a porta não, o serviço foi substituído sem " +
+					"ninguém notar a queda",
+			})
+	},
+}
+
+// driftDeKernel — runbook §34.
+var driftDeKernel = check.Check{
+	ID:       "kernel.surface_drift",
+	Ref:      "34",
+	Title:    "o que o kernel executa mudou desde o retrato anterior",
+	Group:    "kernel",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Drift:    true,
+	FalsePositives: []string{
+		"módulo carrega e descarrega por HARDWARE e por uso: montar um " +
+			"filesystem, plugar um dispositivo, subir um contêiner. A lista de " +
+			"módulos de um host vivo não é estável do jeito que um arquivo é",
+		"atualização de kernel troca o caminho de TODO módulo (`/lib/modules/<versão>`), " +
+			"e a mudança aparece em bloco — em bloco é atualização, isolada não é",
+		"`binfmt_misc` é registrado por qemu-user-static, por Java e por .NET: um " +
+			"registro novo costuma vir junto de um pacote novo",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		return achadosDeDrift(self, f, mudancasDeVarios(f, "modulo", "binfmt", "boot"),
+			"módulo carregado é o único estado que não mora em arquivo nenhum: vem "+
+				"do kernel falando de si. E `binfmt_misc` faz o kernel chamar um "+
+				"interpretador por conta própria, sem nada mudar no userland",
+			[]string{
+				"módulo sem arquivo em disco, ou fora de /lib/modules, não veio de pacote",
+				"a linha de comando do kernel só muda com reboot: se ela mudou, houve um",
+			})
+	},
+}
+
+// driftDeConfianca — runbook §7.11.
+var driftDeConfianca = check.Check{
+	ID:       "integrity.trust_drift",
+	Ref:      "7.11",
+	Title:    "em quem este host confia mudou desde o retrato anterior",
+	Group:    "integrity",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Drift:    true,
+	FalsePositives: []string{
+		"CA CORPORATIVA é a causa normal de âncora extra: empresa que inspeciona " +
+			"TLS na borda instala a própria em toda a frota. A mesma CA em vários " +
+			"hosts é política; em uma máquina só, não é",
+		"atualização do pacote de certificados (`ca-certificates`) acrescenta e " +
+			"remove âncoras em BLOCO, com o pacote datando a mudança",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		return achadosDeDrift(self, f, mudancasDeVarios(f, "ca", "nss"),
+			"uma CA acrescentada ao armazém faz o host aceitar certificado forjado "+
+				"para QUALQUER nome — é interceptação de TLS que não deixa rastro no "+
+				"tráfego. E um módulo NSS entra no caminho de toda resolução de nome "+
+				"e de usuário do sistema",
+			[]string{
+				"confirme a âncora com quem administra a frota, por canal que não " +
+					"seja esta máquina",
+				"`openssl x509 -noout -text` no arquivo mostra para que ela vale",
+			})
+	},
+}
+
+// driftDePrograma — runbook §2.
+var driftDePrograma = check.Check{
+	ID:       "proc.program_drift",
+	Ref:      "2",
+	Title:    "programa passou a rodar sob outra identidade",
+	Group:    "proc",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive,
+	Requires: env.CapProcfs,
+	Optional: env.CapRoot,
+	Drift:    true,
+	FalsePositives: []string{
+		"o mesmo binário roda sob uids diferentes o tempo todo e é normal: " +
+			"`bash` de cada pessoa logada, `python3` de cada serviço. O que sai " +
+			"aqui é o CONJUNTO de uids mudando — e ele muda quando alguém loga",
+		"a família NÃO é exaustiva de propósito: um programa que não estava " +
+			"rodando no segundo retrato NÃO some do host, e por isso nada aqui " +
+			"sai como remoção",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		return achadosDeDrift(self, f, mudancasDe(f, "programa"),
+			"o PID não é identidade e o nome de kthread também não — o que "+
+				"identifica é o EXECUTÁVEL, e o que se pergunta dele é sob que "+
+				"identidade ele roda. `redis-server` que passa a rodar como root é a "+
+				"forma que esta família existe para pegar",
+			[]string{
+				"`aletheia info process <pid>` monta o dossiê de quem está rodando",
+				"uid novo num programa de serviço costuma ser reinício com outra " +
+					"configuração — ou outro programa com o mesmo caminho",
+			})
+	},
 }

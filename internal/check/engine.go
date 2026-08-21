@@ -311,6 +311,10 @@ func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 	// Depois de TODOS os checks, porque a resolução precisa ver os achados uns
 	// dos outros — é um achado nomear o caminho que autoriza a fusão.
 	resolverAtores(r, f)
+	// DEPOIS dos atores: o binário resolvido de um `pid=N` também é alvo, e é
+	// assim que "o executável deste processo mudou" alcança o achado que fala
+	// do processo.
+	marcarDrift(r, f)
 	r.sortFindings()
 	return r
 }

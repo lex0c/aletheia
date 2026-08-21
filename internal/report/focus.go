@@ -26,9 +26,14 @@ type itemFoco struct {
 	sinais    []string // os checks que sustentam (para o correlacionado)
 	n         int      // quantos achados/processos a entidade reúne
 	correlato bool
-	rebaixado bool     // algum achado veio de binário do host (confiança rebaixada)
-	novo      bool     // ausente da baseline: o que MUDOU desde a captura
-	fkeys     []string // chaves ESTÁVEIS dos achados deste item (id\x00subject)
+	rebaixado bool // algum achado veio de binário do host (confiança rebaixada)
+	novo      bool // ausente da baseline: o que MUDOU desde a captura
+	// driftou é o OUTRO eixo de mudança, e ele não é o mesmo: `novo` diz que o
+	// ACHADO não estava na lista anterior; `driftou` diz que o OBJETO dele
+	// mudou. Um achado velho sobre uma unit cujo ExecStart mudou ontem tem
+	// `novo` falso e `driftou` verdadeiro — e é o segundo que importa ali.
+	driftou bool
+	fkeys   []string // chaves ESTÁVEIS dos achados deste item (id\x00subject)
 }
 
 // chaveFinding é a identidade ESTÁVEL de um achado para cruzar o id local do
@@ -68,6 +73,7 @@ func itensDeFoco(r *check.Report) ([]itemFoco, map[string]string) {
 			correlato: true,
 			rebaixado: algumRebaixado(g.Findings),
 			novo:      algumNovo(g.Findings),
+			driftou:   algumDrift(g.Findings),
 			fkeys:     chavesDe(g.Findings),
 		})
 	}
@@ -87,6 +93,7 @@ func itensDeFoco(r *check.Report) ([]itemFoco, map[string]string) {
 			n:         g.N(),
 			rebaixado: algumRebaixado(g.Findings),
 			novo:      algumNovo(g.Findings),
+			driftou:   algumDrift(g.Findings),
 			fkeys:     chavesDe(g.Findings),
 		})
 	}
@@ -116,6 +123,15 @@ func itensDeFoco(r *check.Report) ([]itemFoco, map[string]string) {
 		}
 	}
 	return itens, idPorFinding
+}
+
+func algumDrift(fs []check.Finding) bool {
+	for _, f := range fs {
+		if f.Driftou {
+			return true
+		}
+	}
+	return false
 }
 
 func algumNovo(fs []check.Finding) bool {
@@ -247,6 +263,9 @@ func writeFoco(w io.Writer, t Tema, itens []itemFoco, largura int) {
 		sufixo := ""
 		if it.n > 1 {
 			sufixo += t.fraco(" ×" + strconv.Itoa(it.n))
+		}
+		if it.driftou {
+			sufixo += t.fraco(" mudou desde o retrato")
 		}
 		if it.rebaixado {
 			sufixo += t.fraco(" rebaixado")

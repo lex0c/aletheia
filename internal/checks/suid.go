@@ -46,6 +46,12 @@ var suidInesperado = check.Check{
 	Requires: env.CapFilesystem,
 	Wtf:      true,
 	FalsePositives: []string{
+		"a TERCEIRA porta (bit setuid num binário empacotado que executa comando " +
+			"arbitrário) tem um falso positivo próprio e conhecido: appliance e " +
+			"imagem endurecida à mão às vezes marcam um utilitário para uma " +
+			"finalidade específica. É raro, o time reconhece pelo nome, e a " +
+			"pergunta certa é `dpkg -S` seguida de `rpm -V`/`apk audit` — o " +
+			"pacote nunca entregou o arquivo assim",
 		"software instalado à mão que precisa de setuid legitimamente existe — " +
 			"agente de monitoração que lê contadores privilegiados, binário de " +
 			"appliance, ferramenta interna antiga. São poucos e o time reconhece " +
@@ -75,11 +81,45 @@ var suidInesperado = check.Check{
 		for i := range f.Suid {
 			s := &f.Suid[i]
 			gravavel := s.DirGravavelPorTodos()
+			prim := primitivaDoBinario(s.Path)
 
-			// Num diretório gravável por qualquer um, o bit setuid é a forma do
-			// backdoor mesmo que a base de pacotes não tenha sido consultada:
-			// nada se instala ali de propósito.
-			if !gravavel && !semDono[s.Path] {
+			// A TERCEIRA porta: setuid num binário que TEM DONO DE PACOTE e que
+			// devolve execução arbitrária.
+			//
+			// As duas portas anteriores — sem dono de pacote, ou em diretório
+			// gravável — deixavam passar em SILÊNCIO a forma mais barata que
+			// existe:
+			//
+			//	chmod u+s /usr/bin/find
+			//
+			// O dono de pacote continua certo (findutils entregou o arquivo), o
+			// conteúdo continua conferindo com o hash declarado (nada foi
+			// reescrito), o diretório é /usr/bin. Nenhum dos vinte e tantos
+			// checks olhava para o BIT, e o comentário abaixo — "o conjunto
+			// legítimo de setuid vem TODO de pacote" — estava certo sobre a
+			// origem e cego sobre o modo.
+			//
+			// A regra que fecha isso não precisa de metadado de pacote nenhum,
+			// e é universal: `find`, `tar`, `vim` e `awk` entregam a identidade
+			// do dono pelo bit, e distribuição NENHUMA os entrega com o bit. Se
+			// o arquivo tem os dois, ninguém empacotou isso assim.
+			//
+			// O conjunto de fábrica não é o contrário disso — `sudo`, `mount` e
+			// `pkexec` também executam comando arbitrário, e o bit deles É o
+			// desenho. Por isso a pergunta desta porta tem DUAS partes, e não
+			// uma: ver `primitivaViaSetuid` em primitiva.go. Colapsá-las custou
+			// três falsos críticos no teste e um quarto num desktop limpo —
+			// poder via SUDO não é poder via SETUID, e o que a distribuição
+			// entrega com o bit não é achado.
+			//
+			// LIMITE declarado, e ele é maior que o da tabela: a lista do bit é
+			// deliberadamente CONSERVADORA. `systemctl`, `apt-get`, `docker` e
+			// `crontab` ficaram de fora, e um `chmod u+s` sobre binário fora
+			// dela continua invisível aqui. Vale menos do que parece —
+			// atacante põe o bit onde ele rende, e onde rende é onde há
+			// primitiva —, mas é lacuna e está dita.
+			comPrimitiva := (s.Setuid || s.Setgid) && primitivaViaSetuid(s.Path)
+			if !gravavel && !semDono[s.Path] && !comPrimitiva {
 				continue
 			}
 
@@ -115,11 +155,30 @@ var suidInesperado = check.Check{
 				sev = check.SevCritical
 				ev = append(ev, "e o dono é root: quem executar isto vira root, "+
 					"independente de quem seja")
+			case s.Setgid && !s.Setuid:
+				// SETGID SEM SETUID escala para o GRUPO, e o ramo faltava.
+				//
+				// Antes da terceira porta ele era inalcançável: um arquivo com
+				// dono de pacote, fora de diretório gravável, nunca chegava
+				// aqui. Com ela, um `chmod g+s /usr/bin/find` chega — e caía no
+				// `default`, que fala de DONO e imprimia "o dono não é root"
+				// sobre um arquivo root:root, contradizendo a linha seguinte
+				// que o marcava como crítico.
+				if s.GID == 0 {
+					sev = check.SevCritical
+					ev = append(ev, "e o grupo é root: o bit de setgid faz quem "+
+						"executar isto rodar com o GRUPO root, que em vários "+
+						"caminhos do sistema é escrita")
+				} else {
+					ev = append(ev, "é SETGID (não setuid): escala para o grupo "+
+						strconv.Itoa(s.GID)+", não para root — o poder é o que "+
+						"aquele grupo puder ler e escrever")
+				}
 			default:
 				ev = append(ev, "o dono não é root — escala para a identidade do dono, "+
 					"não para root, e por isso pesa menos")
 			}
-			if ehInterpretador(s.Path) {
+			if prim != primNenhuma {
 				// EVIDÊNCIA, e não severidade — e a diferença veio de um teste de
 				// mutação.
 				//
@@ -134,9 +193,27 @@ var suidInesperado = check.Check{
 				// privilégio, sem análise nem exploração, muda o que o operador
 				// faz primeiro. O que saiu foi o ramo de decisão que não se
 				// pagava.
-				ev = append(ev, "e é um interpretador ("+baseDe(s.Path)+"): não "+
-					"precisa de análise nem de exploração — executar já devolve "+
-					"a identidade do dono")
+				ev = append(ev, "e `"+baseDe(s.Path)+"` "+prim.frase())
+			}
+			if comPrimitiva && !gravavel && !semDono[s.Path] {
+				// Este é o caso que entrou pela terceira porta, e ele precisa
+				// dizer POR QUE está aqui — senão a evidência inteira fala de
+				// origem, a origem está em ordem, e o operador conclui o oposto.
+				//
+				// A SEVERIDADE não é decidida aqui, e isso é deliberado: quem a
+				// decide é o switch acima, pela mesma escada que vale para as
+				// outras duas portas — quem executar isto vira QUEM? Um
+				// `chmod g+s` para um grupo comum é anomalia inexplicada e não é
+				// root, então é aviso. Carimbar crítico aqui atropelava essa
+				// escada e dizia "root" sobre um bit que não leva a root.
+				ev = append(ev, "e um pacote REIVINDICA este arquivo, com o conteúdo "+
+					"conferindo: quem mudou não trocou o binário, mudou o MODO dele "+
+					"— um `chmod u+s` não altera conteúdo, não altera dono e não "+
+					"aparece em nenhuma verificação de hash")
+				ev = append(ev, "e distribuição NENHUMA entrega este binário com o "+
+					"bit: o conjunto de fábrica é pequeno, conhecido e nomeado "+
+					"(sudo, su, passwd, mount, ping, pkexec e a vizinhança), e este "+
+					"caminho não está nele")
 			}
 			if semDono[s.Path] {
 				ev = append(ev, "nenhum pacote reivindica este arquivo (base: "+
@@ -182,28 +259,13 @@ var suidInesperado = check.Check{
 	},
 }
 
-// interpretadorConhecido são os binários que, com setuid, entregam root direto.
+// A tabela de primitivas mudou de lugar: ela era `interpretadorConhecido`, com
+// dezenove nomes, e virou checks/primitiva.go, com ~110 e classes separadas.
 //
-// LIMITE, e ele é grande: o reconhecimento é por NOME, e invasor renomeia. Uma
-// cópia de /bin/sh chamada `.dbus-helper` não casa com nada aqui — foi medido
-// no cenário 98. A nota serve para o caso descuidado e não custa nada, mas NÃO
-// é a detecção: quem detecta é a pergunta de propriedade e o diretório
-// gravável, e as duas independem do nome.
-//
-// Reconhecer a CÓPIA exigiria comparar conteúdo com os binários do sistema,
-// que é o check de integridade por hash — ainda não existe.
-var interpretadorConhecido = map[string]bool{
-	"bash": true, "sh": true, "dash": true, "zsh": true, "ksh": true,
-	"perl": true, "python": true, "python3": true, "ruby": true,
-	"awk": true, "gawk": true, "mawk": true, "find": true, "vim": true,
-	"nmap": true, "tar": true, "cp": true, "env": true, "busybox": true,
-}
-
-func ehInterpretador(p string) bool {
-	b := baseDe(p)
-	b = strings.TrimPrefix(b, ".")
-	return interpretadorConhecido[b]
-}
+// LIMITE, e ele continua sendo o mesmo: o reconhecimento é por NOME, e invasor
+// renomeia. Uma cópia de /bin/sh chamada `.dbus-helper` não casa com nada — foi
+// medido no cenário 98. Quem detecta AQUELE caso é a pergunta de propriedade e
+// o diretório gravável, e as duas independem do nome.
 
 // comoCarregaPrivilegio descreve a FORMA pela qual o arquivo confere poder. As
 // duas formas coexistem no mesmo arquivo, e o operador precisa saber qual é.

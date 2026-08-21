@@ -40,6 +40,20 @@ type Trigger struct {
 	// Lines são as linhas que EXECUTAM algo. Guardar o arquivo inteiro seria
 	// carregar ruído; guardar só o que executa é o que os checks avaliam.
 	Lines []TriggerLine `json:"lines,omitempty"`
+
+	// EscapeN é a linha onde há SEQUÊNCIA DE ESCAPE de terminal, ou 0.
+	//
+	// Ela mora fora de Lines de propósito: o truque usa uma linha de
+	// COMENTÁRIO, que Lines descarta por não executar nada.
+	//
+	//	echo "comando-do-invasor"      >  script.sh
+	//	echo "# $(clear)"              >> script.sh
+	//	echo "# Gerado por configure." >> script.sh
+	//
+	// Quem der `cat` no arquivo vê UMA linha — o `clear` embutido apaga o
+	// resto da tela —, e a que sobra parece um cabeçalho gerado. O `less` e o
+	// `vim` mostram tudo; o reflexo de quem investiga é `cat`.
+	EscapeN int `json:"escape_line,omitempty"`
 }
 
 // TriggerLine é uma linha executável, com o que decide se ela é suspeita.
@@ -287,6 +301,13 @@ func lerTrigger(e *env.Env, path, kind, when, user string) (Trigger, bool) {
 		}
 	}
 	for i, raw := range linhas {
+		// A sequência de escape é procurada na linha CRUA e ANTES do descarte
+		// de comentário — é dentro do comentário que ela mora, e pular
+		// comentário aqui apagaria a única forma que se usa. Mesma razão do
+		// `<?php` atrás do `#` em configweb.go.
+		if t.EscapeN == 0 && temEscapeDeTerminal(raw) {
+			t.EscapeN = i + 1
+		}
 		ln := strings.TrimSpace(raw)
 		if ln == "" || strings.HasPrefix(ln, "#") || strings.HasPrefix(ln, ";") {
 			continue
@@ -299,6 +320,57 @@ func lerTrigger(e *env.Env, path, kind, when, user string) (Trigger, bool) {
 		})
 	}
 	return t, true
+}
+
+// temEscapeDeTerminal diz se a linha carrega uma sequência que faz o TERMINAL
+// mostrar uma coisa e o arquivo conter outra.
+//
+// A primeira versão disparava com QUALQUER ESC (0x1b), e isso acusava a coisa
+// mais comum que existe num arquivo de inicialização de shell: um prompt
+// colorido. `PS1='\[<ESC>[01;32m\]\u@\h…'` está em todo .bashrc gerado por
+// oh-my-zsh, powerlevel10k e afins, e sairia como CRÍTICO irreversível.
+//
+// O que esconde texto NÃO é a cor — é o movimento de cursor e o apagamento de
+// tela. `<ESC>[2J` limpa, `<ESC>[H` volta ao canto, `<ESC>[1A` sobe uma linha, e
+// o que estava escrito some da vista sem sair do arquivo. A cor (final `m`) não
+// apaga nada, e o título de janela (OSC, `<ESC>]`) também não.
+//
+// Por isso a leitura é do BYTE FINAL da sequência CSI, que é o que diz o que
+// ela faz:
+//
+//	J  apaga a tela        H  posiciona o cursor    A B  move o cursor
+//	K  apaga a linha       f  posiciona o cursor    s u  salva/restaura
+//	m  COR — não conta     ]  título — não conta
+func temEscapeDeTerminal(linha string) bool {
+	// CR no MEIO da linha volta ao começo, e o que vier depois SOBRESCREVE o
+	// que já foi impresso. O `\r\n` do fim é o terminador de arquivo editado
+	// no Windows, e acusá-lo seria acusar metade dos hosts.
+	if strings.ContainsRune(strings.TrimSuffix(linha, "\r"), '\r') {
+		return true
+	}
+	b := []byte(linha)
+	for i := 0; i < len(b); i++ {
+		if b[i] != 0x1b || i+1 >= len(b) || b[i+1] != '[' {
+			continue
+		}
+		// CSI: parâmetros (0x30-0x3F), intermediários (0x20-0x2F), final
+		// (0x40-0x7E). É o final que diz o que a sequência faz.
+		j := i + 2
+		for j < len(b) && b[j] >= 0x30 && b[j] <= 0x3f {
+			j++
+		}
+		for j < len(b) && b[j] >= 0x20 && b[j] <= 0x2f {
+			j++
+		}
+		if j >= len(b) {
+			return false
+		}
+		if strings.IndexByte("JKHfABsu", b[j]) >= 0 {
+			return true
+		}
+		i = j
+	}
+	return false
 }
 
 // linhasDe devolve o conjunto de linhas de um arquivo de esqueleto, para o
@@ -350,7 +422,17 @@ func collectServicosLegados(f *Facts, e *env.Env) {
 
 // registrarServicoLegado monta o Trigger de um programa extraído de config
 // legada, declarando ilegível como lacuna.
-func registrarServicoLegado(f *Facts, e *env.Env, arquivo, kind, when string, linhas []TriggerLine) {
+//
+// O `cru` é o conteúdo do arquivo, e ele existe por causa do EscapeN: este
+// caminho monta o Trigger à mão em vez de passar pelo lerTrigger, e sem o
+// conteúdo o campo ficava zerado — que, pela nota do SchemaVersion 8, significa
+// "foi lido e não tem escape nenhum".
+//
+// Justamente aqui isso doía mais: inetd.conf, xinetd.d e inittab são os
+// arquivos que o comentário deste coletor descreve como "ninguém mais abre", e
+// esconder texto de quem não abre o arquivo é redundante — esconder de quem
+// ABRE é o ponto.
+func registrarServicoLegado(f *Facts, e *env.Env, arquivo, kind, when string, linhas []TriggerLine, cru []byte) {
 	fi, err := e.Lstat(arquivo)
 	if err != nil {
 		return
@@ -360,6 +442,12 @@ func registrarServicoLegado(f *Facts, e *env.Env, arquivo, kind, when string, li
 		Modo:   fi.Mode().String(),
 		ModUTC: fi.ModTime().UTC().Format("2006-01-02T15:04:05Z"),
 		Lines:  linhas,
+	}
+	for i, raw := range strings.Split(string(cru), "\n") {
+		if temEscapeDeTerminal(raw) {
+			t.EscapeN = i + 1
+			break
+		}
 	}
 	f.Triggers = append(f.Triggers, t)
 }
@@ -401,7 +489,7 @@ func collectInetd(f *Facts, e *env.Env) {
 	}
 	if len(linhas) > 0 {
 		registrarServicoLegado(f, e, "/etc/inetd.conf", "inetd",
-			"quando alguém conecta na porta do serviço", linhas)
+			"quando alguém conecta na porta do serviço", linhas, b)
 	}
 }
 
@@ -426,6 +514,9 @@ func collectXinetd(f *Facts, e *env.Env) {
 	type svc struct {
 		arquivo, nome, cmd string
 		linha              int
+		// cru é o texto do arquivo de onde este serviço veio, para a busca de
+		// sequência de escape (ver registrarServicoLegado).
+		cru string
 	}
 	var servicos []svc
 	for _, af := range arquivos {
@@ -456,7 +547,7 @@ func collectXinetd(f *Facts, e *env.Env) {
 				// desembrulha, mas precisa dos args.
 				cmd = server + " " + sa
 			}
-			servicos = append(servicos, svc{af.path, bl.nome, cmd, bl.serverLinha})
+			servicos = append(servicos, svc{af.path, bl.nome, cmd, bl.serverLinha, af.texto})
 		}
 	}
 
@@ -469,7 +560,7 @@ func collectXinetd(f *Facts, e *env.Env) {
 		}
 		registrarServicoLegado(f, e, sv.arquivo, "xinetd",
 			"quando alguém conecta na porta do serviço",
-			[]TriggerLine{{N: sv.linha, Text: sv.cmd}})
+			[]TriggerLine{{N: sv.linha, Text: sv.cmd}}, []byte(sv.cru))
 	}
 }
 
@@ -759,6 +850,6 @@ func collectInittab(f *Facts, e *env.Env) {
 	}
 	if len(linhas) > 0 {
 		registrarServicoLegado(f, e, "/etc/inittab", "inittab",
-			"no boot (e reergue, com respawn)", linhas)
+			"no boot (e reergue, com respawn)", linhas, b)
 	}
 }

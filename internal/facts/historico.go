@@ -119,6 +119,11 @@ func DesligaHistorico(linha string) (string, bool) {
 	case strings.HasPrefix(l, "set +o history"),
 		strings.Contains(l, "set +o history"):
 		return "o registro de histórico é desligado", true
+	case strings.HasPrefix(l, "shopt -u histappend"):
+		// Sem append, cada sessão SOBRESCREVE o arquivo com a própria memória:
+		// o histórico das sessões anteriores é apagado a cada logout.
+		return "cada sessão passa a SOBRESCREVER o arquivo em vez de acrescentar: " +
+			"o histórico anterior é apagado a cada logout", true
 	}
 
 	nome, valor, ok := strings.Cut(l, "=")
@@ -136,6 +141,65 @@ func DesligaHistorico(linha string) (string, bool) {
 		if valor == "0" {
 			return "o histórico não guarda nenhuma linha", true
 		}
+	case "histignore":
+		// Apagamento SELETIVO: `HISTIGNORE='*curl*:*wget*'` some com o download
+		// e deixa a sessão inteira com cara de normal.
+		//
+		// O padrão exigido é o `*algo*` — curinga dos DOIS lados de um nome de
+		// comando —, e não "tem `*` em algum lugar". A diferença separa as
+		// formas que essa variável tem no mundo real:
+		//
+		//	HISTIGNORE='ls:cd:pwd:exit'          higiene de ruído
+		//	HISTIGNORE='&:[ ]*:exit:ls:bg:fg'    o trecho da FAQ do bash, copiado
+		//	                                     em milhares de dotfiles
+		//	HISTIGNORE='ls *:cd *'               idem, com argumento
+		//	HISTIGNORE='*curl*:*wget*'           casa por SUBSTRING: faz o comando
+		//	                                     sumir onde quer que ele apareça
+		//
+		// As três primeiras têm `*` e não escondem nada de ninguém. Exigir só a
+		// presença do curinga acusava as três.
+		if casaPorSubstring(valor) {
+			return "os comandos que casam com este padrão nunca são gravados — é o " +
+				"apagamento SELETIVO, que deixa a sessão inteira com cara de normal", true
+		}
 	}
+	// (ver casaPorSubstring, logo abaixo)
+	//
+	// HISTCONTROL NÃO ENTRA, e isto é um negativo MEDIDO — não uma omissão.
+	//
+	// `ignorespace`/`ignoreboth` fazem o shell não gravar linha começada por
+	// espaço, e parece a anti-forense perfeita: o histórico continua ligado, do
+	// tamanho de sempre, sem lacuna que alguém note. A implementação chegou a
+	// existir aqui, e três cenários da suíte a derrubaram no mesmo instante:
+	//
+	//	Debian 12   /etc/skel/.bashrc traz `HISTCONTROL=ignoreboth`, e toda
+	//	            conta criada recebe uma cópia
+	//	CentOS 7    /etc/profile exporta `HISTCONTROL=ignoreboth` para o host
+	//	            inteiro
+	//
+	// Ou seja: é o ESTADO DE FÁBRICA da maioria das distribuições. O invasor não
+	// precisa ligá-lo — ele já está ligado —, então acusá-lo não acrescenta
+	// sinal nenhum e acrescenta um aviso em todo host do mundo. O que vale a
+	// pena saber sobre ele é uma ressalva de LEITURA, e ela está no falso
+	// positivo do check: num host assim, a ausência de uma linha no histórico
+	// não prova que ela não foi digitada.
 	return "", false
+}
+
+// casaPorSubstring diz se algum padrão do HISTIGNORE envolve um nome de comando
+// em curingas dos dois lados — `*curl*`. É essa forma, e só ela, que faz um
+// comando desaparecer do histórico onde quer que ele apareça na linha.
+//
+// `ls *` tem curinga e ancora no começo: some com `ls -la`, e não com nada que
+// alguém queira esconder. `[ ]*` é a forma glob de "linha começada por espaço",
+// que é o HISTCONTROL escrito de outro jeito — e o HISTCONTROL é padrão de
+// fábrica, pelo motivo escrito acima.
+func casaPorSubstring(valor string) bool {
+	for _, p := range strings.Split(valor, ":") {
+		p = strings.TrimSpace(p)
+		if len(p) > 2 && strings.HasPrefix(p, "*") && strings.HasSuffix(p, "*") {
+			return true
+		}
+	}
+	return false
 }

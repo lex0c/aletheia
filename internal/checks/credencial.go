@@ -215,6 +215,13 @@ var historicoDesligado = check.Check{
 			"arquivo vazio ali é o normal e não aparece aqui",
 		"imagem de contêiner costuma vir com HISTFILE desabilitado para não " +
 			"gravar camada, e isso é do construtor da imagem",
+		"RESSALVA DE LEITURA, e ela vale mesmo quando este check fica CALADO: " +
+			"`HISTCONTROL=ignoreboth` é o estado de FÁBRICA do Debian (via " +
+			"/etc/skel/.bashrc) e do CentOS (via /etc/profile), e ele faz o shell " +
+			"não gravar linha começada por ESPAÇO. Num host assim — que é a " +
+			"maioria —, a ausência de um comando no histórico NÃO prova que ele " +
+			"não foi digitado. Por ser o padrão, isto não vira achado: acusá-lo " +
+			"daria um aviso em todo host do mundo sem acrescentar sinal",
 		"HISTÓRICO VAZIO tem explicação inocente frequente: quem entra por " +
 			"script ou por sessão não interativa nunca digita nada. Por isso o " +
 			"vazio só vira achado quando a conta TEM entrada registrada, e ainda " +

@@ -70,6 +70,19 @@ type DoasRule struct {
 	Alvo string `json:"target,omitempty"`
 	// Comando é o `cmd <programa>` — vazio significa QUALQUER comando.
 	Comando string `json:"cmd,omitempty"`
+
+	// TemArgs e Args guardam o `args ...`, e existem porque as TRÊS formas do
+	// doas.conf concedem coisas diferentes — a mesma assimetria do sudoers:
+	//
+	//	cmd /usr/bin/tar               QUALQUER argumento (a mais AMPLA)
+	//	cmd /usr/bin/tar args          NENHUM argumento
+	//	cmd /usr/bin/tar args czf /x   só exatamente aqueles
+	//
+	// Sem esta distinção o classificador de primitiva (checks/primitiva.go)
+	// leria a terceira forma como a primeira e acusaria de root irrestrito uma
+	// regra de backup que fixa o comando inteiro.
+	TemArgs bool     `json:"has_args,omitempty"`
+	Args    []string `json:"args,omitempty"`
 }
 
 // ArquivoMeta guarda a data dos arquivos que decidem acesso. O ctime deles na
@@ -460,6 +473,16 @@ identidade:
 				r.Comando = campos[i+1]
 				i++
 			}
+		case "args":
+			// `args` consome o RESTO da linha: é sempre o último elemento da
+			// gramática do doas.conf. A presença da palavra já muda o
+			// significado, mesmo sem nada depois dela — `args` sozinho é
+			// "nenhum argumento", e não "qualquer um".
+			r.TemArgs = true
+			if i+1 < len(campos) {
+				r.Args = append(r.Args, campos[i+1:]...)
+			}
+			i = len(campos)
 		}
 	}
 	return r, true

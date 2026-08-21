@@ -43,16 +43,44 @@ func Safe(s string) string {
 		case r < 0x20 || r == 0x7f:
 			// ESC, CR, LF, BS e afins viram texto visível: o operador PRECISA
 			// ver que o alvo tentou isso.
-			b.WriteString("\\x" + strconv.FormatInt(int64(r), 16))
+			// DOIS dígitos sempre. Sem o zero à esquerda o escape é
+			// AMBÍGUO, e a ambiguidade volta a permitir exatamente o que este
+			// arquivo existe para impedir: um `\n` (0x0a) seguido da letra `b`
+			// saía como `\xab`, que se lê como um byte só. O atacante escolhe
+			// a letra seguinte.
+			b.WriteString("\\x" + zeros(strconv.FormatInt(int64(r), 16), 2))
 		case unicode.Is(unicode.Cf, r):
 			// Formatação invisível: RTL override e amigos reordenam o que o
 			// humano lê sem mudar o byte.
-			b.WriteString("\\u" + strconv.FormatInt(int64(r), 16))
+			//
+			// A LARGURA MUDA acima de U+FFFF, e não é detalhe: a categoria Cf
+			// inclui as TAG characters (U+E0020–U+E007F), que são o conjunto
+			// padrão de contrabando de texto invisível. Com quatro dígitos
+			// fixos, `U+E0020` saía como `\ue0020` — que se lê como `\ue002`
+			// seguido do literal `0`, e a ambiguidade que este arquivo existe
+			// para fechar voltava exatamente nos caracteres que mais importam.
+			//
+			// A convenção é a do Go e a do Python: `\uXXXX` até U+FFFF,
+			// `\UXXXXXXXX` acima. As duas têm largura fixa, e o prefixo
+			// maiúsculo diz qual é.
+			if r > 0xffff {
+				b.WriteString("\\U" + zeros(strconv.FormatInt(int64(r), 16), 8))
+			} else {
+				b.WriteString("\\u" + zeros(strconv.FormatInt(int64(r), 16), 4))
+			}
 		default:
 			b.WriteRune(r)
 		}
 	}
 	return b.String()
+}
+
+// zeros completa com zeros à esquerda até a largura fixa do escape.
+func zeros(s string, largura int) string {
+	for len(s) < largura {
+		s = "0" + s
+	}
+	return s
 }
 
 // SafeAll aplica Safe a uma lista.

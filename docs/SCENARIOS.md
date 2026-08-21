@@ -3,7 +3,7 @@
 GERADO de `internal/checks` e `test/scenario`. Não edite à mão:
 `go test ./test/scenario -run TestDocumentoDeCenarios -update`.
 
-107 checks, 212 cenários.
+109 checks, 214 cenários.
 
 Um **check** é uma pergunta que a ferramenta faz ao host. Um **cenário** é um
 host montado de propósito — em contêiner, imagem ou microVM — que prova a
@@ -12,13 +12,14 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 
 ## Checks
 
-### `app` (5)
+### `app` (6)
 
 | check | § | o que acusa | provado por |
 |---|---|---|---|
-| `app.code_backdoor` | 24 | padrão de backdoor em código servido (PHP/JS/Python) | `B1-webshell-php`, `B2-php-legado-nao-vira-parede`, `B3-eval-aritmetica-sobre-get` +3 |
+| `app.code_backdoor` | 24 | padrão de backdoor em código servido (PHP/JS/Python) | `B1-webshell-php`, `B2-php-legado-nao-vira-parede`, `B3-eval-aritmetica-sobre-get` +4 |
+| `app.web_config_exec` | 7.12 | configuração por diretório muda o que o servidor web executa | `WC1-webshell-no-proprio-htaccess` |
 | `manual.code_integrity` *(manual)* | 16 | código versionado em git: a comparação que esta ferramenta não pode fazer | — |
-| `persist.web_prepend` | 7.12 | PHP executa arquivo antes de cada requisição | `65-confianca-e-deploy`, `83-comprometimento-de-aplicacao` |
+| `persist.web_prepend` | 7.12 | PHP executa arquivo antes de cada requisição | `65-confianca-e-deploy`, `83-comprometimento-de-aplicacao`, `WC1-webshell-no-proprio-htaccess` |
 | `tool.artifact` | 5.10 | config de ferramenta conhecida presente em disco | `73-ferramentas-conhecidas`, `73b-scanner-de-rede-em-vm-invadida`, `82-exfiltracao` |
 | `tool.binary` | 5.10 | executável de ferramenta conhecida em execução ou agendado | `73-ferramentas-conhecidas`, `73b-scanner-de-rede-em-vm-invadida`, `82-exfiltracao` |
 
@@ -78,11 +79,12 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `net.pivot` | 12.2 | pivô: saída externa e saída interna no mesmo processo | `42-pivot`, `Q1-pool-php-fpm-nao-vira-parede` |
 | `net.vector_same_user` | 14 | por onde a entrada pode ter acontecido: serviços do mesmo usuário | `W3-vetor-estreitado-pelo-usuario` |
 
-### `persist` (40)
+### `persist` (41)
 
 | check | § | o que acusa | provado por |
 |---|---|---|---|
 | `antiforense.audit_disabled` | 11 | capacidade de registrar execução neste host | `E4-auditoria-desligada`, `E7-auditoria-sem-execve` |
+| `antiforense.hidden_text` | 13 | caractere invisível ou sequência de escape: o que se lê não é o que está lá | `TX1-texto-que-engana-quem-le` |
 | `antiforense.log_rotation_gap` | 10 | falta uma geração no meio da rotação de log: alguém removeu | `F1-buraco-na-rotacao` |
 | `antiforense.shell_history` | 13 | histórico de shell desligado ou desviado: rastro apagado de propósito | `E2-historico-desligado` |
 | `antiforense.wtmp_cleared` | 12 | há sessão aberta e nenhum registro de login: o histórico foi zerado | `F2-sessao-sem-registro` |
@@ -107,7 +109,7 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `persist.nss_module` | 7.8 | módulo NSS carregado em toda resolução de nome que nenhum pacote entregou | `101-nss-backdoor` |
 | `persist.pam_exec` | 7.12 | PAM executa programa ou carrega módulo de fora do lugar padrão | `64-gatilhos-de-execucao` |
 | `persist.shell_env` | 7.6 | ENV definido: arquivo lido a cada shell POSIX interativo | `64-gatilhos-de-execucao` |
-| `persist.shell_startup` | 7.6 | arquivo de inicialização de shell executa algo suspeito | `64-gatilhos-de-execucao` |
+| `persist.shell_startup` | 7.6 | arquivo de inicialização de shell executa algo suspeito | `64-gatilhos-de-execucao`, `TX1-texto-que-engana-quem-le` |
 | `persist.ssh_client_exec` | 7.7 | config do cliente ssh executa comando ao conectar | `SC1-proxycommand-backdoor`, `SC2-proxycommand-legitimo`, `SC3-proxycommand-em-include` |
 | `persist.ssh_forced_command` | 7.5 | chave SSH que executa um comando a cada login | `62-cron-e-chaves`, `63-cron-e-chaves-em-imagem` |
 | `persist.ssh_keys` *(manual)* | 7.5 | inventário de chaves SSH autorizadas | `62-cron-e-chaves`, `66-cadeia-completa`, `82-exfiltracao` +2 |
@@ -367,6 +369,7 @@ contêiner não alcança — hidepid, sysctl, módulo, cgroup, eBPF.
 | `T4-servidor-web-como-imagem` | image | o nó de web varrido de fora, como rootfs desligado: os mesmos achados de disco, com a cobertura dizendo o que falta |
 | `T5-servidor-de-banco-como-imagem` | image | o banco varrido de fora: a regra de sudo continua aparecendo, e os checks de processo viram NÃO VERIFICADO |
 | `T6-agente-de-build-como-imagem` | image | o runner de CI varrido de fora: chave privada e credencial de registro continuam visíveis no disco |
+| `TX1-texto-que-engana-quem-le` | live | nome com caractere invisivel ao lado do gemeo limpo, e sequencia de escape escondendo o comando dentro do .bashrc |
 | `U1-core-pattern-sequestrado` | vm | o kernel pipa o core dump para um programa em /tmp: execução como root sem unit, sem cron e sem processo pai |
 | `U2-modprobe-trocado` | vm | o helper que o kernel executa ao carregar módulo aponta para um caminho gravável |
 | `U3-binfmt-com-interpretador-plantado` | vm | interpretador registrado por assinatura: executar um arquivo comum passa a executar outro programa |
@@ -377,6 +380,7 @@ contêiner não alcança — hidepid, sysctl, módulo, cgroup, eBPF.
 | `W1-root-executa-o-que-outro-escreve` | live | cron de root chama um script cujo dono é outra conta, e outro que qualquer um escreve |
 | `W2-backend-so-do-proxy-mas-aberto` | live | serviço que só o loopback usa, escutando na rede inteira: o atacante pula o proxy |
 | `W3-vetor-estreitado-pelo-usuario` | live | o suspeito roda como um uid, e só o serviço daquele uid pode ser a porta de entrada |
+| `WC1-webshell-no-proprio-htaccess` | live | o webshell inteiro dentro do .htaccess: nenhum .php novo no docroot, e o arquivo de configuração é ao mesmo tempo o que o torna executável e o payload |
 | `X1-coleta-aqui-analise-depois` | live | o implante entra no retrato: a coleta acontece no host e a conclusão acontece do lado limpo |
 | `X2-a-analise-nao-melhora-a-cobertura` | live | coleta sem privilégio, análise COMO ROOT: o que ninguém olhou continua não olhado |
 | `Y1-captura-o-que-foi-pedido` | live | captura de tráfego sem tcpdump: o que casa o filtro entra no arquivo |

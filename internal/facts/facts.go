@@ -114,7 +114,29 @@ import (
 //	     Process.State/CmdlineEmpty  zumbi deixou de virar CmdlineEmpty. Num dump
 //	       v6 ele vem marcado, e proc.kthread_disguise sai CRITICAL irreversível
 //	       sobre um filho que ninguém colheu.
-const SchemaVersion = 7
+//	8  Duas superfícies novas, e as duas mentem num dump v7 lido por este
+//	   binário — uma em cada direção, que é o par que mais custa caro.
+//
+//	   DoasRule.TemArgs/Args  o `args ...` do doas.conf nunca foi decodificado.
+//	     Num dump v7 os dois campos vêm zerados, e zerado significa "esta regra
+//	     aceita QUALQUER argumento" — que é a leitura mais AMPLA das três
+//	     formas da gramática. Junto com a tabela de primitivas nova
+//	     (checks/primitiva.go), uma regra de backup honesta
+//	     (`cmd /usr/bin/tar args czf /backup/srv.tgz /srv`) sai como root
+//	     irrestrito: CRITICAL sobre a automação que o time escreveu.
+//	   ConfigWeb  a configuração POR DIRETÓRIO do servidor web (.htaccess,
+//	     .user.ini) nunca foi coletada — o coletor de gatilhos só olhava
+//	     /etc/php*, e a varredura de código seleciona por extensão, que esses
+//	     arquivos não têm. Num dump v7 a lista vem vazia, e vazia ali é o falso
+//	     "limpo" clássico: `app.web_config_exec` e a segunda metade de
+//	     `persist.web_prepend` concluiriam que nenhum diretório servido mudou o
+//	     que executa, sobre uma árvore que ninguém leu.
+//	   Trigger.EscapeN  a sequência de escape de terminal dentro de arquivo que
+//	     executa nunca foi procurada — e não dava para procurá-la em Lines,
+//	     porque o truque mora numa linha de COMENTÁRIO, que Lines descarta. Num
+//	     dump v7 o campo vem 0, e 0 significa "este arquivo foi lido e não tem
+//	     escape nenhum" para `antiforense.hidden_text`.
+const SchemaVersion = 8
 
 // Facts é o retrato do host.
 type Facts struct {
@@ -180,6 +202,10 @@ type Facts struct {
 	// CodigoSuspeito são arquivos de código com padrão de backdoor. Peneira, não
 	// prova — o check pesa cada um com o mtime.
 	CodigoSuspeito []CodigoSuspeito `json:"suspect_code,omitempty"`
+	// ConfigWeb é a configuração POR DIRETÓRIO do servidor web (.htaccess,
+	// .user.ini) encontrada dentro das árvores servidas — e só as linhas dela
+	// que têm consequência de EXECUÇÃO. Ver configweb.go.
+	ConfigWeb []ConfigWeb `json:"web_config,omitempty"`
 	// Vigias é quem observa ARQUIVO por inotify ou fanotify. É a resposta para
 	// "removi o backdoor e ele voltou": quem recria o arquivo apagado precisa
 	// saber que ele sumiu, e é assim que sabe.

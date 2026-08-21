@@ -41,6 +41,11 @@ var webPrepend = check.Check{
 		"auto_prepend_file tem uso legítimo: APM, profiler e framework que " +
 			"precisa de bootstrap global usam exatamente isto. O arquivo apontado " +
 			"tem nome reconhecível e vem junto do pacote da ferramenta",
+		"a mesma diretiva POR DIRETÓRIO (.htaccess, .user.ini) também é usada de " +
+			"propósito: hospedagem compartilhada e painel de controle escrevem " +
+			"`auto_prepend_file` no .user.ini do cliente. O que muda o peso é " +
+			"ONDE o arquivo apontado mora — dentro de uma árvore de upload não " +
+			"tem explicação inocente",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
@@ -79,9 +84,89 @@ var webPrepend = check.Check{
 				r.Findings = append(r.Findings, fd)
 			}
 		}
+		// A MESMA DIRETIVA, POR DIRETÓRIO.
+		//
+		// O laço acima cobre /etc/php*, que exige root para escrever. Esta parte
+		// cobre .htaccess e .user.ini dentro da árvore servida — que é onde quem
+		// só conseguiu um upload consegue escrever, e é a versão do mesmo
+		// backdoor que não precisa de privilégio nenhum.
+		for i := range f.ConfigWeb {
+			cw := &f.ConfigWeb[i]
+			for _, ln := range cw.Linhas {
+				if ln.Motivo != "prepend" {
+					continue
+				}
+				ev := []string{
+					ln.Text,
+					"o PHP executa este arquivo em TODA requisição servida a partir " +
+						"deste diretório",
+					"o docroot fica limpo: a busca por webshell não acha nada",
+					"arquivo: " + cw.Path + ":" + strconv.Itoa(ln.N),
+					"e é configuração POR DIRETÓRIO: diferente do php.ini, ela não " +
+						"exige root — basta escrever dentro da árvore servida, que " +
+						"é o que um upload dá",
+				}
+				sev := check.SevWarn
+				if m, sv, susp := execSuspect(ln.Alvo); susp {
+					ev = append(ev, m)
+					sev = sv
+				}
+				if dentroDeUpload(ln.Alvo) {
+					sev = check.SevCritical
+					ev = append(ev, "e o arquivo apontado está numa árvore de UPLOAD: "+
+						"bootstrap de framework não mora ali, e conteúdo enviado por "+
+						"usuário não deveria ser executado nunca")
+				}
+				fd := self.F(sev, nz(ln.Alvo, cw.Path), "", ev...)
+				fd.Quando, fd.QuandoFonte = cw.ModUTC, "mtime do arquivo de configuração"
+				fd.Chave = cw.Path + "|" + ln.Alvo
+				fd.NextSteps = []string{
+					"leia o arquivo apontado como se fosse malware",
+					"`find <docroot> -name .htaccess -newer <marco>` acha os irmãos " +
+						"dele: quem escreve um costuma escrever mais de um",
+				}
+				r.Findings = append(r.Findings, fd)
+			}
+		}
+
 		r.Partial = append(r.Partial, f.PersistDenied["startup"]...)
+		r.Partial = append(r.Partial, f.PersistDenied["codigo"]...)
 		return r
 	},
+}
+
+// dentroDeUpload diz se o caminho mora numa árvore de conteúdo ENVIADO por
+// usuário. É o discriminador que separa o bootstrap legítimo de framework — que
+// mora junto do código da aplicação — do arquivo que alguém subiu por um
+// formulário.
+// A comparação é por SEGMENTO de caminho, e não por substring, e as duas coisas
+// que isso conserta são reais:
+//
+//	dedução silenciosa   "/upload" como substring já cobria "/uploads",
+//	                     "/wp-content/uploads", "/public/uploads" e
+//	                     "/assets/upload" — quatro das doze entradas eram
+//	                     código morto, e uma lista com código morto convida a
+//	                     acrescentar mais entradas mortas
+//	acerto por acidente  "/img/" e "/images/" como substring casam em qualquer
+//	                     posição, e o achado que sai daqui vai direto para
+//	                     CRÍTICO com a frase "conteúdo enviado por usuário não
+//	                     deveria ser executado nunca"
+//
+// `tmp` fica na lista porque prepend apontando para /tmp não tem forma
+// inocente, e ali o segmento é o próprio diretório.
+var segmentosDeUpload = map[string]bool{
+	"upload": true, "uploads": true, "files": true, "media": true,
+	"tmp": true, "images": true, "img": true, "attachments": true,
+	"userfiles": true, "user_uploads": true,
+}
+
+func dentroDeUpload(p string) bool {
+	for _, seg := range strings.Split(strings.ToLower(p), "/") {
+		if segmentosDeUpload[seg] {
+			return true
+		}
+	}
+	return false
 }
 
 // shellStartup — runbook §7.6.

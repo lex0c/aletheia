@@ -309,7 +309,13 @@ var sudoSemSenha = check.Check{
 			"digitá-la. O `cloud-init` deixa NOPASSWD para o usuário padrão em " +
 			"praticamente toda imagem de nuvem, e isso é de fábrica",
 		"regra restrita a UM comando é desenho comum de menor privilégio, e sai " +
-			"com severidade menor do que a que concede ALL",
+			"com severidade menor do que a que concede ALL — MAS só quando aquele " +
+			"comando não devolve execução arbitrária: `NOPASSWD: /usr/bin/find` " +
+			"sem argumento é root em um passo, e sai crítico (checks/primitiva.go)",
+		"a tabela de primitivas tem ~110 nomes e o universo é maior. O comando " +
+			"que ela NÃO reconhece não sai absolvido: o achado continua como aviso " +
+			"e diz, em voz alta, que aquele binário não foi examinado — a " +
+			"conferência é humana, e a tabela de referência é a GTFOBins",
 		"conceder ALL como OUTRA CONTA não é root, e sai como aviso: " +
 			"`%dba ALL=(postgres) NOPASSWD: ALL` é como um time de DBA recebe o " +
 			"serviço que administra, e um servidor de banco real produziu " +
@@ -334,6 +340,11 @@ var sudoSemSenha = check.Check{
 			// custou um crítico contra um servidor de banco limpo.
 			amplo := regraAmpla(s.Text)
 			comoRoot, runas := viraRoot(s.Text)
+			spec := specDeComando(s.Text)
+			cmds := comandosDaSpec(spec)
+			cmdExec, concedeExec := concedeExecucao(cmds)
+			cmdLe, concedeLe := concedeLeitura(cmds)
+			cmdPreso, temPreso := primitivaPresa(cmds)
 			sev := check.SevWarn
 			ev := []string{
 				s.File + ":" + strconv.Itoa(s.Line) + " — " + s.Text,
@@ -347,19 +358,20 @@ var sudoSemSenha = check.Check{
 				sev = check.SevCritical
 				ev = append(ev, "e a especificação de comando é ALL, como "+runas+
 					": é root inteiro, sem responder nada")
-			case comoRoot && ehShellOuInterp(specDeComando(s.Text)):
-				// "restrita a UM comando" só é menor privilégio se o comando não
-				// for um shell: `NOPASSWD: /bin/bash` como root É root
-				// irrestrito, porque o alvo executa qualquer coisa a partir dali.
+			case comoRoot && concedeExec:
+				// "restrita a UM comando" só é menor privilégio se aquele comando
+				// não devolver execução arbitrária. `NOPASSWD: /bin/bash` como
+				// root É root irrestrito — e `NOPASSWD: /usr/bin/find` também,
+				// porque `find . -exec /bin/sh \;` é um passo, não uma exploração.
 				//
-				// O discriminador já existia — e já era usado — no doasSemSenha,
-				// duzentas linhas abaixo. Sem ele aqui, o MESMO poder saía
-				// CRITICAL pelo doas e WARN pelo sudo, ou seja, exit 1 pelo
-				// caminho que 99% dos hosts usam.
+				// O discriminador anterior conhecia dezesseis nomes e dizia
+				// "desenho de menor privilégio" para os outros duzentos e
+				// tantos, que é uma afirmação FALSA no meio de um incidente.
+				// Ver checks/primitiva.go.
 				sev = check.SevCritical
-				ev = append(ev, "e o comando é um SHELL/interpretador ("+
-					specDeComando(s.Text)+") como "+runas+": restringir a `bash` "+
-					"como root não restringe nada — é root irrestrito, sem senha")
+				ev = append(ev, "e o comando `"+cmdExec.Bin+"` "+cmdExec.Classe.frase()+
+					" — como "+runas+", chamar isto de restrição é falso")
+				ev = append(ev, cmdExec.notaDeArgumento())
 			case amplo:
 				// Conceder TUDO como outra conta não é root, e dizer que é seria
 				// afirmar o que a regra não diz. Continua valendo olhar — quem
@@ -379,12 +391,63 @@ var sudoSemSenha = check.Check{
 				ev = append(ev, "e é um `Defaults` SEM alvo: vale para TODO usuário "+
 					"e TODO comando deste host — é NOPASSWD amplo escrito de outra "+
 					"forma, não uma restrição")
+			case concedeExec:
+				// Mesmo poder, outra identidade: quem usar a regra executa o que
+				// quiser COMO aquela conta. Não é root, e por isso é aviso.
+				ev = append(ev, "e o comando `"+cmdExec.Bin+"` "+cmdExec.Classe.frase()+
+					" — como "+runas+", e não como root")
+			case concedeLe:
+				// Leitura arbitrária não é root no ato: entrega o /etc/shadow, e
+				// o hash ainda precisa ser quebrado. Continua sendo aviso, e
+				// deixa de ser chamado de menor privilégio.
+				//
+				// O ramo era `comoRoot && concedeLe` e ficava ACIMA do `concedeExec`.
+				// Com o `comoRoot`, uma regra `(postgres) NOPASSWD: /bin/cat` caía
+				// no `default` e imprimia "esta ferramenta NÃO reconhece" sobre
+				// um binário que a tabela reconhece — a mesma afirmação falsa de
+				// ignorância que o primitivaPresa foi escrito para tirar do
+				// relatório, reaparecendo por um caminho diferente.
+				ev = append(ev, "e o comando `"+cmdLe.Bin+"` "+cmdLe.Classe.frase())
+				if !comoRoot {
+					ev = append(ev, "e é como "+runas+", não como root: o que ele lê é "+
+						"o que aquela conta lê")
+				}
+				ev = append(ev, cmdLe.notaDeArgumento())
+			case temPreso:
+				// A tabela RECONHECE este binário, e o que segura a regra é o
+				// argumento fixado. Dizer "não reconheço" aqui seria afirmar uma
+				// ignorância que não existe — e esconder que o freio é uma
+				// string.
+				ev = append(ev, cmdPreso.notaDePrisao()...)
+			case ehAliasDeComando(primeiroToken(spec)):
+				// Alias não é binário: o que ele expande está em outra linha do
+				// sudoers, e esta ferramenta não resolve alias. Dizer "não
+				// reconheço como primitiva" aqui seria enganoso — não há o que
+				// reconhecer até alguém expandir.
+				ev = append(ev, "restrita a comando nomeado pelo alias `"+
+					primeiroToken(spec)+"`: o que ele expande está em OUTRA linha do "+
+					"sudoers, e esta ferramenta não resolve alias — `sudo -l -U "+
+					quem+"` resolve, e é ali que se vê o que a regra concede de fato")
 			case naoAutentica:
+				// Ramo de EVIDÊNCIA, e por isso ele é o último antes do default.
+				//
+				// Ele estava acima dos ramos de primitiva, e engolia todos eles:
+				// uma regra que combinasse `!authenticate` com um comando
+				// reconhecido perdia a única frase que diz o que aquele comando
+				// concede. A nota do `!authenticate` já é acrescentada
+				// incondicionalmente antes do switch, então subir este ramo não
+				// comprava nada e custava a evidência inteira.
 				ev = append(ev, "o `!authenticate` está restrito a um alvo nomeado, "+
 					"mas continua desligando a senha para ele")
 			default:
-				ev = append(ev, "restrita a comando nomeado — é desenho de menor "+
-					"privilégio, e vale conferir só se ninguém reconhecer a regra")
+				// A frase anterior era "é desenho de menor privilégio", e ela
+				// AFIRMAVA sobre um binário que a ferramenta não examinou. A
+				// tabela de primitivas cobre ~110 nomes; o universo é maior, e
+				// não reconhecer não é o mesmo que não haver.
+				ev = append(ev, "restrita a comando nomeado (`"+nz(spec, "?")+
+					"`), que esta ferramenta NÃO reconhece como primitiva de escalada — "+
+					"o que a regra concede depende do que aquele binário faz com "+
+					"privilégio, e a tabela de referência do assunto é a GTFOBins")
 			}
 			if strings.HasPrefix(s.File, "/etc/sudoers.d/") {
 				// Um arquivo novo em sudoers.d não altera nada existente: ele
@@ -522,7 +585,9 @@ var doasSemSenha = check.Check{
 			"`nopass`, não a existência da regra",
 		"automação sem operador precisa de nopass pela mesma razão do sudo: não " +
 			"há ninguém para digitar a senha. Um `permit nopass` restrito a UM " +
-			"comando é menor privilégio, e sai com severidade menor",
+			"comando é menor privilégio, e sai com severidade menor — MAS só " +
+			"quando aquele comando não devolve execução arbitrária, e um `cmd` " +
+			"sem `args` aceita QUALQUER argumento",
 		"conceder acesso como OUTRA conta (`as postgres`) não é root, e sai como " +
 			"aviso — é como um time recebe o serviço que administra",
 	},
@@ -546,6 +611,7 @@ var doasSemSenha = check.Check{
 			// comando, que é o que torna a regra ampla.
 			comoRoot := d.Alvo == "" || d.Alvo == "root"
 			amplo := d.Comando == ""
+			cmd := comandoDoDoas(d.Comando, d.TemArgs)
 
 			ev := []string{
 				d.File + ":" + strconv.Itoa(d.Line) + " — " + d.Text,
@@ -570,17 +636,26 @@ var doasSemSenha = check.Check{
 				sev = check.SevCritical
 				ev = append(ev, "e é root, QUALQUER comando, sem senha: é escalada "+
 					"irrestrita para "+quem)
-			case comoRoot && ehShellOuInterp(d.Comando):
+			case comoRoot && cmd.Concede():
 				// "restrita a UM comando" só é menor privilégio se aquele comando
-				// não for um shell. `cmd /bin/sh` como root É root irrestrito: o
-				// alvo executa qualquer coisa a partir dali. Não é a GTFOBins
-				// inteira — é a classe direta de interpretador.
+				// não devolver execução arbitrária. `cmd /bin/sh` como root É root
+				// irrestrito, e `cmd /usr/bin/tar` também — a diferença entre os
+				// dois é quantos caracteres o atacante digita, não o poder.
 				sev = check.SevCritical
-				ev = append(ev, "e o comando é um SHELL/interpretador ("+d.Comando+"): "+
-					"restringir a `sh` como root não restringe nada — é root irrestrito")
+				ev = append(ev, "e o comando `"+d.Comando+"` "+cmd.Classe.frase()+
+					": restringir a isto como root não restringe nada")
+				ev = append(ev, cmd.notaDeArgumento())
+			case comoRoot && cmd.Classe == primLeitura && !d.TemArgs:
+				ev = append(ev, "e o comando `"+d.Comando+"` "+cmd.Classe.frase())
+				ev = append(ev, cmd.notaDeArgumento())
+			case comoRoot && cmd.Classe != primNenhuma:
+				// Reconhecida e presa pelo `args`. Ver notaDePrisao.
+				ev = append(ev, cmd.notaDePrisao()...)
 			case comoRoot:
-				ev = append(ev, "restrita ao comando `"+d.Comando+"` — menor privilégio, "+
-					"vale conferir se ninguém reconhece a regra")
+				ev = append(ev, "restrita ao comando `"+d.Comando+"`, que esta "+
+					"ferramenta NÃO reconhece como primitiva de escalada — o que a "+
+					"regra concede depende do que aquele binário faz com privilégio, "+
+					"e a tabela de referência do assunto é a GTFOBins")
 			default:
 				ev = append(ev, "escala como `"+d.Alvo+"`, não root — quem usa vira "+
 					"aquela conta sem senha")
@@ -628,19 +703,6 @@ func indiceSemCaixa(texto, alvo string) int {
 		}
 	}
 	return -1
-}
-
-// ehShellOuInterp diz se o comando é um shell ou interpretador direto. Reusa o
-// mesmo conjunto do classificador de pipe (systemd.go) — a lista de coisas que,
-// recebendo argumento, executam qualquer coisa. Pega o primeiro token porque a
-// regra de doas pode citar `cmd /bin/sh args ...`.
-func ehShellOuInterp(cmd string) bool {
-	cmd = strings.TrimSpace(cmd)
-	if cmd == "" {
-		return false
-	}
-	campos := strings.Fields(cmd)
-	return interpretadoresDePipe[baseDe(campos[0])]
 }
 
 // concedeNopassEfetivo aplica o last-match do doas: a regra `permit nopass` no

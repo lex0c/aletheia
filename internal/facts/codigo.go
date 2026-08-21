@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"bytes"
 	"io/fs"
 	"regexp"
 	"sort"
@@ -250,7 +251,13 @@ func linguagemPorExtensao(path string) string {
 		return ""
 	}
 	switch strings.ToLower(path[i:]) {
-	case ".php", ".php3", ".php4", ".php5", ".php7", ".phtml", ".phar", ".inc":
+	case ".php", ".php3", ".php4", ".php5", ".php7", ".php8",
+		".phtml", ".pht", ".phpt", ".phar", ".inc":
+		// php8/pht/phpt entraram junto com o coletor de .htaccess, e pela mesma
+		// razão: são mapeamentos de handler que existem em servidor real, e um
+		// upload chamado `shell.php8` só é inerte enquanto ninguém mapeou. Um
+		// `AddType application/x-httpd-php .php8` num .htaccess mapeia — e o
+		// arquivo que ele torna executável não estava nem sendo aberto.
 		return "php"
 	case ".js", ".cjs", ".mjs", ".jsx", ".ts":
 		return "js"
@@ -1629,12 +1636,24 @@ func indexByteFrom(b []byte, de int, c byte) int {
 	return -1
 }
 
+// trecho limita o que vai para o dump: uma linha minificada não pode despejar
+// quilobytes no relatório.
+//
+// O corte é por RUNE e não por byte. Fatiar `t[:maxTrecho]` parte um caractere
+// multibyte quando o limite cai no meio da sequência, e o byte inválido que
+// sobra viaja para dentro do JSON — que é o formato que a análise do lado limpo
+// lê. Custa uma conversão numa linha que já era longa o bastante para ser
+// cortada.
 func trecho(linha string) string {
 	t := strings.TrimSpace(linha)
-	if len(t) > maxTrecho {
-		return t[:maxTrecho] + "…"
+	if len(t) <= maxTrecho {
+		return t
 	}
-	return t
+	r := []rune(t)
+	if len(r) <= maxTrecho {
+		return t
+	}
+	return string(r[:maxTrecho]) + "…"
 }
 
 // A varredura de código: onde procurar, e os tetos.
@@ -1677,6 +1696,13 @@ var maxCodigoDepth = 12
 var (
 	maxCodigoDirs     = 300000
 	maxCodigoArquivos = 40000
+
+	// maxConfigWeb é o teto PRÓPRIO da configuração por diretório. Cinco mil
+	// arquivos de dezenas de bytes cada; nenhuma árvore servida legítima chega
+	// perto, e o teto existe pela mesma razão de todos os outros — parar em
+	// silêncio diria "nenhuma configuração muda o que executa" quando o que
+	// houve foi parar antes.
+	maxConfigWeb = 5000
 )
 
 // codigoRaizes são as árvores onde código SERVIDO mora — é ali que um webshell
@@ -1723,6 +1749,11 @@ type varreduraCodigo struct {
 	dirsIlegiveis     int
 	arquivosIlegiveis int
 
+	// configs conta a configuração por diretório (.htaccess, .user.ini), com
+	// teto próprio: ela não pode gastar as vagas do código.
+	configs         int
+	configsTruncado bool
+
 	// fila são os arquivos SELECIONADOS pela caminhada, na ordem em que ela os
 	// encontrou. A leitura e a análise deles acontecem depois, em paralelo —
 	// ver analisarFila.
@@ -1734,6 +1765,10 @@ type varreduraCodigo struct {
 type arquivoDeCodigo struct {
 	path string
 	lang string
+	// conf marca o arquivo que também é CONFIGURAÇÃO POR DIRETÓRIO do servidor
+	// web (.htaccess, .user.ini). Ele viaja na mesma fila para não pagar uma
+	// segunda caminhada: os tetos, a poda e o paralelismo já estão aqui.
+	conf string
 }
 
 func collectCodigo(f *Facts, e *env.Env) {
@@ -1810,8 +1845,16 @@ func collectCodigo(f *Facts, e *env.Env) {
 		st.grandesPulados += porRaiz.grandesPulados
 		st.dirsIlegiveis += porRaiz.dirsIlegiveis
 		st.arquivosIlegiveis += porRaiz.arquivosIlegiveis
+		st.configsTruncado = st.configsTruncado || porRaiz.configsTruncado
 	}
 
+	if st.configsTruncado {
+		f.denyPersist("codigo", "a varredura passou de "+itoa(maxConfigWeb)+
+			" arquivos de configuração por diretório (.htaccess, .user.ini) em "+
+			"ALGUMA raiz e parou de colhê-los: os que ficaram de fora NÃO foram "+
+			"avaliados — nem o auto_prepend_file deles, nem o mapeamento de "+
+			"handler, nem código embutido")
+	}
 	if st.truncado {
 		f.denyPersist("codigo", "a varredura de código atingiu o teto BACKSTOP de "+
 			itoa(maxCodigoDirs)+" diretórios ou "+itoa(maxCodigoArquivos)+
@@ -1894,6 +1937,7 @@ func analisarFila(f *Facts, e *env.Env, st *varreduraCodigo) {
 	}
 
 	achados := make([]*CodigoSuspeito, len(fila))
+	configs := make([]*ConfigWeb, len(fila))
 	var ilegiveis, expirados int64
 	var prox int64
 	var wg sync.WaitGroup
@@ -1936,15 +1980,48 @@ func analisarFila(f *Facts, e *env.Env, st *varreduraCodigo) {
 					}
 					continue
 				}
-				ms := analisarConteudo(string(b), a.lang)
+				// O mtime é PREGUIÇOSO, e a razão é custo: a caminhada já fez
+				// um Lstat por candidato para o teto de tamanho, e stat-ar de
+				// novo TODO arquivo enfileirado acrescentava um segundo
+				// syscall por arquivo — 29 mil deles no corpus medido no topo
+				// desta seção, um seek cada em cache frio — para um dado que
+				// só entra no achado. A versão anterior a esta mudança só
+				// stat-ava o que CASAVA, que era um punhado.
+				modUTC := func() string {
+					if fi, err := e.Lstat(a.path); err == nil && !fi.ModTime().IsZero() {
+						return fi.ModTime().UTC().Format("2006-01-02T15:04:05Z")
+					}
+					return ""
+				}
+
+				lang := a.lang
+				if a.conf != "" {
+					if cw := analisarConfigWeb(a.path, a.conf, string(b)); cw != nil {
+						cw.ModUTC = modUTC()
+						configs[i] = cw
+					}
+					// O conteúdo só vai para o motor de código quando o arquivo
+					// TEM tag de PHP. Sem esta condição, um .htaccess comum
+					// entraria no motor com `lang=php` e a máscara o trataria
+					// como código puro (ela só desliga a partir do primeiro
+					// `<?`), analisando diretiva de Apache como se fosse fonte.
+					//
+					// A busca é sobre os BYTES: `string(b)` copiaria o arquivo
+					// inteiro só para procurar dois caracteres.
+					if lang == "" && bytes.Contains(b, []byte("<?")) {
+						lang = "php"
+					}
+				}
+				if lang == "" {
+					continue
+				}
+				ms := analisarConteudo(string(b), lang)
 				if len(ms) == 0 {
 					continue
 				}
-				cs := &CodigoSuspeito{Path: a.path, Lang: a.lang, Matches: ms}
-				if fi, err := e.Lstat(a.path); err == nil && !fi.ModTime().IsZero() {
-					cs.ModUTC = fi.ModTime().UTC().Format("2006-01-02T15:04:05Z")
+				achados[i] = &CodigoSuspeito{
+					Path: a.path, Lang: lang, Matches: ms, ModUTC: modUTC(),
 				}
-				achados[i] = cs
 			}
 		}()
 	}
@@ -1957,6 +2034,11 @@ func analisarFila(f *Facts, e *env.Env, st *varreduraCodigo) {
 	for _, cs := range achados {
 		if cs != nil {
 			f.CodigoSuspeito = append(f.CodigoSuspeito, *cs)
+		}
+	}
+	for _, cw := range configs {
+		if cw != nil {
+			f.ConfigWeb = append(f.ConfigWeb, *cw)
 		}
 	}
 }
@@ -2057,14 +2139,32 @@ func varrerCodigo(f *Facts, e *env.Env, raiz string, prof int, st *varreduraCodi
 				continue
 			}
 			lang := linguagemPorExtensao(n)
-			if lang == "" {
+			conf := configWebPorNome(n)
+			if lang == "" && conf == "" {
 				continue
 			}
-			if st.arquivos >= maxCodigoArquivos {
-				st.truncado = true
-				return
+			// ORÇAMENTO SEPARADO para configuração por diretório.
+			//
+			// Um `.htaccess` é minúsculo, e uma árvore de WordPress ou Magento
+			// tem um por diretório. Contá-los no mesmo teto do CÓDIGO fazia
+			// milhares deles gastarem as vagas antes de a varredura chegar aos
+			// `.php` do mesmo nível — a caminhada cortava mais cedo, e o que
+			// deixava de ser olhado era justamente o que o `app.code_backdoor`
+			// procura. O sintoma sairia como truncamento, não como achado
+			// faltando, e é o pior jeito de perder cobertura.
+			if conf != "" {
+				if st.configs >= maxConfigWeb {
+					st.configsTruncado = true
+					continue
+				}
+				st.configs++
+			} else {
+				if st.arquivos >= maxCodigoArquivos {
+					st.truncado = true
+					return
+				}
+				st.arquivos++
 			}
-			st.arquivos++
 
 			// Tamanho antes de ler: não puxar um bundle de 40 MB para a memória.
 			if fi, err := e.Lstat(p); err == nil && fi.Size() > maxCodigoBytes {
@@ -2078,7 +2178,7 @@ func varrerCodigo(f *Facts, e *env.Env, raiz string, prof int, st *varreduraCodi
 			// corta. Paralelizar a seleção faria o corte cair num lugar
 			// diferente a cada execução, que é justamente o que o comentário do
 			// BFS acima existe para impedir.
-			st.fila = append(st.fila, arquivoDeCodigo{path: p, lang: lang})
+			st.fila = append(st.fila, arquivoDeCodigo{path: p, lang: lang, conf: conf})
 		}
 		for _, p := range subdirs {
 			if at.prof+1 > maxCodigoDepth {

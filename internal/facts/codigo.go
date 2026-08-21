@@ -1,9 +1,12 @@
 package facts
 
 import (
+	"io/fs"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/lex0c/aletheia/internal/env"
 )
@@ -363,7 +366,40 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 	// atribuições já estão sendo varridas, e só quando há in_array no arquivo.
 	listas := map[string]bool{}
 	temLista := strings.Contains(masc, "in_array")
-	for _, m := range def.atribui.FindAllStringSubmatchIndex(masc, -1) {
+
+	// GATE POR SINK, e ele é EXATO — não é peneira heurística.
+	//
+	// Um evento de atribuição só vira achado quando um evento de SINK o
+	// consome: o laço abaixo não chama `registrar` nenhuma vez, ele só alimenta
+	// `evs` e `listas`. Logo, num arquivo sem nenhum sink, sem callback e sem
+	// chamada dinâmica, o motor de taint inteiro é trabalho morto.
+	//
+	// Medido num corpus real: 6.886 de 28.819 arquivos (24%) contêm algum
+	// sink; nos outros 76% esta varredura rodava para nada. Ela sozinha é a
+	// linha mais cara da coleta — 36s de 117s —, e a de `varTok` logo abaixo
+	// responde por 44% de TODAS as alocações do processo.
+	//
+	// As localizações são calculadas AQUI e reusadas mais abaixo: são as mesmas
+	// chamadas de antes, movidas para cima, sem varredura extra.
+	locsSink := def.sinkAbre.FindAllStringIndex(masc, -1)
+	var locsCb1, locsCb2 [][]int
+	var locsDyn [][]int
+	if def.cbArg1 != nil {
+		locsCb1 = def.cbArg1.FindAllStringIndex(masc, -1)
+	}
+	if def.cbArg2 != nil {
+		locsCb2 = def.cbArg2.FindAllStringIndex(masc, -1)
+	}
+	if def.dynAbre != nil {
+		locsDyn = def.dynAbre.FindAllStringSubmatchIndex(mascVar, -1)
+	}
+	temSink := len(locsSink) > 0 || len(locsCb1) > 0 || len(locsCb2) > 0 || len(locsDyn) > 0
+
+	var atribuicoes [][]int
+	if temSink {
+		atribuicoes = def.atribui.FindAllStringSubmatchIndex(masc, -1)
+	}
+	for _, m := range atribuicoes {
 		rhsVis := masc[m[4]:m[5]]    // lista literal e fonte literal: precisam visível
 		rhsVar := mascVar[m[4]:m[5]] // fonte-variável: aspa simples apagada
 		if temLista && listaLiteral(rhsVis, 0) {
@@ -444,7 +480,7 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 		}
 		evs = append(evs, e)
 	}
-	for _, loc := range def.sinkAbre.FindAllStringIndex(masc, -1) {
+	for _, loc := range locsSink {
 		adicionarSink(loc, 0, "sink de execução sobre entrada de request")
 	}
 	// Validador de CAMINHO do WordPress: `validate_file($v)`/`validate_plugin($v)`
@@ -467,28 +503,24 @@ func analisarConteudo(conteudo, lang string) []MatchDeCodigo {
 		}
 	}
 	const rotCb = "callback nomeado pelo request — executa função escolhida pelo atacante"
-	if def.cbArg1 != nil {
-		for _, loc := range def.cbArg1.FindAllStringIndex(masc, -1) {
-			adicionarSink(loc, 1, rotCb)
-		}
+	for _, loc := range locsCb1 {
+		adicionarSink(loc, 1, rotCb)
 	}
-	if def.cbArg2 != nil {
-		for _, loc := range def.cbArg2.FindAllStringIndex(masc, -1) {
-			adicionarSink(loc, 2, rotCb)
-		}
+	for _, loc := range locsCb2 {
+		adicionarSink(loc, 2, rotCb)
 	}
 	// Chamada dinâmica `$fn(...)` onde $fn é tainted: o atacante escolhe a
 	// função. EXCLUI `new $fn()` (instanciação = object injection, uma
 	// vulnerabilidade, não backdoor — e o padrão de um exemplo inseguro de
 	// biblioteca como o jpGraph) e método/estático (`.m()`, `->m()`, `::m()`).
-	if def.dynAbre != nil {
-		for _, m := range def.dynAbre.FindAllStringSubmatchIndex(mascVar, -1) {
-			if !chamadaDinamicaValida(masc, m[0]) {
-				continue
-			}
-			evs = append(evs, evento{off: m[0], vars: []string{masc[m[2]:m[3]]},
-				rotulo: "função nomeada por variável de entrada de request (chamada dinâmica)"})
+	// locsDyn já vem nil quando a linguagem não tem dynAbre — o guarda de nil
+	// ficou lá em cima, junto com a varredura.
+	for _, m := range locsDyn {
+		if !chamadaDinamicaValida(masc, m[0]) {
+			continue
 		}
+		evs = append(evs, evento{off: m[0], vars: []string{masc[m[2]:m[3]]},
+			rotulo: "função nomeada por variável de entrada de request (chamada dinâmica)"})
 	}
 
 	// A ESTRUTURA que o taint precisa conhecer antes de andar: em que função
@@ -1616,6 +1648,12 @@ func trecho(linha string) string {
 // ruído e custo. O que passar disso é dito.
 const maxCodigoBytes = 2 << 20
 
+// maxCodigoWorkers é o teto de trabalhadores da ANÁLISE de código. É o mesmo
+// número do coletor de processos e do de hash: acima disso a disputa por I/O
+// passa a custar mais do que o paralelismo rende, e este estágio é CPU-bound
+// com leitura de arquivo no meio.
+const maxCodigoWorkers = 8
+
 // maxCodigoDepth é o teto de profundidade — freio contra laço por symlink, e
 // declarado quando bate. var (não const) só para o teste baixá-lo.
 var maxCodigoDepth = 12
@@ -1684,6 +1722,18 @@ type varreduraCodigo struct {
 	grandesPulados    int
 	dirsIlegiveis     int
 	arquivosIlegiveis int
+
+	// fila são os arquivos SELECIONADOS pela caminhada, na ordem em que ela os
+	// encontrou. A leitura e a análise deles acontecem depois, em paralelo —
+	// ver analisarFila.
+	fila []arquivoDeCodigo
+}
+
+// arquivoDeCodigo é um candidato que a caminhada já aceitou: passou pelo filtro
+// de extensão, pela poda por nome e pelos tetos.
+type arquivoDeCodigo struct {
+	path string
+	lang string
 }
 
 func collectCodigo(f *Facts, e *env.Env) {
@@ -1753,6 +1803,7 @@ func collectCodigo(f *Facts, e *env.Env) {
 		vistos[r] = true
 		porRaiz := varreduraCodigo{tempo: st.tempo}
 		varrerCodigo(f, e, r, 0, &porRaiz, vistos, pularAbs)
+		analisarFila(f, e, &porRaiz)
 		st.truncado = st.truncado || porRaiz.truncado
 		st.tempo = st.tempo || porRaiz.tempo
 		st.profundidade = st.profundidade || porRaiz.profundidade
@@ -1816,6 +1867,100 @@ func declararIgnore(f *Facts, e *env.Env, check string) {
 		"havia neles NÃO foi procurado")
 }
 
+// analisarFila lê e analisa, EM PARALELO, os arquivos que a caminhada
+// selecionou.
+//
+// Era o único estágio caro da coleta rodando serial: collectProcesses, a
+// varredura de SUID e verificarHashes todos usam e.Workers(...), e este arquivo
+// não tinha um `go func` sequer. Medido antes da separação: 103s de CPU num
+// host de 12 núcleos, gastando um — e a varredura de código respondia por 98%
+// do tempo de parede de um `scan`.
+//
+// O resultado continua DETERMINÍSTICO, e isso não é acidente:
+//
+//   - a SELEÇÃO ficou na caminhada, serial e em ordem de BFS. É ela que gasta
+//     os tetos e decide onde a varredura corta, e um corte que cai num lugar
+//     diferente a cada execução não é reprodutível.
+//   - os achados são escritos em posições FIXAS de um vetor indexado pela
+//     ordem da fila, não anexados na ordem em que os trabalhadores terminam.
+//
+// O prazo é checado por tarefa: um --fs-budget que estoura no meio para de
+// analisar e o que sobrou vira lacuna declarada, como no caminho serial.
+func analisarFila(f *Facts, e *env.Env, st *varreduraCodigo) {
+	fila := st.fila
+	st.fila = nil
+	if len(fila) == 0 {
+		return
+	}
+
+	achados := make([]*CodigoSuspeito, len(fila))
+	var ilegiveis, expirados int64
+	var prox int64
+	var wg sync.WaitGroup
+
+	n := e.Workers(maxCodigoWorkers)
+	if n > len(fila) {
+		n = len(fila)
+	}
+	for w := 0; w < n; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Mesmo guarda das outras pools: um panic aqui mataria o processo
+			// com status 2, que o contrato lê como CRITICAL de alta confiança.
+			defer f.guardaGoroutine("codigo")
+			for {
+				i := int(atomic.AddInt64(&prox, 1)) - 1
+				if i >= len(fila) {
+					return
+				}
+				if e.WalkExpired() {
+					atomic.AddInt64(&expirados, 1)
+					continue
+				}
+				a := fila[i]
+				// O batimento segue a ANÁLISE, que passou a ser a fase longa:
+				// sem isto o progresso congelava no último diretório da
+				// caminhada por todo o tempo em que os trabalhadores rodavam, e
+				// "parece travado" é exatamente o que este pacote existe para
+				// evitar. Detalhe é seguro em concorrência (o Reporter tranca).
+				e.Detalhe(a.path)
+				b, err := e.ReadFile(a.path)
+				if err != nil {
+					// Um .php que o readdir listou e o ReadFile não abriu SOME
+					// do universo avaliado se calarmos. Ilegível é lacuna;
+					// não-existe (corrida: arquivo removido entre listar e ler)
+					// não é.
+					if env.EhLacuna(err) {
+						atomic.AddInt64(&ilegiveis, 1)
+					}
+					continue
+				}
+				ms := analisarConteudo(string(b), a.lang)
+				if len(ms) == 0 {
+					continue
+				}
+				cs := &CodigoSuspeito{Path: a.path, Lang: a.lang, Matches: ms}
+				if fi, err := e.Lstat(a.path); err == nil && !fi.ModTime().IsZero() {
+					cs.ModUTC = fi.ModTime().UTC().Format("2006-01-02T15:04:05Z")
+				}
+				achados[i] = cs
+			}
+		}()
+	}
+	wg.Wait()
+
+	st.arquivosIlegiveis += int(ilegiveis)
+	if expirados > 0 {
+		st.tempo = true
+	}
+	for _, cs := range achados {
+		if cs != nil {
+			f.CodigoSuspeito = append(f.CodigoSuspeito, *cs)
+		}
+	}
+}
+
 func varrerCodigo(f *Facts, e *env.Env, raiz string, prof int, st *varreduraCodigo, vistos, pularAbs map[string]bool) {
 	// BFS por PROFUNDIDADE, não DFS. O código SERVIDO — o index.php, o
 	// bootstrap.php, o painel — mora raso, na raiz de cada aplicação; o que é
@@ -1877,7 +2022,23 @@ func varrerCodigo(f *Facts, e *env.Env, raiz string, prof int, st *varreduraCodi
 			if pularAbs[p] || e.Ignorado(p) {
 				continue
 			}
-			if e.IsDir(p) {
+			// ent.IsDir() vem do d_type do readdir, que o kernel JÁ entregou —
+			// o e.IsDir(p) daqui era um stat(2) por dirent, e ele rodava ANTES
+			// do filtro de extensão, ou seja, sobre todo .jpg, .o e .md da
+			// árvore. Medido: 942.880 chamadas os.Stat sobre 933.944 dirents
+			// para 28.819 arquivos de código — 97% jogadas fora, 3,46s de 136s
+			// com cache quente e um seek por entrada em disco frio. O comentário
+			// no topo deste arquivo já afirmava "não faz stat por arquivo", e a
+			// varredura de SUID já fazia certo.
+			//
+			// SYMLINK é a exceção: o d_type diz DT_LNK e não diz para onde, e o
+			// e.IsDir segue o link (Stat, não Lstat). Só aí se paga o stat, que
+			// é o comportamento anterior para esse caso.
+			ehDir := ent.IsDir()
+			if !ehDir && ent.Type()&fs.ModeSymlink != 0 {
+				ehDir = e.IsDir(p)
+			}
+			if ehDir {
 				// As mesmas árvores que só geram profundidade e ruído. vendor e
 				// node_modules TAMBÉM podem esconder shell — mas varrê-los inteiros
 				// é o custo que acabamos de medir, então ficam de fora e isso é dito.
@@ -1910,25 +2071,14 @@ func varrerCodigo(f *Facts, e *env.Env, raiz string, prof int, st *varreduraCodi
 				st.grandesPulados++
 				continue
 			}
-			b, err := e.ReadFile(p)
-			if err != nil {
-				// Um .php que o readdir listou e o ReadFile não abriu SOME do
-				// universo avaliado se calarmos. Ilegível é lacuna; não-existe
-				// (corrida: arquivo removido entre listar e ler) não é.
-				if env.EhLacuna(err) {
-					st.arquivosIlegiveis++
-				}
-				continue
-			}
-			ms := analisarConteudo(string(b), lang)
-			if len(ms) == 0 {
-				continue
-			}
-			cs := CodigoSuspeito{Path: p, Lang: lang, Matches: ms}
-			if fi, err := e.Lstat(p); err == nil && !fi.ModTime().IsZero() {
-				cs.ModUTC = fi.ModTime().UTC().Format("2006-01-02T15:04:05Z")
-			}
-			f.CodigoSuspeito = append(f.CodigoSuspeito, cs)
+			// A caminhada SELECIONA; quem lê e analisa é analisarFila, em
+			// paralelo. A separação existe porque a seleção precisa continuar
+			// SERIAL e na ordem do BFS — é ela que gasta os tetos
+			// (maxCodigoArquivos, a profundidade) e decide ONDE a varredura
+			// corta. Paralelizar a seleção faria o corte cair num lugar
+			// diferente a cada execução, que é justamente o que o comentário do
+			// BFS acima existe para impedir.
+			st.fila = append(st.fila, arquivoDeCodigo{path: p, lang: lang})
 		}
 		for _, p := range subdirs {
 			if at.prof+1 > maxCodigoDepth {
@@ -1952,9 +2102,25 @@ var fsDeRede = map[string]bool{
 	"fuse.glusterfs": true, "fuse.cephfs": true, "davfs": true,
 }
 
+// A lista é a MESMA classe da pularPorNome da varredura de SUID, e estava com
+// menos da metade das entradas — na varredura CARA.
+//
+// Medido no corpus de um host real: 15.152 de 28.819 arquivos (53%) e 184 de
+// 470 MB (39%) do que a varredura de código LIA E PASSAVA POR REGEX estavam
+// nestas árvores. A de SUID, que só faria stat neles, já os pulava. O argumento
+// que justifica a poda está escrito lá, no coletor barato: "pular árvore NOMEADA
+// é melhor que truncar" — a exclusão fica conhecida e é a mesma em todo host,
+// enquanto um corte por contagem cai num lugar diferente a cada máquina.
+//
+// Exclusão de CUSTO, silenciosa: estas árvores existem em quase todo host, e
+// declarar lacuna por elas degradaria a cobertura para sempre. O limite — código
+// escondido dentro de dependência não é procurado — está no FP do check.
 var pularNoCodigo = map[string]bool{
 	"node_modules": true, "vendor": true, ".git": true, ".cache": true,
 	".svn": true, "bower_components": true, ".npm": true,
+	"site-packages": true, "venv": true, ".venv": true, "__pycache__": true,
+	".cargo": true, ".rustup": true, ".gradle": true, ".m2": true,
+	".pnpm-store": true, ".yarn": true, ".mozilla": true, ".terraform": true,
 }
 
 // ehArgvSink diz se, para este sink, só o 1º argumento importa. Duas famílias

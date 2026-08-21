@@ -208,6 +208,15 @@ bate com o alvo — só existem na memória daquele processo: um dump de memóri
 vários minutos morto no meio deixaria os arquivos no disco sem cadeia de custódia
 nenhuma.
 
+O sinal é notado **dentro** de uma peça, e não só entre elas: o dump de memória
+consulta a interrupção a cada região, e a cópia de arquivo a cada fatia. Um
+`--file` de gigabytes ou um `/proc/<pid>/exe` num mount de rede travado não
+seguram mais o pedido de parada.
+
+Um **segundo** sinal força a saída na hora, e aí o manifesto **não** é escrito —
+o que estiver no diretório fica sem hash de origem. É a saída de emergência para
+quando a primeira não responde; use-a sabendo o que ela custa.
+
 Aletheia não mata processos, remove persistência ou altera regras de firewall.
 
 ---
@@ -323,6 +332,12 @@ facts daquele processo ficam parciais
         ->
 analyze não transforma isso em "executável normal"
 ```
+
+A mesma ausência pode ser lacuna num lugar e escopo em outro, e o coletor
+discrimina: tracefs ausente num host bare-metal é lacuna (o kernel tem tracing e
+a interface não está montada); dentro de um contêiner não é, porque o runtime
+mascara `/sys/kernel` de propósito e o kernel ali é do host — o mesmo raciocínio
+que o eBPF e o bootloader já seguiam.
 
 O fluxo é:
 
@@ -447,6 +462,24 @@ sudo ./aletheia scan --all-fs --ignore /data/xmls --ignore /var/backups
 Quando a varredura estoura um teto (árvore gigante) ou você exclui um caminho, o
 relatório **declara a lacuna** em vez de dizer "limpo" — a ausência de achado
 onde não se olhou é desconhecimento, não resposta.
+
+Há uma exclusão que **não** vira lacuna, e ela precisa estar dita aqui: árvores
+de dependência são puladas pelo NOME, em qualquer nível, sem declarar nada.
+
+```text
+node_modules  vendor  bower_components  .git  .svn  .cache  .npm
+site-packages venv  .venv  __pycache__  .cargo  .rustup  .gradle
+.m2  .pnpm-store  .yarn  .mozilla  .terraform
+```
+
+Elas existem em quase todo host, e declarar lacuna por elas degradaria a
+cobertura de forma permanente — o que gasta o sinal que separa "não achei" de
+"não consegui olhar". A medição que fixou a lista: num corpus real elas eram
+**53% dos arquivos e 39% dos bytes** que a varredura lia e passava por regex.
+
+O limite fica DECLARADO aqui e no falso-positivo do check: **código escondido
+dentro de uma dependência não é procurado**. Para incluí-las numa investigação
+específica, aponte `--root` direto na árvore.
 
 Isso é especialmente útil para procurar:
 
@@ -577,22 +610,53 @@ Um check pode estar:
 complete
 partial
 not checked
+out of scope
 ```
 
 Além disso, a própria coleta pode registrar lacunas quando uma fonte necessária
 não estava disponível.
 
-Exemplos comuns:
+Exemplos comuns de LACUNA:
 
 - execução sem privilégios suficientes;
 - `/proc` montado com restrições;
-- tracefs/debugfs indisponível;
-- kernel sem determinada API;
+- tracefs presente e ilegível, ou **não montado num host bare-metal** — ali o
+  kernel tem tracing e a interface que denunciaria um hook por ftrace não está
+  no ar, o que é diferente de não haver o que olhar (`mount -t tracefs nodev
+  /sys/kernel/tracing` fecha a lacuna);
+- base de pacotes existente e ilegível;
 - dados que só podem ser observados no host live;
 - limites internos atingidos durante uma coleta hostil ou muito grande.
 
 Um resultado sem findings, mas com cobertura incompleta, não é equivalente a um
 resultado totalmente observado.
+
+### Lacuna e escopo não são a mesma coisa
+
+O critério que separa os dois:
+
+- se a pergunta **pode** ser feita neste host e não foi, é **lacuna** — ela
+  derruba a cobertura e o veredito vira `INCOMPLETE`;
+- se a pergunta **não existe** aqui, é **escopo** — ele aparece no rodapé, mas
+  sai do denominador e não derruba nada.
+
+Um kernel compilado sem `inet_diag` nunca vai responder ao `sock_diag`, e nenhum
+privilégio muda isso. Enquanto essa ausência contava como lacuna, **toda**
+varredura naquele host saía `INCOMPLETE` com exit 1 — inclusive a de um host
+limpo —, e a mensagem ainda mandava usar `--allow-kernel-autoload`, que ali não
+tem o que carregar. Uma lacuna que nunca fecha deixa de ser informação e vira
+ruído fixo.
+
+No rodapé de `--coverage` as duas listas saem separadas:
+
+```text
+COBERTURA  105/105 completos · 2 fora de escopo
+  fora de escopo (o mecanismo não existe neste host; NÃO conta como lacuna)
+    cross.socket_view — este kernel não OFERECE a enumeração de socket por netlink
+```
+
+O mesmo vale para o modo `image` (não há kernel vivo para consultar) e para
+contêiner, onde `/sys/kernel` é mascarado pelo runtime de propósito.
 
 ---
 
@@ -729,6 +793,18 @@ severidade pode ser reduzida.
 capturado é benigno.** Se o comprometimento já existia, a baseline também o
 capturou.
 
+Uma baseline carrega o esquema da CHAVE que a identifica, e uma baseline de
+esquema anterior é **recusada** em vez de interpretada — `recapture`. Recusar é
+a única saída segura: uma chave lida com a forma errada casa achado com achado
+errado, e o erro cai para o lado de marcar como conhecido o que é novo.
+
+O esquema mudou para 2: a chave passou a admitir um discriminador do achado além
+de `id|sujeito`. Sem ele, dois achados diferentes do MESMO check sobre o MESMO
+sujeito colidiam — `priv.sudo_nopasswd` usa o usuário como sujeito, então uma
+regra recém-inserida em `sudoers.d` herdava a presença da antiga e saía sem a
+marca ✳NOVO, sob uma linha afirmando que já estava na baseline. Baselines
+capturadas antes disso precisam ser recapturadas.
+
 ---
 
 ## Preservação e impacto no host
@@ -840,6 +916,18 @@ make mutacao
 - `race` roda o detector de data races, incluindo a suíte de cenários;
 - `mutacao` injeta mutações em decisões dos checks para verificar se os testes
   detectam regressões semânticas.
+
+Cross-compilação:
+
+```sh
+make arches
+```
+
+`arches` roda `go vet ./...` em `386` e `arm64` **antes** de construir, e o `./...`
+não é detalhe: enquanto o alvo compilava só `./cmd/aletheia`, as duas
+arquiteturas de ABI mais divergente eram as menos verificadas — tamanho de `int`,
+número de syscall e layout de struct do kernel divergem justamente ali, e é onde
+os arquivos `sys_*.go` existem.
 
 Distribuição:
 

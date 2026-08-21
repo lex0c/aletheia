@@ -136,9 +136,25 @@ var persistRedundant = check.Check{
 			// por root) fazia um implante SUID com unit e cron @reboot sair com
 			// "RESULT: OK — nenhum indicador coberto disparou".
 			//
-			// Agora a isenção casa a FORMA da transição e nada além dela: dois
-			// mecanismos, um deles init.d. Três mecanismos não são transição de
-			// ninguém.
+			// Ela ficou em DOIS MECANISMOS COM DONO, e não em "dois, um deles
+			// init.d" — e a diferença já foi medida, não é preferência.
+			//
+			// Estreitar para a forma da transição do SysV parece o conserto
+			// óbvio e rende ruído numa distribuição limpa: o apt entrega
+			// /etc/cron.daily/apt-compat E apt-daily.timer para o mesmo
+			// apt.systemd.daily, e o dpkg faz igual com o backup da base. Uma
+			// debian:12 sem nada plantado passou a sair com dois avisos, e o
+			// orçamento de ruído dos cenários A6, A12 e A12b pegou isso.
+			//
+			// O que sobra do cenário A1 — implante empacotado por `echo` na
+			// lista do dpkg, com unit e cron — NÃO é resolvido aqui, e é
+			// deliberado: quem o pega é integrity.pkgdb_tampered, perguntando se
+			// a BASE foi editada. Isso nomeia a CAUSA em vez do sintoma, e vale
+			// para os cinco checks que a edição derruba, não só para este. Com
+			// TRÊS mecanismos a redundância dispara de novo, empacotado ou não.
+			//
+			// Ver o comentário do A1 em test/scenario/cases_evasao.go, que é
+			// onde a decisão está registrada com a medição junto.
 			if dono[alvo] && len(mecs) == 2 {
 				continue
 			}

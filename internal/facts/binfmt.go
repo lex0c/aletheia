@@ -245,6 +245,17 @@ func collectBinfmtConfig(f *Facts, e *env.Env) {
 				if c, ok := parseBinfmtLinha(ln); ok {
 					c.Fonte = p
 					f.BinfmtConfig = append(f.BinfmtConfig, c)
+				} else {
+					// "Não entendi" ≠ "não achei", e o descarte mudo apagava a
+					// diferença. O kernel aceita QUALQUER byte como delimitador,
+					// e parseBinfmtLinha usa string(ln[0]) — um primeiro byte
+					// >= 0x80 vira uma string UTF-8 de dois bytes que nunca casa
+					// o byte cru, e a linha some. Um /etc/binfmt.d/x.conf assim
+					// registra sequestro de execução para o próximo boot e saía
+					// da coleta como ausência.
+					f.partial("binfmt", p+": uma linha de registro não pôde ser "+
+						"interpretada e NÃO foi avaliada — o interpretador que "+
+						"ela registra não entrou na análise")
 				}
 			}
 		}

@@ -107,9 +107,19 @@ func collectSockets(f *Facts, e *env.Env) {
 	} {
 		tabela, cortou, err := lerTabelaSockets(src.path, src.proto)
 		if err != nil {
-			// A variante v6 ausente é normal em host sem IPv6; a v4 não é.
-			if src.proto == "tcp" || src.proto == "udp" {
-				f.partial("net", src.path+" ilegível: nenhuma conexão desse protocolo foi avaliada")
+			// A variante v6 AUSENTE é normal em host sem IPv6 — mas só a
+			// ausência. A condição anterior casava com QUALQUER erro na v6, e
+			// com /proc/net/tcp6 ilegível (AppArmor ou SELinux cobrindo
+			// /proc/net/**, que é uma política comum) metade da pilha sumia sem
+			// uma palavra: net.listener_unowned e net.egress_unowned reportavam
+			// cobertura COMPLETA tendo perdido todo o IPv6. A distinção certa
+			// já existe no irmão procNetLido, em crosssocket.go, que lê estes
+			// mesmos quatro arquivos: ENOENT é ausência de protocolo, EACCES e
+			// EIO são cegueira.
+			ehV6 := src.proto == "tcp6" || src.proto == "udp6"
+			if !ehV6 || !procNetLido(err) {
+				f.partial("net", src.path+" ilegível ("+env.MotivoDoErro(err)+
+					"): nenhuma conexão desse protocolo foi avaliada")
 			}
 			continue
 		}

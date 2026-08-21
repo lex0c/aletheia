@@ -263,14 +263,25 @@ var unitDirs = []struct {
 	{"/run/systemd/transient", "system", false},
 	{"/run/systemd/generator.early", "system", false},
 	{"/etc/systemd/system", "system", false},
+	// As árvores `*.attached` são de SERVIÇO PORTÁTIL (systemd >= 239,
+	// systemd-portabled), e são parte da "System Unit Search Path" da
+	// systemd.unit(5) — não uma extensão exótica. Faltando as duas, uma unit
+	// anexada por `portablectl attach` roda no host e NÃO aparece em f.Units:
+	// sem achado e sem lacuna, que é a forma de cegueira que esta ferramenta
+	// existe para não ter. Debian 12, Fedora e RHEL 9 entregam o portabled.
+	{"/etc/systemd/system.attached", "system", false},
+	{"/run/systemd/system.attached", "system", false},
 	{"/run/systemd/system", "system", false},
 	{"/run/systemd/generator", "system", false},
 	{"/usr/local/lib/systemd/system", "system", false},
 	{"/usr/lib/systemd/system", "system", true},
 	{"/lib/systemd/system", "system", true},
 	{"/run/systemd/generator.late", "system", false},
-	{"/etc/systemd/user", "user", false},
+	{"/etc/systemd/user.control", "user", false},
 	{"/run/systemd/user.control", "user", false},
+	{"/etc/systemd/user", "user", false},
+	{"/run/systemd/user", "user", false},
+	{"/usr/local/lib/systemd/user", "user", false},
 	{"/usr/lib/systemd/user", "user", true},
 }
 
@@ -1449,6 +1460,97 @@ func detectarMascara(e *env.Env, path string) bool {
 	return fi.Mode().IsRegular() && fi.Size() == 0
 }
 
+// maxProfundidadeInclude limita a recursão de `.include`, que pode ser circular
+// — o mesmo teto que a expansão de ld.so.conf usa, pelo mesmo motivo.
+const maxProfundidadeInclude = 8
+
+// expandirIncludeUnit resolve a diretiva `.include` do systemd, trocando a linha
+// pelo CONTEÚDO do arquivo apontado.
+//
+// `.include` não tem `=`, então o laço do parseUnitFile a descartava no
+// `if !ok { continue }` — sem lacuna, sem nada. É o idioma DOCUMENTADO de
+// override no systemd 219 (RHEL/CentOS 7, SLES 12) e continua funcionando no
+// systemd atual, com aviso de depreciação:
+//
+//	/etc/systemd/system/foo.service:
+//	  .include /usr/lib/systemd/system/foo.service
+//	  [Service]
+//	  ExecStart=
+//	  ExecStart=/tmp/.implant
+//
+// O arquivo de /etc VENCE a precedência, então a unit de vendor virava
+// Shadowed e a efetiva saía com Exec VAZIO: o binário não entrava em
+// candidatosDePropriedade, não era hasheado, não passava por check de startup, e
+// a cobertura saía COMPLETA. Serve de ponto cego e de vetor de plantio ao mesmo
+// tempo — `.include /run/x.conf` não deixa nada em disco persistente.
+//
+// A substituição é textual, mas a SEÇÃO é restaurada depois dela.
+//
+// O systemd parseia o arquivo incluído com estado de seção PRÓPRIO
+// (config_parse recursivo, com `section` reiniciado), e ao voltar continua na
+// seção em que estava. Uma emenda textual crua faz o contrário: o `[Unit]` do
+// arquivo incluído passa a valer para o resto do arquivo que o incluiu, e um
+//
+//	[Service]
+//	.include /base.conf      # base.conf abre com [Unit]
+//	ExecStart=/tmp/implant
+//
+// perderia o ExecStart — diretivaValeNaSecao o descartaria como se estivesse em
+// [Unit]. Seria um falso NEGATIVO introduzido pelo próprio conserto, e a forma
+// é barata de escrever para quem planta. Por isso o cabeçalho da seção corrente
+// é reemitido logo após o conteúdo incluído.
+func expandirIncludeUnit(f *Facts, e *env.Env, origem, texto string, prof int) string {
+	if !strings.Contains(texto, ".include") {
+		return texto // caminho comum, sem custo
+	}
+	var sb strings.Builder
+	secao := "" // a seção corrente DESTE arquivo, para restaurar após o include
+	for _, raw := range strings.Split(texto, "\n") {
+		ln := strings.TrimSpace(raw)
+		if strings.HasPrefix(ln, "[") {
+			secao = ln
+		}
+		resto, ehInclude := strings.CutPrefix(ln, ".include")
+		if !ehInclude || (resto != "" && resto[0] != ' ' && resto[0] != '\t') {
+			sb.WriteString(raw)
+			sb.WriteByte('\n')
+			continue
+		}
+		alvo := strings.TrimSpace(resto)
+		switch {
+		case alvo == "":
+			f.denyPersist("unit", origem+": diretiva `.include` sem caminho — "+
+				"o que ela traria NÃO foi avaliado")
+			continue
+		case prof >= maxProfundidadeInclude:
+			f.denyPersist("unit", origem+" encadeia `.include` além de "+
+				strconv.Itoa(maxProfundidadeInclude)+" níveis (provável ciclo): "+
+				"o restante NÃO foi expandido")
+			continue
+		}
+		if !strings.HasPrefix(alvo, "/") {
+			alvo = path.Dir(origem) + "/" + alvo
+		}
+		ib, err := e.ReadFile(alvo)
+		if err != nil {
+			f.denyPersist("unit", origem+" faz `.include "+alvo+"` e o arquivo "+
+				"não pôde ser lido ("+env.MotivoDoErro(err)+"): o ExecStart e o "+
+				"Environment que ele traria NÃO foram avaliados")
+			continue
+		}
+		sb.WriteString(expandirIncludeUnit(f, e, alvo,
+			strings.TrimPrefix(string(ib), "\ufeff"), prof+1))
+		sb.WriteByte('\n')
+		// Restaura a seção que valia ANTES do include — ver o comentário acima.
+		// Reemitir o cabeçalho é inócuo para o parser: ele só reatribui.
+		if secao != "" {
+			sb.WriteString(secao)
+			sb.WriteByte('\n')
+		}
+	}
+	return sb.String()
+}
+
 func parseUnitFile(f *Facts, e *env.Env, path, scope, tipo string, vendor bool) Unit {
 	u := Unit{Path: path, Scope: scope, Kind: tipo, Vendor: vendor}
 	if fi, err := e.Lstat(path); err == nil {
@@ -1471,7 +1573,7 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope, tipo string, vendor bool) 
 	// com BOM tinha a primeira linha começando por \uFEFF e o `[Service]` não
 	// era reconhecido como seção. Medido: systemd-analyze verifica limpo e
 	// executa; esta ferramenta saía calada.
-	texto := strings.TrimPrefix(string(b), "\ufeff")
+	texto := expandirIncludeUnit(f, e, path, strings.TrimPrefix(string(b), "\ufeff"), 0)
 
 	var pending string
 	// A SEÇÃO decide se a diretiva vale, e ignorá-la era um bypass de três

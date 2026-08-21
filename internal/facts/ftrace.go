@@ -78,6 +78,21 @@ func collectFtrace(f *Facts, e *env.Env) {
 		f.denyPersist("ftrace", "enabled_functions existe e não pôde ser lido "+
 			"(exige privilégio): as funções do kernel interceptadas AGORA não "+
 			"foram examinadas — rode como root para respondê-lo")
+		return
+	}
+	// Nenhum dos dois caminhos existe. A tabela do comentário acima resolve o
+	// caso do CONTÊINER, e parava aí: fora dele, "não existe" era tratado como
+	// ausência de interface e saía calado, com kernel.ftrace_hook reportando
+	// COMPLETO sobre um arquivo que ninguém abriu. Em bare-metal o significado é
+	// outro — o kernel TEM tracing, o tracefs é que não está montado —, e é
+	// exatamente o estado que interessa a quem acabou de instalar um hook: a
+	// interface que o denunciaria não está no ar. O discriminador é o mesmo que
+	// collectBPF usa dez linhas acima; faltava usá-lo aqui.
+	if !f.Host.EmContainer {
+		f.denyPersist("ftrace", "não há tracefs montado (nem /sys/kernel/tracing "+
+			"nem /sys/kernel/debug/tracing): as funções do kernel interceptadas "+
+			"NÃO foram examinadas — `mount -t tracefs nodev /sys/kernel/tracing` "+
+			"e repita")
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
 	"github.com/lex0c/aletheia/internal/ioc"
+	"github.com/lex0c/aletheia/internal/redact"
 )
 
 func init() { check.Register(indicadorDoIncidente) }
@@ -118,13 +119,21 @@ func (b *caçaIOC) registrar(ind ioc.Indicador, valor, sujeito, onde string) {
 	// Quando a comparação não é exata — curinga e conteúdo —, o valor do host
 	// precisa aparecer: sem ele o operador não sabe o que casou.
 	if (ind.Tipo == ioc.Caminho || ind.Tipo == ioc.Texto) && valor != ind.Bruto {
-		ev = append(ev, "valor no host: "+valor)
+		// Redigido: quando o indicador é de TEXTO, `valor` é a linha de comando
+		// inteira do processo que casou, e ela vai crua para o relatório, para o
+		// JSONL e para o ticket. Um indicador que casa um domínio dentro de um
+		// `curl -u user:senha` levaria a credencial junto (SPEC 5.4).
+		ev = append(ev, "valor no host: "+redact.Linha(valor))
 	}
 	ev = append(ev, "a lista veio de "+b.lista.Arquivo+" (linha "+
 		strconv.Itoa(ind.Linha)+"): este achado é do incidente que a produziu, "+
 		"não de heurística desta ferramenta")
 
 	fd := b.self.F(check.SevCritical, sujeito, "", ev...)
+	// O sujeito é o pid (que a baseline resolve para o exe), e o MESMO processo
+	// pode casar indicadores diferentes: sem discriminador, o segundo herdava a
+	// presença do primeiro na baseline. Ver check.Finding.Chave.
+	fd.Chave = string(ind.Tipo) + "|" + ind.Bruto
 	fd.Irreversible = true
 	fd.NextSteps = []string{
 		"trate este host como parte do MESMO incidente: o indicador veio dele",

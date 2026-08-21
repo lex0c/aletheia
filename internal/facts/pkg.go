@@ -146,13 +146,31 @@ func collectPkg(f *Facts, e *env.Env) {
 	}
 
 	donos := map[string]string{}
+	baseLida, motivo := true, ""
 	switch f.Pkg.Kind {
 	case "dpkg":
-		donosDpkg(f, e, candidatos, donos)
+		baseLida, motivo = donosDpkg(f, e, candidatos, donos)
 	case "apk":
-		donosApk(f, e, candidatos, donos)
+		baseLida, motivo = donosApk(f, e, candidatos, donos)
 	case "pacman":
-		donosPacman(f, e, candidatos, donos)
+		baseLida, motivo = donosPacman(f, e, candidatos, donos)
+	}
+	// A base EXISTE (detectarPkgDB concedeu Consultavel por presença) e não
+	// respondeu. Daqui para baixo `donos` está vazio por cegueira, e montar
+	// Ownership com ele carimbaria Owned:false em todo candidato — o falso
+	// CRITICAL em série que donosDpkg descreve. O caminho certo é o MESMO do
+	// rpm: dizer a lacuna e não afirmar propriedade nenhuma.
+	if !baseLida {
+		f.Pkg.Consultavel = false
+		f.Pkg.Motivo = motivo
+		f.denyPersist("pkg", "a base de pacotes ("+f.Pkg.Kind+") existe mas NÃO "+
+			"pôde ser lida ("+motivo+"): "+strconv.Itoa(len(candidatos))+
+			" binários em execução ou agendados NÃO foram verificados, e "+
+			"'nenhum pacote reivindica' não pode ser afirmado sobre nenhum deles")
+		f.denyPersist("pkg", "a comparação de datas (timestomp) NÃO foi feita: "+
+			"ela só distingue adulteração de instalação nos arquivos sem dono "+
+			"de pacote, e a propriedade não pôde ser consultada")
+		return
 	}
 
 	verificarHashes(f, e, donos)
@@ -511,7 +529,17 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 // A armadilha aqui é o usrmerge: o dpkg lista `/bin/cat`, e o processo roda
 // `/usr/bin/cat`. Sem casar as duas formas, TODO binário de /usr/bin apareceria
 // sem dono — um falso positivo catastrófico, em todo host Debian moderno.
-func donosDpkg(f *Facts, e *env.Env, cand map[string][]string, donos map[string]string) {
+//
+// O retorno diz se a BASE foi realmente lida. Existir não é o mesmo que ser
+// legível: detectarPkgDB concede Consultavel por e.IsDir(), e o resto do caminho
+// engolia o erro de listagem e o de cada .list. Com a base presente e ilegível
+// — imagem enxuta que apagou os *.list mantendo o diretório, /var em modo
+// restrito, EIO — `donos` saía vazio, TODO candidato virava Owned:false, e
+// caminhosSemDono alimentava CRITICAL em integrity.no_package_owner,
+// persist.unit_unowned, egress, binfmt, initramfs e helper de uma vez, com
+// r.Partial vazio. "Não pude perguntar" nunca pode sair igual a "ninguém
+// reivindica".
+func donosDpkg(f *Facts, e *env.Env, cand map[string][]string, donos map[string]string) (bool, string) {
 	cacheDir := map[string]string{}
 	// forma no arquivo -> caminhos perguntados. A LISTA importa: com usrmerge
 	// duas formas do mesmo arquivo podem ser perguntadas ao mesmo tempo
@@ -525,14 +553,22 @@ func donosDpkg(f *Facts, e *env.Env, cand map[string][]string, donos map[string]
 		}
 	}
 
-	for _, n := range e.ReadDirNames("/var/lib/dpkg/info") {
+	nomes, err := e.ReadDirNamesErr("/var/lib/dpkg/info")
+	if err != nil {
+		return false, "/var/lib/dpkg/info não pôde ser listado (" +
+			env.MotivoDoErro(err) + ")"
+	}
+	listas, lidas := 0, 0
+	for _, n := range nomes {
 		if !strings.HasSuffix(n, ".list") {
 			continue
 		}
+		listas++
 		b, err := e.ReadFile("/var/lib/dpkg/info/" + n)
 		if err != nil {
 			continue
 		}
+		lidas++
 		sc := bufio.NewScanner(strings.NewReader(string(b)))
 		sc.Buffer(make([]byte, 0, 4096), 64*1024)
 		for sc.Scan() {
@@ -544,11 +580,29 @@ func donosDpkg(f *Facts, e *env.Env, cand map[string][]string, donos map[string]
 		}
 		f.scannerFoiAteOFim(sc, "pkg", "/var/lib/dpkg/info/"+n)
 	}
+	switch {
+	case listas == 0:
+		return false, "/var/lib/dpkg/info não tem nenhuma lista de arquivos (*.list)"
+	case lidas == 0:
+		return false, "nenhuma das " + strconv.Itoa(listas) +
+			" listas de /var/lib/dpkg/info pôde ser lida"
+	case lidas < listas:
+		// Perda PARCIAL: a maioria respondeu, então Ownership continua valendo
+		// para quem foi reivindicado — mas os pacotes cujas listas ficaram de
+		// fora não podem sustentar um "sem dono" sobre os arquivos deles.
+		f.denyPersist("pkg", strconv.Itoa(listas-lidas)+" de "+strconv.Itoa(listas)+
+			" listas de /var/lib/dpkg/info não puderam ser lidas: sobre os "+
+			"arquivos desses pacotes, 'nenhum pacote reivindica' NÃO pode ser "+
+			"afirmado")
+	}
+	return true, ""
 }
 
 // donosApk lê /lib/apk/db/installed. O formato é de blocos: `F:` fixa o
 // diretório corrente e `R:` é um arquivo dentro dele.
-func donosApk(f *Facts, e *env.Env, cand map[string][]string, donos map[string]string) {
+//
+// O retorno diz se a base foi lida — ver o comentário de donosDpkg.
+func donosApk(f *Facts, e *env.Env, cand map[string][]string, donos map[string]string) (bool, string) {
 	cacheDir := map[string]string{}
 	// Lista, e não valor único: duas grafias do mesmo arquivo podem ser
 	// perguntadas ao mesmo tempo e geram as MESMAS chaves aqui. Guardando um
@@ -563,7 +617,8 @@ func donosApk(f *Facts, e *env.Env, cand map[string][]string, donos map[string]s
 
 	b, err := e.ReadFile("/lib/apk/db/installed")
 	if err != nil {
-		return
+		return false, "/lib/apk/db/installed não pôde ser lido (" +
+			env.MotivoDoErro(err) + ")"
 	}
 	dir, pacote := "", ""
 	sc := bufio.NewScanner(strings.NewReader(string(b)))
@@ -587,6 +642,7 @@ func donosApk(f *Facts, e *env.Env, cand map[string][]string, donos map[string]s
 		}
 	}
 	f.scannerFoiAteOFim(sc, "pkg", "/lib/apk/db/installed")
+	return true, ""
 }
 
 // formasUsrMerge devolve as grafias equivalentes de um caminho sob usrmerge.
@@ -767,7 +823,9 @@ func PrimeiroCaminhoAbsoluto(linha string) string {
 // barra no fim. Sem suporte a pacman a pergunta de propriedade ficava muda em
 // todo host Arch — e ficar mudo enfraquece meia dúzia de checks em silêncio,
 // que é a coisa que esta ferramenta existe para não fazer.
-func donosPacman(f *Facts, e *env.Env, cand map[string][]string, donos map[string]string) {
+//
+// O retorno diz se a base foi lida — ver o comentário de donosDpkg.
+func donosPacman(f *Facts, e *env.Env, cand map[string][]string, donos map[string]string) (bool, string) {
 	cacheDir := map[string]string{}
 	procurados := map[string][]string{}
 	for p := range cand {
@@ -777,11 +835,26 @@ func donosPacman(f *Facts, e *env.Env, cand map[string][]string, donos map[strin
 		}
 	}
 
-	for _, dir := range e.ReadDirNames("/var/lib/pacman/local") {
+	dirs, err := e.ReadDirNamesErr("/var/lib/pacman/local")
+	if err != nil {
+		return false, "/var/lib/pacman/local não pôde ser listado (" +
+			env.MotivoDoErro(err) + ")"
+	}
+	pacotes, lidos := 0, 0
+	for _, dir := range dirs {
 		b, err := e.ReadFile("/var/lib/pacman/local/" + dir + "/files")
 		if err != nil {
+			// e.Exists e não env.EhLacuna: o diretório tem entradas que NÃO são
+			// pacote (ALPM_DB_VERSION é arquivo comum), e para elas o ReadFile
+			// falha com ENOTDIR — que EhLacuna classificaria como "existe e não
+			// pôde ser lido", inflando a contagem de manifestos que faltaram.
+			if e.Exists("/var/lib/pacman/local/" + dir + "/files") {
+				pacotes++
+			}
 			continue
 		}
+		pacotes++
+		lidos++
 		sc := bufio.NewScanner(strings.NewReader(string(b)))
 		sc.Buffer(make([]byte, 0, 4096), 64*1024)
 		dentro := false
@@ -801,4 +874,17 @@ func donosPacman(f *Facts, e *env.Env, cand map[string][]string, donos map[strin
 		}
 		f.scannerFoiAteOFim(sc, "pkg", "/var/lib/pacman/local/"+dir+"/files")
 	}
+	switch {
+	case pacotes == 0:
+		return false, "/var/lib/pacman/local não tem nenhum manifesto de arquivos"
+	case lidos == 0:
+		return false, "nenhum dos " + strconv.Itoa(pacotes) +
+			" manifestos de /var/lib/pacman/local pôde ser lido"
+	case lidos < pacotes:
+		f.denyPersist("pkg", strconv.Itoa(pacotes-lidos)+" de "+strconv.Itoa(pacotes)+
+			" manifestos de /var/lib/pacman/local não puderam ser lidos: sobre os "+
+			"arquivos desses pacotes, 'nenhum pacote reivindica' NÃO pode ser "+
+			"afirmado")
+	}
+	return true, ""
 }

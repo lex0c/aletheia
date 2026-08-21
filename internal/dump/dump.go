@@ -77,6 +77,12 @@ type Ambiente struct {
 	// olhar", e a diferença decide se a ausência degrada a cobertura.
 	BPFSemMecanismo bool `json:"bpf_unavailable,omitempty"`
 
+	// NetlinkSemMecanismo é o mesmo para o sock_diag. Dump antigo não tem o
+	// campo e ele vem false — que é o comportamento ANTERIOR (ausência conta
+	// como lacuna). Errar para o lado de degradar a cobertura é o lado seguro,
+	// e por isso isto não força re-coleta.
+	NetlinkSemMecanismo bool `json:"netlink_unavailable,omitempty"`
+
 	CollectedAt string `json:"collected_at"` // RFC3339 UTC
 	Clock       int    `json:"clock"`
 	ClockTexto  string `json:"clock_text,omitempty"` // legível sem a ferramenta
@@ -104,9 +110,10 @@ func ambienteDe(e *env.Env) Ambiente {
 	return Ambiente{
 		Source: e.Source.String(), Root: e.Root,
 		Caps: e.Caps.Names(), CapReason: e.CapReason,
-		BPFSemMecanismo: e.BPFSemMecanismo,
-		CollectedAt:     e.Now.UTC().Format(time.RFC3339),
-		Clock:           int(e.Clock), ClockTexto: e.Clock.String(),
+		BPFSemMecanismo:     e.BPFSemMecanismo,
+		NetlinkSemMecanismo: e.NetlinkSemMecanismo,
+		CollectedAt:         e.Now.UTC().Format(time.RFC3339),
+		Clock:               int(e.Clock), ClockTexto: e.Clock.String(),
 		Tool: e.ToolVersion, ToolSHA: e.ToolSHA256, ToolPath: e.ToolPath,
 		NumCPU: e.NumCPU,
 	}
@@ -290,17 +297,25 @@ func (d *Dump) Env(local *env.Env) (*env.Env, error) {
 	}
 
 	e := &env.Env{
-		Root:            a.Root,
-		Source:          origem,
-		Caps:            caps,
-		CapReason:       razoes,
-		Now:             quando(a.CollectedAt),
-		Clock:           env.ClockDeCodigo(a.Clock),
-		ToolVersion:     a.Tool,
-		ToolSHA256:      a.ToolSHA,
-		ToolPath:        a.ToolPath,
-		NumCPU:          a.NumCPU,
-		BPFSemMecanismo: a.BPFSemMecanismo,
+		Root:                a.Root,
+		Source:              origem,
+		Caps:                caps,
+		CapReason:           razoes,
+		Now:                 quando(a.CollectedAt),
+		Clock:               env.ClockDeCodigo(a.Clock),
+		ToolVersion:         a.Tool,
+		ToolSHA256:          a.ToolSHA,
+		ToolPath:            a.ToolPath,
+		NumCPU:              a.NumCPU,
+		BPFSemMecanismo:     a.BPFSemMecanismo,
+		NetlinkSemMecanismo: a.NetlinkSemMecanismo,
+	}
+	// Restaura o conjunto de "escopo, não lacuna" — ver env.MarcarSemMecanismo.
+	if a.BPFSemMecanismo {
+		e.MarcarSemMecanismo(env.CapBPF)
+	}
+	if a.NetlinkSemMecanismo {
+		e.MarcarSemMecanismo(env.CapNetlink)
 	}
 	if local != nil {
 		e.IOC = local.IOC

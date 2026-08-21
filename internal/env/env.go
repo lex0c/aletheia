@@ -299,6 +299,20 @@ type Env struct {
 	// ausência degrada a cobertura ou não.
 	BPFSemMecanismo bool
 
+	// NetlinkSemMecanismo é o mesmo para o sock_diag: o kernel não OFERECE a
+	// interface (EPROTONOSUPPORT, ENOENT, EINVAL), e nenhuma permissão a faria
+	// aparecer. O netlink.Erro já carregava esse bit, com a doc certa — e
+	// nenhum chamador o lia. O efeito era um exit 1 PERMANENTE: CapNetlink
+	// negada, cross.socket_view NotChecked, cobertura incompleta, e a mensagem
+	// mandando usar --allow-kernel-autoload, que naquele host não pode ajudar
+	// porque não há módulo a carregar. É a "lacuna constante que não é lacuna".
+	NetlinkSemMecanismo bool
+
+	// semMecanismo é o conjunto de capacidades cuja ausência é ESCOPO e não
+	// lacuna. O motor não conta essas no denominador da cobertura: escopo se
+	// declara uma vez, não como degradação em cada check.
+	semMecanismo Cap
+
 	// PermitirAutoload libera a consulta por netlink mesmo quando o handler de
 	// diagnóstico ainda não está carregado — o que pode fazer o kernel
 	// AUTOCARREGAR o módulo (request_module). É opt-in (--allow-kernel-autoload)
@@ -340,6 +354,29 @@ func (e *Env) Has(c Cap) bool { return e.Caps&c == c }
 
 // Missing devolve as capacidades de c que faltam.
 func (e *Env) Missing(c Cap) Cap { return c &^ e.Caps }
+
+// SemMecanismo diz se TODAS as capacidades de c faltam porque o host não
+// oferece o mecanismo — e não porque faltou permissão.
+//
+// A distinção é a mesma que o projeto já paga caro para manter em outros
+// lugares: se a pergunta PODE ser feita neste host e não foi, é lacuna; se ela
+// não existe aqui, é ESCOPO. Um kernel compilado sem inet_diag nunca vai
+// responder ao sock_diag, e chamar isso de cobertura degradada faz TODA
+// varredura naquele host sair INCOMPLETE com exit 1 — inclusive a de um host
+// limpo.
+//
+// Exige que o conjunto INTEIRO seja sem-mecanismo: um check que precisa de
+// netlink e de root, rodando sem root num kernel sem inet_diag, continua sendo
+// lacuna — porque uma das duas ausências tem conserto.
+func (e *Env) SemMecanismo(c Cap) bool {
+	return c != 0 && c&^e.semMecanismo == 0
+}
+
+// MarcarSemMecanismo registra que a ausência daquela capacidade é escopo.
+// Exportada porque a reconstrução do Env a partir de um dump precisa restaurar
+// o bit: sem isso, analisar um dump coletado num kernel sem inet_diag voltaria a
+// contar a capacidade ausente como lacuna, e o replay divergiria da coleta.
+func (e *Env) MarcarSemMecanismo(c Cap) { e.semMecanismo |= c }
 
 // Reason explica por que as capacidades do conjunto faltam. Devolve TODAS as
 // razões: colapsar para a primeira faz o rodapé citar "sem root" e omitir
@@ -556,11 +593,15 @@ func (e *Env) probeCaps() {
 	// lacuna que esta ferramenta não pode ter.
 	if e.Source == SourceImage {
 		e.BPFSemMecanismo = true
+		e.MarcarSemMecanismo(CapBPF)
 		e.grant(CapBPF, false, "modo image: não há kernel vivo para enumerar programa eBPF")
 	} else if err := kbpf.Sonda(); err != nil {
 		var es *kbpf.ErroSonda
 		if errors.As(err, &es) {
 			e.BPFSemMecanismo = es.SemMecanismo
+			if es.SemMecanismo {
+				e.MarcarSemMecanismo(CapBPF)
+			}
 			e.grant(CapBPF, false, es.Motivo)
 		} else {
 			e.grant(CapBPF, false, "enumeração de eBPF indisponível: "+err.Error())
@@ -598,6 +639,8 @@ func (e *Env) probeCaps() {
 
 	switch {
 	case e.Source == SourceImage:
+		e.NetlinkSemMecanismo = true
+		e.MarcarSemMecanismo(CapNetlink)
 		e.grant(CapNetlink, false, "modo image: não há kernel vivo para consultar por netlink")
 	default:
 		e.DiagSeguros = diagProtocolosSeguros(e)
@@ -623,21 +666,47 @@ func (e *Env) probeCaps() {
 					"--allow-kernel-autoload, MAS /proc/sys/kernel/modprobe é "+alvo+
 					", fora do padrão da distribuição: a ferramenta se recusa a ser o "+
 					"gatilho de um helper sequestrado")
-			} else if err := netlink.Sonda(famDe(protoSonda), protoDe(protoSonda)); err != nil {
-				e.grant(CapNetlink, false, "enumeração de socket por netlink indisponível: "+err.Error())
 			} else {
-				e.grant(CapNetlink, true, "")
+				e.sondarNetlink(protoSonda)
 			}
 		default:
 			// Handler já disponível: consultar NÃO autocarrega nada. A sonda usa
 			// um protocolo comprovadamente seguro, nunca um que dispararia o load.
-			if err := netlink.Sonda(famDe(protoSonda), protoDe(protoSonda)); err != nil {
-				e.grant(CapNetlink, false, "enumeração de socket por netlink indisponível: "+err.Error())
-			} else {
-				e.grant(CapNetlink, true, "")
-			}
+			e.sondarNetlink(protoSonda)
 		}
 	}
+}
+
+// sondarNetlink faz a sonda de capacidade e CLASSIFICA a falha.
+//
+// O netlink.Erro sempre carregou o bit SemMecanismo, com a doc certa ("não é
+// lacuna de leitura"), e nenhum chamador o lia — o grep confirmava só
+// atribuições. O contraste estava no vizinho: o kbpf.ErroSonda tem o mesmo bit
+// e ele flui até facts/bpf.go, onde decide se a ausência degrada a cobertura.
+//
+// Sem essa leitura, um kernel compilado sem inet_diag — ou, muito mais comum,
+// um host sem /lib/modules/$(uname -r)/modules.builtin, onde inet_diag é
+// BUILTIN e portanto invisível a modulosDisponiveis — saía com CapNetlink
+// negada, cross.socket_view NotChecked e INCOMPLETE com exit 1 em TODA
+// execução, para sempre. E a frase mandava usar --allow-kernel-autoload, que
+// ali não pode ajudar: não há módulo a carregar.
+func (e *Env) sondarNetlink(protoSonda string) {
+	err := netlink.Sonda(famDe(protoSonda), protoDe(protoSonda))
+	if err == nil {
+		e.grant(CapNetlink, true, "")
+		return
+	}
+	var ne *netlink.Erro
+	if errors.As(err, &ne) && ne.SemMecanismo {
+		e.NetlinkSemMecanismo = true
+		e.MarcarSemMecanismo(CapNetlink)
+		e.grant(CapNetlink, false, "este kernel não OFERECE a enumeração de "+
+			"socket por netlink ("+ne.Motivo+"): não é falta de permissão, e "+
+			"nenhuma opção a faria aparecer — a divergência /proc/net × netlink "+
+			"não se aplica a este host")
+		return
+	}
+	e.grant(CapNetlink, false, "enumeração de socket por netlink indisponível: "+err.Error())
 }
 
 func (e *Env) probeClock() {

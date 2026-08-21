@@ -116,16 +116,33 @@ func runPreserve(args []string) int {
 	// o que prova que a cópia bate com o alvo, e que só existem na memória deste
 	// processo — sumiam para sempre. É o desfecho que este arquivo declara pior
 	// que coleta nenhuma.
+	// Buffer 2 e DUAS leituras, como o watch já fazia.
+	//
+	// Com buffer 1 e uma leitura só, a goroutine morria depois do primeiro
+	// sinal — e o signal.Notify, que segue ativo, já tinha desligado o
+	// comportamento padrão do processo. Os sinais seguintes iam para o buffer e
+	// eram descartados: o operador apertava Ctrl-C mais cinco vezes, mandava um
+	// SIGTERM, e o processo continuava vivo, sem nenhuma forma de encerrá-lo a
+	// não ser SIGKILL — que é justamente o que pula o escreverManifesto e leva
+	// embora os hashes da origem.
 	interrompido := make(chan struct{})
-	sinais := make(chan os.Signal, 1)
+	sinais := make(chan os.Signal, 2)
 	signal.Notify(sinais, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sinais)
 	go func() {
-		<-sinais
+		<-sinais // primeiro: fecha a peça em curso e escreve o manifesto
 		close(interrompido)
 		fmt.Fprintln(os.Stderr, "\npreserve: interrompido — fechando a peça em curso "+
 			"e escrevendo o manifesto do que JÁ foi preservado")
+		<-sinais // segundo: sai na hora, mesmo no meio de uma peça
+		fmt.Fprintln(os.Stderr, "preserve: interrompido à força — o manifesto NÃO "+
+			"foi escrito, e o que está no diretório não tem hash de origem")
+		os.Exit(130)
 	}()
+	// O canal também vai para o Coletor: sem isto o sinal só era notado ENTRE
+	// alvos, e uma única região de memória grande ou um arquivo de gigabytes
+	// segurava a interrupção até terminar.
+	c.Parar = interrompido
 	parou := func() bool {
 		select {
 		case <-interrompido:

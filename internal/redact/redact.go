@@ -29,11 +29,51 @@ var secretAssign = []string{
 func Cmdline(argv []string) []string {
 	out := make([]string, 0, len(argv))
 	skipNext := false
+	noCabecalhoAuth := false
 	for _, a := range argv {
 		if skipNext {
 			out = append(out, "<redacted>")
 			skipNext = false
 			continue
+		}
+		// Dentro de um `Authorization:` quebrado por branco — que é como ele
+		// chega quando o cabeçalho vem dentro de um `sh -c` — tudo até a
+		// próxima opção ou URL é credencial.
+		if noCabecalhoAuth {
+			if !fechaCabecalhoAuth(a) {
+				out = append(out, "<redacted>")
+				continue
+			}
+			noCabecalhoAuth = false
+		}
+		if abreCabecalhoAuth(a) {
+			out = append(out, a)
+			noCabecalhoAuth = true
+			continue
+		}
+		// UM ARGUMENTO QUE É UMA LINHA DE COMANDO INTEIRA — decomposto ANTES
+		// de qualquer outra regra.
+		//
+		// `sh -c "mysqldump -u root -pS3cr3t db"` tem o comando todo em UM
+		// token de argv, e a varredura por token não olhava para dentro dele: a
+		// senha atravessava a redação e saía crua na evidência de
+		// proc.shell_from_service, que é justamente o check feito para reportar
+		// essa forma. É o modo de uso MAIS comum do shell num incidente.
+		//
+		// A ORDEM importa e custou um teste: com a decomposição depois do
+		// redactInline, o casamento de `authorization:` no MEIO do payload
+		// devolvia `a[:fim] + " <redacted>"` e comia todo o resto da linha —
+		// inclusive a URL do C2, que é a evidência principal. Decompor primeiro
+		// garante que as regras seguintes só vejam tokens sem branco.
+		//
+		// A recursão é de um nível só: quem entra é o resultado do Fields, e
+		// nenhum token dele contém branco.
+		if strings.ContainsAny(a, " \t") {
+			campos := strings.Fields(a)
+			if len(campos) > 1 {
+				out = append(out, strings.Join(Cmdline(campos), " "))
+				continue
+			}
 		}
 		// -pSENHA colado (padrão do mysql) e --password=SENHA
 		if red, ok := redactInline(a); ok {
@@ -57,6 +97,15 @@ func Cmdline(argv []string) []string {
 }
 
 func redactInline(a string) (string, bool) {
+	// Cabeçalho de autorização num token só, que é a forma em argv de verdade:
+	// `curl -H "Authorization: Bearer tok"`. O NOME do cabeçalho fica, porque é
+	// ele que identifica o que o processo estava fazendo; o valor sai.
+	if i := indiceSemCaixa(a, "authorization:"); i >= 0 {
+		fim := i + len("authorization:")
+		if strings.TrimSpace(a[fim:]) != "" {
+			return a[:fim] + " <redacted>", true
+		}
+	}
 	for _, k := range secretAssign {
 		if i := indiceSemCaixa(a, k); i >= 0 && i+len(k) < len(a) {
 			return a[:i+len(k)] + "<redacted>", true
@@ -70,6 +119,25 @@ func redactInline(a string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// abreCabecalhoAuth diz se o token é o NOME do cabeçalho de autorização, e
+// portanto o que vem depois dele é a credencial.
+//
+// A decisão é por CONTEXTO, e não por uma lista de esquemas ("bearer",
+// "basic", "token"). Uma lista solta redigiria o argumento seguinte a qualquer
+// `token` da linha — `vault token lookup` viraria `vault token <redacted>` —,
+// destruindo evidência sem ganhar segredo nenhum. Depois de `Authorization:`,
+// ao contrário, tudo até o próximo argumento é credencial por definição.
+func abreCabecalhoAuth(a string) bool {
+	return len(a) >= len("authorization:") &&
+		igualSemCaixa(a[len(a)-len("authorization:"):], "authorization:")
+}
+
+// fechaCabecalhoAuth diz que o token já NÃO faz parte do cabeçalho: é a próxima
+// opção, ou a URL. Sem esse limite a redação engoliria o resto da linha.
+func fechaCabecalhoAuth(a string) bool {
+	return strings.HasPrefix(a, "-") || strings.Contains(a, "://")
 }
 
 func isSecretFlag(a string) bool {

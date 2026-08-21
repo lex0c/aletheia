@@ -59,6 +59,12 @@ var auditoriaNeutralizada = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+		// A lacuna do coletor entra ANTES de qualquer saída — o padrão de
+		// checks/bpf.go. Esta chave era EMITIDA pelo coletor e lida por check
+		// nenhum: como o motor conta Coverage.Complete++ quando res.Partial
+		// está vazio, o check saía COMPLETO sobre uma fonte que o coletor
+		// tinha declarado ilegível.
+		r.Partial = append(r.Partial, f.PersistDenied["audit"]...)
 		a := &f.Audit
 
 		// NUNCA TEVE, OU TEVE E NUNCA CONFIGUROU: nada é dito, e isso é

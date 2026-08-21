@@ -29,6 +29,18 @@ type findingLine struct {
 	FalsePositives []string `json:"false_positives,omitempty"`
 	Downgraded     bool     `json:"downgraded,omitempty"`
 
+	// Os quatro campos abaixo existem em check.Finding, COM tag JSON, e não
+	// eram copiados para cá — findingLine é uma struct paralela, e o que ela
+	// não lista some. O consumidor deste arquivo é a agregação de frota, e sem
+	// eles ela não vê a DATA do achado (o eixo inteiro do --since e da âncora
+	// §9), não vê o ator que o motor resolveu, e não consegue separar o achado
+	// cuja evidência morre se alguém agir. A linha de janela reporta o recorte
+	// da execução, não a data de cada achado.
+	Quando       string `json:"when,omitempty"`
+	QuandoFonte  string `json:"when_source,omitempty"`
+	Ator         string `json:"actor,omitempty"`
+	Irreversible bool   `json:"irreversible,omitempty"`
+
 	// Baseline e Novo só têm significado numa execução com referência. O
 	// agregador de frota usa Novo para separar deriva de mudança.
 	Baseline bool `json:"baseline,omitempty"`
@@ -104,6 +116,8 @@ func JSONL(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, bl *Baselin
 			Evidence: fd.Evidence, NextSteps: fd.NextSteps,
 			FalsePositives: fd.FalsePositives, Downgraded: fd.Downgraded,
 			Baseline: fd.Baseline, Novo: fd.Novo,
+			Quando: fd.Quando, QuandoFonte: fd.QuandoFonte,
+			Ator: fd.Ator, Irreversible: fd.Irreversible,
 		}); err != nil {
 			return err
 		}

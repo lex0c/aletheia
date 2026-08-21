@@ -41,7 +41,14 @@ func collectModprobe(f *Facts, e *env.Env) {
 
 	// Carga automática no boot: as duas formas dizem a mesma coisa.
 	lerCargaDeModulo(f, e, "/etc/modules")
-	for _, dir := range []string{"/etc/modules-load.d", "/usr/lib/modules-load.d"} {
+	// /run e /usr/local/lib entram porque o systemd os PROCURA (modules-load.d(5)),
+	// e é justamente onde vai parar o implante que não quer escrever em disco
+	// persistente: /usr costuma ser read-only, e o que está em /run some no
+	// reboot sem deixar arquivo para o próximo respondedor achar.
+	for _, dir := range []string{
+		"/etc/modules-load.d", "/run/modules-load.d",
+		"/usr/local/lib/modules-load.d", "/usr/lib/modules-load.d",
+	} {
 		nomes, err := e.ReadDirNamesErr(dir)
 		if env.EhLacuna(err) {
 			f.denyPersist("modprobe", dir+" não pôde ser listado ("+
@@ -58,7 +65,15 @@ func collectModprobe(f *Facts, e *env.Env) {
 	// modprobe.d: aqui mora a diretiva que EXECUTA. Um diretório ilegível aqui
 	// silenciava persist.modprobe_install — o `install <mod> /bin/sh -c …` que
 	// roda como root na carga do módulo.
-	for _, dir := range []string{"/etc/modprobe.d", "/lib/modprobe.d", "/usr/lib/modprobe.d"} {
+	//
+	// A lista é a do modprobe.d(5), na ordem em que o kmod procura. /run e
+	// /usr/local/lib faltavam, e é ali que um `install` executa como root a cada
+	// carga de módulo sem tocar em disco persistente — /usr costuma ser
+	// read-only. O coletor de binfmt, neste mesmo pacote, já incluía /run.
+	for _, dir := range []string{
+		"/etc/modprobe.d", "/run/modprobe.d", "/usr/local/lib/modprobe.d",
+		"/lib/modprobe.d", "/usr/lib/modprobe.d",
+	} {
 		nomes, err := e.ReadDirNamesErr(dir)
 		if env.EhLacuna(err) {
 			f.denyPersist("modprobe", dir+" não pôde ser listado ("+
@@ -85,19 +100,31 @@ func lerCargaDeModulo(f *Facts, e *env.Env, p string) {
 		}
 		return
 	}
-	for i, raw := range strings.Split(string(b), "\n") {
-		ln := strings.TrimSpace(raw)
+	for _, ll := range linhasLogicas(string(b)) {
+		ln := strings.TrimSpace(ll.Texto)
 		if ln == "" || strings.HasPrefix(ln, "#") {
 			continue
 		}
 		// A forma antiga aceita opções depois do nome; só o nome interessa.
 		nome := strings.Fields(ln)[0]
 		f.Modules = append(f.Modules, ModuleConf{
-			File: p, Line: i + 1, Kind: "load", Module: nome,
+			File: p, Line: ll.Num, Kind: "load", Module: nome,
 		})
 	}
 }
 
+// lerModprobe interpreta um arquivo de modprobe.d.
+//
+// A continuação por barra invertida passa por linhasLogicas (users.go), a mesma
+// do sudoers, e pela mesma razão: o kmod trata `\` no fim da linha como
+// continuação, junta DIRETO, e só depois descarta o que começa com `#`.
+//
+// Sem isso, `install mod /bin/sh -c '…' \` com o resto na linha seguinte deixava
+// Cmd truncado em `\` — e soChamaModprobe (checks/modprobe.go) aceita `\` como
+// nome de módulo, porque não contém `/`, e devolve true. O resultado era
+// persist.modprobe_install SUPRIMINDO o achado enquanto o kmod executava a linha
+// inteira como root. A continuação partia o comando exatamente no ponto que o
+// tornava invisível, e escrevê-la é grátis para quem planta.
 func lerModprobe(f *Facts, e *env.Env, p string) {
 	b, err := e.ReadFile(p)
 	if err != nil {
@@ -108,8 +135,8 @@ func lerModprobe(f *Facts, e *env.Env, p string) {
 		}
 		return
 	}
-	for i, raw := range strings.Split(string(b), "\n") {
-		ln := strings.TrimSpace(raw)
+	for _, ll := range linhasLogicas(string(b)) {
+		ln := strings.TrimSpace(ll.Texto)
 		if ln == "" || strings.HasPrefix(ln, "#") {
 			continue
 		}
@@ -125,7 +152,7 @@ func lerModprobe(f *Facts, e *env.Env, p string) {
 			continue
 		}
 		f.Modules = append(f.Modules, ModuleConf{
-			File: p, Line: i + 1, Kind: fs[0], Module: fs[1],
+			File: p, Line: ll.Num, Kind: fs[0], Module: fs[1],
 			Cmd: strings.Join(fs[2:], " "),
 		})
 	}

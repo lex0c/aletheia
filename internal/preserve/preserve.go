@@ -111,6 +111,26 @@ type Coletor struct {
 
 	// MaxMem é o teto do dump de memória, em bytes. Zero usa o padrão.
 	MaxMem int64
+
+	// Parar é fechado quando o operador interrompe. O laço de REGIÕES o
+	// consulta, e não só o laço de alvos: Memoria percorre até maxRegioes
+	// regiões e copiar move até 4 GiB, então um Ctrl-C durante uma peça grande
+	// não tinha onde ser notado — o processo só olhava o canal ENTRE alvos. Nil
+	// é o normal em teste e em uso não interativo.
+	Parar <-chan struct{}
+}
+
+// interrompido diz se o operador pediu para parar.
+func (c *Coletor) interrompido() bool {
+	if c.Parar == nil {
+		return false
+	}
+	select {
+	case <-c.Parar:
+		return true
+	default:
+		return false
+	}
 }
 
 // Limites. O de memória existe porque um processo grande tem gigabytes de
@@ -255,7 +275,7 @@ func (c *Coletor) PCAP(o pcap.Opcoes) (pcap.Estatisticas, error) {
 
 	h := sha256.New()
 	st, capErr := pcap.Capturar(fh, h, iface, o)
-	if cerr := fh.Close(); capErr == nil {
+	if cerr := fechar(fh); capErr == nil {
 		capErr = cerr
 	}
 	// Falha DEPOIS de já ter gravado não descarta a cadeia de custódia.
@@ -384,6 +404,11 @@ func (c *Coletor) Memoria(pid int) error {
 	var gasto, perdido int64
 	var n, pulados int
 	for _, r := range regioes {
+		if c.interrompido() {
+			c.falhar("mem", alvo, errors.New("interrompido pelo operador: as "+
+				"regiões restantes NÃO foram dumpadas"))
+			break
+		}
 		if n >= maxRegioes {
 			c.falhar("mem", alvo, fmt.Errorf(
 				"teto de %d regiões atingido: as demais NÃO foram dumpadas", maxRegioes))
@@ -468,6 +493,58 @@ func (c *Coletor) orcamentoMem() int64 {
 	return maxMemPadrao
 }
 
+// fechar sincroniza e fecha, devolvendo o primeiro erro.
+//
+// O Sync é o que faz a diferença entre evidência e um arquivo do tamanho certo
+// cheio de zeros. O passo seguinte do runbook, depois de um
+// `preserve --out /mnt/evidencia/…`, é DESLIGAR o host para imagear o disco —
+// e num ext4 com alocação atrasada, um corte de energia, um reset ou a
+// destruição da VM sem umount limpo devolvem exatamente isso. No collect a
+// corrupção ainda é detectável (o .sha256 não bate); aqui não havia nem essa
+// rede, porque o hash da CÓPIA é lido de volta do mesmo cache que ainda não
+// foi ao disco.
+func fechar(f *os.File) error {
+	err := f.Sync()
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// copiaInterrompivel é o io.Copy que OLHA o canal de interrupção.
+//
+// Um io.Copy direto de até 4 GiB não é interrompível: o operador aperta Ctrl-C,
+// lê "fechando a peça em curso e escrevendo o manifesto" e não acontece nada
+// até o arquivo terminar — ou até um SEGUNDO sinal, que sai por os.Exit e pula
+// justamente o manifesto com os hashes da origem. O canal só era consultado
+// ENTRE alvos, e é dentro de UM alvo que o tempo passa.
+//
+// O erro de interrupção é devolvido para que o chamador trate a peça como
+// falha: um arquivo pela metade sem essa marca entraria no manifesto como
+// preservado.
+func (c *Coletor) copiaInterrompivel(w io.Writer, r io.Reader) (int64, error) {
+	const fatia = 4 << 20 // grande o bastante para não custar, pequeno para responder
+	var total int64
+	for {
+		if c.interrompido() {
+			return total, errInterrompido
+		}
+		n, err := io.CopyN(w, r, fatia)
+		total += n
+		if err == io.EOF {
+			return total, nil
+		}
+		if err != nil {
+			return total, err
+		}
+	}
+}
+
+// errInterrompido marca a peça que parou por ordem do operador, e não por
+// falha do sistema — a distinção vai para o manifesto.
+var errInterrompido = errors.New("interrompido pelo operador: a cópia parou " +
+	"antes do fim e o que está no destino é PARCIAL")
+
 // copiar lê a origem em FLUXO e escreve no destino, hasheando os dois lados.
 func (c *Coletor) copiar(origem, nome, tipo string) (Item, error) {
 	destino, err := c.destino(nome)
@@ -485,8 +562,8 @@ func (c *Coletor) copiar(origem, nome, tipo string) (Item, error) {
 		return Item{}, err
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(dst, h), io.LimitReader(src, maxArquivoBin))
-	if cerr := dst.Close(); err == nil {
+	n, err := c.copiaInterrompivel(io.MultiWriter(dst, h), io.LimitReader(src, maxArquivoBin))
+	if cerr := fechar(dst); err == nil {
 		err = cerr
 	}
 	if err != nil {
@@ -544,7 +621,7 @@ func (c *Coletor) escreverFaixa(nome string, r io.ReaderAt, ini uint64, tam int6
 	}
 	h := sha256.New()
 	n, cerr := io.Copy(io.MultiWriter(dst, h), io.NewSectionReader(r, int64(ini), tam))
-	if err := dst.Close(); cerr == nil {
+	if err := fechar(dst); cerr == nil {
 		cerr = err
 	}
 	if cerr != nil && n == 0 {
@@ -552,6 +629,17 @@ func (c *Coletor) escreverFaixa(nome string, r io.ReaderAt, ini uint64, tam int6
 		// ele seria lido como "região dumpada e vazia".
 		os.Remove(destino)
 		return Item{}, cerr
+	}
+	if cerr != nil {
+		// Saiu PELA METADE, e o erro não pode sumir por isso.
+		//
+		// A condição acima é `cerr != nil && n == 0`: com um byte gravado, o
+		// erro era descartado e a região entrava no manifesto marcada "dump
+		// PARCIAL" sem NENHUMA linha dizendo por quê. Com ENOSPC no meio de um
+		// dump de memória, todas as regiões seguintes falhavam igual e o
+		// diretório terminava cheio de parciais mudos — quem o ler meses depois
+		// não sabe se foi o disco ou a região sumindo.
+		c.falhar("mem", origem, cerr)
 	}
 
 	item := Item{
@@ -581,7 +669,7 @@ func (c *Coletor) escrever(nome string, dados []byte, tipo, origem string) (Item
 		return Item{}, err
 	}
 	_, err = fh.Write(dados)
-	if cerr := fh.Close(); err == nil {
+	if cerr := fechar(fh); err == nil {
 		err = cerr
 	}
 	if err != nil {
@@ -677,7 +765,16 @@ func nomeSeguro(p string) string {
 		return '_'
 	}, s)
 	if len(s) > 120 {
-		s = s[:120]
+		// Truncar sozinho COLIDE: dois caminhos longos com prefixo comum viram o
+		// mesmo nome de destino, e o segundo bate em ErrExiste — "preservar de
+		// novo por cima apagaria a evidência anterior" — sobre um arquivo que é
+		// de OUTRA origem. A falha vai para c.Erros, então não é silenciosa, mas
+		// culpa a coisa errada, e num incidente isso custa tempo.
+		//
+		// O sufixo é do sha256 do caminho ORIGINAL, então é estável entre
+		// execuções e distingue as origens sem alongar o nome.
+		soma := sha256.Sum256([]byte(p))
+		s = s[:120] + "-" + hex.EncodeToString(soma[:4])
 	}
 	return s
 }

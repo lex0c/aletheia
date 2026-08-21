@@ -77,7 +77,11 @@ func atimeDe(p string) (time.Time, error) {
 	if !ok {
 		return time.Time{}, errors.New("sem Stat_t neste sistema")
 	}
-	return time.Unix(st.Atim.Sec, st.Atim.Nsec).UTC(), nil
+	// int64() explícito: em i386 os campos de Timespec são int32, e passá-los
+	// direto para time.Unix (que quer int64) não compila. Cross-compilar os
+	// TESTES para as três arquiteturas passou a ser portão de CI, e foi assim
+	// que isto apareceu.
+	return time.Unix(int64(st.Atim.Sec), int64(st.Atim.Nsec)).UTC(), nil
 }
 
 // lerCru lê pelo caminho normal do Go, SEM O_NOATIME. Serve para provar que o

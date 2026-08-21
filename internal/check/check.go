@@ -142,6 +142,23 @@ type Finding struct {
 	// FalsePositives é copiado do check para o achado: o operador precisa
 	// saber o que descartar ANTES de investigar.
 	FalsePositives []string `json:"false_positives,omitempty"`
+
+	// Chave é o discriminador ESTÁVEL deste achado dentro do par (ID, Subject),
+	// para quem compara execuções — a baseline.
+	//
+	// Existe porque `ID|Subject` colide sempre que um check emite mais de um
+	// achado sobre o MESMO sujeito, e a colisão erra para o lado perigoso:
+	// priv.sudo_nopasswd usa o USUÁRIO como Subject, então uma regra
+	// recém-inserida em sudoers.d saía marcada como "já estava na baseline",
+	// sem a marca ✳NOVO, sob uma linha de evidência afirmando "já estava
+	// presente na baseline de …" — uma frase falsa sobre uma regra que nunca
+	// esteve lá. O mesmo valia para ioc.match, que usa o mesmo pid para
+	// indicadores diferentes.
+	//
+	// Preenchê-la é OPCIONAL e só faz sentido para esses checks. O valor precisa
+	// ser estável entre execuções: o TEXTO da regra serve, o número da linha
+	// não (ele anda quando alguém edita o arquivo acima).
+	Chave string `json:"key,omitempty"`
 }
 
 // Result é o que um check devolve.

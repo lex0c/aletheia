@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"syscall"
@@ -320,14 +321,32 @@ func main() {
 		fmt.Sscanf(os.Args[6], "%d", &n)
 		fh, err := os.OpenFile(os.Args[2], os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		die(err)
+		// O TAMANHO DO REGISTRO SEGUE A LIBC DO HOST EM QUE O HELPER RODA.
+		//
+		// Ele escrevia 384 bytes sempre — o layout do x86 com glibc. Em Alpine
+		// (musl) o `struct utmpx` tem 400, com o segundo do timestamp em 344 e
+		// 64 bits de largura, e é isso que o busybox escreve no wtmp de
+		// verdade. Enquanto o helper plantava 384 numa imagem musl, o cenário
+		// provava que a ferramenta lê o que o HELPER escreve, não o que o
+		// SISTEMA escreve: as duas pontas compartilhavam a mesma suposição
+		// errada e o teste ficava tautológico.
+		//
+		// Foi assim que a correção do desempate por libc, no coletor, apareceu
+		// como "regressão" aqui: ela é que está certa.
+		tam, offTempo := 384, 340
+		if ehMusl() {
+			tam, offTempo = 400, 344
+		}
 		for i := 0; i < n; i++ {
-			r := make([]byte, 384)
+			r := make([]byte, tam)
 			r[0], r[1] = byte(tipo), byte(tipo>>8)
 			put32(r[4:], uint32(1000+i))
 			copy(r[8:40], "pts/0")
 			copy(r[44:76], os.Args[4])
 			copy(r[76:332], os.Args[5])
-			put32(r[340:], uint32(time.Now().Unix()))
+			// Na musl o campo é de 64 bits; escrever os 32 baixos e deixar os
+			// altos zerados dá o mesmo valor em little-endian.
+			put32(r[offTempo:], uint32(time.Now().Unix()))
 			_, err := fh.Write(r)
 			die(err)
 		}
@@ -727,6 +746,13 @@ func sessaoComPTY(uid int, prog string, args []string) error {
 		return err
 	}
 	return syscall.Exec(prog, append([]string{prog}, args...), os.Environ())
+}
+
+// ehMusl diz se o sistema em que este helper roda usa musl. É a mesma pergunta
+// que o coletor de host faz, pelo mesmo sinal: o loader tem nome próprio.
+func ehMusl() bool {
+	m, _ := filepath.Glob("/lib/ld-musl-*.so.1")
+	return len(m) > 0
 }
 
 func need(n int) {

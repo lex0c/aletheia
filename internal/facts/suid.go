@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/lex0c/aletheia/internal/env"
 )
@@ -351,6 +352,7 @@ func (v *varredura) rodar(n int) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer v.f.guardaGoroutine("suid")
 			for {
 				t, ok := v.proxima()
 				if !ok {
@@ -389,9 +391,20 @@ func (v *varredura) proxima() (tarefaDir, bool) {
 		if ativos == 0 {
 			return tarefaDir{}, false
 		}
-		// Alguém ainda trabalha e pode empilhar. Ceder a vez é mais barato que
-		// uma variável de condição para um laço que dura milissegundos.
+		// Alguém ainda trabalha e pode empilhar.
+		//
+		// A aposta do Gosched sozinho era "um laço que dura milissegundos", e
+		// ela vale enquanto todos os trabalhadores avançam. Ela deixa de valer
+		// exatamente no caso que interessa: um trabalhador preso num ReadDir de
+		// mount NFS morto, sem WalkDeadline definido (o padrão do collect e do
+		// scan sem --fs-budget). Aí os outros N-1 giram a 100% de CPU
+		// indefinidamente, num host que já está sob incidente e possivelmente
+		// sob carga.
+		//
+		// O sleep curto mantém a resposta na ordem de grandeza do Gosched
+		// enquanto o laço é curto, e para de queimar núcleo quando ele não é.
 		runtime.Gosched()
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -570,13 +583,21 @@ func (v *varredura) visitar(t tarefaDir) {
 	// paralelismo em fila.
 	if len(novos) > 0 || len(achados) > 0 || len(fora) > 0 ||
 		len(achadosOcultos) > 0 || len(donosLocais.itens) > 0 {
-		v.mu.Lock()
-		v.fila = append(v.fila, novos...)
-		v.f.Suid = append(v.f.Suid, achados...)
-		v.f.ExecOculto = append(v.f.ExecOculto, achadosOcultos...)
-		v.outroFS = append(v.outroFS, fora...)
-		v.donos.juntar(donosLocais.itens)
-		v.mu.Unlock()
+		// defer no Unlock, e não Unlock ao fim: esta seção chama `juntar`, que
+		// é a única aqui dentro que executa código de outro tipo. Com o
+		// guardaGoroutine recuperando panics, um panic com o mutex TRAVADO
+		// deixaria os outros trabalhadores bloqueados e o wg.Wait() eterno — a
+		// ferramenta penduraria em vez de cair, e pendurar é pior: não há saída
+		// nem relatório. Ver o invariante em Facts.guardaGoroutine.
+		func() {
+			v.mu.Lock()
+			defer v.mu.Unlock()
+			v.fila = append(v.fila, novos...)
+			v.f.Suid = append(v.f.Suid, achados...)
+			v.f.ExecOculto = append(v.f.ExecOculto, achadosOcultos...)
+			v.outroFS = append(v.outroFS, fora...)
+			v.donos.juntar(donosLocais.itens)
+		}()
 	}
 }
 

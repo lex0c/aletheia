@@ -179,16 +179,39 @@ func writeWtfFindings(w io.Writer, t Tema, r *check.Report) {
 			fmt.Fprintln(w, "             "+t.fraco(Safe(ev)))
 		}
 		// O passo irreversível — e só ele. O resto é trabalho do scan.
-		if fd.Irreversible {
-			for _, ns := range fd.NextSteps {
-				if strings.HasPrefix(ns, "sudo ") {
-					fmt.Fprintln(w, "             "+t.fraco("→ "+Safe(ns)))
-					break
-				}
-			}
+		//
+		// O gatilho é o CAMPO Irreversible, nunca o texto do comando. Casar por
+		// prefixo "sudo " é o mesmo defeito que human.go documenta ter
+		// corrigido ("calava justamente o kernel.bpf_unowned"), e ele continuou
+		// vivo aqui: kernel.bpf_unowned, cross.bpf_hidden e o trampolim são
+		// todos CRITICAL + Irreversible, e nenhum passo deles começa com
+		// `sudo` — o primeiro é um `bpftool prog dump` ou um `cp` do pin. O
+		// resultado era o wtf imprimir o achado e engolir o "guarde AGORA, o
+		// programa some no próximo boot", que é a única razão de o campo
+		// existir.
+		if fd.Irreversible && len(fd.NextSteps) > 0 {
+			fmt.Fprintln(w, "             "+t.fraco("→ "+Safe(primeiroPassoAcionavel(fd.NextSteps))))
 		}
 	}
 	fmt.Fprintln(w)
+}
+
+// primeiroPassoAcionavel devolve o passo que o operador deve EXECUTAR primeiro.
+//
+// A convenção dos checks é abrir com a PROIBIÇÃO ("NÃO mate antes de
+// preservar", "NÃO reinicie o host antes de decidir") e pôr a ação logo em
+// seguida. O wtf tem uma linha só por achado, e ela rende mais gasta na ação:
+// a proibição sozinha não diz o que fazer, e a ação já carrega a urgência.
+//
+// Quando todo passo é proibição, sai a primeira mesmo assim — melhor a
+// proibição que o silêncio.
+func primeiroPassoAcionavel(ns []string) string {
+	for _, s := range ns {
+		if !strings.HasPrefix(s, "NÃO ") {
+			return s
+		}
+	}
+	return ns[0]
 }
 
 // resumoTitulos encurta os títulos para caber na linha: no wtf o que decide é
@@ -221,7 +244,10 @@ func resumoTitulos(g check.SubjectGroup) string {
 // informa nada. Vira contagem, e o detalhe fica com o scan.
 func writeWtfGaps(w io.Writer, t Tema, r *check.Report) {
 	c := r.Coverage
-	motivos := append(reasonsOf(c.NotChecked), partialReasons(c)...)
+	// Só as LACUNAS: escopo não degradou cobertura, e citá-lo aqui gastaria a
+	// única linha de lacuna do wtf com um mecanismo que este host nunca terá.
+	lacunas, _ := c.NaoVerificados()
+	motivos := append(reasonsOf(lacunas), partialReasons(c)...)
 
 	var parts []string
 	if len(motivos) > 0 {

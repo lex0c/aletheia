@@ -245,11 +245,6 @@ func Capturar(w io.Writer, h hash.Hash, iface Interface, o Opcoes) (Estatisticas
 			}
 		}
 
-		quando, doKernel := horario(oob[:oobn])
-		if !doKernel {
-			semRelogio = true
-		}
-
 		// Com MSG_TRUNC, `n` é o tamanho do quadro NO FIO, que pode ser MAIOR
 		// que `buf` — e `buf` tem exatamente `snap` bytes. O clamp precisa vir
 		// antes do primeiro uso, não antes da escrita: com --snaplen 1500 e GRO
@@ -270,6 +265,21 @@ func Capturar(w io.Writer, h hash.Hash, iface Interface, o Opcoes) (Estatisticas
 		case !casa:
 			st.Filtrados++
 			continue
+		}
+
+		// O horário sai do control message DEPOIS do filtro, e não antes.
+		//
+		// syscall.ParseSocketControlMessage ALOCA, e rodá-lo antes do filtro
+		// era uma alocação por pacote DO FIO em vez de por pacote GRAVADO. Com
+		// filtro estreito numa interface movimentada a diferença é de ordens de
+		// grandeza, e este laço é exatamente onde pressão de alocação vira o
+		// descarte que Estatisticas.Descartados depois reporta como evidência
+		// perdida. O filtro em espaço de usuário é decisão declarada (ver
+		// pcap.go), e ela faz o kernel entregar tudo — mais uma razão para não
+		// pagar nada a mais por pacote que vai ser jogado fora.
+		quando, doKernel := horario(oob[:oobn])
+		if !doKernel {
+			semRelogio = true
 		}
 
 		// Truncados conta o que foi GRAVADO cortado, então só depois do filtro.

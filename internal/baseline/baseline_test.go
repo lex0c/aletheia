@@ -3,6 +3,7 @@ package baseline
 import (
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -108,8 +109,11 @@ func TestEsquemaIncompativelEhRecusado(t *testing.T) {
 	bom := dir + "/bom.json"
 	ruim := dir + "/ruim.json"
 
+	// O número sai da CONSTANTE, não de um literal: o teste é sobre "o esquema
+	// corrente carrega e um diferente é recusado", e fixar o 1 fazia ele falhar
+	// por motivo errado a cada bump legítimo da forma da chave.
 	if err := os.WriteFile(bom,
-		[]byte(`{"schema":1,"host":"h","keys":["a|/x"]}`), 0o600); err != nil {
+		[]byte(`{"schema":`+strconv.Itoa(Schema)+`,"host":"h","keys":["a|/x"]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(ruim,

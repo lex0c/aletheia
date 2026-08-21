@@ -430,13 +430,17 @@ func collectSSHConfig(f *Facts, e *env.Env) {
 			if ln == "" || strings.HasPrefix(ln, "#") {
 				continue
 			}
-			k, v, ok := strings.Cut(ln, " ")
-			if !ok {
-				if k, v, ok = strings.Cut(ln, "\t"); !ok {
-					continue
-				}
+			// cortaDiretiva, e não Cut por espaço/TAB: o sshd aceita o
+			// separador como `=` também, e cortar só por branco fazia
+			// `PermitRootLogin=yes`, `AuthorizedKeysCommand=/tmp/.k` e
+			// `Include=/etc/ssh/x.conf` caírem no continue — descartados sem
+			// lacuna, com o relatório imprimindo o padrão do sshd como se fosse
+			// o efetivo. O comentário de cortaDiretiva já chamava isso de
+			// "evasão trivial"; o lado do SERVIDOR é que não a usava.
+			if strings.IndexAny(ln, " \t=") < 0 {
+				continue // linha sem separador: não é `keyword valor`
 			}
-			v = strings.TrimSpace(v)
+			k, v := cortaDiretiva(ln)
 			// Include REDIRECIONA a configuração para outro arquivo, e quem
 			// escolhe o caminho é quem escreve o sshd_config. Ler só o
 			// diretório fixo da distribuição cobria o caso de fábrica e deixava

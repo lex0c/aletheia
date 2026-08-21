@@ -358,7 +358,8 @@ const maxCausas = 5
 
 func writeCoverage(w io.Writer, t Tema, r *check.Report, o Options) {
 	c := r.Coverage
-	nPartial, nNot := len(c.Partial), len(c.NotChecked)
+	lacunasNC, escopoNC := c.NaoVerificados()
+	nPartial, nNot, nEscopo := len(c.Partial), len(lacunasNC), len(escopoNC)
 
 	// Cabeçalho terse: só o que não é zero.
 	cab := fmt.Sprintf("%s  %d/%d completos", t.negrito("COBERTURA"), c.Complete, c.Total)
@@ -367,6 +368,12 @@ func writeCoverage(w io.Writer, t Tema, r *check.Report, o Options) {
 	}
 	if nNot > 0 {
 		cab += fmt.Sprintf(" · %d não verificados", nNot)
+	}
+	// FORA DE ESCOPO conta à parte, e nunca junto dos não verificados: eles já
+	// saíram do denominador, e somá-los ali fazia a linha se contradizer
+	// ("105/105 completos · 2 não verificados").
+	if nEscopo > 0 {
+		cab += fmt.Sprintf(" · %d fora de escopo", nEscopo)
 	}
 	fmt.Fprintln(w, cab)
 
@@ -398,7 +405,9 @@ func writeCoverage(w io.Writer, t Tema, r *check.Report, o Options) {
 			acumula(rz)
 		}
 	}
-	for _, nc := range c.NotChecked {
+	// Só as lacunas viram CAUSA de cobertura degradada. O escopo não degradou
+	// nada — listá-lo aqui mandaria o operador consertar o que não tem conserto.
+	for _, nc := range lacunasNC {
 		acumula(nc.Reason)
 	}
 	for _, g := range c.CollectorGaps {
@@ -465,9 +474,17 @@ func writeResult(w io.Writer, t Tema, r *check.Report) {
 		switch {
 		case miss > 0:
 			fmt.Fprintf(w, " — 0 achados, mas %d checks não cobriram o que deveriam.\n", miss)
-		default:
+		case len(r.Coverage.CollectorGaps) > 0:
 			fmt.Fprintf(w, " — 0 achados, mas a coleta não conseguiu ler tudo (%d lacunas).\n",
 				len(r.Coverage.CollectorGaps))
+		default:
+			// O TERCEIRO motivo, que caía no `default` acima e saía como
+			// "a coleta não conseguiu ler tudo (0 lacunas)" — uma frase que se
+			// contradiz na mesma linha e manda o operador procurar um problema
+			// de leitura que não existe. Aqui a cobertura está completa e as
+			// lacunas são zero: quem produziu o INCOMPLETE foi o RECORTE.
+			fmt.Fprintf(w, " — 0 achados NESTA JANELA, mas %d crítico(s) existem "+
+				"fora dela e este recorte os removeu.\n", r.CriticosForaDaJanela)
 		}
 		fmt.Fprintln(w, "        Isto NÃO é o mesmo que host limpo.")
 	default:

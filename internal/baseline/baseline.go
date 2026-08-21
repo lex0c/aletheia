@@ -45,7 +45,7 @@ import (
 // Schema muda quando a forma da chave muda. Uma baseline de esquema anterior é
 // RECUSADA em vez de interpretada torto: casar chave errada abençoaria achado
 // que ninguém aprovou.
-const Schema = 1
+const Schema = 2
 
 // Baseline é o que se sabia deste host — ou da referência — num momento dado.
 type Baseline struct {
@@ -71,6 +71,10 @@ type Baseline struct {
 
 // Chave identifica um achado de forma estável entre execuções.
 //
+// Três partes: o ID do check, o sujeito (com o PID trocado pelo executável) e,
+// quando o check o fornece, o discriminador do achado — ver
+// check.Finding.Chave, e a razão de ele existir.
+//
 // `ID|Subject` resolve a maioria, porque a maior parte dos sujeitos é caminho,
 // nome de unit ou usuário — coisas que não mudam entre reboots.
 //
@@ -93,6 +97,13 @@ func Chave(f *facts.Facts, fd check.Finding) string {
 			return ""
 		}
 		s = "exe=" + p.Exe
+	}
+	// O discriminador do achado entra na chave quando o check o fornece. Sem
+	// ele, dois achados distintos do mesmo check sobre o mesmo sujeito geram a
+	// MESMA chave, e o segundo é abençoado pela presença do primeiro na
+	// baseline — ver check.Finding.Chave.
+	if fd.Chave != "" {
+		return fd.ID + "|" + s + "|" + fd.Chave
 	}
 	return fd.ID + "|" + s
 }

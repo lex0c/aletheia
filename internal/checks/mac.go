@@ -55,6 +55,17 @@ var macRebaixado = check.Check{
 		var r check.Result
 		m := &f.MAC
 
+		// A lacuna do coletor vem PRIMEIRO, antes de qualquer saída.
+		//
+		// O coletor grava f.Partial["mac"] quando /etc/selinux/config ou
+		// /sys/fs/selinux/enforce não abrem, e nenhum check lia a chave. Com
+		// isso o `return` logo abaixo juntava duas coisas diferentes — "o
+		// administrador escolheu permissive" e "não consegui ler o config" — e
+		// as duas saíam como cobertura COMPLETA. O mesmo valia com config
+		// legível pedindo enforcing e /sys ilegível: Ativo=="" não casa nenhum
+		// case do switch, e o check terminava em silêncio.
+		r.Partial = append(r.Partial, f.Partial["mac"]...)
+
 		// Sem config não há o que contradizer, e config que já pede permissivo
 		// ou disabled é escolha declarada.
 		if m.Configurado != "enforcing" {

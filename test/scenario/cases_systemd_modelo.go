@@ -1,5 +1,3 @@
-//go:build scenarios
-
 package scenario
 
 // FNs do MODELO de Unit, apontados na revisão externa. Aqui o que dá para provar

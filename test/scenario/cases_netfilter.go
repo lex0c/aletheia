@@ -1,5 +1,3 @@
-//go:build scenarios
-
 package scenario
 
 // Backdoor de netfilter no kernel (magic-packet, forma Syslogk/Drovorub),

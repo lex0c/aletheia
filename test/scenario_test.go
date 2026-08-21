@@ -623,21 +623,13 @@ func capture(t *testing.T, cmd *exec.Cmd) result {
 	return r
 }
 
-// TestTodoCheckTemCenario fecha o ciclo: do mesmo jeito que Register recusa
-// check sem FalsePositives, aqui se recusa check que ninguém provou disparar.
-// Sem isto, dá para acrescentar um check e nunca demonstrar que ele funciona.
-func TestTodoCheckTemCenario(t *testing.T) {
-	coberto := scenario.CoveredCheckIDs()
-	for _, c := range check.All() {
-		if c.Mode == check.ModeManual {
-			continue
-		}
-		if !coberto[c.ID] {
-			t.Errorf("%s não aparece no Expect de nenhum cenário: ninguém demonstrou "+
-				"que ele dispara contra um host real", c.ID)
-		}
-	}
-}
+// TestTodoCheckTemCenario mudou de casa: está em test/scenario/registro_test.go,
+// SEM a tag `scenarios`.
+//
+// Ele nunca precisou de docker — compara dois registros em memória —, e atrás da
+// tag só rodava para quem lembrasse de rodar a suíte inteira. Fora dela, roda no
+// `go test ./...` e portanto na CI, que é onde um check novo sem cenário precisa
+// falhar: antes do PR, não meses depois.
 
 // O binário estático é a propriedade que justificou escolher Go (SPEC 4).
 // `file` diz que ele é estático; rodar em `scratch` — sem libc, sem shell, sem

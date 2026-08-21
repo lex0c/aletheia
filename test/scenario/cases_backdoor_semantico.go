@@ -1,5 +1,3 @@
-//go:build scenarios
-
 package scenario
 
 // Backdoor SEMÂNTICO — a lacuna da peneira léxica (app.code_backdoor).

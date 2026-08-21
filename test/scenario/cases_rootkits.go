@@ -1,5 +1,3 @@
-//go:build scenarios
-
 package scenario
 
 // Rootkits nomeados como PADRÕES de cenário adversarial.

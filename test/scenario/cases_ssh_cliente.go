@@ -1,5 +1,3 @@
-//go:build scenarios
-
 package scenario
 
 // Config do CLIENTE ssh que executa comando — a persistência de usuário que o

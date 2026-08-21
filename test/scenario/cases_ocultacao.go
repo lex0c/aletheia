@@ -1,5 +1,3 @@
-//go:build scenarios
-
 package scenario
 
 // Ocultação por kernel, MEDIDA contra kernel real.

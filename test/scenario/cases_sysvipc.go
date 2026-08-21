@@ -1,5 +1,3 @@
-//go:build scenarios
-
 package scenario
 
 // Memória compartilhada System V como canal — a forma do Ebury. A credencial

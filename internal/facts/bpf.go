@@ -265,8 +265,12 @@ type CoberturaDeAnexo struct {
 // interface do kernel entrega um objeto que a outra nega —, e por isso os ids
 // vistos aqui entram na lista de citados.
 func anexosDeRede(f *Facts, e *env.Env, porID map[uint32]*ProgramaBPF, citados map[uint32]bool) {
-	if !e.Has(env.CapNetlink) {
-		f.partial("bpf", "anexo de tc e de XDP NÃO foi lido ("+e.Reason(env.CapNetlink)+
+	// CapRtnetlink, e não CapNetlink: tc e XDP saem do NETLINK_ROUTE, que não
+	// depende dos módulos de diagnóstico de socket. Enquanto isto olhava a
+	// capacidade errada, todo host sem inet_diag carregado perdia tc e XDP e
+	// recebia, como motivo, uma frase sobre autoload de sock_diag.
+	if !e.Has(env.CapRtnetlink) {
+		f.partial("bpf", "anexo de tc e de XDP NÃO foi lido ("+e.Reason(env.CapRtnetlink)+
 			"): programa de rede sem dono visível continua sem atribuição")
 		return
 	}
@@ -353,9 +357,9 @@ func anexosDeRede(f *Facts, e *env.Env, porID map[uint32]*ProgramaBPF, citados m
 // próprio netns enxerga.
 //
 // Só declara quando há OUTRO netns (contêiner) e as consultas de rede de fato
-// rodaram (CapNetlink). Num host de um netns só — o comum — não há o que anunciar.
+// rodaram (CapRtnetlink). Num host de um netns só — o comum — não há o que anunciar.
 func lacunaDeNetns(f *Facts, e *env.Env) {
-	if !e.Has(env.CapNetlink) || !e.Has(env.CapProcfs) {
+	if !e.Has(env.CapRtnetlink) || !e.Has(env.CapProcfs) {
 		return
 	}
 	meu, ok := inodeDeNS("/proc/self/ns/net")

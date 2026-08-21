@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/lex0c/aletheia/internal/ioc"
@@ -144,6 +145,25 @@ const (
 	CapPkgDB
 	CapNetlink
 	CapFilesystem
+	// CapRtnetlink é o NETLINK_ROUTE, e é uma capacidade DIFERENTE do
+	// CapNetlink apesar do nome parecido.
+	//
+	// As duas famílias não têm nada em comum além da palavra: o SOCK_DIAG
+	// enumera socket e depende de inet_diag/tcp_diag/udp_diag — módulos que a
+	// consulta pode AUTOCARREGAR, e é por isso que ele é tratado com pinça. O
+	// NETLINK_ROUTE enumera interface, filtro de tc e programa de XDP, não
+	// depende de módulo nenhum e não autocarrega nada.
+	//
+	// Enquanto eram a mesma capacidade, um host sem os módulos de diagnóstico
+	// perdia tc e XDP JUNTO — e o relatório dizia que não os leu porque
+	// "inet_diag não está carregado", que não tem relação com o que ele deixou
+	// de ler. Uma lacuna com o motivo errado é pior que nenhuma: manda o
+	// operador consertar o que não estava quebrado.
+	//
+	// Fica no FIM da lista de propósito: o bit é serializado por NOME no dump
+	// (`caps: []string`), mas mover os anteriores tornaria qualquer leitura
+	// posicional de dump antigo silenciosamente errada.
+	CapRtnetlink
 )
 
 var capNames = []struct {
@@ -158,6 +178,7 @@ var capNames = []struct {
 	{CapPkgDB, "pkgdb"},
 	{CapNetlink, "netlink"},
 	{CapFilesystem, "filesystem"},
+	{CapRtnetlink, "rtnetlink"},
 }
 
 // Names devolve os nomes das capacidades presentes no conjunto.
@@ -559,6 +580,22 @@ func (e *Env) probeCaps() {
 	//
 	// Diante disso ela não pergunta, e diz que não perguntou. Perder uma visão
 	// cruzada é um preço menor que executar o implante do investigado.
+	// O rtnetlink é decidido ANTES e por conta própria, porque a razão que
+	// bloqueia o sock_diag não o alcança: abrir NETLINK_ROUTE não carrega módulo
+	// e não executa nada.
+	switch {
+	case e.Source == SourceImage:
+		e.grant(CapRtnetlink, false, "modo image: não há kernel vivo para consultar por netlink")
+	default:
+		if c, err := netlink.Abrir(syscall.NETLINK_ROUTE); err != nil {
+			e.grant(CapRtnetlink, false, "rtnetlink indisponível ("+err.Error()+
+				"): interface, filtro de tc e programa de XDP não puderam ser enumerados")
+		} else {
+			c.Fechar()
+			e.grant(CapRtnetlink, true, "")
+		}
+	}
+
 	switch {
 	case e.Source == SourceImage:
 		e.grant(CapNetlink, false, "modo image: não há kernel vivo para consultar por netlink")

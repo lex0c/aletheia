@@ -698,6 +698,7 @@ func collectUnits(f *Facts, e *env.Env) {
 		f.denyPersist("unit", strconv.Itoa(len(negados))+
 			" diretórios de unit de usuário ilegíveis (permissão): "+resumoCaminhos(negados))
 	}
+	lacunaDeManagerDeUsuario(f, units)
 
 	for i := range units {
 		units[i].EnabledBy = wants[units[i].Name]
@@ -1549,6 +1550,87 @@ func parseBindDaUnit(item string, somenteLeitura bool) (BindDaUnit, bool) {
 		b.Destino = partes[1]
 	}
 	return b, b.Origem != ""
+}
+
+// lacunaDeManagerDeUsuario declara o que a configuração efetiva por usuário NÃO
+// reconstrói — e declara CIRURGICAMENTE, só onde a colisão existe de verdade.
+//
+// # O que está por baixo
+//
+// O `systemd --user` da alice carrega DUAS origens na mesma configuração: a
+// árvore compartilhada (/etc/systemd/user, /usr/lib/systemd/user) e a dela
+// (~/.config/systemd/user). Esta coleta as mantém separadas — a compartilhada
+// fica com Manager vazio, a por-home com o nome do usuário —, e o merge agrupa
+// por Scope+Manager+Nome. São chaves diferentes, então não há fusão:
+//
+//	/usr/lib/systemd/user/agent.service          base, Manager=""
+//	~alice/.config/systemd/user/agent.service.d/ drop-in, Manager="alice"
+//
+// O systemd aplica um sobre o outro; a ferramenta vê dois objetos soltos. Um
+// drop-in que só acrescenta ExecSearchPath=/tmp/.hidden nem tem Exec próprio
+// para o unit_dropin_exec denunciar, e a base compartilhada continua com
+// aparência intacta.
+//
+// # Por que declarar em vez de consertar
+//
+// Reconstruir a configuração efetiva de cada manager exige duplicar a árvore
+// compartilhada por UID e resolver precedência entre quatro origens. É caro, e
+// o ataque depende de uma composição específica. Um scanner de resposta a
+// incidente não precisa reproduzir o executor inteiro; precisa saber
+// exatamente quando a aproximação dele deixou de bastar.
+//
+// # Por que só na colisão
+//
+// Declarar sempre que houvesse as duas árvores faria toda workstation sair com
+// lacuna — e lacuna que aparece em toda instância de um ambiente não informa
+// nada, só ensina a ignorar o veredito. Já custou caro quatro vezes nesta base.
+// A lacuna se forma quando o MESMO nome de unit aparece nos dois domínios, que
+// é exatamente a situação em que a precedência decidiria algo e ninguém a
+// resolveu.
+func lacunaDeManagerDeUsuario(f *Facts, units []Unit) {
+	compartilhadas := map[string]bool{}
+	for i := range units {
+		if units[i].Scope == "user" && units[i].Manager == "" {
+			compartilhadas[units[i].Name] = true
+		}
+	}
+	if len(compartilhadas) == 0 {
+		return
+	}
+	// Um par por manager+nome, ordenado: a mesma unit pode vir de vários
+	// subdiretórios do mesmo home, e repetir a linha não acrescenta nada.
+	vistos := map[string]bool{}
+	var colisoes []string
+	for i := range units {
+		u := &units[i]
+		if u.Scope != "user" || u.Manager == "" || !compartilhadas[u.Name] {
+			continue
+		}
+		k := u.Manager + "/" + u.Name
+		if vistos[k] {
+			continue
+		}
+		vistos[k] = true
+		colisoes = append(colisoes, k)
+	}
+	if len(colisoes) == 0 {
+		return
+	}
+	sort.Strings(colisoes)
+	f.denyPersist("unit", strconv.Itoa(len(colisoes))+" unit(s) de usuário existem "+
+		"na árvore COMPARTILHADA e na do próprio usuário ao mesmo tempo ("+
+		firstNCaminhos(colisoes, 3)+"): o `systemd --user` funde as duas numa "+
+		"configuração só, e esta coleta as mantém separadas. A precedência e os "+
+		"drop-ins ENTRE as duas árvores NÃO foram resolvidos — um drop-in por-home "+
+		"sobre uma unit compartilhada pode não ser atribuído a ela")
+}
+
+// firstNCaminhos resume uma lista longa sem esconder que ela é longa.
+func firstNCaminhos(v []string, n int) string {
+	if len(v) <= n {
+		return strings.Join(v, ", ")
+	}
+	return strings.Join(v[:n], ", ") + " e mais " + strconv.Itoa(len(v)-n)
 }
 
 // diretivaValeNaSecao diz se o systemd aplicaria esta diretiva nesta seção.

@@ -30,7 +30,9 @@ como **verdade**, mas sua formação também carrega a ideia de
 Aletheia trabalha com **comportamento, inconsistências e correlação de
 evidências**, em vez de depender de uma base de assinaturas.
 
-Alguns exemplos de sinais implementados:
+O catálogo completo — cada check, o que ele acusa, e o cenário que prova que ele
+dispara — está em **[docs/SCENARIOS.md](docs/SCENARIOS.md)**, gerado do próprio
+registro. Abaixo, alguns exemplos:
 
 | Área | Exemplos |
 | --- | --- |

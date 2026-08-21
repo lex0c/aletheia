@@ -168,9 +168,29 @@ func atoiOctal(s string) int { n, _ := strconv.ParseInt(s, 8, 32); return int(n)
 // sem ctime do segmento não há prova em direção nenhuma, e inventar uma seria
 // pior que não ter.
 //
-// A granularidade dos dois é o SEGUNDO, e a comparação é estrita de propósito:
-// um processo que começou em t=10,9 e criou o segmento em t=11,0 aparece como
-// (10, 11) e não pode ser acusado de reciclagem por arredondamento.
+// A TOLERÂNCIA não é frouxidão: é o erro da própria medida, e ignorá-la
+// suprimia uma detecção real.
+//
+// O início do processo não é lido, é DERIVADO — btime do /proc/stat (segundo
+// inteiro) mais o campo 22 do /proc/<pid>/stat dividido pelo USER_HZ. As duas
+// pontas arredondam, e o resultado pode cair DEPOIS do instante verdadeiro.
+// Medido no cenário SV3, onde o helper cria o segmento no primeiro instante de
+// vida: ctime 07:35:51, início derivado 07:35:52. Com comparação estrita, o
+// criador legítimo era acusado de PID reciclado e o CRITICAL do Ebury sumia —
+// trocar um falso positivo por um falso negativo no ponto mais forte do
+// catálogo é péssimo negócio.
+//
+// O viés é deliberado e assimétrico: errar para "não é reciclagem" devolve o FP
+// que este guarda existe para tirar; errar para "é reciclagem" APAGA uma
+// detecção. Entre os dois, prefira o primeiro.
+//
+// 60s é folga enorme sobre os ~2s de erro da medida. O que ela custa: num host
+// onde o espaço de PID dá a volta em menos de um minuto — servidor de build com
+// pid_max pequeno e milhares de forks por segundo — uma reciclagem dentro dessa
+// janela passa despercebida, e ali o resultado é o comportamento antigo, não
+// algo pior.
+const toleranciaCriacaoSHM = 60
+
 func processoComecouDepois(p *Process, criadoEm int) (bool, bool) {
 	if p.StartUTC == "" || criadoEm <= 0 {
 		return false, false
@@ -179,5 +199,5 @@ func processoComecouDepois(p *Process, criadoEm int) (bool, bool) {
 	if err != nil {
 		return false, false
 	}
-	return t.Unix() > int64(criadoEm), true
+	return t.Unix() > int64(criadoEm)+toleranciaCriacaoSHM, true
 }

@@ -17,16 +17,6 @@ incidente:
 
 ---
 
-## Documentação
-
-| | |
-| --- | --- |
-| **[docs/SCENARIOS.md](docs/SCENARIOS.md)** | o catálogo do que ela detecta: cada check, o que acusa, e o cenário que prova que dispara. Gerado do próprio registro |
-| **[docs/PLAYBOOKS.md](docs/PLAYBOOKS.md)** | quando usar cada comando, e catorze fluxos de investigação de ponta a ponta |
-| **[docs/RUNBOOK.md](docs/RUNBOOK.md)** | o runbook de resposta a incidente em Linux que originou os checks. É dele que vêm as seções (`§7.2`, `§35`) citadas em cada achado |
-
----
-
 ## Por que o nome Aletheia?
 
 **Alḗtheia** (`ἀλήθεια`) é uma palavra do grego antigo normalmente traduzida
@@ -808,6 +798,14 @@ fontes ausentes durante a aquisição ficaram disponíveis retroativamente.
 Essa separação também permite que os checks sejam testados sobre fatos
 controlados, enquanto cenários de integração exercitam a CLI contra sistemas
 reais.
+
+### Docs
+
+| | |
+| --- | --- |
+| **[docs/SCENARIOS.md](docs/SCENARIOS.md)** | o catálogo do que ela detecta: cada check, o que acusa, e o cenário que prova que dispara. Gerado do próprio registro |
+| **[docs/PLAYBOOKS.md](docs/PLAYBOOKS.md)** | quando usar cada comando, e catorze fluxos de investigação de ponta a ponta |
+| **[docs/RUNBOOK.md](docs/RUNBOOK.md)** | o runbook de resposta a incidente em Linux que originou os checks. É dele que vêm as seções (`§7.2`, `§35`) citadas em cada achado |
 
 ---
 

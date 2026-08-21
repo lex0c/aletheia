@@ -307,12 +307,16 @@ type Comando struct {
 	// seguro de não simular é não afirmar que a regra segura.
 	Curinga bool
 
-	// GlobFraco é `?` ou `[...]` em argumento. Os dois casam UM caractere —
-	// inclusive o espaço, e por isso atravessam a fronteira entre argumentos —,
-	// mas um caractere não é onde cabe uma opção injetada. Eles saem na nota e
-	// NÃO mudam a severidade: tratá-los como o `*` transformaria a regra de
-	// `curl https://x/?a=b` em crítico, e essa é a linha que qualquer webhook
-	// de produção tem.
+	// GlobFraco é `?` ou `[...]` em argumento. Os dois casam UM caractere cada
+	// — inclusive o espaço, e por isso também atravessam a fronteira entre
+	// argumentos. Eles saem na nota e NÃO mudam a severidade: tratá-los como o
+	// `*` transformaria a regra de `curl https://x/?a=b` em crítico, e essa é a
+	// linha que qualquer webhook de produção tem.
+	//
+	// A afirmação é sobre o que a FERRAMENTA demonstrou, e não sobre o que é
+	// impossível: a expansão é limitada a um caractere por metacaractere, e daí
+	// não se derivou rota de escalada. Quem lê a regra sabe coisas que esta
+	// ferramenta não sabe.
 	GlobFraco bool
 
 	// Regex marca argumento em expressão regular ancorada — a forma que o
@@ -349,9 +353,27 @@ var dirDeExecutaveisGerais = map[string]bool{
 
 // temGlob é o metacaractere que de fato REABRE: só o `*` casa uma string de
 // tamanho arbitrário. `?` e `[...]` casam um caractere cada (ver GlobFraco).
-func temGlob(s string) bool { return strings.Contains(s, "*") }
+//
+// O `\` ESCAPA, e o sudoers(5) diz isso: `\*` é um asterisco literal, não um
+// curinga. Sem essa leitura, a regra que escapou o metacaractere de propósito —
+// que é a regra de quem sabia do problema — saía com a severidade de quem não
+// escapou.
+func temGlob(s string) bool { return temMetacaractere(s, "*") }
 
-func temGlobFraco(s string) bool { return strings.ContainsAny(s, "?[") }
+func temGlobFraco(s string) bool { return temMetacaractere(s, "?[") }
+
+func temMetacaractere(s, quais string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' {
+			i++ // o próximo é literal, qualquer que seja
+			continue
+		}
+		if strings.IndexByte(quais, s[i]) >= 0 {
+			return true
+		}
+	}
+	return false
+}
 
 // ehRegexSudo: o sudoers trata como expressão regular o que começa com `^`.
 func ehRegexSudo(s string) bool { return strings.HasPrefix(s, "^") }
@@ -548,9 +570,10 @@ func (c Comando) notaDePrisao() []string {
 	}
 	if c.GlobFraco {
 		out = append(out, "e há `?` ou `[...]` no argumento: cada um casa UM "+
-			"caractere, inclusive o espaço — afrouxa o casamento sem abrir espaço "+
-			"para uma opção inteira, e por isso entra como nota e não como "+
-			"severidade")
+			"caractere, inclusive o espaço, e portanto atravessa a fronteira entre "+
+			"argumentos. A expansão é limitada a um caractere por metacaractere e "+
+			"esta ferramenta NÃO derivou rota de escalada a partir dela — o que é "+
+			"diferente de afirmar que não há")
 	}
 	if c.Regex {
 		out = append(out, "o argumento é REGEX ancorada (`^...$`), que o sudoers "+

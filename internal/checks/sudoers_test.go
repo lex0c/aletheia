@@ -223,3 +223,133 @@ func TestSudoAliasComNomeNopasswdNaoEhAchado(t *testing.T) {
 		t.Fatalf("%+v", r.Findings)
 	}
 }
+
+// LISTA COM NEGAÇÃO: vence a ÚLTIMA entrada que casa, e não a primeira.
+//
+// A primeira versão desta resolução devolvia no primeiro casamento, e por isso
+// lia o `ALL` de `ALL,!web01` e imprimia CRITICAL em web01 — sobre a regra
+// escrita justamente para não valer ali. O sudo percorre a lista ao contrário e
+// para no primeiro casamento, que dá no mesmo.
+func TestSudoNegacaoNaListaDeHosts(t *testing.T) {
+	casos := []struct {
+		host  string
+		regra string
+		sev   check.Severity
+		porqu string
+	}{
+		{"web01", "ops ALL,!web01=(root) NOPASSWD: ALL", check.SevInfo,
+			"a exclusão vem depois do ALL e é ela que decide"},
+		{"web02", "ops ALL,!web01=(root) NOPASSWD: ALL", check.SevCritical,
+			"a exclusão não alcança este host, e o ALL vale"},
+		{"web01", "ops !web01,ALL=(root) NOPASSWD: ALL", check.SevCritical,
+			"aqui o ALL é a última que casa — a ordem inverte a resposta, e é assim " +
+				"que o sudo resolve"},
+		{"web01", "ops SERVIDORES,!web01=(root) NOPASSWD: ALL", check.SevInfo,
+			"a exclusão é posterior ao alias e decide sozinha, casando ou não o alias"},
+		{"web01", "ops !web01,SERVIDORES=(root) NOPASSWD: ALL", check.SevCritical,
+			"o alias é POSTERIOR e pode casar: o desconhecido apaga a exclusão em " +
+				"vez de herdá-la, porque supor que não casa seria inventar absolvição"},
+	}
+	for _, c := range casos {
+		r := sudoSemSenha.Run(sudoSemSenha, regraNoHost(c.host, c.regra), testEnv())
+		if len(r.Findings) != 1 {
+			t.Errorf("%s @ %q: achados = %d", c.regra, c.host, len(r.Findings))
+			continue
+		}
+		if got := r.Findings[0].Sev; got != c.sev {
+			t.Errorf("%s @ %q\n  severidade=%v, queria %v — %s",
+				c.regra, c.host, got, c.sev, c.porqu)
+		}
+	}
+}
+
+// AS QUATRO FORMAS DO RUNAS_SPEC, e duas delas eu li ao contrário.
+//
+// O sudoers(5) separa uma a uma, e a diferença entre elas é a diferença entre
+// "root inteiro sem senha" e "o próprio usuário com um grupo a mais".
+func TestSudoQuatroFormasDoRunas(t *testing.T) {
+	casos := []struct {
+		runas      string
+		root, invo bool
+		porqu      string
+	}{
+		{"(root)", true, false, "usuário explícito"},
+		{"(ALL)", true, false, "ALL na lista de usuários alcança root"},
+		{"(#0)", true, false, "root por uid numérico"},
+		{"(ALL:ALL)", true, false, "usuário e grupo, os dois ALL"},
+		{"(postgres)", false, false, "outra conta não é root"},
+		{"(postgres:postgres)", false, false, "conta e grupo nomeados"},
+		{"(:www-data)", false, true, "lista de usuários VAZIA: roda como o invocador"},
+		{"(:adm)", false, true, "idem"},
+		{"()", false, true, "as duas vazias: só o próprio invocador"},
+	}
+	for _, c := range casos {
+		reg := parseRegraSudo("ana ALL=" + c.runas + " NOPASSWD: /bin/ls")
+		if len(reg.Specs) != 1 {
+			t.Errorf("%s: %+v", c.runas, reg.Specs)
+			continue
+		}
+		sp := reg.Specs[0]
+		if sp.ComoRoot != c.root {
+			t.Errorf("%s: ComoRoot=%v, queria %v — %s", c.runas, sp.ComoRoot, c.root, c.porqu)
+		}
+		if sp.RunasInvocador != c.invo {
+			t.Errorf("%s: RunasInvocador=%v, queria %v — %s",
+				c.runas, sp.RunasInvocador, c.invo, c.porqu)
+		}
+	}
+	// E a ausência continua sendo root — é o padrão do sudo.
+	reg := parseRegraSudo("ana ALL=NOPASSWD: /bin/ls")
+	if !reg.Specs[0].ComoRoot || reg.Specs[0].RunasDeclarado {
+		t.Errorf("sem Runas_Spec o padrão é root: %+v", reg.Specs[0])
+	}
+}
+
+// O `runas_default` é do ARQUIVO: trocá-lo muda o que a AUSÊNCIA de `(runas)`
+// significa, e afirmar root ali vira um crítico sobre uma regra que não concede
+// root nenhum.
+func TestSudoRunasDefaultTrocado(t *testing.T) {
+	f := regraNoHost("web01",
+		"Defaults runas_default=postgres",
+		"ops ALL=NOPASSWD: ALL",
+	)
+	r := sudoSemSenha.Run(sudoSemSenha, f, testEnv())
+	if len(r.Findings) != 1 {
+		t.Fatalf("%+v", r.Findings)
+	}
+	if r.Findings[0].Sev != check.SevWarn {
+		t.Errorf("a ausência de runas não é root neste arquivo: %v", r.Findings[0].Sev)
+	}
+	if ev := strings.Join(r.Findings[0].Evidence, " "); !strings.Contains(ev, "runas_default") {
+		t.Errorf("e a evidência precisa dizer POR QUE deixou de ser root:\n%s", ev)
+	}
+
+	// ESCOPADO não muda a leitura: o escopo não é resolvido, e supor que ele
+	// alcança esta regra inventaria uma absolvição.
+	f = regraNoHost("web01",
+		"Defaults:ana runas_default=postgres",
+		"ops ALL=NOPASSWD: ALL",
+	)
+	r = sudoSemSenha.Run(sudoSemSenha, f, testEnv())
+	if r.Findings[0].Sev != check.SevCritical {
+		t.Errorf("Defaults escopado a OUTRO usuário não absolve esta regra: %v",
+			r.Findings[0].Sev)
+	}
+	if ev := strings.Join(r.Findings[0].Evidence, " "); !strings.Contains(ev, "ESCOPADO") {
+		t.Errorf("mas a ressalva precisa aparecer:\n%s", ev)
+	}
+}
+
+// O `\\` escapa o metacaractere, e o sudoers(5) diz isso. A regra que escapou de
+// propósito — a de quem sabia do problema — não pode sair com a severidade de
+// quem não escapou.
+func TestSudoCuringaEscapadoNaoReabre(t *testing.T) {
+	comEscape := parseRegraSudo(`ops ALL=(root) NOPASSWD: /usr/bin/find /var/log -name \*.gz -delete`)
+	if comEscape.Specs[0].Cmd.Curinga {
+		t.Error("`\\*` é asterisco literal, não curinga")
+	}
+	semEscape := parseRegraSudo(`ops ALL=(root) NOPASSWD: /usr/bin/find /var/log -name *.gz -delete`)
+	if !semEscape.Specs[0].Cmd.Curinga {
+		t.Error("e sem a barra ele continua sendo curinga")
+	}
+}

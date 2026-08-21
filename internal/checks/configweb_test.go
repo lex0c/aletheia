@@ -229,3 +229,54 @@ func TestArvoreDeUploadEhPorSegmento(t *testing.T) {
 		}
 	}
 }
+
+// ARQUIVO ENCONTRADO NÃO É CONFIGURAÇÃO EFETIVA, segunda metade: o eixo aqui
+// não é a diretiva, é a FORMA e o SAPI.
+//
+//	php_admin_value em .htaccess   o Apache não permite — a linha não fica
+//	                               ativa, ela QUEBRA o diretório
+//	.user.ini                      só é lido por CGI/FastCGI; sob mod_php o
+//	                               arquivo não participa de nada
+func TestPrependRessalvaAOrigem(t *testing.T) {
+	// php_admin_value em .htaccess não é backdoor silencioso: é erro de
+	// configuração visível. Afirmar "executa em toda requisição" descreveria um
+	// efeito que não existe.
+	f := fConfigWeb(facts.ConfigWeb{
+		Path: "/var/www/uploads/.htaccess", Tipo: "htaccess",
+		Linhas: []facts.LinhaConfigWeb{
+			{N: 1, Motivo: "prepend", Text: "php_admin_value auto_prepend_file /var/www/uploads/.i.php",
+				Alvo: "/var/www/uploads/.i.php"},
+		},
+	})
+	r := webPrepend.Run(webPrepend, f, imgEnv())
+	if len(r.Findings) != 1 {
+		t.Fatalf("o achado não some — muda a afirmação: %+v", r.Findings)
+	}
+	if r.Findings[0].Sev != check.SevInfo {
+		t.Errorf("o Apache recusa esta forma em .htaccess: %v", r.Findings[0].Sev)
+	}
+	ev := strings.Join(r.Findings[0].Evidence, " ")
+	if strings.Contains(ev, "executa este arquivo em TODA requisição") {
+		t.Errorf("e não pode afirmar o efeito:\n%s", ev)
+	}
+	if !strings.Contains(ev, "QUEBRA o diretório") {
+		t.Errorf("precisa dizer o que a linha faz de verdade:\n%s", ev)
+	}
+
+	// .user.ini com php_value equivalente: o efeito é REAL sob php-fpm, que é o
+	// caso comum. A severidade fica; a condição passa a sair junto.
+	f = fConfigWeb(facts.ConfigWeb{
+		Path: "/var/www/uploads/.user.ini", Tipo: "user.ini",
+		Linhas: []facts.LinhaConfigWeb{
+			{N: 1, Motivo: "prepend", Text: "auto_prepend_file = /var/www/uploads/.i.php",
+				Alvo: "/var/www/uploads/.i.php"},
+		},
+	})
+	r = webPrepend.Run(webPrepend, f, imgEnv())
+	if len(r.Findings) != 1 || r.Findings[0].Sev != check.SevCritical {
+		t.Fatalf("prepend apontando para árvore de upload continua crítico: %+v", r.Findings)
+	}
+	if ev := strings.Join(r.Findings[0].Evidence, " "); !strings.Contains(ev, "CGI/FastCGI") {
+		t.Errorf("mas a condição do SAPI precisa sair junto da afirmação:\n%s", ev)
+	}
+}

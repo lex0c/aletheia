@@ -96,6 +96,23 @@ var webPrepend = check.Check{
 				if ln.Motivo != "prepend" {
 					continue
 				}
+				// A FORMA QUE O SERVIDOR RECUSA não configura nada: o Apache
+				// não permite `php_admin_value` em .htaccess, e a linha quebra o
+				// diretório com erro de configuração em vez de virar backdoor.
+				// Afirmar "o PHP executa em toda requisição" sobre ela seria
+				// descrever um efeito que não existe.
+				if ehAdminEmHtaccess(cw, ln.Text) {
+					fd := self.F(check.SevInfo, nz(ln.Alvo, cw.Path), "",
+						ln.Text,
+						ressalvaDeOrigemWeb(cw, ln.Text),
+						"arquivo: "+cw.Path+":"+strconv.Itoa(ln.N),
+						"o que a linha diz é sobre quem a escreveu, e não sobre o "+
+							"estado do host — o ctime do arquivo data a tentativa")
+					fd.Quando, fd.QuandoFonte = cw.ModUTC, "mtime do arquivo de configuração"
+					fd.Chave = cw.Path + "|" + ln.Alvo
+					r.Findings = append(r.Findings, fd)
+					continue
+				}
 				ev := []string{
 					ln.Text,
 					"o PHP executa este arquivo em TODA requisição servida a partir " +
@@ -105,6 +122,15 @@ var webPrepend = check.Check{
 					"e é configuração POR DIRETÓRIO: diferente do php.ini, ela não " +
 						"exige root — basta escrever dentro da árvore servida, que " +
 						"é o que um upload dá",
+				}
+				// E o EFEITO depende de o arquivo ser lido: o `.user.ini` é coisa
+				// de CGI/FastCGI. A severidade não muda — php-fpm é o caso comum,
+				// e um prepend apontando para dentro de árvore de upload não fica
+				// inocente por causa do SAPI —, mas a AFIRMAÇÃO passa a ter a
+				// condição junto, que é a mesma regra aplicada às diretivas de
+				// proteção (checks/configweb.go).
+				if rs := ressalvaDeOrigemWeb(cw, ln.Text); rs != "" {
+					ev = append(ev, rs)
 				}
 				sev := check.SevWarn
 				if m, sv, susp := execSuspect(ln.Alvo); susp {

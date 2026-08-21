@@ -131,6 +131,19 @@ type specSudo struct {
 	RunasTexto string
 	ComoRoot   bool
 
+	// RunasInvocador é a forma `(:grupo)` e `()`: quem roda é o usuário que
+	// invocou, e a regra entrega um GRUPO — não uma conta.
+	RunasInvocador bool
+	// RunasNota é a ressalva sobre COMO o runas foi resolvido — o padrão
+	// trocado, o `Defaults` escopado. Fica separada do RunasTexto porque o
+	// texto é citado no meio de uma frase, e explicação embutida ali vira
+	// evidência ilegível.
+	RunasNota string
+	// RunasDeclarado diz se a regra escreveu um Runas_Spec. Sem ele, quem
+	// decide é o `runas_default`, e ele pode ter sido trocado por um
+	// `Defaults` — ver runasPadraoDoSudoers.
+	RunasDeclarado bool
+
 	Nopasswd bool
 	Noexec   bool
 	Negado   bool
@@ -402,7 +415,8 @@ func specsDaSecao(toks []string) []specSudo {
 			return
 		}
 		sp := specSudo{Nopasswd: tags.nopasswd, Noexec: tags.noexec, Negado: neg}
-		sp.ComoRoot, sp.RunasTexto = interpretaRunas(runas, runasDeclarado)
+		sp.RunasDeclarado = runasDeclarado
+		sp.ComoRoot, sp.RunasInvocador, sp.RunasTexto = interpretaRunas(runas, runasDeclarado)
 		if bin == "ALL" {
 			sp.Tudo = true
 		} else {
@@ -472,30 +486,43 @@ func ehOpcaoSudo(t string) bool {
 	return true
 }
 
-// interpretaRunas lê o `(usuario:grupo)`. Ausência é root — é o padrão do sudo,
-// e `ALL=NOPASSWD: ALL` concede root do mesmo jeito.
-func interpretaRunas(dentro string, declarado bool) (bool, string) {
-	if !declarado || strings.TrimSpace(dentro) == "" {
-		return true, "root (padrão do sudo, sem runas declarado)"
+// interpretaRunas lê o `(usuario:grupo)`, e as QUATRO formas dele têm respostas
+// diferentes. O sudoers(5) as separa uma a uma:
+//
+//	sem Runas_Spec     roda pelo `runas_default`, que de fábrica é root
+//	(usuario)          roda como aquele usuário
+//	(usuario:grupo)    aquele usuário, com aquele grupo
+//	(:grupo)           roda como o USUÁRIO INVOCADOR, com aquele grupo
+//	()                 roda como o usuário invocador, e só
+//
+// As duas últimas são o conserto de um erro meu: a versão anterior lia `(:grupo)`
+// como root — "só o grupo foi declarado, o usuário continua sendo root" — e
+// chegou a travar isso num teste com essa frase. É o contrário do que o manual
+// diz. `ana ALL=(:www-data) NOPASSWD: ALL` NÃO é root: é a própria `ana` com o
+// grupo `www-data`, e chamar aquilo de "root inteiro, sem responder nada" é um
+// CRÍTICO inventado em cima de uma regra que entrega um grupo.
+func interpretaRunas(dentro string, declarado bool) (comoRoot, invocador bool, texto string) {
+	if !declarado {
+		return true, false, "root (padrão do sudo, sem runas declarado)"
 	}
-	usuarios, _, temGrupo := strings.Cut(dentro, ":")
-	if strings.TrimSpace(usuarios) == "" {
-		// `(:www-data)` declara SÓ o grupo: o usuário continua sendo root, e a
-		// versão anterior lia isto como "não é root".
-		if temGrupo {
-			return true, "root (só o grupo foi declarado em `" + dentro + "`)"
+	usuarios, grupos, temGrupo := strings.Cut(dentro, ":")
+	if strings.TrimSpace(usuarios) != "" {
+		for _, campo := range strings.FieldsFunc(usuarios, func(r rune) bool {
+			return r == ',' || r == ' ' || r == '\t'
+		}) {
+			switch c := strings.TrimSpace(campo); c {
+			case "root", "ALL", "#0":
+				return true, false, c
+			}
 		}
-		return true, "root (padrão do sudo, sem runas declarado)"
+		return false, false, strings.TrimSpace(dentro)
 	}
-	for _, campo := range strings.FieldsFunc(usuarios, func(r rune) bool {
-		return r == ',' || r == ' ' || r == '\t'
-	}) {
-		switch c := strings.TrimSpace(campo); c {
-		case "root", "ALL", "#0":
-			return true, c
-		}
+	// Lista de usuários VAZIA: quem roda é o próprio invocador.
+	if temGrupo && strings.TrimSpace(grupos) != "" {
+		return false, true, "o PRÓPRIO usuário invocador, com o grupo `" +
+			strings.TrimSpace(grupos) + "`"
 	}
-	return false, strings.TrimSpace(dentro)
+	return false, true, "o PRÓPRIO usuário invocador (runas vazio)"
 }
 
 // aplicSudo é a resposta da pergunta que faltava: esta regra vale NESTE host?
@@ -517,46 +544,119 @@ const (
 // Sem isto, um sudoers distribuído por configuração central — que é como uma
 // frota inteira recebe o arquivo — fazia a regra do banco de dados sair
 // CRITICAL em cada servidor web.
+//
+// # A ÚLTIMA entrada que casa é a que decide, e não a primeira
+//
+// A primeira versão desta função devolvia no primeiro casamento, e isso quebrava
+// a forma que a própria gramática oferece para EXCLUIR:
+//
+//	ops ALL,!web01=(root) NOPASSWD: ALL
+//
+// Em web01 ela lia o `ALL`, devolvia "aplicável" e imprimia CRITICAL — sobre a
+// regra escrita justamente para não valer ali. O sudo percorre a lista ao
+// CONTRÁRIO e para no primeiro casamento, que é o mesmo que dizer: vence a
+// última entrada que casa.
+//
+// Entrada que não dá para resolver (alias, netgroup, endereço) POSTERIOR a um
+// casamento apaga a decisão em vez de mantê-la: ela pode casar, é mais nova, e
+// supor que não casa seria inventar uma absolvição.
 func aplicabilidadeSudo(hosts []string, hostname string) (aplicSudo, string) {
-	if len(hosts) == 0 {
-		return sudoIndeterminado, ""
+	if len(hosts) == 0 || hostname == "" {
+		return sudoIndeterminado, strings.Join(hosts, ",")
 	}
-	indet := false
-	var outros []string
+	const (
+		semDecisao = iota
+		decideSim
+		decideNao
+		decideNaoSei
+	)
+	decisao := semDecisao
+	var casou, outros []string
 	for _, h := range hosts {
 		neg := strings.HasPrefix(h, "!")
 		nome := strings.TrimPrefix(h, "!")
-		if nome == "ALL" {
-			if neg {
-				return sudoOutroHost, "!ALL"
-			}
-			return sudoAplicavel, "ALL"
-		}
-		if !ehHostLiteral(nome) {
-			indet = true
+		if !ehHostLiteral(nome) && nome != "ALL" {
+			decisao = decideNaoSei
 			continue
 		}
-		if hostname == "" {
-			indet = true
+		if nome != "ALL" && !casaHostname(nome, hostname) {
+			if !neg {
+				outros = append(outros, nome)
+			}
 			continue
 		}
-		if casaHostname(nome, hostname) {
-			if neg {
-				return sudoOutroHost, nome
-			}
-			return sudoAplicavel, nome
-		}
-		if !neg {
-			outros = append(outros, nome)
+		casou = append(casou, h)
+		if neg {
+			decisao = decideNao
+		} else {
+			decisao = decideSim
 		}
 	}
-	if indet || hostname == "" {
+	switch decisao {
+	case decideSim:
+		return sudoAplicavel, ultimo(casou)
+	case decideNao:
+		return sudoOutroHost, "excluído por `" + ultimo(casou) + "`"
+	case decideNaoSei:
 		return sudoIndeterminado, strings.Join(hosts, ",")
 	}
 	if len(outros) > 0 {
 		return sudoOutroHost, strings.Join(outros, ",")
 	}
 	return sudoIndeterminado, strings.Join(hosts, ",")
+}
+
+func ultimo(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return s[len(s)-1]
+}
+
+// runasPadrao é o que responde por uma regra SEM Runas_Spec. De fábrica é root,
+// e o sudoers deixa trocar:
+//
+//	Defaults runas_default=postgres
+//
+// A partir daí `ops ALL=NOPASSWD: ALL` não é root — é postgres. Afirmar root
+// ali seria um CRÍTICO em cima de uma linha que não concede root nenhum.
+type runasPadrao struct {
+	// Valor é o runas_default declarado; "" quando ninguém trocou.
+	Valor string
+	// Escopado é o `Defaults:usuario runas_default=...` — vale só para o alvo
+	// dele, e esta ferramenta não resolve escopo. Não muda a leitura: entra
+	// como ressalva, porque supor que se aplica seria inventar do outro lado.
+	Escopado bool
+}
+
+func runasPadraoDoSudoers(linhas []string) runasPadrao {
+	var out runasPadrao
+	for _, l := range linhas {
+		t := strings.TrimSpace(l)
+		if !prefixoDePalavra(t, "defaults") {
+			continue
+		}
+		i := strings.Index(strings.ToLower(t), "runas_default")
+		if i < 0 {
+			continue
+		}
+		_, v, ok := strings.Cut(t[i:], "=")
+		if !ok {
+			continue
+		}
+		campos := strings.Fields(v)
+		if len(campos) == 0 {
+			continue
+		}
+		if v = strings.Trim(campos[0], `"'`); v == "" {
+			continue
+		}
+		esc := len(t) > len("defaults") &&
+			strings.ContainsRune(":@>!", rune(t[len("defaults")]))
+		// O ÚLTIMO vence, que é como o sudo resolve `Defaults` repetido.
+		out = runasPadrao{Valor: v, Escopado: esc}
+	}
+	return out
 }
 
 // ehHostLiteral separa o que dá para decidir do que não dá. Alias em CAIXA

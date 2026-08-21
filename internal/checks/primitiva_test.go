@@ -84,10 +84,27 @@ func TestEscadaDaPrimitivaNoSudo(t *testing.T) {
 		{"ops ALL=(root) NOPASSWD: SETENV: /usr/bin/find", check.SevCritical,
 			"executa comando arbitrário",
 			"`SETENV:` é tag, não binário — lê-la como comando escondia o find"},
-		// E a tag que de fato restringe, que antes caía em "não reconheço".
-		{"ops ALL=(root) NOPASSWD: NOEXEC: /usr/bin/vim", check.SevWarn,
-			"tag `NOEXEC:`",
-			"o sudo intercepta a família exec, e é por ali que o escape passa"},
+		// NOEXEC É EVIDÊNCIA, NÃO REBAIXAMENTO — e esta linha também já esteve
+		// travada ao contrário, exigindo WARN.
+		//
+		// A tag impede o processo de EXECUTAR outros; ela não retira o
+		// privilégio do processo que já está rodando. Sem o `:!sh`, o vim como
+		// root ainda é `:w /etc/cron.d/x`. O mesmo vale para tee, dd, python e
+		// para o `-fprintf` do find: em todos, a primitiva mora no próprio
+		// processo, e rebaixar por NOEXEC transformava root em aviso.
+		{"ops ALL=(root) NOPASSWD: NOEXEC: /usr/bin/vim", check.SevCritical,
+			"NÃO rebaixa o achado",
+			"o NOEXEC fecha o processo filho e não tira o privilégio de quem já " +
+				"está rodando: escrever arquivo como root não precisa de exec"},
+		{"ops ALL=(root) NOPASSWD: NOEXEC: /usr/bin/tee", check.SevCritical,
+			"NÃO rebaixa o achado",
+			"a primitiva do tee É a escrita do próprio processo: o NOEXEC não " +
+				"alcança nada dela"},
+		// E o runas de GRUPO, que não é conta nenhuma.
+		{"ops ALL=(:www-data) NOPASSWD: ALL", check.SevWarn,
+			"NÃO é troca de conta",
+			"lista de usuários vazia roda como o invocador: o que a regra " +
+				"acrescenta é o grupo"},
 		{"web ALL=(root) NOPASSWD: /usr/bin/tar czf /b.tgz /srv", check.SevWarn,
 			"SÓ isso que a segura",
 			"argumento fixado prende a primitiva do tar — e o relatório precisa " +

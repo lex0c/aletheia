@@ -245,6 +245,44 @@ func diretivaDaLinhaWeb(cw *facts.ConfigWeb, texto string) string {
 	return ""
 }
 
+// ondeAdmiteWeb responde a pergunta que o `pesoDaDiretivaPHP` faz sobre a
+// diretiva, mas do outro lado: não é a diretiva que não pode vir daqui — é a
+// FORMA de escrevê-la que o servidor não aceita neste arquivo, ou o SAPI que
+// não lê este arquivo.
+//
+//	php_admin_value / php_admin_flag   o Apache NÃO os permite em .htaccess:
+//	                                   a diretiva não é ignorada, ela QUEBRA o
+//	                                   diretório com erro de configuração
+//	.user.ini                          só é lido por CGI/FastCGI (php-fpm). Com
+//	                                   mod_php o arquivo não participa de nada
+//
+// Devolve "" quando não há ressalva a fazer.
+func ressalvaDeOrigemWeb(cw *facts.ConfigWeb, texto string) string {
+	if cw.Tipo == "user.ini" {
+		return "e a origem é um `.user.ini`, que SÓ é lido quando o PHP roda como " +
+			"CGI/FastCGI (php-fpm, o caso comum hoje). Sob `mod_php` este arquivo " +
+			"não participa da configuração — esta ferramenta NÃO determinou o " +
+			"SAPI, e `php -i | grep 'Server API'` responde"
+	}
+	if campos := strings.Fields(strings.TrimSpace(texto)); len(campos) > 0 &&
+		strings.HasPrefix(strings.ToLower(campos[0]), "php_admin_") {
+		return "e a forma é `" + campos[0] + "`, que o Apache NÃO permite em " +
+			"`.htaccess` (só em httpd.conf ou vhost): a diretiva não fica ativa — " +
+			"ela QUEBRA o diretório com erro de configuração, o que é sintoma " +
+			"visível e não backdoor silencioso"
+	}
+	return ""
+}
+
+// ehAdminEmHtaccess é a forma que o Apache recusa: ela não configura nada.
+func ehAdminEmHtaccess(cw *facts.ConfigWeb, texto string) bool {
+	if cw.Tipo != "htaccess" {
+		return false
+	}
+	campos := strings.Fields(strings.TrimSpace(texto))
+	return len(campos) > 0 && strings.HasPrefix(strings.ToLower(campos[0]), "php_admin_")
+}
+
 func nomeDoArquivoWeb(cw *facts.ConfigWeb) string {
 	if cw.Tipo == "user.ini" {
 		return "`.user.ini`"
@@ -257,6 +295,13 @@ func pesoDaDiretivaPHP(cw *facts.ConfigWeb, ln facts.LinhaConfigWeb) (check.Seve
 	vale, conhecida := phpPorDiretorio[dir]
 	arq := nomeDoArquivoWeb(cw)
 	switch {
+	case ehAdminEmHtaccess(cw, ln.Text):
+		return check.SevInfo, []string{
+			ln.Text,
+			ressalvaDeOrigemWeb(cw, ln.Text),
+			"o que a linha diz é sobre quem a escreveu, e não sobre o estado do " +
+				"host — o ctime do arquivo data a tentativa",
+		}, true
 	case !conhecida:
 		// Não saber qual diretiva é não vira absolvição nem crítico: sai como
 		// aviso dizendo o que não foi lido.
@@ -298,6 +343,17 @@ func pesoDaDiretivaPHP(cw *facts.ConfigWeb, ln facts.LinhaConfigWeb) (check.Seve
 				"endurecimento, e chamá-la de afrouxamento invertia o fato",
 		}, true
 
+	case cw.Tipo == "user.ini" && vale:
+		// Vale como diretiva, MAS o arquivo pode nem ser lido: o `.user.ini` é
+		// coisa de CGI/FastCGI. Não afirmar o efeito é a mesma regra que tirou
+		// o crítico do `disable_functions` — só que aqui o eixo é o SAPI.
+		return check.SevWarn, []string{
+			ln.Text,
+			"`" + dir + "` vale a partir de um " + arq + " (é PHP_INI_PERDIR ou " +
+				"PHP_INI_ALL), e muda o comportamento do PHP NESTE diretório — por " +
+				"configuração que não exige root",
+			ressalvaDeOrigemWeb(cw, ln.Text),
+		}, true
 	default:
 		return check.SevWarn, []string{
 			ln.Text,

@@ -334,14 +334,32 @@ var sudoSemSenha = check.Check{
 			"o sudo compara os argumentos como UMA string e o `*` casa espaço, " +
 			"então o confinamento não é demonstrável. A saída é fixar o argumento " +
 			"sem curinga, ou usar a regex ancorada do sudo 1.9.10+",
-		"a tag `NOEXEC:` REBAIXA o achado, e ela é a única do sudoers que " +
-			"responde à primitiva. O freio depende de link dinâmico: binário " +
-			"estático não é interceptado, e por isso o achado continua saindo " +
-			"como aviso em vez de sumir",
+		"a tag `NOEXEC:` NÃO rebaixa o achado, e isso é deliberado: ela impede o " +
+			"processo de executar OUTROS processos, e não retira o privilégio do " +
+			"processo que já está rodando. `tee`, `dd`, `python` e o `-fprintf` do " +
+			"`find` escrevem `/etc/cron.d/x` como root sem criar filho nenhum. A " +
+			"tag entra como evidência, porque fecha uma rota real — o `-exec`, o " +
+			"`:!sh`, o `--to-command` —, e porque o freio ainda depende de link " +
+			"dinâmico",
+		"`(:grupo)` e `()` NÃO são root: com a lista de usuários vazia o comando " +
+			"roda como o PRÓPRIO invocador, e o que a regra acrescenta é um grupo. " +
+			"Saem como aviso, e o alcance é o que aquele grupo escreve",
+		"`Defaults runas_default=` troca o que a AUSÊNCIA de `(runas)` significa: " +
+			"num sudoers com essa linha, `ops ALL=NOPASSWD: ALL` não é root. " +
+			"Escopado (`Defaults:alguém`) não é resolvido e não absolve — a " +
+			"ressalva sai na evidência",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
 		var deOutroHost []string
+		// O runas_default é do ARQUIVO e não da linha: uma regra sem
+		// `(runas)` roda por ele, e um `Defaults runas_default=postgres` em
+		// qualquer ponto do sudoers muda o que a ausência significa.
+		textos := make([]string, 0, len(f.Sudoers))
+		for i := range f.Sudoers {
+			textos = append(textos, f.Sudoers[i].Text)
+		}
+		padrao := runasPadraoDoSudoers(textos)
 		for i := range f.Sudoers {
 			s := &f.Sudoers[i]
 			up := strings.ToUpper(s.Text)
@@ -360,7 +378,7 @@ var sudoSemSenha = check.Check{
 			reg := parseRegraSudo(s.Text)
 			var v vereditoSudo
 			if reg.Ok {
-				v = vereditoDaRegra(reg, naoAutentica, f.Host.Hostname, quem)
+				v = vereditoDaRegra(reg, naoAutentica, f.Host.Hostname, quem, padrao)
 			}
 
 			sev := check.SevWarn
@@ -522,7 +540,7 @@ func rankDaSpec(sp specSudo) int {
 // decisões distintas na mesma linha. A leitura anterior cortava no último
 // `NOPASSWD:` e olhava só o que vinha depois; esta olha todas e fica com a
 // que pesa mais.
-func vereditoDaRegra(reg regraSudo, semSenhaSempre bool, hostname, quem string) vereditoSudo {
+func vereditoDaRegra(reg regraSudo, semSenhaSempre bool, hostname, quem string, padrao runasPadrao) vereditoSudo {
 	var v vereditoSudo
 	for _, sp := range reg.Specs {
 		if !sp.Nopasswd && !semSenhaSempre {
@@ -541,7 +559,7 @@ func vereditoDaRegra(reg regraSudo, semSenhaSempre bool, hostname, quem string) 
 			}
 			continue
 		}
-		sev, ev := vereditoDoSpec(sp, quem)
+		sev, ev := vereditoDoSpec(aplicaRunasPadrao(sp, padrao), quem)
 		// Empate de severidade é decidido pela primitiva MAIS DIRETA: quando a
 		// linha concede `find` e `bash` juntos, a evidência precisa citar o
 		// shell. Era o que o `concedeExecucao` fazia com a ordem das classes, e
@@ -555,6 +573,40 @@ func vereditoDaRegra(reg regraSudo, semSenhaSempre bool, hostname, quem string) 
 	return v
 }
 
+// aplicaRunasPadrao resolve o que a AUSÊNCIA de `(runas)` significa.
+//
+// De fábrica é root, e é o que a regra continua sendo na esmagadora maioria dos
+// arquivos. Mas o sudoers deixa trocar o padrão, e a partir daí
+// `ops ALL=NOPASSWD: ALL` deixa de ser root:
+//
+//	Defaults runas_default=postgres
+//
+// Escopado (`Defaults:ana runas_default=...`) NÃO muda a leitura: esta
+// ferramenta não resolve escopo, e supor que ele alcança esta regra seria
+// inventar uma absolvição do mesmo jeito que ignorá-lo inventaria um crítico. A
+// ressalva entra na evidência, que é onde o operador consegue usá-la.
+func aplicaRunasPadrao(sp specSudo, padrao runasPadrao) specSudo {
+	if sp.RunasDeclarado || padrao.Valor == "" {
+		return sp
+	}
+	if padrao.Escopado {
+		sp.RunasNota = "há um `Defaults` ESCOPADO trocando o `runas_default` para `" +
+			padrao.Valor + "` neste sudoers, e esta ferramenta não resolve o escopo " +
+			"dele: a regra continua sendo lida como root, que é o padrão de fábrica"
+		return sp
+	}
+	switch padrao.Valor {
+	case "root", "ALL", "#0":
+		return sp
+	}
+	sp.ComoRoot = false
+	sp.RunasTexto = "`" + padrao.Valor + "`"
+	sp.RunasNota = "a regra NÃO declara runas, e quem responde por isso é o " +
+		"`runas_default` — que este sudoers trocou para `" + padrao.Valor + "`. A " +
+		"ausência de `(runas)` deixou de significar root neste arquivo"
+	return sp
+}
+
 // vereditoDoSpec é a escada inteira para UM Cmnd_Spec.
 func vereditoDoSpec(sp specSudo, quem string) (check.Severity, []string) {
 	c := sp.Cmd
@@ -565,6 +617,14 @@ func vereditoDoSpec(sp specSudo, quem string) (check.Severity, []string) {
 		sev = check.SevCritical
 		ev = []string{"e a especificação de comando é ALL, como " + sp.RunasTexto +
 			": é root inteiro, sem responder nada"}
+	case sp.Tudo && sp.RunasInvocador:
+		// `(:www-data)` e `()`: não há troca de conta nenhuma. A regra entrega
+		// QUALQUER comando ao próprio usuário, com um GRUPO a mais — o que ele
+		// ganha é o que aquele grupo pode escrever, e não uma identidade.
+		ev = []string{"a especificação de comando é ALL, e o runas é " + sp.RunasTexto +
+			": NÃO é root e NÃO é troca de conta — o que a regra acrescenta é o " +
+			"GRUPO, e o alcance dela é o que aquele grupo escreve (arquivo de " +
+			"aplicação, socket, diretório de deploy)"}
 	case sp.Tudo:
 		// Conceder TUDO como outra conta não é root, e dizer que é seria
 		// afirmar o que a regra não diz. Continua valendo olhar — quem usa vira
@@ -622,17 +682,35 @@ func vereditoDoSpec(sp specSudo, quem string) (check.Severity, []string) {
 			"o que a regra concede depende do que aquele binário faz com " +
 			"privilégio, e a tabela de referência do assunto é a GTFOBins"}
 	}
-	if sp.Noexec && sev == check.SevCritical && !sp.Tudo {
-		// NOEXEC é a tag que de fato restringe: o sudo pré-carrega uma
-		// biblioteca que intercepta a família exec, e o `-exec` do find, o `:!sh`
-		// do vim e o `--to-command` do tar passam todos por ela. Manter CRITICAL
-		// aqui seria ignorar a única tag do sudoers que responde à primitiva.
-		sev = check.SevWarn
-		ev = append(ev, "MAS a regra tem a tag `NOEXEC:`, e ela responde justamente "+
-			"a esta primitiva: o sudo pré-carrega uma biblioteca que intercepta a "+
-			"família `exec`, e é por ali que o escape passa")
-		ev = append(ev, "o freio NÃO é absoluto: ele depende de link dinâmico. "+
-			"Binário estático, ou que chame o syscall direto, não é interceptado")
+	if sp.RunasNota != "" {
+		ev = append(ev, sp.RunasNota)
+	}
+	if sp.Noexec {
+		// NOEXEC ENTRA COMO EVIDÊNCIA, E NÃO MAIS COMO REBAIXAMENTO.
+		//
+		// A versão anterior rebaixava qualquer CRÍTICO de primitiva para aviso
+		// quando via a tag, e a premissa estava errada: o NOEXEC impede o
+		// processo de EXECUTAR OUTROS processos, e não retira o privilégio do
+		// processo que já está rodando. Onde a primitiva mora no próprio
+		// processo, ele não tira nada:
+		//
+		//	tee, dd, cp     a primitiva É a escrita do próprio processo
+		//	python, perl    `open("/etc/cron.d/x","w")` não chama exec nenhum
+		//	vim             sem o `:!sh` ainda é `:w /etc/cron.d/x` como root
+		//	find            `-fprintf` escreve arquivo sem criar processo
+		//
+		// Ou seja: rebaixar por NOEXEC transformava root em aviso numa boa
+		// parte da própria tabela de primitivas. Ele volta a ser o que é — um
+		// fato da regra que o operador precisa saber, e que restringe UMA das
+		// rotas.
+		ev = append(ev, "a regra tem a tag `NOEXEC:`: o sudo pré-carrega uma "+
+			"biblioteca que impede este processo de EXECUTAR outros, o que fecha o "+
+			"`-exec`, o `:!sh` e o `--to-command`")
+		ev = append(ev, "isso NÃO rebaixa o achado, e a razão é o que sobra: o "+
+			"NOEXEC não tira o privilégio do processo que já está rodando. "+
+			"Escrever `/etc/cron.d/x` ou `~root/.ssh/authorized_keys` não precisa "+
+			"de processo filho — e o freio ainda depende de link dinâmico, então "+
+			"binário estático não é interceptado")
 	}
 	return sev, ev
 }

@@ -144,8 +144,15 @@ func TestEvasaoSudoers(t *testing.T) {
 		{"ana ALL=(postgres) NOPASSWD: ALL", false, "outra conta não é root"},
 		{"ana ALL=NOPASSWD: ALL", true, "sem runas: root é o padrão"},
 		// As três formas que a leitura por `strings.Index` errava.
-		{"ana ALL=(:www-data) NOPASSWD: ALL", true,
-			"só o GRUPO declarado: o usuário continua sendo root"},
+		// ESTA LINHA JÁ ESTEVE TRAVADA AO CONTRÁRIO, com a frase "só o grupo
+		// foi declarado, o usuário continua sendo root". O sudoers(5) diz o
+		// oposto: lista de usuários VAZIA e lista de grupos preenchida faz o
+		// comando rodar como o usuário INVOCADOR, com aquele grupo. Não há root
+		// nenhum aqui, e chamar isto de "root inteiro" era um crítico inventado.
+		{"ana ALL=(:www-data) NOPASSWD: ALL", false,
+			"lista de usuários vazia: roda como o invocador, com o grupo www-data"},
+		{"ana ALL=() NOPASSWD: ALL", false,
+			"as duas listas vazias: roda só como o próprio invocador"},
 		{"ana ALL=NOPASSWD: /usr/bin/vim ^(/etc/motd|/etc/issue)$", true,
 			"o parêntese é do REGEX de argumento, não do runas"},
 		{"ana ALL=(postgres) NOPASSWD: /bin/sh -c 'echo (x)'", false,
@@ -183,6 +190,7 @@ func TestEvasaoSudoers(t *testing.T) {
 	}
 	roda(t, "tag não engole o comando", fSemSenha, []ev{
 		{"ops ALL=(root) NOPASSWD: /usr/bin/find", true, "forma base"},
+		{"ops ALL=(:adm) NOPASSWD: /usr/bin/find", true, "runas de grupo não muda a tag"},
 		{"ops ALL=(root) NOPASSWD: SETENV: /usr/bin/find", true, "tag SETENV depois do NOPASSWD"},
 		{"ops ALL=(root) NOPASSWD:SETENV:/usr/bin/find", true, "as duas tags coladas"},
 		{"ops ALL=(root) NOPASSWD: /bin/true, /usr/bin/find", true, "segundo da lista"},

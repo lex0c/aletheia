@@ -74,6 +74,8 @@ COMANDOS
   wtf           overview em ~1s: este host está pegando fogo?
   watch         varre em ciclo e reporta só o que MUDAR: o eixo do tempo
   baseline      captura o estado atual como referência para comparar depois
+  drift         o que MUDOU desde um retrato anterior — a mudança para a qual
+                não existe check a escrever
   collect       só coleta: tira o retrato do host e sai. Não conclui nada
   analyze       só analisa: roda os checks sobre um retrato, do lado limpo
   preserve      guarda a evidência antes que ela suma — inclusive tráfego
@@ -130,6 +132,34 @@ FLAGS DE watch
 
   Amostragem por polling PERDE o que dura menos que o intervalo, e o resumo diz
   isso. Detecção contínua de verdade se instala ANTES do incidente, com eBPF.
+
+DRIFT — o que mudou desde um estado conhecido
+  aletheia drift ANTES.json [DEPOIS.json]
+
+  ANTES é um dump do collect. Sem DEPOIS, o estado atual é coletado agora.
+  Só os checks de drift rodam (--all-checks roda todos).
+
+  scan  há evidência de comprometimento AGORA?
+  watch quando isto aconteceu, enquanto eu olhava?
+  drift o que mudou desde um retrato que eu tinha?
+
+  Ele alcança o que nenhum check alcança: a mudança de uma forma legítima para
+  OUTRA forma legítima. ExecStart que passa a apontar para outro binário de
+  pacote, chave de SSH trocada por outra bem formada, command= retirado de uma
+  chave existente — não há regra a escrever, e o que denuncia é a transição.
+
+  Os DOIS retratos precisam ter sido feitos com o mesmo alcance: comparar um com
+  root contra um sem root fabricaria "sumiu" para tudo que só root enxerga. As
+  famílias afetadas são declaradas NÃO COMPARADAS, e o silêncio delas deixa de
+  valer como resposta.
+
+  A mudança é datada por INTERVALO ("entre t0 e t1"), nunca por instante: a
+  ferramenta não estava presente na hora, e fingir precisão no eixo do tempo
+  manda quem investiga para a hora errada.
+
+  --root PATH   comparar contra uma imagem montada
+  --only G,G    igual ao scan
+  --all-checks  roda o catálogo inteiro, e não só os de drift
 
 FLAGS DE baseline
   --root PATH   capturar de imagem montada em vez do host vivo
@@ -275,6 +305,8 @@ func main() {
 		os.Exit(runWtf(os.Args[2:]))
 	case "watch":
 		os.Exit(runWatch(os.Args[2:]))
+	case "drift":
+		os.Exit(runDrift(os.Args[2:]))
 	case "baseline":
 		os.Exit(runBaseline(os.Args[2:]))
 	case "preserve":

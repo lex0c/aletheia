@@ -305,6 +305,10 @@ type Facts struct {
 	// Não é o mesmo que "não havia nada": é "não deu para olhar".
 	Partial map[string][]string `json:"partial,omitempty"`
 
+	// DriftDados é a comparação com um estado anterior, quando alguém pediu
+	// uma. NÃO viaja no dump — ver o tipo Drift.
+	DriftDados *Drift `json:"-"`
+
 	idx *idx
 
 	// idxMount indexa a tabela de montagem por ponto. Fica aqui e não no idx

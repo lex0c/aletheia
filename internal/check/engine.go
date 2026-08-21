@@ -221,6 +221,24 @@ func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 			})
 			continue
 		}
+		// SEM COMPARAÇÃO NÃO HÁ PERGUNTA, e ela sai do DENOMINADOR.
+		//
+		// Um check de drift sobre fatos sem drift não acha nada — e "não achei"
+		// aqui significaria "ninguém pediu comparação", que é decisão de quem
+		// roda e não lacuna do host. Marcá-lo como lacuna tornaria o exit 0
+		// inalcançável em toda execução sem `--drift`, e uma lacuna que nunca
+		// fecha é uma que as pessoas aprendem a ignorar (ver NotChecked.Escopo).
+		if c.Drift && !f.TemDrift() {
+			r.Coverage.NotChecked = append(r.Coverage.NotChecked, NotChecked{
+				ID: c.ID, Ref: c.Ref, Title: c.Title,
+				Reason: "nenhum estado anterior foi informado: não há o que comparar",
+				Escopo: true,
+				Manual: []string{"`aletheia drift ANTES.json` ou `--drift ANTES.json` " +
+					"compara este host com um retrato dele"},
+			})
+			r.Coverage.Total--
+			continue
+		}
 		if c.Sources&e.Source == 0 {
 			r.Coverage.NotChecked = append(r.Coverage.NotChecked, NotChecked{
 				ID: c.ID, Ref: c.Ref, Title: c.Title,

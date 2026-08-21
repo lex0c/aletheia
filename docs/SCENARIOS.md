@@ -3,7 +3,7 @@
 GERADO de `internal/checks` e `test/scenario`. Não edite à mão:
 `go test ./test/scenario -run TestDocumentoDeCenarios -update`.
 
-109 checks, 214 cenários.
+114 checks, 217 cenários.
 
 Um **check** é uma pergunta que a ferramenta faz ao host. Um **cenário** é um
 host montado de propósito — em contêiner, imagem ou microVM — que prova a
@@ -30,10 +30,11 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `manual.cloud_audit` *(manual)* | 10.4 | a evidência que o root do host não apaga está fora da caixa | — |
 | `persist.cloud_metadata` *(manual)* | 7.12 | startup-script no metadata da nuvem: fora do alcance desta varredura | — |
 
-### `integrity` (6)
+### `integrity` (7)
 
 | check | § | o que acusa | provado por |
 |---|---|---|---|
+| `integrity.drift_coverage` | 39.3 | o que a comparação com o retrato anterior NÃO alcançou | `DR1-drift-de-persistencia`, `DR2-drift-sem-mudanca-e-silencio` |
 | `integrity.immutable_flag` | 21 | arquivo travado por atributo de inode: a remoção falha até ele sair | `C2-implante-imutavel` |
 | `integrity.no_package_owner` | 24 | binário em execução ou agendado que nenhum pacote reivindica | `100-azazel-userland`, `101-nss-backdoor`, `18b-nome-de-runtime-sem-pacote-nao-compra-isencao` +16 |
 | `integrity.pkg_file_modified` | 24 | arquivo entregue por um pacote não confere com o que o pacote declara | `92-userland-trojanizado` |
@@ -79,7 +80,7 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `net.pivot` | 12.2 | pivô: saída externa e saída interna no mesmo processo | `42-pivot`, `Q1-pool-php-fpm-nao-vira-parede` |
 | `net.vector_same_user` | 14 | por onde a entrada pode ter acontecido: serviços do mesmo usuário | `W3-vetor-estreitado-pelo-usuario` |
 
-### `persist` (41)
+### `persist` (44)
 
 | check | § | o que acusa | provado por |
 |---|---|---|---|
@@ -90,9 +91,11 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `antiforense.wtmp_cleared` | 12 | há sessão aberta e nenhum registro de login: o histórico foi zerado | `F2-sessao-sem-registro` |
 | `correlate.persistence_redundant` | 7 | o mesmo alvo persistido por vários mecanismos diferentes | `66-cadeia-completa`, `81-minerador-oportunista`, `94-xorddos` +2 |
 | `persist.at_job` | 7.4 | job do at agendado: dispara uma vez, no futuro | `62-cron-e-chaves`, `63-cron-e-chaves-em-imagem` |
+| `persist.authorized_key_drift` | 7.3 | chave autorizada de SSH mudou desde o retrato anterior | `DR1-drift-de-persistencia` |
 | `persist.bash_env` | 7.6 | BASH_ENV definido: executa em shell NÃO interativo | `64-gatilhos-de-execucao` |
 | `persist.binfmt_config` | 7.12 | configuração de binfmt que recria um interpretador no boot | `GB1-binfmt-interpretador-sem-dono` |
 | `persist.ca_planted` | 7.12 | âncora de confiança instalada fora do pacote de certificados | `65-confianca-e-deploy` |
+| `persist.cron_drift` | 7.5 | agendamento mudou desde o retrato anterior | `DR1-drift-de-persistencia` |
 | `persist.cron_frequent` | 7.1 | agendamento com intervalo curto: a cadência de um beacon | `62-cron-e-chaves`, `93-kinsing`, `95-outlaw` +2 |
 | `persist.cron_suspect` | 7.1 | agendamento executa de lugar suspeito, ou baixa o que executa | `62-cron-e-chaves`, `63-cron-e-chaves-em-imagem`, `81-minerador-oportunista` +3 |
 | `persist.env_preload` | 7.8 | LD_PRELOAD definido em arquivo lido a cada sessão | `60-persistencia-ao-vivo` |
@@ -120,12 +123,13 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `persist.trigger_exec` | 7.7 | gatilho de boot, login ou pacote executa algo suspeito | `64-gatilhos-de-execucao`, `65-confianca-e-deploy`, `83-comprometimento-de-aplicacao` +3 |
 | `persist.udev_run` | 7.12 | regra de udev executa programa em evento de dispositivo | `64-gatilhos-de-execucao` |
 | `persist.unit_bind_shadow` | 7.2 | unit monta outro arquivo por cima de um caminho de sistema | `A12-bind-troca-o-arquivo-sob-caminho-limpo` |
+| `persist.unit_drift` | 7.4 | unit do systemd mudou desde o retrato anterior | `DR1-drift-de-persistencia` |
 | `persist.unit_dropin_exec` | 7.2 | drop-in acrescenta execução a uma unit existente | `60-persistencia-ao-vivo`, `61-persistencia-em-imagem`, `71-adversario-competente` +1 |
 | `persist.unit_exec_suspect` | 7.2 | unit de systemd executa de lugar suspeito, ou baixa o que executa | `60-persistencia-ao-vivo`, `61-persistencia-em-imagem`, `81-minerador-oportunista` +4 |
 | `persist.unit_socket_unowned` | 7.2 | unit de ativação expõe gatilho para binário que nenhum pacote entregou | `A5-ativacao-por-socket`, `J2-dropin-ao-lado-da-unit-de-verdade` |
 | `persist.unit_unowned` | 7.2 | serviço de systemd executa um binário de sistema que nenhum pacote entregou | `100-azazel-userland`, `J7-nome-nu-path-padrao`, `US1-nome-nu-atras-de-env` |
 
-### `priv` (16)
+### `priv` (17)
 
 | check | § | o que acusa | provado por |
 |---|---|---|---|
@@ -143,6 +147,7 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `priv.root_equivalent_group` | 7.9 | grupo que equivale a root tem membro | `67-privilegio` |
 | `priv.root_runs_writable` | 36.4 | root executa um arquivo que outra pessoa pode reescrever | `W1-root-executa-o-que-outro-escreve` |
 | `priv.service_account_shell` | 7.9 | conta de serviço com shell de login | `67-privilegio` |
+| `priv.sudo_drift` | 7.9 | regra de sudo mudou desde o retrato anterior | `DR1-drift-de-persistencia` |
 | `priv.sudo_nopasswd` | 7.9 | regra de sudo que escala sem pedir senha | `84-acesso-por-credencial`, `85-acesso-por-credencial-imagem`, `T5-servidor-de-banco-como-imagem` |
 | `priv.uid_zero` | 7.9 | conta com uid 0 além do root | `67-privilegio`, `84-acesso-por-credencial`, `85-acesso-por-credencial-imagem` +2 |
 
@@ -274,6 +279,9 @@ contêiner não alcança — hidepid, sysctl, módulo, cgroup, eBPF.
 | `C1-capability-em-xattr` | vm | retenção de root por capability em atributo estendido, sem bit de setuid nenhum |
 | `C2-implante-imutavel` | vm | implante travado com atributo imutável: a limpeza falha, e falha em silêncio |
 | `D2-forca-bruta-que-entrou` | live | a mesma origem que falhou dezenas de vezes conseguiu entrar |
+| `DR1-drift-de-persistencia` | live | quatro mudanças legítimas em forma, invisíveis para o catálogo de checks |
+| `DR2-drift-sem-mudanca-e-silencio` | live | duas coletas do MESMO contêiner parado: o drift precisa ser VAZIO, senão a feature é ruído |
+| `DR3-drift-com-a-ordem-trocada` | live | os dois retratos na ordem errada: a ferramenta precisa RECUSAR, e não responder ao contrário |
 | `E1-chave-privada-sem-senha` | live | chave SSH privada sem senha: credencial de movimento lateral largada aberta |
 | `E2-historico-desligado` | live | histórico de shell apontado para /dev/null e desligado no rc: rastro apagado de propósito |
 | `E3-alcance-do-host` | live | known_hosts: dezenas de evidências mandam procurar na frota, e esta diz em quais máquinas |

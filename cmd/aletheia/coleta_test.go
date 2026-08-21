@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -346,5 +348,51 @@ func TestResumoMostraGapMesmoComCapsCompletas(t *testing.T) {
 	}
 	if !strings.Contains(out, "O QUE ESTA COLETA NÃO VIU") || !strings.Contains(out, "40000 diretórios") {
 		t.Errorf("a truncagem de SUID (PersistDenied) precisa sair no resumo: %q", out)
+	}
+}
+
+// FLAG DEPOIS DO POSICIONAL, que é a forma que o próprio texto de uso
+// documenta:
+//
+//	analyze DUMP [--ioc F] [--since S] [--only G,G] ...
+//
+// O `flag` da stdlib para no primeiro não-flag, então `analyze dump.json --only
+// proc` via TRÊS posicionais e o comando saía com "informe UM dump". Falhava
+// ruidosamente — melhor que em silêncio —, mas a documentação prometia o que o
+// comando recusava.
+func TestFlagDepoisDoPosicional(t *testing.T) {
+	casos := []struct {
+		nome  string
+		args  []string
+		quer  []string
+		only  string
+		vquer bool
+	}{
+		{nome: "tudo antes", args: []string{"--only", "proc", "-v", "d.json"},
+			quer: []string{"d.json"}, only: "proc", vquer: true},
+		{nome: "tudo depois", args: []string{"d.json", "--only", "proc", "-v"},
+			quer: []string{"d.json"}, only: "proc", vquer: true},
+		{nome: "no meio", args: []string{"--only", "proc", "d.json", "-v"},
+			quer: []string{"d.json"}, only: "proc", vquer: true},
+		{nome: "dois posicionais", args: []string{"a.json", "-v", "b.json"},
+			quer: []string{"a.json", "b.json"}, vquer: true},
+		{nome: "sem flag", args: []string{"a.json"}, quer: []string{"a.json"}},
+	}
+	for _, c := range casos {
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		only := fs.String("only", "", "")
+		v := fs.Bool("v", false, "")
+		pos, err := parseComPosicionais(fs, c.args)
+		if err != nil {
+			t.Errorf("%s: %v", c.nome, err)
+			continue
+		}
+		if strings.Join(pos, ",") != strings.Join(c.quer, ",") {
+			t.Errorf("%s: posicionais = %v, quer %v", c.nome, pos, c.quer)
+		}
+		if *only != c.only || *v != c.vquer {
+			t.Errorf("%s: --only=%q -v=%v, quer %q/%v", c.nome, *only, *v, c.only, c.vquer)
+		}
 	}
 }

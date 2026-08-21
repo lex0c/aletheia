@@ -79,6 +79,17 @@ type partialJSON struct {
 type notCheckedJSON struct {
 	ID     string `json:"id"`
 	Reason string `json:"reason"`
+	// Escopo separa as DUAS coisas que moram em not_checked, e a distinção é a
+	// mesma que o motor faz: lacuna é o que não rodou e devia; escopo é a
+	// pergunta que não existe neste host — ela sai do DENOMINADOR e não derruba
+	// a cobertura.
+	//
+	// O harness lia as duas como lacuna, e por muito tempo isso não custou nada
+	// porque quase nada era escopo. Deixou de ser verdade quando os checks de
+	// drift entraram: sem estado anterior informado eles são escopo puro, e todo
+	// cenário de host limpo passou a "ter cinco lacunas" que a cobertura, na
+	// mesma execução, contava como 109/109.
+	Escopo bool `json:"out_of_scope"`
 }
 
 // lacunas devolve TODO motivo de lacuna declarado na execução, venha ele de um
@@ -91,6 +102,10 @@ func (r result) lacunas() []string {
 		}
 	}
 	for _, n := range r.coverage.NotChecked {
+		if n.Escopo {
+			// Fora de escopo não é lacuna — ver notCheckedJSON.Escopo.
+			continue
+		}
 		out = append(out, n.ID+" NÃO RODOU: "+n.Reason)
 	}
 	return append(out, r.coverage.CollectorGaps...)

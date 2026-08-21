@@ -189,6 +189,16 @@ type Check struct {
 	// Wtf marca os checks que cabem no orçamento de ~1s do overview.
 	Wtf bool
 
+	// Drift marca o check que só tem o que responder quando DUAS pontas foram
+	// comparadas — ele lê f.DriftDados, e sem comparação não há pergunta.
+	//
+	// Sem esta marca ele cairia na mesma armadilha que a ferramenta evita em
+	// todo lugar: rodar sobre fato ausente e concluir "nada encontrado" quando
+	// o certo é "não houve o que olhar". Com ela, o motor o declara NÃO
+	// VERIFICADO na cobertura — que é a resposta honesta — e o `aletheia drift`
+	// o usa como seleção.
+	Drift bool
+
 	// Run recebe o próprio Check para poder montar Findings com o ID, o Ref
 	// e os FalsePositives dele — sem referenciar a var de pacote, o que
 	// criaria ciclo de inicialização.
@@ -252,12 +262,18 @@ type Selection struct {
 	Mode   string   // "", "auto", "manual"
 	OnlyID []string // vazio = todos
 	Wtf    bool
+	// Drift seleciona SÓ os checks que comparam duas pontas. É o `aletheia
+	// drift`, que responde "o que mudou" e não "o que há de errado".
+	Drift bool
 }
 
 func Select(s Selection) []Check {
 	var out []Check
 	for _, c := range All() {
 		if s.Wtf && !c.Wtf {
+			continue
+		}
+		if s.Drift && !c.Drift {
 			continue
 		}
 		if len(s.Groups) > 0 && !contains(s.Groups, c.Group) {

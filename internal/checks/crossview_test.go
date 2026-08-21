@@ -13,7 +13,7 @@ import (
 // nascido entre a listagem e ela.
 func TestPidOcultoSeveridadePelaVia(t *testing.T) {
 	f := &facts.Facts{Cross: facts.CrossView{
-		ProbeAte: 40000, PidMax: 4194304,
+		ProbeAte: 4194304, ProbeProcfsAte: 40000, PidMax: 4194304,
 		Hidden: []facts.HiddenPid{
 			{PID: 666, Como: "ppid de processo visível", Comm: "x"},
 			{PID: 777, Como: "sondagem: responde a stat e não aparece na listagem", Comm: "y"},
@@ -30,9 +30,39 @@ func TestPidOcultoSeveridadePelaVia(t *testing.T) {
 	if sev["pid=777"] != check.SevWarn {
 		t.Error("a sondagem pode pegar processo recém-nascido")
 	}
-	// Sem dizer até onde sondou, "nenhum PID oculto" não significa nada.
-	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "sondagem foi até") {
-		t.Error("o alcance da sondagem precisa aparecer na evidência")
+	// Sem dizer até onde sondou, "nenhum PID oculto" não significa nada. E são
+	// DUAS testemunhas com alcances diferentes — kill(2) cobre pid_max inteiro,
+	// /proc cobre a faixa em uso —, então um número só não responde "sobre o
+	// quê".
+	ev := strings.Join(r.Findings[0].Evidence, " ")
+	for _, quer := range []string{"kill(2)", "4194304", "/proc", "40000"} {
+		if !strings.Contains(ev, quer) {
+			t.Errorf("o alcance da sondagem precisa aparecer na evidência (falta %q): %s", quer, ev)
+		}
+	}
+}
+
+// Alcance ZERO por sinal não é "sondou até o pid 0": é NÃO SONDOU. Acontece de
+// verdade em dois casos — comando com teto de tempo (wtf) e hidepid sem root —,
+// e nos dois a lacuna sai declarada à parte. O que não pode é a evidência
+// imprimir um número que se lê como alcance.
+func TestPidOcultoDizQuandoASondagemNaoRodou(t *testing.T) {
+	f := &facts.Facts{Cross: facts.CrossView{
+		ProbeAte: 0, ProbeProcfsAte: 40000, PidMax: 4194304,
+		Hidden: []facts.HiddenPid{
+			{PID: 777, Como: "sondagem: responde a stat em /proc e não aparece na listagem"},
+		},
+	}}
+	r := pidOculto.Run(pidOculto, f, testEnv())
+	if len(r.Findings) == 0 {
+		t.Fatal("sem achado não há evidência para conferir")
+	}
+	ev := strings.Join(r.Findings[0].Evidence, " ")
+	if strings.Contains(ev, "até pid 0") {
+		t.Errorf("alcance zero saiu como se fosse alcance: %s", ev)
+	}
+	if !strings.Contains(ev, "NÃO rodou") {
+		t.Errorf("a evidência precisa dizer que a varredura por sinal não rodou: %s", ev)
 	}
 }
 

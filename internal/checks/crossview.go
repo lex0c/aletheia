@@ -164,6 +164,12 @@ var pidOculto = check.Check{
 		"LIMITE que vale mais que o check: se o KERNEL estiver comprometido, as " +
 			"duas fontes mentem juntas. Ausência de divergência não prova nada — " +
 			"presença prova muito",
+		"PONTO CEGO NOMEADO: a sondagem tem duas testemunhas com alcances " +
+			"diferentes — kill(2) cobre pid_max inteiro, /proc cobre a faixa em " +
+			"uso. Um rootkit que minte NAS DUAS e posicione o PID acima da faixa " +
+			"do /proc (via ns_last_pid) não é achado aqui. Isso é limite do " +
+			"método e fica dito aqui, não na cobertura: o alcance foi coberto, e " +
+			"lacuna que aparece em toda execução deixa de informar",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
@@ -183,7 +189,18 @@ var pidOculto = check.Check{
 				ev = append(ev, "pode ser processo nascido entre a listagem e a "+
 					"sondagem — o que dá sinal é a quantidade, não o caso isolado")
 			}
-			ev = append(ev, "sondagem foi até pid "+strconv.Itoa(f.Cross.ProbeAte)+
+			// O ALCANCE das duas testemunhas, e não um número só: elas cobrem
+			// faixas diferentes de propósito, e sem os dois números "nenhum
+			// outro PID oculto" não diz sobre o quê.
+			porSinal := "até pid " + strconv.Itoa(f.Cross.ProbeAte)
+			if f.Cross.ProbeAte == 0 {
+				// Zero aqui não é "sondou até o pid 0": é "não sondou". A
+				// diferença importa porque esta linha é a que diz sobre QUE
+				// faixa vale o "nenhum outro PID oculto" logo acima.
+				porSinal = "NÃO rodou (ver a lacuna declarada)"
+			}
+			ev = append(ev, "sondagem por kill(2) "+porSinal+
+				", e por /proc até "+strconv.Itoa(f.Cross.ProbeProcfsAte)+
 				" (pid_max="+strconv.Itoa(f.Cross.PidMax)+")")
 
 			fd := self.F(sev, "pid="+strconv.Itoa(h.PID), "", ev...)

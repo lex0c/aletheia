@@ -27,7 +27,15 @@ import (
 //	2  coleta de /proc/sysvipc/shm (persist.sysv_shm_channel) e do config de
 //	   cliente ssh (persist.ssh_client_exec). Um dump v1 não os tem, e os dois
 //	   checks concluiriam "limpo" sobre fatos nunca coletados.
-const SchemaVersion = 2
+//	3  a sondagem de PID ganhou uma SEGUNDA testemunha (kill(2), cobrindo pid_max
+//	   inteiro) e o alcance virou dois números: ProbeAte agora é o do sinal e
+//	   ProbeProcfsAte é o do /proc. Num dump v2 o campo novo vem zerado e o campo
+//	   antigo tem outro significado, então cross.hidden_pid imprimiria "sondagem
+//	   foi até N por kill(2) e até 0 por /proc" — trocando o nome da testemunha e
+//	   afirmando alcance zero onde houve alcance. Não é falso "limpo", é pior de
+//	   um jeito: é evidência com a etiqueta errada, e é sobre ela que alguém
+//	   decide se o host tem rootkit.
+const SchemaVersion = 3
 
 // Facts é o retrato do host.
 type Facts struct {

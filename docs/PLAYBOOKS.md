@@ -1,6 +1,6 @@
 <!-- Extraído do README para não afogar o começo dele: eram 600 das 1450 linhas,
      e quem chega pela primeira vez precisa de instalação e primeiro comando,
-     não de catorze fluxos completos. -->
+     não de quinze fluxos completos. -->
 
 # Quando usar cada comando
 
@@ -22,6 +22,7 @@ suspeito que o host esteja escondendo?   -> scan --root
 o comportamento aparece e some?          -> watch
 tenho um estado conhecido anterior?       -> baseline
 quero saber exatamente quais regras há?  -> checks
+não confio no binário que está no host?  -> mídia read-only (Cenário 14)
 ```
 
 Abaixo estão fluxos concretos de investigação.
@@ -585,7 +586,75 @@ o oposto do que a comparação existe para fazer.
 
 ---
 
-## Cenário 14: "Quero saber exatamente por que um finding existe"
+## Cenário 14: "Preciso rodar no host, mas não confio no que já está lá"
+
+O binário que você executa é a única coisa da investigação que você controla
+inteiramente — desde que ele não venha do host suspeito e não possa ser trocado
+depois de chegar.
+
+Prepare a mídia na máquina limpa, verificando antes de gravar:
+
+```sh
+ARCH=amd64
+BASE="https://github.com/lex0c/aletheia/releases/latest/download"
+
+curl -fLO "$BASE/aletheia-linux-$ARCH"
+curl -fLO "$BASE/SHA256SUMS"
+curl -fLO "$BASE/SHA256SUMS.minisig"
+
+minisign -Vm SHA256SUMS -p aletheia.pub
+sha256sum --ignore-missing -c SHA256SUMS
+
+sha256sum "aletheia-linux-$ARCH" | tee /mnt/ir-media/HASH-ANOTADO
+cp "aletheia-linux-$ARCH" /mnt/ir-media/aletheia
+cp SHA256SUMS SHA256SUMS.minisig aletheia.pub /mnt/ir-media/
+```
+
+Idealmente numa mídia com **trava física** de escrita. Onde não houver, um
+cartão SD com a trava, um pendrive com chave, ou uma imagem ISO gravada servem —
+o que importa é que o host investigado não consiga reescrever o arquivo.
+
+No host:
+
+```sh
+sudo mount -o ro,noexec,nosuid /dev/sdX1 /mnt/ir
+```
+
+O `noexec` é intencional: **copie** para executar, em vez de executar direto da
+mídia. Assim a mídia continua sendo a referência, e o que roda é uma cópia cuja
+identidade você confere:
+
+```sh
+cp /mnt/ir/aletheia /run/aletheia
+chmod +x /run/aletheia
+/run/aletheia version
+```
+
+O `sha256` impresso tem que ser igual ao `HASH-ANOTADO` da mídia. Se não for,
+pare: alguma coisa entre a mídia e a execução alterou o arquivo.
+
+Por que isso vale a pena:
+
+```text
+root no userland
+        │
+   pode reescrever /usr/bin, /tmp, PATH, LD_PRELOAD
+        │
+   NÃO pode reescrever mídia montada read-only
+```
+
+Contra comprometimento de **userland** isso é forte. Contra comprometimento de
+**kernel**, não: quem controla o kernel controla a execução de qualquer binário,
+inclusive a leitura que confere o hash. Aí a resposta deixa de ser proteger
+melhor a ferramenta e passa a ser não confiar no ambiente de execução — bootar
+mídia externa, ou analisar o disco de fora (Cenário 6).
+
+E a mídia é evidência também: ela cria arquivos e montagens na timeline do host.
+Anote quando foi montada.
+
+---
+
+## Cenário 15: "Quero saber exatamente por que um finding existe"
 
 Liste o catálogo:
 

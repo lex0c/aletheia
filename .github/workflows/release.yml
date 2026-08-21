@@ -109,6 +109,56 @@ jobs:
           sha256sum aletheia-linux-* > SHA256SUMS
           cat SHA256SUMS
 
+      # ASSINATURA DESTACADA, e ela existe para um caso que a proveniência NÃO
+      # cobre: verificação OFFLINE.
+      #
+      # `gh attestation verify` é a âncora forte, e depende de rede, do CLI do
+      # GitHub e do GitHub alcançável. Isso falha exatamente quando mais
+      # importa — rede segmentada durante contenção, ambiente isolado, link
+      # caído de madrugada. Uma assinatura minisign se verifica com a chave
+      # pública que o respondedor carrega, sem consultar ninguém.
+      #
+      # As duas não competem: a proveniência responde "de qual workflow e de
+      # qual commit veio", a assinatura responde "quem publicou isto, e dá para
+      # conferir sem rede". Um release quer as duas.
+      - name: assinar as somas (minisign)
+        id: assinar
+        if: steps.ver.outputs.publicar == 'tag'
+        env:
+          CHAVE: ${{ secrets.MINISIGN_KEY }}
+        run: |
+          if [ -z "$CHAVE" ]; then
+            # SEM CHAVE O RELEASE SAI, e sai DIZENDO que não tem assinatura.
+            # Pular em silêncio publicaria um release indistinguível de um
+            # assinado para quem só olha a lista de assets — a mesma classe de
+            # mentira por omissão que a ferramenta existe para não cometer.
+            echo "assinado=nao" >> "$GITHUB_OUTPUT"
+            echo "AVISO: MINISIGN_KEY não está configurada — release SEM assinatura destacada" >&2
+            exit 0
+          fi
+          if [ ! -f aletheia.pub ]; then
+            echo "FALHA: MINISIGN_KEY existe e aletheia.pub não está no repositório." >&2
+            echo "Sem a pública versionada ninguém tem contra o que verificar." >&2
+            exit 1
+          fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+
+          printf '%s' "$CHAVE" > /tmp/minisign.key
+          chmod 600 /tmp/minisign.key
+          cd dist
+          # O comentário confiável é ASSINADO junto: quem verifica lê a tag e o
+          # commit de dentro da assinatura, não de um campo que qualquer um
+          # reescreve.
+          minisign -S -s /tmp/minisign.key -m SHA256SUMS \
+            -t "aletheia ${{ steps.ver.outputs.version }} commit ${GITHUB_SHA}"
+          rm -f /tmp/minisign.key
+
+          # VERIFICAR A PRÓPRIA ASSINATURA antes de publicar: se o segredo não
+          # corresponder à pública versionada, o erro aparece aqui e não na
+          # máquina de quem vai responder a um incidente.
+          minisign -V -p ../aletheia.pub -m SHA256SUMS
+          echo "assinado=sim" >> "$GITHUB_OUTPUT"
+
       # A nota do release carrega a instrução de VERIFICAR. É a primeira coisa
       # que quem baixa vê, e o runbook §16 é explícito: baixar e executar sem
       # conferir é a prática que esta ferramenta existe para desaconselhar.
@@ -139,8 +189,31 @@ jobs:
             echo 'um reescreve o outro: a conferência acima pega download corrompido e'
             echo 'troca no caminho, **não** release adulterado.'
             echo
-            echo 'Quem quer a garantia forte verifica a PROVENIÊNCIA, que é assinada'
-            echo 'pela identidade do workflow e guardada fora dos assets:'
+            echo 'Há duas âncoras acima disso, e elas respondem perguntas diferentes.'
+            echo
+            echo '#### Assinatura destacada — verifica SEM REDE'
+            if [ "${{ steps.assinar.outputs.assinado }}" = "sim" ]; then
+              echo
+              echo 'É a que serve durante um incidente: a chave pública fica no'
+              echo 'repositório (`aletheia.pub`), você a carrega junto com o binário, e a'
+              echo 'verificação não consulta ninguém.'
+              echo
+              echo '```sh'
+              echo 'curl -fsSLO "$BASE/SHA256SUMS.minisig"'
+              echo 'minisign -Vm SHA256SUMS -P '"$(cat aletheia.pub | tail -1)"
+              echo 'sha256sum --ignore-missing -c SHA256SUMS'
+              echo '```'
+              echo
+              echo 'O comentário confiável impresso pelo minisign traz a tag e o commit,'
+              echo 'e vai ASSINADO junto — não é um campo que se reescreva de fora.'
+            else
+              echo
+              echo '> **Esta release NÃO tem assinatura destacada.** A chave de assinatura'
+              echo '> não estava configurada quando ela foi publicada. Use a proveniência'
+              echo '> abaixo, que exige rede.'
+            fi
+            echo
+            echo '#### Proveniência — responde DE ONDE veio'
             echo
             echo '```sh'
             echo 'gh attestation verify "aletheia-linux-$ARCH" --owner ${{ github.repository_owner }}'
@@ -148,7 +221,20 @@ jobs:
             echo
             echo 'Isso responde de onde o binário veio — qual repositório, qual commit,'
             echo 'qual workflow o construiu. Falsificar exige comprometer o GitHub'
-            echo 'Actions, não só este release.'
+            echo 'Actions, não só este release. Exige rede e o CLI `gh`.'
+            echo
+            echo '#### Reconstruir e conferir — não confia em quem assinou'
+            echo
+            echo 'O toolchain é fixo no `go.mod` e a identidade da build sai do git, não'
+            echo 'do relógio de quem compila: a mesma tag reconstrói byte a byte.'
+            echo
+            echo '```sh'
+            echo "git clone --branch ${GITHUB_REF_NAME} https://github.com/${{ github.repository }}"
+            echo "cd aletheia && make repro VERSION=${GITHUB_REF_NAME}"
+            echo '```'
+            echo
+            echo 'Os hashes impressos têm que bater com o `SHA256SUMS` acima. É a única'
+            echo 'verificação que não pede confiança em nós.'
             echo
             echo 'Binários estáticos, sem dependência: rodam em imagem mínima, sem libc.'
             echo 'Baixe numa máquina limpa e copie para o alvo quando puder — este'
@@ -196,7 +282,8 @@ jobs:
             dist/aletheia-linux-amd64 \
             dist/aletheia-linux-386 \
             dist/aletheia-linux-arm64 \
-            dist/SHA256SUMS
+            dist/SHA256SUMS \
+            $(ls dist/SHA256SUMS.minisig 2>/dev/null)
 
       # No ensaio nada é publicado: os artefatos ficam disponíveis para download
       # na própria execução, e é isso que se inspeciona antes de criar a tag.

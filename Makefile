@@ -1,5 +1,21 @@
 VERSION ?= 0.1.0-dev
-LDFLAGS := -s -w -X main.version=$(VERSION)
+
+# IDENTIDADE DA BUILD, e ela sai do GIT — nunca do relógio de quem compila.
+#
+# A data é a do COMMIT (%cI, ISO 8601), e não a do build, porque o binário desta
+# ferramenta precisa ser RECONSTRUÍVEL: o toolchain é fixado no go.mod para que
+# dois builds da mesma tag saiam idênticos, e um timestamp de build daria hashes
+# diferentes para o mesmo código — a conferência que o README documenta passaria
+# a falhar sempre, e quem baixa perderia a única forma de verificar o release sem
+# confiar em quem o assinou.
+#
+# Fora de um repositório git as duas ficam VAZIAS, e o `version` omite as linhas
+# em vez de imprimir "desconhecido": ausência já é a resposta (build local).
+COMMIT     ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null)
+COMMIT_AT  ?= $(shell TZ=UTC0 git show -s --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd HEAD 2>/dev/null)
+
+LDFLAGS := -s -w -X main.version=$(VERSION) \
+	-X main.commit=$(COMMIT) -X main.commitTime=$(COMMIT_AT)
 GOFLAGS := -trimpath
 
 # CGO_ENABLED=0 não é otimização: é a propriedade que justificou escolher Go.
@@ -7,7 +23,7 @@ GOFLAGS := -trimpath
 # LD_PRELOAD e a binário de sistema trojanizado (SPEC 4).
 export CGO_ENABLED = 0
 
-.PHONY: all build helper vm-image test race race-unit lint verify clean dist scenarios scenarios-container images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix vm-matrix arches
+.PHONY: all build helper vm-image test race race-unit lint verify clean dist binarios repro scenarios scenarios-container images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix vm-matrix arches
 
 all: verify
 
@@ -90,11 +106,39 @@ verify: lint test build
 # dist DEPENDE de verify: sem isso, um GOOS herdado do ambiente produzia
 # executáveis PE chamados aletheia-linux-* com manifesto sha256 de aparência
 # autoritativa.
-dist: verify
+# binarios é SÓ a compilação das três arquiteturas, sem testes.
+#
+# Existe como alvo próprio porque duas receitas precisam dela e não podem
+# divergir: `dist` (o release) e `repro` (a reconstrução de quem confere). Se
+# cada uma tivesse sua cópia da linha de build, um flag acrescentado numa e não
+# na outra faria a conferência de reprodutibilidade falhar sem nada de errado
+# com o código — e uma verificação que falha sozinha é uma que as pessoas
+# aprendem a ignorar.
+binarios:
 	for arch in amd64 arm64 386; do \
 		GOOS=linux GOARCH=$$arch go build $(GOFLAGS) -ldflags="$(LDFLAGS)" \
 			-o dist/aletheia-linux-$$arch ./cmd/aletheia || exit 1; \
 	done
+
+dist: verify binarios
+	sha256sum dist/aletheia-linux-*
+
+# repro reconstrói o release SEM rodar a suíte: é a receita de quem BAIXOU o
+# binário e quer conferir que ele sai do código publicado.
+#
+# A propriedade que a sustenta é o toolchain FIXO no go.mod somado ao -trimpath
+# e à identidade da build vir do GIT — nunca do relógio de quem compila. Medido:
+# três builds seguidos e um a partir de outro diretório dão o mesmo sha256.
+#
+# VERSION é obrigatória e precisa ser a MESMA da tag: ela entra no binário por
+# -ldflags, então `make repro` sem ela produz outro hash e a conferência falha
+# por motivo errado.
+repro:
+	@test -n "$(filter-out 0.1.0-dev,$(VERSION))" || { \
+		echo "repro: informe a VERSION da tag, ex.: make repro VERSION=v0.2.0" >&2; \
+		exit 1; \
+	}
+	@$(MAKE) --no-print-directory binarios
 	sha256sum dist/aletheia-linux-*
 
 # scenarios roda a CLI de verdade contra /proc de verdade, em distribuições de

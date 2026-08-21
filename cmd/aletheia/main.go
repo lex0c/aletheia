@@ -31,10 +31,25 @@ import (
 	"github.com/lex0c/aletheia/internal/report"
 )
 
-// version é injetada no build: -ldflags "-X main.version=…". O relatório a
-// imprime junto do hash do binário, para o war log saber qual ferramenta
-// produziu cada achado (runbook §39.3).
-var version = "dev"
+// A IDENTIDADE DA BUILD, injetada por -ldflags. O relatório a imprime junto do
+// hash do binário, para o war log saber qual ferramenta produziu cada achado
+// (runbook §39.3).
+//
+// commitTime é a data do COMMIT, e não a do build. A diferença é a promessa de
+// reprodutibilidade: o toolchain é fixado no go.mod para que dois builds da
+// mesma tag produzam o mesmo binário, e carimbar o relógio de quem compilou
+// destruiria isso — dois hashes diferentes para o mesmo código, e a conferência
+// documentada em "Reconstruir e conferir" passaria a falhar sempre. A data do
+// commit responde a mesma pergunta ("de quando é este código?") e é a mesma em
+// qualquer máquina que reconstrua.
+//
+// Vazias em build de desenvolvimento: o `make build` local não passa por git, e
+// inventar valor seria pior que declarar ausência.
+var (
+	version    = "dev"
+	commit     = ""
+	commitTime = ""
+)
 
 // kernelFloor é o piso de RUNTIME deste binário: o kernel mínimo que o toolchain
 // Go atual sustenta (Go >= 1.24 exige Linux 3.2). É declarado — não escondido —
@@ -274,8 +289,17 @@ func main() {
 		os.Exit(runChecks(os.Args[2:]))
 	case "version":
 		e := env.Probe(env.Options{Version: version})
-		fmt.Printf("aletheia %s\n%s\nsha256=%s\nkernel mínimo (runtime): %s\n",
-			version, e.ToolPath, e.ToolSHA256, kernelFloor)
+		fmt.Printf("aletheia %s\n%s\nsha256=%s\n", version, e.ToolPath, e.ToolSHA256)
+		// Identidade da build só sai quando existe. Linha com "desconhecido"
+		// ocuparia espaço para não dizer nada, e a ausência já é a resposta:
+		// build local, fora de tag.
+		if commit != "" {
+			fmt.Printf("commit=%s\n", commit)
+		}
+		if commitTime != "" {
+			fmt.Printf("commit-em=%s\n", commitTime)
+		}
+		fmt.Printf("kernel mínimo (runtime): %s\n", kernelFloor)
 		return
 	case "-h", "--help", "help":
 		fmt.Print(usage)

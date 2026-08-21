@@ -122,13 +122,75 @@ chmod +x "aletheia-linux-${ARCH}"
 mv "aletheia-linux-${ARCH}" aletheia
 ```
 
-Confira novamente a identidade do binário no destino:
+O `SHA256SUMS` viaja no mesmo release que os binários: ele pega download
+corrompido e troca no caminho, **não** release adulterado. Há três âncoras acima
+dele, e cada uma responde uma pergunta diferente.
+
+### Assinatura destacada — verifica sem rede
+
+É a que serve durante um incidente. A chave pública está versionada neste
+repositório (`aletheia.pub`), você a carrega junto com o binário, e a verificação
+não consulta ninguém:
+
+```sh
+curl -fLO \
+  "https://github.com/lex0c/aletheia/releases/latest/download/SHA256SUMS.minisig"
+
+minisign -Vm SHA256SUMS -p aletheia.pub
+sha256sum --ignore-missing -c SHA256SUMS
+```
+
+O comentário confiável que o minisign imprime traz a tag e o commit, e vai
+assinado junto — não é um campo que se reescreva de fora.
+
+Rede segmentada durante contenção, ambiente isolado e link caído são exatamente
+quando a verificação importa e quando as outras duas não funcionam.
+
+### Proveniência — responde de onde veio
+
+```sh
+gh attestation verify "aletheia-linux-${ARCH}" --owner lex0c
+```
+
+Diz qual repositório, qual commit e qual workflow construíram o arquivo.
+Falsificar exige comprometer o GitHub Actions, não só o release. **Exige rede.**
+
+### Reconstruir e conferir — não confia em quem assinou
+
+O toolchain é fixo no `go.mod` e a identidade da build sai do **git**, não do
+relógio de quem compila. A mesma tag reconstrói byte a byte:
+
+```sh
+git clone --branch v0.2.0 https://github.com/lex0c/aletheia
+cd aletheia && make repro VERSION=v0.2.0
+```
+
+Os hashes impressos têm que bater com o `SHA256SUMS` do release. É a única
+verificação que não pede confiança em nós — e a razão de `commitTime` vir do
+commit e não do build: um timestamp de compilação daria hashes diferentes para o
+mesmo código e quebraria a conferência para sempre.
+
+### Identidade do binário no destino
 
 ```sh
 ./aletheia version
 ```
 
-O comando imprime a versão, o caminho real e o SHA-256 do próprio executável.
+```text
+aletheia 0.2.0
+/mnt/ir/aletheia
+sha256=9187f0...
+commit=918719acf012
+commit-em=2026-08-21T12:00:00Z
+kernel mínimo (runtime): Linux 3.2
+```
+
+Versão, caminho real, SHA-256 do próprio executável e a identidade da build.
+Compare com o que você anotou **na máquina limpa**.
+
+> A comparação usa interfaces fornecidas pelo host em execução. Ela pega
+> alteração em transporte e armazenamento; **não** estabelece integridade contra
+> um kernel comprometido. Ver [Modelo de confiança](#modelo-de-confiança).
 
 Evite baixar ferramentas diretamente no host suspeito quando isso não for
 necessário. Cada arquivo criado e cada conexão nova passam a fazer parte da
@@ -880,7 +942,7 @@ reais.
 | | |
 | --- | --- |
 | **[docs/SCENARIOS.md](docs/SCENARIOS.md)** | o catálogo do que ela detecta: cada check, o que acusa, e o cenário que prova que dispara. Gerado do próprio registro |
-| **[docs/PLAYBOOKS.md](docs/PLAYBOOKS.md)** | quando usar cada comando, e catorze fluxos de investigação de ponta a ponta |
+| **[docs/PLAYBOOKS.md](docs/PLAYBOOKS.md)** | quando usar cada comando, e quinze fluxos de investigação de ponta a ponta |
 | **[docs/RUNBOOK.md](docs/RUNBOOK.md)** | o runbook de resposta a incidente em Linux que originou os checks. É dele que vêm as seções (`§7.2`, `§35`) citadas em cada achado |
 
 ---
@@ -916,6 +978,46 @@ make mutacao
 - `race` roda o detector de data races, incluindo a suíte de cenários;
 - `mutacao` injeta mutações em decisões dos checks para verificar se os testes
   detectam regressões semânticas.
+
+Reconstruir um release (o que quem baixa roda para conferir):
+
+```sh
+make repro VERSION=v0.2.0
+```
+
+`repro` compila as três arquiteturas com os mesmos flags do release e imprime os
+hashes, **sem** rodar a suíte. `dist` e `repro` compartilham a receita de build
+(`binarios`) de propósito: duas cópias divergiriam em silêncio, e a conferência
+passaria a falhar sem nada de errado com o código.
+
+### Chave de assinatura do release
+
+O release assina o `SHA256SUMS` com minisign. A chave pública é versionada
+(`aletheia.pub`) para que a verificação funcione **offline**; a privada vive só
+no segredo `MINISIGN_KEY` do repositório.
+
+Para criar o par (uma vez, numa máquina confiável):
+
+```sh
+minisign -G -W -p aletheia.pub -s aletheia.key
+```
+
+`-W` gera a chave sem senha, porque quem a protege é o cofre de segredos do
+GitHub — um prompt de senha não tem quem responda dentro de um workflow.
+
+```sh
+# a pública entra no repositório, versionada e revisável
+git add aletheia.pub && git commit -m "chave pública de assinatura do release"
+
+# a privada vira segredo e NÃO fica em disco
+gh secret set MINISIGN_KEY < aletheia.key
+shred -u aletheia.key   # guarde um backup offline antes
+```
+
+Enquanto o segredo não existir, o release **sai assim mesmo** e a nota dele diz,
+em voz alta, que não tem assinatura destacada. Publicar em silêncio um release
+indistinguível de um assinado seria a mesma mentira por omissão que a ferramenta
+existe para não cometer.
 
 Cross-compilação:
 

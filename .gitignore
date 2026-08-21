@@ -1,2 +1,10 @@
 # binários e artefatos de build
 /dist/
+
+# CHAVE PRIVADA DE ASSINATURA. O `minisign -G` a escreve no diretório corrente,
+# e a receita de criação (README, "Chave de assinatura do release") roda aqui
+# dentro: sem esta linha um `git add -A` publicaria a chave que autentica todos
+# os releases. A pública (`aletheia.pub`) é versionada de propósito — é dela que
+# a verificação offline depende.
+*.key
+!aletheia.pub

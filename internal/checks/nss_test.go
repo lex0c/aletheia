@@ -40,6 +40,16 @@ func TestNSSModuleSemDono(t *testing.T) {
 
 // item 9: no musl o check NÃO acusa (o nsswitch é ignorado pela libc), e declara
 // a inaplicabilidade em vez de silenciar.
+//
+// O QUE MUDOU, e por quê: a declaração saiu de `Partial` e virou achado INFO.
+//
+// A intenção do item 9 continua inteira — inaplicabilidade não pode virar
+// silêncio —, o que estava errado era o canal. `Partial` significa "esta
+// pergunta cabia aqui e eu não consegui responder", e como todo Alpine é musl,
+// TODA varredura em Alpine saía INCOMPLETE com exit 1, inclusive a de um host
+// limpo. Aqui a pergunta não cabe: não há libnss_ para carregar porque a libc
+// não os carrega. Isso é ESCOPO, e escopo é contexto — o mesmo que o
+// proc.container_boundary e o kernel.module_no_file já tinham aprendido.
 func TestNSSModuleMuslNaoAcusa(t *testing.T) {
 	f := &facts.Facts{
 		NSSModules: []facts.NSSModule{{Fonte: "impl", Paths: []string{"/usr/lib/libnss_impl.so.2"}, Servicos: []string{"passwd"}}},
@@ -48,11 +58,18 @@ func TestNSSModuleMuslNaoAcusa(t *testing.T) {
 	}
 	f.Host.Libc = "musl"
 	r := nssModuleSemDono.Run(nssModuleSemDono, f, testEnv())
-	if len(r.Findings) != 0 {
-		t.Fatalf("musl ignora nsswitch: não pode acusar execução NSS-glibc: %+v", r.Findings)
+	for _, fd := range r.Findings {
+		if fd.Sev != check.SevInfo {
+			t.Fatalf("musl ignora nsswitch: não pode ACUSAR execução NSS-glibc: %+v", fd)
+		}
 	}
-	if len(r.Partial) == 0 {
+	if len(r.Findings) == 0 {
 		t.Error("inaplicabilidade no musl tem de ser declarada, não silenciada")
+	}
+	if len(r.Partial) != 0 {
+		t.Errorf("inaplicabilidade não é lacuna de cobertura: todo Alpine é musl, e "+
+			"isto faria toda varredura em Alpine sair INCOMPLETE — inclusive a de um "+
+			"host limpo\npartial: %v", r.Partial)
 	}
 }
 

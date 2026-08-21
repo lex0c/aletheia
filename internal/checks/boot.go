@@ -65,7 +65,11 @@ var cmdlineEnfraquecida = check.Check{
 			"da frota é provisionamento, num só é alteração",
 		"BOOT SEM BOOTLOADER — QEMU com `-append`, iPXE, kexec, contêiner — não " +
 			"tem configuração para comparar. A divergência só é afirmada quando " +
-			"alguma configuração foi de fato LIDA; sem ela, o que sai é lacuna",
+			"alguma configuração foi de fato LIDA; sem ela o que sai é a linha " +
+			"rodando, sozinha, e dita como tal. Ausência de configuração NÃO " +
+			"derruba a cobertura: nesses ambientes ela nunca existiria, e chamar " +
+			"isso de lacuna faria todo host limpo ali sair INCOMPLETE. O que " +
+			"derruba é configuração que EXISTE e não abriu",
 		"`init=` legítimo existe: initramfs e algumas distribuições o passam " +
 			"apontando para o próprio systemd. O que dispara é o alvo estar em " +
 			"diretório gravável ou nenhum pacote reivindicá-lo",
@@ -152,11 +156,25 @@ var cmdlineEnfraquecida = check.Check{
 			r.Partial = append(r.Partial, "/proc/cmdline não foi lido: o que está "+
 				"valendo NESTE kernel não pôde ser comparado com a configuração")
 		}
-		if !f.BootConfigLido {
-			r.Partial = append(r.Partial, "nenhuma configuração de bootloader foi "+
-				"encontrada ou lida (grub, systemd-boot, UKI): o que o PRÓXIMO boot "+
-				"vai fazer não foi avaliado")
-		}
+		// AUSÊNCIA DE BOOTLOADER NÃO É LACUNA — é resposta.
+		//
+		// Havia aqui um Partial para `!BootConfigLido`, e ele confundia "não há"
+		// com "não consegui ver" — a mesma confusão que o cruzarModulos já tinha
+		// nomeado do outro lado ("um guest sem módulo carregado tem /proc/modules
+		// vazio, e isso é uma resposta completa").
+		//
+		// O custo foi grande e demorou a aparecer, porque não aparece como
+		// achado: contêiner, VM com `-append`, iPXE e kexec NÃO TÊM configuração
+		// de bootloader, e nunca vão ter. Marcar isso como cobertura degradada
+		// fazia toda varredura nesses ambientes sair INCOMPLETE com exit 1 —
+		// inclusive a de um host limpo, que é precisamente o que o
+		// proc.container_boundary e o kernel.module_no_file já tinham pago para
+		// aprender (ver o comentário em internal/checks/modulo.go).
+		//
+		// A lacuna de verdade continua declarada, e vem do coletor: ele separa
+		// "o arquivo não existe" (segue em frente) de "o arquivo existe e não
+		// abriu" (denyPersist). É esse segundo caso que precisa derrubar a
+		// cobertura, e é só ele que a linha abaixo propaga.
 		r.Partial = append(r.Partial, f.PersistDenied["boot"]...)
 		return r
 	},

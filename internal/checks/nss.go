@@ -49,11 +49,28 @@ var nssModuleSemDono = check.Check{
 		// afirmar "roda em toda resolução" seria falso. Só o glibc — ou o
 		// desconhecido, onde a presença de nsswitch.conf + libnss_ já é padrão
 		// glibc — sustenta a afirmação; no musl vira nota, não acusação.
+		//
+		// E a NOTA É INFO, não lacuna de cobertura. As duas dizem coisas
+		// diferentes e só uma é verdade aqui: lacuna é "esta pergunta cabia neste
+		// host e eu não consegui responder"; aqui a pergunta NÃO CABE — não há
+		// libnss_ para carregar porque a libc não os carrega. Como todo Alpine é
+		// musl, a versão anterior fazia TODA varredura em Alpine sair INCOMPLETE
+		// com exit 1, inclusive a de um host limpo. É a mesma confusão que o
+		// proc.container_boundary e o kernel.module_no_file já pagaram para
+		// aprender, e ela reaparece porque o instinto certo — "não silencie" —
+		// escolhe o canal errado.
+		//
+		// O instinto continua honrado: o nsswitch.conf inerte SAI no relatório,
+		// como contexto. O que ele deixa de fazer é derrubar a cobertura.
 		if f.Host.Libc == "musl" {
 			if len(f.NSSModules) > 0 {
-				r.Partial = append(r.Partial, "há fontes no /etc/nsswitch.conf, mas a "+
-					"libc é musl: ela IGNORA o nsswitch, então nenhum libnss_ é carregado "+
-					"por ele — a via NSS-glibc não se aplica a este host")
+				fd := self.F(check.SevInfo, "musl", "",
+					"há fontes no /etc/nsswitch.conf, mas a libc é musl: ela IGNORA o "+
+						"nsswitch, então nenhum libnss_ é carregado por ele",
+					"a via NSS-glibc não se aplica a este host — não é lacuna, é escopo: "+
+						"não existe o que olhar, e por isso a cobertura NÃO cai",
+					"fontes declaradas mesmo assim: "+strings.Join(fontesDe(f.NSSModules), ", "))
+				r.Findings = append(r.Findings, fd)
 			}
 			return r
 		}
@@ -105,4 +122,14 @@ var nssModuleSemDono = check.Check{
 		r.Partial = append(r.Partial, f.PersistDenied["nss"]...)
 		return r
 	},
+}
+
+// fontesDe lista as fontes declaradas no nsswitch.conf, para a nota de musl
+// dizer O QUE está inerte em vez de só afirmar que algo está.
+func fontesDe(ms []facts.NSSModule) []string {
+	var out []string
+	for _, m := range ms {
+		out = append(out, m.Fonte)
+	}
+	return out
 }

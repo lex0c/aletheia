@@ -292,12 +292,30 @@ func lerEntradasDeLoader(f *Facts, e *env.Env, add adicionaBoot) {
 // lerCmdlineSolta lê os arquivos que carregam a linha inteira, usados por
 // imagem unificada de kernel (UKI) e por dracut. Num host que boota por UKI não
 // há grub.cfg NEM entrada de loader: é aqui, ou em lugar nenhum.
+// A leitura aqui distingue NÃO EXISTE de NÃO ABRIU, e isso passou a importar
+// mais do que importava.
+//
+// Enquanto o check de cmdline marcava lacuna sempre que NENHUMA configuração
+// era lida, um EACCES nestes arquivos ainda produzia — por acidente, e com o
+// texto errado — alguma degradação de cobertura. Com aquela lacuna removida (ela
+// disparava em contêiner, VM e kexec, onde configuração de bootloader não
+// existe), o acidente sumiu junto: num host onde /etc/kernel/cmdline é a única
+// fonte e está ilegível, o silêncio seria total.
+//
+// As outras fontes já faziam isto. Estas duas eram as que faltavam.
 func lerCmdlineSolta(f *Facts, e *env.Env, add adicionaBoot) {
 	for _, p := range []string{"/etc/kernel/cmdline", "/usr/lib/kernel/cmdline"} {
-		if b, err := e.ReadFile(p); err == nil {
-			f.BootConfigLido = true
-			add(p, linhaUnica(string(b)), false)
+		b, err := e.ReadFile(p)
+		if err != nil {
+			if env.EhLacuna(err) {
+				f.denyPersist("boot", p+" existe e não pôde ser lido ("+
+					env.MotivoDoErro(err)+"): a linha de comando do próximo boot "+
+					"NÃO foi avaliada por esta fonte")
+			}
+			continue
 		}
+		f.BootConfigLido = true
+		add(p, linhaUnica(string(b)), false)
 	}
 	nomes, err := e.ReadDirNamesErr("/etc/cmdline.d")
 	if env.EhLacuna(err) {
@@ -309,10 +327,16 @@ func lerCmdlineSolta(f *Facts, e *env.Env, add adicionaBoot) {
 			continue
 		}
 		p := "/etc/cmdline.d/" + nome
-		if b, err := e.ReadFile(p); err == nil {
-			f.BootConfigLido = true
-			add(p, linhaUnica(string(b)), false)
+		b, err := e.ReadFile(p)
+		if err != nil {
+			if env.EhLacuna(err) {
+				f.denyPersist("boot", p+" existe e não pôde ser lido ("+
+					env.MotivoDoErro(err)+"): este dropin de linha de comando NÃO foi avaliado")
+			}
+			continue
 		}
+		f.BootConfigLido = true
+		add(p, linhaUnica(string(b)), false)
 	}
 }
 

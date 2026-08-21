@@ -29,9 +29,22 @@ func writeCoberturaDetalhe(w io.Writer, t Tema, c check.Coverage, verbose int) {
 	}
 
 	// Checks que NEM rodaram (falta pré-requisito) — eixo à parte, raro. Por check.
-	if len(c.NotChecked) > 0 {
+	//
+	// Em DUAS listas: lacuna é "não rodou e devia", escopo é "a pergunta não
+	// existe neste host". Só a primeira entra no denominador da cobertura, e
+	// misturá-las mandava o operador atrás de um conserto que não existe — um
+	// kernel compilado sem inet_diag não passa a oferecer sock_diag com sudo.
+	lacunas, escopo := c.NaoVerificados()
+	if len(lacunas) > 0 {
 		fmt.Fprintln(w, "  "+t.negrito("não verificados"))
-		for _, nc := range c.NotChecked {
+		for _, nc := range lacunas {
+			fmt.Fprintln(w, "    "+Safe(nc.ID)+t.fraco(" — "+Safe(nc.Reason)))
+		}
+	}
+	if len(escopo) > 0 {
+		fmt.Fprintln(w, "  "+t.negrito("fora de escopo")+
+			t.fraco(" (o mecanismo não existe neste host; NÃO conta como lacuna)"))
+		for _, nc := range escopo {
 			fmt.Fprintln(w, "    "+Safe(nc.ID)+t.fraco(" — "+Safe(nc.Reason)))
 		}
 	}

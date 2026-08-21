@@ -88,6 +88,7 @@ var fronteiraDeContainer = check.Check{
 		}
 
 		var forasteiros, vazados []*facts.Process
+		var semCgroup []string
 		emContainer := 0
 		for i := range f.Processes {
 			p := &f.Processes[i]
@@ -95,6 +96,15 @@ var fronteiraDeContainer = check.Check{
 				continue
 			}
 			naCamada := facts.EmCamadaDeImagem(p.Exe)
+			// Sem cgroup legível não há premissa: as DUAS conclusões deste
+			// check ("está no host" e "está em contêiner") saem da comparação
+			// com ele. Um processo assim vira lacuna, não achado.
+			if p.CgroupDesconhecido {
+				if naCamada {
+					semCgroup = append(semCgroup, "pid="+strconv.Itoa(p.PID)+" ("+p.Exe+")")
+				}
+				continue
+			}
 			switch {
 			case p.Container == "" && naCamada:
 				forasteiros = append(forasteiros, p)
@@ -104,6 +114,13 @@ var fronteiraDeContainer = check.Check{
 			case p.Container != "":
 				emContainer++
 			}
+		}
+
+		if n := len(semCgroup); n > 0 {
+			r.Partial = append(r.Partial, strconv.Itoa(n)+" processo(s) com exe "+
+				"em camada de imagem tiveram o cgroup ILEGÍVEL, e sem ele não se "+
+				"pode dizer se rodam dentro ou fora do contêiner: "+
+				strings.Join(semCgroup, ", "))
 		}
 
 		// O CASO FORTE: conteúdo de imagem executado fora do contêiner.

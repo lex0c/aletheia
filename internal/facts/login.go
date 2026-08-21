@@ -140,7 +140,7 @@ func lerUtmp(f *Facts, e *env.Env, caminho string, falhou, agora bool) bool {
 		}
 	}
 
-	tam, ok := tamanhoDoRegistro(fi.Size())
+	tam, ok := tamanhoDoRegistroCom(fi.Size(), nativoDeUtmp(f.Host.Libc))
 	if !ok {
 		// Nem 384 nem 400 dividem o arquivo: é outro layout, ou o arquivo está
 		// truncado. Adivinhar aqui produziria um inventário de login inventado,
@@ -148,7 +148,15 @@ func lerUtmp(f *Facts, e *env.Env, caminho string, falhou, agora bool) bool {
 		f.denyPersist("login", baseNome(caminho)+" tem "+itoa(int(fi.Size()))+
 			" bytes, que não é múltiplo de nenhum dos dois tamanhos conhecidos "+
 			"de registro utmp (384 e 400): o arquivo NÃO foi interpretado")
-		return true
+		// false, e não true: a lacuna acima diz que o arquivo não foi
+		// interpretado, e devolver true marcaria HistoricoDeLoginLido como
+		// testemunha de uma leitura que não houve. Com um wtmp truncado (corte
+		// de disco, escrita interrompida) o resultado era f.Logins vazio COM a
+		// testemunha ligada — que atravessa o guarda de antiforense.wtmp_cleared
+		// e produz o CRITICAL irreversível de "histórico zerado" a partir de um
+		// arquivo que ninguém leu. É o mesmo falso positivo que o ramo do Lstat
+		// acima descreve, pela porta do tamanho.
+		return false
 	}
 
 	n := int(fi.Size() / int64(tam))
@@ -255,14 +263,41 @@ func itoa(n int) string {
 	return string(d[i:])
 }
 
-// tamanhoDoRegistro descobre o layout pelo tamanho do arquivo.
+// nativoDeUtmp escolhe o layout DESTE host, pela arquitetura e pela LIBC.
+//
+// A build tag sozinha errava, e o comentário do próprio arquivo irmão já dizia
+// por quê: ele afirma "e da musl em qualquer arquitetura", enquanto a tag
+// `!amd64 && !386` exclui justamente a arquitetura em que o Alpine mais roda.
+// Na musl x86_64 o `struct utmpx` tem `ut_tv` como `struct timeval` de verdade
+// — tv_sec de 64 bits no deslocamento 344 — e o registro tem 400 bytes, igual
+// ao arm64 com glibc.
+//
+// O efeito em Alpine x86_64: sempre que o tamanho do arquivo dividisse os dois
+// (múltiplo de 9600, ou seja 24 registros musl), o desempate escolhia 384 e o
+// inventário de login saía lido do byte errado — nome de usuário vindo do meio
+// de outro campo, timestamp zero — SEM lacuna declarada. Um inventário de login
+// inventado é pior que nenhum, que é o que o resto deste arquivo já diz.
+func nativoDeUtmp(libc string) int {
+	if libc == "musl" {
+		return tamUtmp64
+	}
+	return tamanhoNativoDeUtmp
+}
+
+// tamanhoDoRegistro descobre o layout pelo tamanho do arquivo, para o host em
+// que este binário roda.
+func tamanhoDoRegistro(tamanho int64) (int, bool) {
+	return tamanhoDoRegistroCom(tamanho, tamanhoNativoDeUtmp)
+}
+
+// tamanhoDoRegistroCom é a mesma decisão com o layout nativo INFORMADO.
 //
 // O utmp é uma sequência de registros de tamanho fixo, sem cabeçalho: o único
 // jeito de saber qual dos dois layouts está em uso é a divisibilidade. Quando os
 // dois dividem — arquivo vazio, ou um múltiplo comum como 2400 bytes — vence o
-// que casa com a arquitetura em que este binário roda, que é a resposta certa em
-// todo host que não teve o arquivo copiado de outra máquina.
-func tamanhoDoRegistro(tamanho int64) (int, bool) {
+// nativo, que é a resposta certa em todo host que não teve o arquivo copiado de
+// outra máquina.
+func tamanhoDoRegistroCom(tamanho int64, nativo int) (int, bool) {
 	if tamanho < 0 {
 		return 0, false
 	}
@@ -273,7 +308,7 @@ func tamanhoDoRegistro(tamanho int64) (int, bool) {
 	c64 := tamanho%tamUtmp64 == 0
 	switch {
 	case c32 && c64:
-		return tamanhoNativoDeUtmp, true
+		return nativo, true
 	case c64:
 		return tamUtmp64, true
 	case c32:

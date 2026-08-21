@@ -49,6 +49,32 @@ import (
 // duas há UM intervalo, e um intervalo não é um padrão — é uma coincidência.
 const minAparicoesParaPeriodo = 3
 
+// Tetos do estado do amostrador. O `watch` é o comando feito para rodar
+// `--for 8h`, e nada aqui era podado — nem `destinos`, nem `aparicoes`, nem
+// `jaFalouDoPeriodo`.
+//
+// Quem escolhe o tamanho desse estado é o HOST VIGIADO: uma varredura de saída
+// produz centenas de peers ESTAB distintos por amostra, e a `--interval 5s` por
+// 8h são 5760 amostras. A ferramenta de triagem morria por OOM causado pelo
+// comprometimento que ela existe para observar.
+const (
+	// maxDestinos é o teto de peers acompanhados. Ao atingi-lo, os novos são
+	// CONTADOS e não acompanhados — e a contagem sai no resumo, porque um
+	// número alto aqui já é o achado.
+	//
+	// A conta que fixa o número: cada destino guarda até maxAparicoes instantes
+	// de 24 bytes, então o pior caso é 20000 × 64 × 24 ≈ 31 MB, mais o mapa.
+	// Um host legítimo fica três ordens de grandeza abaixo disso.
+	maxDestinos = 20000
+
+	// maxAparicoes é a janela deslizante do histórico de um destino. A
+	// periodicidade se julga pelos intervalos RECENTES: guardar as 5760 voltas
+	// de uma vigília de 8h não melhora a conclusão e faz concluiPeriodo
+	// reconstruir `deltas` sobre o histórico inteiro a cada volta — O(n²) por
+	// destino, ~16M operações num peer que pisca a cada amostra.
+	maxAparicoes = 64
+)
+
 // toleranciaPeriodo é o quanto os intervalos podem variar e ainda serem
 // chamados de constantes. Amostragem por polling já introduz jitter do tamanho
 // do próprio intervalo, então um piso apertado demais nunca dispararia.
@@ -63,13 +89,25 @@ type amostrador struct {
 	// jaFalouDoPeriodo evita repetir a mesma conclusão a cada volta.
 	jaFalouDoPeriodo map[string]bool
 	amostras         int
+
+	// destinosDescartados conta os peers que não couberam no teto. Sai no
+	// resumo: silenciar o corte diria "acompanhei tudo" sobre uma vigília que
+	// parou de acompanhar.
+	destinosDescartados int
 }
 
 // ritmo é o histórico de aparições de um destino.
 type ritmo struct {
-	presente  bool
+	presente bool
+	// aparicoes é a JANELA das últimas voltas, não o histórico inteiro — ver
+	// maxAparicoes.
 	aparicoes []time.Time
-	exe       string
+	// vistas é a contagem TOTAL de reaparições, que a janela não guarda. Ela
+	// entra na frase do achado: "repete a cada ~5s em 500 aparições" é
+	// evidência muito mais forte que "em 64", e dizer 64 porque foi só o que
+	// coube na janela seria subdeclarar o que se observou.
+	vistas int
+	exe    string
 }
 
 func novoAmostrador() *amostrador {
@@ -146,6 +184,10 @@ func (a *amostrador) amostra(f *facts.Facts, completo *facts.Facts, agora time.T
 		vistos[chave] = true
 		r := a.destinos[chave]
 		if r == nil {
+			if len(a.destinos) >= maxDestinos {
+				a.destinosDescartados++
+				continue
+			}
 			r = &ritmo{}
 			a.destinos[chave] = r
 		}
@@ -156,11 +198,20 @@ func (a *amostrador) amostra(f *facts.Facts, completo *facts.Facts, agora time.T
 			continue // já estava: não é volta
 		}
 		r.presente = true
+		r.vistas++
 		r.aparicoes = append(r.aparicoes, agora)
+		if len(r.aparicoes) > maxAparicoes {
+			// Janela deslizante: descarta a volta mais antiga em vez de crescer.
+			r.aparicoes = append(r.aparicoes[:0], r.aparicoes[1:]...)
+		}
 		if primeira {
 			continue
 		}
-		if len(r.aparicoes) == 1 {
+		// r.vistas, e não len(r.aparicoes): a janela deslizante nunca deixa o
+		// slice passar de maxAparicoes, mas ela também não volta a 1 — só que
+		// depender do comprimento aqui amarra "é a primeira vez" a uma estrutura
+		// que existe por razão de memória. A contagem total é quem responde.
+		if r.vistas == 1 {
 			out = append(out, linhaAmostra{
 				Sev: check.SevInfo, ID: "watch.peer_new", Assunto: chave,
 				Texto: fmt.Sprintf("%s ＋ conexão %s%s",
@@ -213,6 +264,14 @@ func (a *amostrador) concluiPeriodo(chave string, r *ritmo, completo *facts.Fact
 	if !ok {
 		// Irregular é conclusão também, e é a oposta: humano, não automação.
 		// Não vira linha para não competir com o achado.
+		//
+		// Com a janela CHEIA a conclusão já está formada, e insistir só
+		// reconstrói `deltas` inteiro a cada volta — o O(n²) por destino. Um
+		// peer com jitter irregular nunca marcava, e era exatamente ele que
+		// pagava o laço para sempre.
+		if len(r.aparicoes) >= maxAparicoes {
+			a.jaFalouDoPeriodo[chave] = true
+		}
 		return linhaAmostra{}
 	}
 	a.jaFalouDoPeriodo[chave] = true
@@ -220,7 +279,7 @@ func (a *amostrador) concluiPeriodo(chave string, r *ritmo, completo *facts.Fact
 	l := fmt.Sprintf("           ⏱ %s repete a cada ~%s em %d aparições: "+
 		"intervalo constante é AUTOMAÇÃO, não pessoa",
 		report.Safe(chave), time.Duration(media*float64(time.Second)).Round(time.Second),
-		len(r.aparicoes))
+		r.vistas)
 	if quem := gatilhoComPeriodo(completo, media); quem != "" {
 		l += "\n           ⏱ e casa com um gatilho já lido nesta máquina: " + report.Safe(quem)
 	}
@@ -385,6 +444,15 @@ func (a *amostrador) resumo(intervalo time.Duration) string {
 	if len(periodicos) > 0 {
 		sort.Strings(periodicos)
 		fmt.Fprintf(&b, "destinos com ritmo constante: %s\n", strings.Join(periodicos, " "))
+	}
+	if a.destinosDescartados > 0 {
+		// O corte é DITO. Uma vigília que parou de acompanhar destinos e cala
+		// sobre isso relata "nenhum ritmo constante" sobre o que não olhou — e
+		// o número alto aqui já é, por si, o sinal de varredura de saída.
+		fmt.Fprintf(&b, "ATENÇÃO: o teto de %d destinos acompanhados foi atingido e "+
+			"%d aparição(ões) de destinos novos NÃO foram acompanhadas — esse "+
+			"volume de peers distintos já é, por si, comportamento de varredura\n",
+			maxDestinos, a.destinosDescartados)
 	}
 	fmt.Fprintf(&b, "o que dura menos que %s pode não ter sido amostrado: "+
 		"polling perde processo muito curto, e detecção contínua de verdade se "+

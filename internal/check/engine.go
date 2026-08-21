@@ -20,6 +20,16 @@ type NotChecked struct {
 	Reason string `json:"reason"`
 	// Manual é o que o operador pode rodar à mão para cobrir esta lacuna.
 	Manual []string `json:"manual,omitempty"`
+
+	// Escopo marca o check que não roda porque a pergunta NÃO EXISTE neste
+	// host — o kernel não oferece o mecanismo, e nenhuma permissão o faria
+	// aparecer. Continua listado, porque silenciar seria esconder o que a
+	// execução não cobriu; o que ele NÃO faz é entrar no denominador da
+	// cobertura. Marcá-lo como lacuna fazia toda varredura naquele host sair
+	// INCOMPLETE com exit 1, inclusive a de um host limpo — a mesma confusão
+	// entre escopo e lacuna que o bootloader em contêiner e o nsswitch em musl
+	// já custaram.
+	Escopo bool `json:"out_of_scope,omitempty"`
 }
 
 // Partial é um check que rodou, mas não cobriu tudo.
@@ -49,6 +59,23 @@ type Coverage struct {
 // coleta também conta — é literalmente "não olhei".
 func (c Coverage) Incomplete() bool {
 	return c.Complete < c.Total || len(c.CollectorGaps) > 0
+}
+
+// NaoVerificados separa as duas listas que moram em NotChecked: o que é LACUNA
+// (não rodou e devia) e o que é ESCOPO (a pergunta não existe neste host).
+//
+// Sem essa separação o rodapé se contradizia na mesma linha — "105/105
+// completos · 2 não verificados" —, porque o escopo sai do denominador e
+// continuava sendo contado na lista.
+func (c Coverage) NaoVerificados() (lacunas, escopo []NotChecked) {
+	for _, nc := range c.NotChecked {
+		if nc.Escopo {
+			escopo = append(escopo, nc)
+		} else {
+			lacunas = append(lacunas, nc)
+		}
+	}
+	return lacunas, escopo
 }
 
 // Report é o resultado de uma execução.
@@ -202,10 +229,16 @@ func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 			continue
 		}
 		if missing := e.Missing(c.Requires); missing != 0 {
-			r.Coverage.NotChecked = append(r.Coverage.NotChecked, NotChecked{
+			nc := NotChecked{
 				ID: c.ID, Ref: c.Ref, Title: c.Title,
 				Reason: e.Reason(missing),
-			})
+			}
+			// ESCOPO sai do denominador; lacuna fica nele. Ver NotChecked.Escopo.
+			if e.SemMecanismo(missing) {
+				nc.Escopo = true
+				r.Coverage.Total--
+			}
+			r.Coverage.NotChecked = append(r.Coverage.NotChecked, nc)
 			continue
 		}
 

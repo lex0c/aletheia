@@ -780,6 +780,17 @@ func varrerPorSinal(limite int, visiveis map[int]bool, prazo time.Time) (map[int
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// Um panic aqui matava o PROCESSO: goroutine não é alcançada pelo
+			// recover do main, e o status 2 que sai dali é justamente o que a
+			// automação de frota lê como "CRITICAL, alta confiança" — um defeito
+			// nosso marcando o host como comprometido.
+			//
+			// Recuperado, não há lacuna a declarar por fora: o bloco que estava
+			// com este trabalhador não chega ao feito[b].Store(true), então o
+			// prefixo contíguo `ate` para antes dele e a sondagem passa a
+			// afirmar o alcance MENOR que de fato teve. É a resposta honesta, no
+			// campo que já existe para dizê-la.
+			defer func() { _ = recover() }()
 			for {
 				b := int(proximo.Add(1) - 1)
 				if b >= blocos || time.Now().After(prazo) {
@@ -800,11 +811,16 @@ func varrerPorSinal(limite int, visiveis map[int]bool, prazo time.Time) (map[int
 				}
 				feito[b].Store(true)
 				if len(achados) > 0 {
-					mu.Lock()
-					for _, pid := range achados {
-						cand[pid] = "kill(2)"
-					}
-					mu.Unlock()
+					// defer no Unlock — ver o invariante em
+					// Facts.guardaGoroutine: com recover ativo, um panic com o
+					// mutex travado pendura a pool inteira.
+					func() {
+						mu.Lock()
+						defer mu.Unlock()
+						for _, pid := range achados {
+							cand[pid] = "kill(2)"
+						}
+					}()
 				}
 			}
 		}()

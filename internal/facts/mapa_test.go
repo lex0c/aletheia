@@ -106,8 +106,11 @@ func TestLerMapsDeduplicaApagadoRepetido(t *testing.T) {
 func TestLerMapsLimitaAmostraSemPerderOTotal(t *testing.T) {
 	var b strings.Builder
 	for i := 0; i < 40; i++ {
-		e := strconv.FormatInt(int64(0x7f0000000000+i*0x1000), 16)
-		f := strconv.FormatInt(int64(0x7f0000000000+(i+1)*0x1000), 16)
+		// A base é int64 explícito: 0x7f0000000000 não cabe no `int` de 32
+		// bits do i386, e a expressão não compilava lá.
+		const base = int64(0x7f0000000000)
+		e := strconv.FormatInt(base+int64(i)*0x1000, 16)
+		f := strconv.FormatInt(base+int64(i+1)*0x1000, 16)
 		b.WriteString(e + "-" + f + " r-xp 00000000 00:00 0 \n")
 	}
 	p := lerMapsDe(t, b.String())

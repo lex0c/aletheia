@@ -577,6 +577,12 @@ Mas baseline não é allowlist de legitimidade.
 Se você criar a baseline depois que o invasor já entrou, o comprometimento
 também vira "estado conhecido".
 
+Baseline de esquema anterior é **recusada**, não interpretada: se aparecer
+`baseline de esquema incompatível: recapture`, recapture em vez de procurar
+contorno. Interpretar uma chave com a forma errada casa achado com achado
+errado, e o erro cai para o lado de marcar como conhecido o que é novo — que é
+o oposto do que a comparação existe para fazer.
+
 ---
 
 ## Cenário 14: "Quero saber exatamente por que um finding existe"

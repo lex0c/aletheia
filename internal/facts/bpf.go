@@ -629,12 +629,27 @@ func quandoCarregou(f *Facts, ns uint64) string {
 func linksBPF(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]bool) {
 	links, cortou, err := kbpf.Links()
 	if err != nil {
-		// Kernel anterior ao 5.8 não tem link nenhum. Não é lacuna de leitura:
-		// é ausência do mecanismo, e o programa de lá é segurado por descritor
-		// ou por anexo legado. Declarar mesmo assim, porque muda o significado
-		// de "sem anexo".
-		f.partial("bpf", "este kernel não enumera link de eBPF (anterior ao 5.8): "+
-			"o ponto de anexação de cada programa não foi lido")
+		// A frase NÃO afirma versão de kernel a partir de um errno.
+		//
+		// A versão anterior traduzia QUALQUER falha em "anterior ao 5.8", e num
+		// kernel 6.x sob perfil restrito — seccomp ou LSM negando
+		// BPF_LINK_GET_NEXT_ID, EPERM em cgroup delegado — o operador lia que o
+		// kernel era velho e parava de investigar. É o mesmo erro que
+		// kbpf.Sonda já aprendeu a não cometer, e o comentário de lá diz por
+		// quê: o errno distingue "não existe" de "não me deixaram".
+		//
+		// EINVAL/ENOSYS são o mecanismo ausente (o comando não existe antes do
+		// 5.8); o resto é lacuna de leitura, e vai com o errno cru.
+		if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOSYS) {
+			f.partial("bpf", "este kernel não tem BPF_LINK_GET_NEXT_ID, ou foi "+
+				"compilado sem ele ("+err.Error()+"): o ponto de anexação de cada "+
+				"programa NÃO foi lido, e o programa daqui é segurado por "+
+				"descritor ou por anexo legado")
+		} else {
+			f.partial("bpf", "a enumeração de link de eBPF falhou ("+err.Error()+
+				"): o ponto de anexação de cada programa NÃO foi lido — isto NÃO "+
+				"diz que o kernel não os tem")
+		}
 		return
 	}
 	f.BPF.Cortado = f.BPF.Cortado || cortou
@@ -783,9 +798,18 @@ func pinsDoBpffs(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]boo
 
 	vistos := 0
 	for _, raiz := range raizes {
-		err := filepath.WalkDir(raiz, func(caminho string, d os.DirEntry, err error) error {
+		// A lacuna é ACUMULADA aqui dentro, e não deduzida do erro que o
+		// WalkDir devolve: o callback só retornava nil ou SkipAll, e o WalkDir
+		// converte SkipAll em nil — então o f.partial que ficava depois do
+		// laço era código MORTO, inalcançável em qualquer execução. Com um pin
+		// ilegível (SELinux, lockdown, bpffs sob namespace restrito) o programa
+		// caía em SemDonoVisivel() e virava kernel.bpf_unowned CRITICAL, com a
+		// evidência "não há pin no bpffs" afirmada a partir de cegueira.
+		var ilegiveis, naoLidos []string
+		_ = filepath.WalkDir(raiz, func(caminho string, d os.DirEntry, err error) error {
 			if err != nil {
-				return nil // diretório ilegível: segue
+				ilegiveis = append(ilegiveis, caminho)
+				return nil
 			}
 			if d.IsDir() {
 				return nil
@@ -797,7 +821,14 @@ func pinsDoBpffs(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]boo
 			vistos++
 			f.BPF.Pins++
 			obj, err := kbpf.ObjetoDoPin(caminho)
-			if err != nil || obj.Classe != "prog" {
+			if err != nil {
+				// "Não pude perguntar" separado de "não é programa": fundir os
+				// dois num só `continue` era o que fazia o pin ilegível
+				// desaparecer como se fosse um mapa.
+				naoLidos = append(naoLidos, caminho)
+				return nil
+			}
+			if obj.Classe != "prog" {
 				return nil
 			}
 			citados[obj.ID] = true
@@ -806,10 +837,25 @@ func pinsDoBpffs(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]boo
 			}
 			return nil
 		})
-		if err != nil {
-			f.partial("bpf", "bpffs em "+raiz+" não pôde ser percorrido: "+err.Error())
+		if n := len(ilegiveis); n > 0 {
+			f.partial("bpf", strconv.Itoa(n)+" caminho(s) do bpffs em "+raiz+
+				" não puderam ser percorridos ("+amostraDeCaminhos(ilegiveis)+
+				"): um programa com pin ali apareceria SEM dono")
+		}
+		if n := len(naoLidos); n > 0 {
+			f.partial("bpf", strconv.Itoa(n)+" pin(s) do bpffs em "+raiz+
+				" não puderam ser lidos ("+amostraDeCaminhos(naoLidos)+
+				"): o programa que eles ancoram apareceria SEM dono")
 		}
 	}
+}
+
+// amostraDeCaminhos resume uma lista para caber numa linha de lacuna.
+func amostraDeCaminhos(cs []string) string {
+	if len(cs) > 3 {
+		return strings.Join(cs[:3], ", ") + ", …"
+	}
+	return strings.Join(cs, ", ")
 }
 
 // tailCalls marca quem é alcançado por prog_array. Sem esta leitura, todo

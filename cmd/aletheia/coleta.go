@@ -116,6 +116,22 @@ func runCollect(args []string) int {
 	// imprimia "o arquivo mudou depois de coletado": um defeito de escrita
 	// apresentado como adulteração de evidência, sobre uma coleta irrepetível.
 	if fh != nil {
+		// Sync ANTES do Close, e o erro dos dois confere igual.
+		//
+		// O Close conferido pegava ENOSPC e EIO que o cache adiava, mas não o
+		// caso em que a escrita "deu certo" e nunca chegou ao disco: o passo
+		// seguinte do runbook, depois de um `collect -o /mnt/evidencia/…`, é
+		// DESLIGAR o host para imagear. Corte de energia ou destruição da VM sem
+		// umount limpo, e o ext4 com alocação atrasada devolve um arquivo do
+		// tamanho certo cheio de zeros — com o .sha256 ao lado atestando o
+		// conteúdo que não está mais lá.
+		if err := fh.Sync(); err != nil {
+			fmt.Fprintf(os.Stderr, "collect: o dump NÃO foi sincronizado com o disco "+
+				"(%v). Não desligue o host antes de repetir a coleta para outro "+
+				"destino — o que está em %s pode não sobreviver.\n", err, *out)
+			fh.Close()
+			return 3
+		}
 		if err := fh.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "collect: o dump NÃO foi gravado por inteiro "+
 				"(%v). O arquivo em %s está truncado e a soma abaixo não vale como "+

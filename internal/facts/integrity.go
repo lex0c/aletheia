@@ -59,6 +59,13 @@ const (
 	// disputa por I/O passa a custar mais do que o paralelismo rende.
 	maxHashWorkers = 8
 
+	// Teto de DESCOMPRESSÃO do mtree do pacman. O arquivo em disco já é capado
+	// por env.MaxLeitura; o que sai do gzip não era capado por nada, e a razão
+	// entre os dois é escolhida por quem escreve o arquivo. Um mtree legítimo
+	// do maior pacote de uma distribuição fica na casa das unidades de MB, então
+	// 64 MB é folgado por uma ordem de grandeza e ainda assim finito.
+	maxMtreeDescomprimido = 64 << 20
+
 	// Teto TOTAL de bytes hasheados. Sem ele o custo cresce com o host: um
 	// servidor com dois mil mapeamentos distintos de biblioteca levaria a
 	// varredura a dezenas de segundos.
@@ -194,6 +201,7 @@ func verificarHashes(f *Facts, e *env.Env, donos map[string]string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer f.guardaGoroutine("hash")
 			for {
 				i := int(atomic.AddInt64(&prox, 1)) - 1
 				if i >= len(fila) {
@@ -210,23 +218,27 @@ func verificarHashes(f *Facts, e *env.Env, donos map[string]string) {
 				}
 				ref := esperados[t.caminho]
 				obtido, err := hashDoArquivo(e, t.caminho, ref.algo)
-				mu.Lock()
-				switch {
-				case err != nil:
-					semHash = append(semHash, t.caminho)
-				case !strings.EqualFold(obtido, ref.hash):
-					f.HashDiff = append(f.HashDiff, HashDivergente{
-						Path: t.caminho, Pacote: t.pkg, Algo: ref.algo,
-						Esperado: ref.hash, Obtido: obtido, Config: ref.conf,
-					})
-				default:
-					// CONFERIU. Guardar isto não é simetria decorativa: é o que
-					// permite a outros checks SUPRIMIREM um achado com prova.
-					// Sem a lista, "tem dono de pacote" viraria licença para
-					// calar sobre um arquivo que ninguém verificou.
-					f.HashOK = append(f.HashOK, t.caminho)
-				}
-				mu.Unlock()
+				// defer no Unlock — ver o invariante em Facts.guardaGoroutine.
+				func() {
+					mu.Lock()
+					defer mu.Unlock()
+					switch {
+					case err != nil:
+						semHash = append(semHash, t.caminho)
+					case !strings.EqualFold(obtido, ref.hash):
+						f.HashDiff = append(f.HashDiff, HashDivergente{
+							Path: t.caminho, Pacote: t.pkg, Algo: ref.algo,
+							Esperado: ref.hash, Obtido: obtido, Config: ref.conf,
+						})
+					default:
+						// CONFERIU. Guardar isto não é simetria decorativa: é o
+						// que permite a outros checks SUPRIMIREM um achado com
+						// prova. Sem a lista, "tem dono de pacote" viraria
+						// licença para calar sobre um arquivo que ninguém
+						// verificou.
+						f.HashOK = append(f.HashOK, t.caminho)
+					}
+				}()
 			}
 		}()
 	}
@@ -483,7 +495,17 @@ func hashesPacman(f *Facts, e *env.Env, porPacote map[string][]string) map[strin
 		if err != nil {
 			continue
 		}
-		sc := bufio.NewScanner(zr)
+		// O teto de DESCOMPRESSÃO. A entrada já é capada em env.MaxLeitura, mas
+		// a saída não era capada em nada, e a razão entre as duas é escolhida
+		// por quem escreve o arquivo: 2,6 MB de mtree plantado renderam 7,1 s e
+		// 56 milhões de linhas neste laço, e o laço roda UMA VEZ POR PACOTE.
+		// Trezentos diretórios em /var/lib/pacman/local com o mesmo arquivo
+		// fazem a coleta girar por horas — e como o dump só é escrito no fim, o
+		// operador mata a ferramenta e perde TUDO, de uma máquina que pode não
+		// existir amanhã. Este caminho não passa por WalkExpired() e não há
+		// deadline global de coleta.
+		lim := &io.LimitedReader{R: zr, N: maxMtreeDescomprimido + 1}
+		sc := bufio.NewScanner(lim)
 		sc.Buffer(make([]byte, 0, 4096), 256*1024)
 		for sc.Scan() {
 			ln := sc.Text()
@@ -506,6 +528,16 @@ func hashesPacman(f *Facts, e *env.Env, porPacote map[string][]string) map[strin
 			}
 		}
 		f.scannerFoiAteOFim(sc, "hash", mtree)
+		if lim.N <= 0 {
+			// Bateu o teto: o resto do mtree NÃO foi lido, e os hashes de
+			// referência que faltaram não podem virar "o arquivo diverge do
+			// pacote". A lacuna é declarada pelo mesmo caminho que o resto do
+			// arquivo usa para dizer "não terminei de olhar".
+			f.denyPersist("hash", mtree+" descomprime além de "+
+				strconv.Itoa(maxMtreeDescomprimido>>20)+" MB e foi CORTADO: os "+
+				"hashes de referência seguintes NÃO foram lidos, e a divergência "+
+				"dos arquivos deste pacote não pôde ser avaliada")
+		}
 		zr.Close()
 	}
 	return out

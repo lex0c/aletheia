@@ -160,6 +160,14 @@ type Process struct {
 	// que não reportar.
 	Vanished bool `json:"vanished,omitempty"`
 
+	// CgroupDesconhecido marca o processo cujo /proc/<pid>/cgroup não pôde ser
+	// lido ou interpretado. Existe porque Cgroup=="" tem DOIS significados —
+	// "está no host" e "não consegui olhar" — e o primeiro é premissa de
+	// acusação: proc.container_boundary chama de escape de contêiner o exe em
+	// camada de imagem cujo cgroup é do host. Quem for afirmar sobre o host
+	// precisa checar esta marca antes.
+	CgroupDesconhecido bool `json:"cgroup_unknown,omitempty"`
+
 	startTicks int64 // campo 22 de stat, em ticks desde o boot
 	deniedFDs  bool  // /proc/<pid>/fd ilegível: vira cobertura parcial
 
@@ -704,11 +712,30 @@ func reconfirmCmdline(f *Facts) {
 			p.Argv = argv // era exec em curso
 		default:
 			// Confirma que ainda é o MESMO processo: PID pode ter sido reusado.
-			if st, ok := readTrim(procPath(p.PID, "stat")); ok {
-				if _, rest, ok := splitStatComm(st); ok && len(rest) > 19 && rest[19] != strconv.FormatInt(p.startTicks, 10) {
-					p.Vanished = true
-					continue
-				}
+			//
+			// A âncora falhava ABERTA: quando o readTrim ou o split não davam
+			// certo, o código caía direto no CmdlineEmpty — afirmando sobre um
+			// processo que ele não conseguiu identificar. Sem âncora não há o
+			// que afirmar, e o certo é não afirmar.
+			st, ok := readTrim(procPath(p.PID, "stat"))
+			if !ok {
+				p.Vanished = true
+				continue
+			}
+			_, rest, ok := splitStatComm(st)
+			if !ok || len(rest) <= 19 || rest[19] != strconv.FormatInt(p.startTicks, 10) {
+				p.Vanished = true
+				continue
+			}
+			// O ZUMBI tem cmdline vazio POR DEFINIÇÃO: o kernel já liberou o
+			// mm_struct e só resta a entrada na tabela até o pai chamar wait().
+			// O estado estava ali, em rest[0], recém-parseado e ignorado — e
+			// contar zumbi como cmdline vazio produzia proc.kthread_disguise
+			// CRITICAL irreversível sobre um processo que não é kthread nem
+			// disfarce, só um filho que ninguém colheu.
+			p.State = rest[0]
+			if rest[0] == "Z" {
+				continue
 			}
 			p.CmdlineEmpty = true
 		}
@@ -773,11 +800,22 @@ func readLimites(p *Process) {
 func readCgroup(p *Process) {
 	b, err := os.ReadFile(procPath(p.PID, "cgroup"))
 	if err != nil {
+		// Cgroup vazio por CEGUEIRA tem o mesmo formato de cgroup vazio por ser
+		// do host — e "do host" é metade da premissa do CRITICAL de
+		// proc.container_boundary ("exe em camada de imagem + cgroup do HOST").
+		// Sem esta marca, um /proc/<pid>/cgroup que não abriu produzia a
+		// acusação de escape de contêiner com o campo cgroup VAZIO na própria
+		// evidência que a sustentava.
+		p.CgroupDesconhecido = true
 		return
 	}
 	if c := parseCgroup(string(b)); c != "" {
 		p.Cgroup = c
+		return
 	}
+	// Arquivo lido e sem nenhuma linha interpretável: também não autoriza a
+	// afirmar "este processo está no host".
+	p.CgroupDesconhecido = true
 }
 
 // parseCgroup separa as duas gramáticas. É função PURA sobre texto porque é

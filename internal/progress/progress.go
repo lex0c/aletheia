@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // Reporter pinta o estágio atual e o tempo decorrido, uma vez por tique.
@@ -99,8 +100,40 @@ func (r *Reporter) Detalhe(s string) {
 		return
 	}
 	r.mu.Lock()
-	r.detalhe = s
+	r.detalhe = seguro(s)
 	r.mu.Unlock()
+}
+
+// seguro neutraliza os bytes de CONTROLE de uma string que veio do ALVO.
+//
+// O detalhe é um nome de diretório do host investigado, e nome de arquivo em
+// Linux aceita qualquer byte menos `/` e NUL. Um `/var/www/<ESC>[?1049h…` era
+// escrito verbatim no terminal do respondedor durante a varredura: troca para o
+// buffer alternativo, redefine a região de rolagem, ou injeta texto com cara de
+// saída da ferramenta — e o relatório que nasce depois do Stop() sai invisível
+// ou adulterado. Um `\n` no nome também quebra a aritmética de duas linhas do
+// `\033[A`, fazendo o Stop apagar a linha errada.
+//
+// O report.Safe existe exatamente para isto e cobre todo o resto da saída; esta
+// superfície era a única que passava. Não dá para importá-lo daqui sem ciclo, e
+// o filtro cabe em oito linhas.
+func seguro(s string) string {
+	temControle := false
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || unicode.Is(unicode.Cf, r) {
+			temControle = true
+			break
+		}
+	}
+	if !temControle {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || unicode.Is(unicode.Cf, r) {
+			return '?'
+		}
+		return r
+	}, s)
 }
 
 // Stop encerra o batimento e apaga AS DUAS linhas. Idempotente: o explícito

@@ -51,6 +51,17 @@ var credencialEmArquivo = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+		// A lacuna vem ANTES do return antecipado, e da chave CERTA.
+		//
+		// Este check lia PersistDenied["ssh"] enquanto o coletor grava em
+		// ["segredo"], e o append ficava depois do `len(f.Segredos)==0` — que é
+		// exatamente o caminho que um /srv ilegível toma. Os .env de aplicação
+		// não entravam no raio de alcance, nenhum segredo era achado, e o check
+		// saía COMPLETO sobre uma árvore que ninguém conseguiu ler, enquanto o
+		// texto de falso-positivo acima promete "a cobertura diz quando foi
+		// esse o caso". É o padrão que checks/bpf.go já seguia: declarar a
+		// lacuna antes de qualquer saída.
+		r.Partial = append(r.Partial, f.PersistDenied["segredo"]...)
 		if len(f.Segredos) == 0 {
 			return r
 		}
@@ -101,7 +112,6 @@ var credencialEmArquivo = check.Check{
 				strconv.Itoa(abertos)+" de "+strconv.Itoa(len(f.Segredos))+
 					" credenciais estão legíveis além da conta dona")
 		}
-		r.Partial = append(r.Partial, f.PersistDenied["ssh"]...)
 		return r
 	},
 }

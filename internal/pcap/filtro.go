@@ -128,6 +128,15 @@ func semEnlace(tipoEnlace uint32, pkt []byte) (carga []byte, etherType uint16, o
 			et = uint16(pkt[off+2])<<8 | uint16(pkt[off+3])
 			off += 4
 		}
+		// Ainda etiquetado depois de duas voltas: são três ou mais etiquetas, e
+		// o laço parou sem chegar ao tipo real. Devolver `true` aqui fazia o
+		// pacote cair no default de casaIP e ser CONTADO como "fora do filtro" —
+		// o manifesto declarava tê-lo avaliado e descartado, quando na verdade
+		// não chegou a decodificá-lo. Não entender precisa sair como não
+		// entender.
+		if et == 0x8100 || et == 0x88A8 {
+			return nil, 0, false
+		}
 		return pkt[off:], et, true
 	}
 	return nil, 0, false

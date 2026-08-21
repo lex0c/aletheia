@@ -96,7 +96,13 @@ func collectUsers(f *Facts, e *env.Env) {
 	}
 	for _, ln := range strings.Split(string(b), "\n") {
 		fs := strings.Split(ln, ":")
-		if len(fs) < 7 {
+		// A linha COMENTADA não é conta. Comentar a linha do passwd é a forma
+		// clássica de desabilitar um acesso, e sem este guarda ela virava
+		// Account{Name: "#deploy"} — um nome que nunca está no shadow, logo
+		// SemShadow=true, logo priv.account_no_shadow CRITICAL sobre uma conta
+		// que não existe (e SevCritical quando o UID comentado é 0). O
+		// NomesDeUsuario, no fim deste arquivo, sempre teve o guarda.
+		if len(fs) < 7 || strings.HasPrefix(ln, "#") {
 			continue
 		}
 		uid, err := strconv.Atoi(fs[2])
@@ -126,7 +132,7 @@ func collectUsers(f *Facts, e *env.Env) {
 	} else if err == nil {
 		for _, ln := range strings.Split(string(b), "\n") {
 			fs := strings.Split(ln, ":")
-			if len(fs) < 4 {
+			if len(fs) < 4 || strings.HasPrefix(ln, "#") {
 				continue
 			}
 			gid, _ := strconv.Atoi(fs[2])
@@ -157,7 +163,7 @@ func lerShadow(f *Facts, e *env.Env) map[string]string {
 	}
 	for _, ln := range strings.Split(string(b), "\n") {
 		fs := strings.Split(ln, ":")
-		if len(fs) < 2 {
+		if len(fs) < 2 || strings.HasPrefix(ln, "#") {
 			continue
 		}
 		out[fs[0]] = fs[1]

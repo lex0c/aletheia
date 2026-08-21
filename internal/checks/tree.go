@@ -7,6 +7,7 @@ import (
 	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
+	"github.com/lex0c/aletheia/internal/redact"
 )
 
 func init() {
@@ -108,7 +109,11 @@ var shellDeServico = check.Check{
 				"shell: exe=" + nz(p.Exe, "?") + " " + uidStr(p),
 			}
 			if len(p.Argv) > 0 {
-				ev = append(ev, "argv="+strings.Join(p.Argv, " "))
+				// Redigido ANTES de entrar no achado, como em checks/proc.go: a
+				// evidência vai para o relatório humano, para o JSONL da frota e
+				// para o ticket, e um `mysqldump -u root -pS3cr3t` levaria a
+				// senha junto nos três (SPEC 5.4).
+				ev = append(ev, "argv="+strings.Join(redact.Cmdline(p.Argv), " "))
 			}
 			// Os filhos do shell contam a história inteira — é onde o `curl`
 			// aparece.

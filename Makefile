@@ -153,7 +153,18 @@ vm-matrix:
 # Servidor legado de 32 bits ainda existe. Cross-compilar custa segundos e é a
 # única forma de provar que a ferramenta roda lá — tamanho de int e número de
 # syscall divergem, e o compilador não pega tudo.
+#
+# O `go vet ./...` das duas arquiteturas vem ANTES dos binários, e cobre o
+# repositório INTEIRO — inclusive os testes e a ferramenta de plantio da matriz.
+# Enquanto o alvo construía só ./cmd/aletheia, as duas arquiteturas de ABI mais
+# divergente eram as MENOS verificadas: `GOARCH=386 go build ./...` e o
+# equivalente em arm64 estavam quebrados sem que nada acusasse, a matriz
+# adversarial só podia ser plantada em amd64, e dois testes não compilavam em 32
+# bits (Timespec de int32, constante que estoura o int). É justamente onde os
+# sys_*.go existem.
 arches:
+	GOOS=linux GOARCH=386   go vet ./...
+	GOOS=linux GOARCH=arm64 go vet ./...
 	CGO_ENABLED=0 GOOS=linux GOARCH=386   go build -trimpath -o dist/aletheia-386   ./cmd/aletheia
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o dist/aletheia-arm64 ./cmd/aletheia
 	CGO_ENABLED=0 GOOS=linux GOARCH=386   go build -trimpath -o dist/helper-386     ./test/helper

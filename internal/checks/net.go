@@ -47,6 +47,9 @@ var revshell = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+		// Idem: chave emitida pelo coletor e nunca lida. Ver o comentário do
+		// primeiro check que a consome.
+		r.Partial = append(r.Partial, f.Partial["net"]...)
 		for i := range f.Processes {
 			p := &f.Processes[i]
 			if p.Self || p.Vanished {

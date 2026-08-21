@@ -347,6 +347,19 @@ var sudoSemSenha = check.Check{
 				sev = check.SevCritical
 				ev = append(ev, "e a especificação de comando é ALL, como "+runas+
 					": é root inteiro, sem responder nada")
+			case comoRoot && ehShellOuInterp(specDeComando(s.Text)):
+				// "restrita a UM comando" só é menor privilégio se o comando não
+				// for um shell: `NOPASSWD: /bin/bash` como root É root
+				// irrestrito, porque o alvo executa qualquer coisa a partir dali.
+				//
+				// O discriminador já existia — e já era usado — no doasSemSenha,
+				// duzentas linhas abaixo. Sem ele aqui, o MESMO poder saía
+				// CRITICAL pelo doas e WARN pelo sudo, ou seja, exit 1 pelo
+				// caminho que 99% dos hosts usam.
+				sev = check.SevCritical
+				ev = append(ev, "e o comando é um SHELL/interpretador ("+
+					specDeComando(s.Text)+") como "+runas+": restringir a `bash` "+
+					"como root não restringe nada — é root irrestrito, sem senha")
 			case amplo:
 				// Conceder TUDO como outra conta não é root, e dizer que é seria
 				// afirmar o que a regra não diz. Continua valendo olhar — quem
@@ -384,6 +397,11 @@ var sudoSemSenha = check.Check{
 			ev = append(ev, metaDeAcesso(f)...)
 
 			fd := self.F(sev, quem, "", ev...)
+			// O sujeito é o USUÁRIO, e o mesmo usuário costuma ter mais de uma
+			// regra: sem discriminador, uma regra NOVA em sudoers.d herdava a
+			// presença da antiga na baseline e saía sem a marca ✳NOVO. O texto
+			// da regra é estável entre execuções; o número da linha não é.
+			fd.Chave = s.Text
 			fd.NextSteps = []string{
 				"`sudo -l -U " + quem + "` mostra o que a regra concede de verdade, " +
 					"já resolvendo alias e herança de grupo",
@@ -456,15 +474,20 @@ func defaultsGlobal(texto string) bool {
 	return resto[0] == ' ' || resto[0] == '\t'
 }
 
-func regraAmpla(texto string) bool {
-	// A especificação de comando é o que vem depois do último `=` ou dos
-	// dois-pontos do NOPASSWD.
-	corte := texto
+// specDeComando devolve a especificação de comando da regra: o que vem depois
+// do `NOPASSWD:` ou, sem ele, do último `=`.
+func specDeComando(texto string) string {
 	if i := indiceSemCaixa(texto, "NOPASSWD:"); i >= 0 {
-		corte = texto[i+len("NOPASSWD:"):]
-	} else if i := strings.LastIndex(texto, "="); i >= 0 {
-		corte = texto[i+1:]
+		return strings.TrimSpace(texto[i+len("NOPASSWD:"):])
 	}
+	if i := strings.LastIndex(texto, "="); i >= 0 {
+		return strings.TrimSpace(texto[i+1:])
+	}
+	return texto
+}
+
+func regraAmpla(texto string) bool {
+	corte := specDeComando(texto)
 	for _, campo := range strings.FieldsFunc(corte, func(r rune) bool {
 		return r == ',' || r == ' ' || r == '\t'
 	}) {
@@ -564,6 +587,9 @@ var doasSemSenha = check.Check{
 			}
 
 			fd := self.F(sev, quem, "", ev...)
+			// Mesma razão do sudo: o sujeito é a identidade, e uma identidade
+			// pode ter várias regras. Ver check.Finding.Chave.
+			fd.Chave = d.Alvo + "|" + d.Comando
 			fd.NextSteps = []string{
 				"leia a regra: `permit nopass` sem `as` é root; com `cmd` é restrita",
 				"se ninguém reconhecer a identidade liberada, remova a linha e " +

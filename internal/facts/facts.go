@@ -10,6 +10,9 @@
 package facts
 
 import (
+	"fmt"
+	"sync"
+
 	"github.com/lex0c/aletheia/internal/env"
 )
 
@@ -66,7 +69,52 @@ import (
 //
 //	   É por isso que existe o TestImpressaoDoEsquema: regra que depende de
 //	   alguém lembrar continua sendo esquecida.
-const SchemaVersion = 6
+//	7  A rodada de conserto de confiabilidade. São DOIS campos novos e SEIS
+//	   mudanças de semântica, e todas as oito mentem num dump v6 lido por este
+//	   binário — a maioria na direção do falso "limpo".
+//
+//	   Campos novos:
+//	     Process.CgroupDesconhecido  num dump v6 vem `false`, que afirma "o
+//	       cgroup deste processo foi lido e é do host" sobre um /proc/<pid>/cgroup
+//	       que ninguém conseguiu abrir. É metade da premissa do CRITICAL de
+//	       proc.container_boundary — a outra metade é o exe estar em camada de
+//	       imagem —, então zerado ali produz acusação de escape de contêiner a
+//	       partir de cegueira.
+//	     Finding.Chave não é fato, mas a CHAVE DA BASELINE mudou de forma junto
+//	       (baseline.Schema 1 -> 2), e baseline antiga é recusada por lá.
+//
+//	   Semânticas mudadas, todas sobre campo que já existia:
+//	     HistoricoDeLoginLido  v6 podia trazer `true` para um wtmp que o coletor
+//	       declarou não ter interpretado. Hoje é `false`, e a diferença decide o
+//	       CRITICAL irreversível de antiforense.wtmp_cleared.
+//	     Logins  em Alpine x86_64 (musl) o registro tem 400 bytes e era lido com
+//	       passo de 384: um dump v6 daquele host traz inventário de login LIDO DO
+//	       BYTE ERRADO — usuário vindo do meio de outro campo, timestamp zero —
+//	       com cara de dado bom.
+//	     Accounts  v6 podia trazer Account{Name: "#deploy"} de uma linha
+//	       COMENTADA do passwd, que nunca está no shadow: SemShadow=true e
+//	       priv.account_no_shadow CRITICAL sobre conta que não existe.
+//	     Ownership/Pkg.Consultavel  v6 montava Ownership com `donos` vazio quando
+//	       a base de pacotes existia e não podia ser lida, carimbando Owned=false
+//	       em TODO candidato. Hoje esse caso não monta Ownership e marca
+//	       Consultavel=false. Um dump v6 assim dispara CRITICAL em série em
+//	       integrity.no_package_owner, persist.unit_unowned, egress, binfmt,
+//	       initramfs e helper.
+//	     Units  o `.include` do systemd passou a ser expandido. Num dump v6 a
+//	       unit que usa esse idioma — o override documentado no systemd 219, ou
+//	       seja RHEL/CentOS 7 e SLES 12 — tem Exec VAZIO, e vazio ali é
+//	       "esta unit não executa nada".
+//	     SSH  as diretivas escritas com `=` (PermitRootLogin=yes,
+//	       AuthorizedKeysCommand=/tmp/.k) eram descartadas: num dump v6 elas
+//	       simplesmente não estão, e o relatório imprime o padrão do sshd como se
+//	       fosse o efetivo.
+//	     Modules  a continuação por `\` era truncada em `\`, e checks/modprobe
+//	       aceitava `\` como nome de módulo e SUPRIMIA o achado. Um dump v6 traz
+//	       o Cmd cortado no ponto que o torna invisível.
+//	     Process.State/CmdlineEmpty  zumbi deixou de virar CmdlineEmpty. Num dump
+//	       v6 ele vem marcado, e proc.kthread_disguise sai CRITICAL irreversível
+//	       sobre um filho que ninguém colheu.
+const SchemaVersion = 7
 
 // Facts é o retrato do host.
 type Facts struct {
@@ -238,6 +286,15 @@ type Facts struct {
 	idxMount map[string]uint64
 }
 
+// muLacuna protege as escritas de lacuna vindas de GOROUTINE.
+//
+// É de PACOTE e não campo de Facts porque Facts é um tipo COPIADO — o dump o
+// copia, e meia dúzia de tabelas de teste o carregam por valor. Um sync.Mutex
+// lá dentro torna cada uma dessas cópias um erro que o `go vet` acusa, e com
+// razão. Como o caminho guardado é raro (lacuna de goroutine, e panic de
+// coletor), serializar por processo não custa nada.
+var muLacuna sync.Mutex
+
 // idx são as buscas por chave. Sem elas, um check que pergunta "quais sockets
 // são deste processo" para CADA processo custa P×S: num balanceador com 2 mil
 // processos e 100 mil conexões isso mediu 1,5s só de laço — mais que o
@@ -311,6 +368,66 @@ func (f *Facts) partial(collector, reason string) {
 	f.Partial[collector] = append(f.Partial[collector], reason)
 }
 
+// partialSeguro é o partial chamável de dentro de goroutine.
+func (f *Facts) partialSeguro(collector, reason string) {
+	muLacuna.Lock()
+	defer muLacuna.Unlock()
+	f.partial(collector, reason)
+}
+
+// guardaGoroutine isola o panic do corpo de UMA goroutine de varredura.
+//
+// O recover() do main NÃO alcança goroutine: ela morre levando o processo
+// junto, e o status vira 2 — que o contrato desta ferramenta define como
+// "CRITICAL: indicador de alta confiança". Um defeito NOSSO faz a automação de
+// frota, que ordena host por exit code, marcar a máquina como comprometida.
+//
+// É a mesma correção que readProcessGuarded fez para o coletor de processos e
+// que runGuarded fez para os checks; as varreduras de suid, de hash e de PID
+// ficaram de fora, e elas percorrem justamente nomes de diretório e conteúdo de
+// arquivo escolhidos por quem se quer esconder.
+//
+// Uso: `defer f.guardaGoroutine("suid")` DEPOIS do `defer wg.Done()`, para que
+// o recover rode antes de o WaitGroup ser liberado.
+//
+// INVARIANTE que ele impõe ao resto da pool: nenhuma seção crítica pode ficar
+// travada se o corpo dela entrar em pânico. Antes do recover, um panic ali
+// derrubava o processo e o mutex ia junto; agora o processo sobrevive, e um
+// mutex travado bloquearia os outros trabalhadores no Lock — o wg.Wait() nunca
+// voltaria e a ferramenta PENDURARIA, sem saída e sem relatório, que é pior que
+// cair. Por isso as seções críticas das pools guardadas usam `defer Unlock`.
+func (f *Facts) guardaGoroutine(coletor string) {
+	if r := recover(); r != nil {
+		f.partialSeguro(coletor, "um trabalhador desta varredura caiu (panic: "+
+			fmt.Sprint(r)+"): a parte da fila que estava com ele NÃO foi "+
+			"examinada — o que ela diria não pode ser deduzido do silêncio")
+	}
+}
+
+// rodarColetor isola a falha de UM coletor.
+//
+// Collect chama cerca de trinta coletores em sequência, e um panic em qualquer
+// um deles subia até o recover do main: saída sem dump, exit 3, e TODOS os
+// coletores anteriores descartados junto — de um host que pode não existir
+// amanhã. Aqui a queda vira lacuna daquele coletor e a coleta segue.
+// rodarColetor recebe a CHAVE de lacuna e o NOME do coletor separados.
+//
+// A chave decide qual check degrada, e por isso sai do vocabulário que os
+// checks já consomem — a catraca de lacunas exige isso. O nome vai na mensagem
+// porque uma chave sozinha não identifica o que caiu: `collectHost` e
+// `collectProcesses` degradam o mesmo check, e "o coletor caiu" sem dizer qual
+// manda o operador procurar no lugar errado.
+func rodarColetor(f *Facts, chave, nome string, fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			f.partialSeguro(chave, "o coletor "+nome+" caiu (panic: "+fmt.Sprint(r)+
+				"): os fatos que ele produz NÃO foram coletados, e nenhuma "+
+				"conclusão sobre eles pode sair desta execução")
+		}
+	}()
+	fn()
+}
+
 // Collect roda os coletores disponíveis para o ambiente sondado.
 func Collect(e *env.Env) *Facts {
 	f := &Facts{
@@ -320,34 +437,34 @@ func Collect(e *env.Env) *Facts {
 	}
 
 	e.Stage("host")
-	collectHost(f, e)
+	rodarColetor(f, "proc", "collectHost", func() { collectHost(f, e) })
 	// Antes de tudo que interpreta caminho: a tabela de montagem diz se o bit
 	// setuid de um arquivo é inerte e se algo executa de um diretório.
 	e.Stage("montagens")
-	collectMounts(f, e)
+	rodarColetor(f, "mounts", "collectMounts", func() { collectMounts(f, e) })
 
 	if e.Has(env.CapProcfs) {
 		e.Stage("processos")
-		collectProcesses(f, e)
+		rodarColetor(f, "proc", "collectProcesses", func() { collectProcesses(f, e) })
 		// Depois dos processos: o dono de cada socket sai do join com os fds
 		// que o coletor de processo já leu.
 		// Os limites vêm ANTES dos sockets: além de serem os tetos que
 		// transformam "há 400 conexões" em "e o próximo connect vai falhar",
 		// a faixa de porta efêmera é INSUMO da inferência de direção.
 		e.Stage("rede")
-		collectLimitesDeRede(f, e)
-		collectSockets(f, e)
+		rodarColetor(f, "net", "collectLimitesDeRede", func() { collectLimitesDeRede(f, e) })
+		rodarColetor(f, "net", "collectSockets", func() { collectSockets(f, e) })
 		// DEPOIS dos sockets: o criador de um segmento SysV SHM é um cpid, e
 		// saber se ele é DAEMON DE REDE (tem socket de escuta) exige os sockets já
 		// lidos — é o discriminador que pega o Ebury 0600. O canal IPC que não
 		// aparece em socket nem em fd.
-		collectSysVShm(f, e)
+		rodarColetor(f, "sysvipc", "collectSysVShm", func() { collectSysVShm(f, e) })
 		// E os que leem PACOTE, que não aparecem em tabela de conexão nenhuma:
 		// é por eles que um filtro de socket eBPF órfão continua vivo.
-		collectSocketsBrutos(f, e)
+		rodarColetor(f, "pacote", "collectSocketsBrutos", func() { collectSocketsBrutos(f, e) })
 		// DEPOIS dos sockets: a segunda visão da mesma tabela, pelo netlink.
 		// Ela precisa da primeira para ter com o que divergir.
-		collectCrossSockets(f, e)
+		rodarColetor(f, "net", "collectCrossSockets", func() { collectCrossSockets(f, e) })
 		// Depois dos processos e ANTES de qualquer pergunta de propriedade: é
 		// a classificação que decide se "que pacote entregou este binário?" faz
 		// sentido para aquele processo.
@@ -355,19 +472,19 @@ func Collect(e *env.Env) *Facts {
 		// Depois dos processos: a comparação precisa da lista para saber o que
 		// está VISÍVEL.
 		e.Stage("kernel e módulos")
-		collectCrossView(f, e)
+		rodarColetor(f, "cross", "collectCrossView", func() { collectCrossView(f, e) })
 		// Junto do cross-view: aqueles dizem que o kernel pode estar mentindo,
 		// e este diz COMO.
-		collectFtrace(f, e)
+		rodarColetor(f, "ftrace", "collectFtrace", func() { collectFtrace(f, e) })
 		// Marca do próprio kernel sobre o que já foi carregado nele. Não
 		// depende de privilégio e não pode ser apagada sem reiniciar.
-		collectTaint(f, e)
+		rodarColetor(f, "taint", "collectTaint", func() { collectTaint(f, e) })
 		// O que o kernel deixa acontecer com ele mesmo. Vem antes dos módulos
 		// carregados porque é o contexto que pesa o achado deles.
-		collectProtecaoKernel(f, e)
+		rodarColetor(f, "taint", "collectProtecaoKernel", func() { collectProtecaoKernel(f, e) })
 		// Depois dos processos: o dono de um programa eBPF é um descritor
 		// aberto, e a lista de descritores já está lida.
-		collectBPF(f, e)
+		rodarColetor(f, "bpf", "collectBPF", func() { collectBPF(f, e) })
 	} else {
 		f.partial("proc", e.Reason(env.CapProcfs))
 	}
@@ -377,24 +494,24 @@ func Collect(e *env.Env) *Facts {
 		// que a coleta "parece travada" num disco lento, e por isso o que mais
 		// justifica o batimento.
 		e.Stage("varredura de filesystem")
-		collectPersist(f, e)
+		rodarColetor(f, "persist", "collectPersist", func() { collectPersist(f, e) })
 		// Depois da persistência: a varredura de código reusa os web roots e
 		// procura backdoor em PHP/JS/Python. Peneira declarada, com teto.
 		e.Stage("varredura de código")
-		collectCodigo(f, e)
+		rodarColetor(f, "codigo", "collectCodigo", func() { collectCodigo(f, e) })
 		// DEPOIS da persistência: a pergunta "quem pode reescrever o que root
 		// executa" precisa da lista do que root executa, e ela sai dali.
-		collectAlvosDeRoot(f, e)
+		rodarColetor(f, "gravavel", "collectAlvosDeRoot", func() { collectAlvosDeRoot(f, e) })
 		// DEPOIS da persistência, que é quem varre /lib/modules: a pergunta
 		// "que arquivo entregou este módulo?" precisa da lista de arquivos, e
 		// respondê-la antes diria "nenhum" em todo host — a pior forma de falso
 		// positivo, porque é uniforme e convincente.
 		if e.Has(env.CapProcfs) {
-			collectModulosCarregados(f, e)
+			rodarColetor(f, "modulo", "collectModulosCarregados", func() { collectModulosCarregados(f, e) })
 		}
 		// Depois de tudo: o conjunto de candidatos a hash é o que os outros
 		// coletores acharem interessante. Só roda com hash na lista.
-		collectHashesIOC(f, e)
+		rodarColetor(f, "ioc", "collectHashesIOC", func() { collectHashesIOC(f, e) })
 	} else {
 		f.partial("persist", e.Reason(env.CapFilesystem))
 	}
@@ -404,7 +521,7 @@ func Collect(e *env.Env) *Facts {
 	// inodes observados ganham nome.
 	if e.Has(env.CapProcfs) {
 		e.Stage("vigias de arquivo")
-		collectVigias(f, e)
+		rodarColetor(f, "vigia", "collectVigias", func() { collectVigias(f, e) })
 	}
 
 	e.Stage("finalizando")

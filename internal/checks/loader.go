@@ -42,6 +42,9 @@ var ldPreloadGlobal = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+		// Idem: chave emitida pelo coletor e nunca lida. Ver o comentário do
+		// primeiro check que a consome.
+		r.Partial = append(r.Partial, f.Partial["persist"]...)
 		l := f.Loader
 		if !l.PreloadExists {
 			return r

@@ -7,7 +7,7 @@ GOFLAGS := -trimpath
 # LD_PRELOAD e a binário de sistema trojanizado (SPEC 4).
 export CGO_ENABLED = 0
 
-.PHONY: all build helper vm-image test race race-unit lint verify clean dist scenarios images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix vm-matrix arches
+.PHONY: all build helper vm-image test race race-unit lint verify clean dist scenarios scenarios-container images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix vm-matrix arches
 
 all: verify
 
@@ -160,6 +160,23 @@ arches:
 
 scenarios: build helper arches vm-image
 	go test -tags scenarios -v -timeout 10m ./test/...
+
+# scenarios-container é a METADE que cabe numa CI, e ela é NOMEADA como metade.
+#
+# Não substitui o `scenarios`: o tier de microVM é onde hidepid, sysctl, módulo
+# e cgroup são medidos contra kernel de verdade, e nada disso existe em
+# contêiner. O que ela remove é a dependência de KVM, que runner de CI não tem —
+# sem qemu os cenários de VM se PULAM sozinhos, com o motivo dito, em vez de
+# falhar.
+#
+# Sem o vm-image junto: aquele alvo compila initramfs a partir dos módulos do
+# host, e num runner isso falha por um motivo que não é do código.
+#
+# O anti-apodrecimento da lista de lacunas ambientais sabe desta execução
+# parcial (GapAmbiental.SoEmVM): entrada que só se forma em VM não é cobrada
+# quando o tier de VM não rodou.
+scenarios-container: build helper arches
+	go test -tags scenarios -timeout 10m ./test/...
 
 # fixtures constrói os três SERVIDORES DE REFERÊNCIA.
 #

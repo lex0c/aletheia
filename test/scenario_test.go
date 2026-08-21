@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -370,6 +371,10 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 // verdade durante a execução da suíte. Ver TestGapsDoAmbienteSaoUsados.
 var gapsAmbientaisUsados sync.Map
 
+// vmRodou conta cenários que de fato subiram uma microVM. Zero significa tier
+// de VM ausente (sem qemu), não suíte incompleta por defeito.
+var vmRodou atomic.Int64
+
 func anotarUsoDeAmbiente(lacunas []string) {
 	for _, l := range lacunas {
 		for _, g := range scenario.GapsDoAmbiente {
@@ -552,6 +557,11 @@ func runVM(t *testing.T, sc scenario.Scenario) result {
 	if len(sc.Args) > 0 {
 		appendArgs += " aletheia.args=" + strings.Join(sc.Args, ",")
 	}
+
+	// Daqui em diante a VM sobe de verdade — os pulos por qemu ausente e por
+	// initramfs sem módulo já passaram. É este ponto que o anti-apodrecimento
+	// usa para saber se o tier de VM participou desta execução.
+	vmRodou.Add(1)
 
 	cmd := exec.Command(qemu,
 		"-enable-kvm", "-no-reboot", "-m", "512", "-display", "none",
@@ -915,7 +925,13 @@ func TestGapsDoAmbienteSaoUsados(t *testing.T) {
 	if total == 0 {
 		t.Skip("nenhum cenário rodou nesta invocação (-run filtrou): sem base para julgar a lista")
 	}
+	semVM := vmRodou.Load() == 0
 	for _, g := range scenario.GapsDoAmbiente {
+		if g.SoEmVM && semVM {
+			// O tier de VM não rodou (sem qemu): esta entrada não teve chance de
+			// casar, e cobrá-la seria falhar por execução parcial.
+			continue
+		}
 		if _, ok := gapsAmbientaisUsados.Load(g.Contem); !ok {
 			t.Errorf("a lacuna ambiental %q não apareceu em execução nenhuma da suíte.\n"+
 				"Ou ela deixou de acontecer — e a entrada tem de SAIR, porque uma "+

@@ -42,12 +42,14 @@ var GapsDoAmbiente = []GapAmbiental{
 			"Contêiner usa o kernel do host, então isto não é escolha do cenário",
 	},
 	{
+		SoEmVM: true,
 		Contem: "consulta por netlink NÃO feita",
 		Porque: "o mesmo, do lado do check: sem NENHUM módulo de diagnóstico " +
 			"disponível o cross.socket_view não roda. Acontece nas microVMs, cujo " +
 			"kernel mínimo não traz inet_diag",
 	},
 	{
+		SoEmVM: true,
 		Contem: "cgroup v2 não encontrado em /sys/fs/cgroup",
 		Porque: "as microVMs sobem sem cgroup2 montado, a menos que o cenário o " +
 			"monte de propósito (o P6 monta). Onde ele não existe, não há anexo " +
@@ -63,6 +65,14 @@ var GapsDoAmbiente = []GapAmbiental{
 type GapAmbiental struct {
 	Contem string
 	Porque string
+	// SoEmVM marca a entrada que só se forma no tier de microVM.
+	//
+	// Existe para o anti-apodrecimento não cobrar o que não teve chance de
+	// acontecer: rodar só o tier de contêiner — que é o que cabe numa CI sem
+	// KVM — deixaria essas entradas sem uso e a suíte falharia acusando lista
+	// podre onde há apenas execução parcial. Falha por motivo errado é a mesma
+	// doença que este arquivo inteiro combate.
+	SoEmVM bool
 }
 
 // EhDoAmbiente diz se uma lacuna declarada é uma das esperadas.

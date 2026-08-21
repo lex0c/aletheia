@@ -24,6 +24,7 @@ func init() {
 	check.Register(unitDropIn)
 	check.Register(unitTimerFrequent)
 	check.Register(unitSemDono)
+	check.Register(bindQueTrocaArquivo)
 }
 
 // unitSemDono — runbook §7.2 e §24.
@@ -769,4 +770,109 @@ func trapDeShell(low string) (string, bool) {
 func ehInicioDeComando(low string, i int) bool {
 	c := low[i-1]
 	return c == ' ' || c == '\t' || c == ';' || c == '&' || c == '|'
+}
+
+// bindQueTrocaArquivo — runbook §7.2, e é a irmã do RootDirectory pelo caminho
+// do mount namespace.
+//
+// # O que ele fecha
+//
+// O systemd monta, DENTRO do namespace da unit, o que BindPaths= e
+// BindReadOnlyPaths= mandarem. Esses mounts não aparecem na visão de mounts do
+// host, e é isso que os torna interessantes para quem já tem root:
+//
+//	[Service]
+//	BindReadOnlyPaths=/tmp/.implant:/usr/bin/agent
+//	ExecStart=/usr/bin/agent
+//
+//	host:        /usr/bin/agent  legítimo, com dono de pacote, hash confere
+//	na unit:     /usr/bin/agent  == /tmp/.implant
+//
+// As duas leituras são verdadeiras, e a que a ferramenta faz é a irrelevante.
+// Isso derruba de uma vez os dois sinais mais fortes do catálogo — propriedade
+// de pacote e integridade por hash —, sem que nenhum deles esteja errado.
+//
+// # Por que isto NÃO modela mount namespace
+//
+// Reconstruir a visão de arquivos de cada unit seria caro e frágil. Não precisa:
+// a FORMA já é o achado. Bind cuja ORIGEM está em diretório gravável e cujo
+// DESTINO é caminho de pacote não tem uso legítimo — distribuição nenhuma
+// entrega binário por /tmp. Onde a origem não é suspeita mas o destino é de
+// sistema, o que sai é AVISO: pode ser empacotamento legítimo, e o que importa
+// dizer é que a verificação daquele caminho não vale para esta unit.
+var bindQueTrocaArquivo = check.Check{
+	ID:       "persist.unit_bind_shadow",
+	Ref:      "7.2",
+	Title:    "unit monta outro arquivo por cima de um caminho de sistema",
+	Group:    "persist",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Wtf:      true,
+	FalsePositives: []string{
+		"BindReadOnlyPaths com origem E destino em caminho de sistema é " +
+			"ENDURECIMENTO comum: expor só /usr/share/foo dentro da unit é o uso " +
+			"para o qual a diretiva existe, e não dispara aqui",
+		"bind SEM destino não troca arquivo nenhum — o caminho continua o mesmo " +
+			"dentro e fora —, e por isso não é avaliado",
+		"contêiner de aplicação e sandbox de build usam bind de /var e /srv " +
+			"legitimamente: o aviso só se forma quando o destino é diretório de " +
+			"PACOTE, onde a distribuição é a única fonte esperada",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		var r check.Result
+		for i := range f.Units {
+			u := &f.Units[i]
+			if !u.Efetiva() {
+				continue
+			}
+			for _, b := range u.Binds {
+				if b.Destino == "" || b.Destino == b.Origem {
+					continue // não troca arquivo: só disponibiliza
+				}
+				motivo, gravavel := suspectDir(b.Origem)
+				alvoDeSistema := dirDePacote(b.Destino)
+				if !gravavel && !alvoDeSistema {
+					continue
+				}
+
+				ev := []string{
+					"a unit monta " + b.Origem + " sobre " + b.Destino,
+					"esse mount existe SÓ dentro do namespace da unit: no host, " +
+						b.Destino + " continua sendo o arquivo da distribuição, e é " +
+						"esse que a pergunta de propriedade e a de hash respondem",
+				}
+				sev := check.SevWarn
+				switch {
+				case gravavel && alvoDeSistema:
+					sev = check.SevCritical
+					ev = append(ev, "a origem está "+motivo+" e o destino é diretório "+
+						"de PACOTE: distribuição nenhuma entrega binário assim, e a "+
+						"troca torna a verificação daquele caminho sem valor para esta unit")
+				case gravavel:
+					ev = append(ev, "a origem está "+motivo)
+				default:
+					ev = append(ev, "o destino é diretório de PACOTE: a integridade "+
+						"daquele caminho NÃO descreve o que esta unit executa")
+				}
+				if b.SomenteL {
+					ev = append(ev, "montado somente-leitura, o que não muda nada aqui: "+
+						"o que importa é QUAL arquivo aparece, não se ele pode ser escrito")
+				}
+				ev = append(ev, unitContext(u)...)
+
+				fd := self.F(sev, u.Name, "", ev...)
+				fd.Quando, fd.QuandoFonte = u.ModUTC, "mtime do arquivo da unit"
+				fd.NextSteps = []string{
+					"leia a ORIGEM, não o destino: " + b.Origem + " é o que roda",
+					"preserve " + b.Origem + " antes de mexer na unit",
+					"a comparação de hash de " + b.Destino + " não responde por esta " +
+						"unit — refaça a pergunta sobre a origem",
+				}
+				r.Findings = append(r.Findings, fd)
+			}
+		}
+		r.Partial = append(r.Partial, f.PersistDenied["unit"]...)
+		return r
+	},
 }

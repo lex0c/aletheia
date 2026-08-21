@@ -49,7 +49,13 @@ import (
 //	   ali MENTE nas duas direções: "alvo provado" para uma linha de `sh -c` que
 //	   ninguém conseguiu resolver, e "não é lote" para o bloco de extração que
 //	   fazia o check gritar doze CRITICAL num contêiner saudável.
-const SchemaVersion = 4
+//	5  Unit.Binds (BindPaths/BindReadOnlyPaths) e a âncora temporal do SysV
+//	   (SysVShmSeg.CriadoEm/PIDReciclado/CriadorNaoConfirmado). Num dump v4 os
+//	   dois vêm zerados, e zerado MENTE de novo nas duas direções: "esta unit
+//	   não monta nada por cima de caminho de sistema", e "a autoria do segmento
+//	   está provada" — que era justamente a afirmação que produzia CRITICAL a
+//	   partir de PID reciclado.
+const SchemaVersion = 5
 
 // Facts é o retrato do host.
 type Facts struct {

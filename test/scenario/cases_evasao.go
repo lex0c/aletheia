@@ -424,6 +424,53 @@ func init() {
 		MaxWarn: 3,
 	})
 
+	Register(Scenario{
+		ID:   "A12-bind-troca-o-arquivo-sob-caminho-limpo",
+		Desc: "a unit monta um implante por cima de /usr/bin: o host mostra o binário da distribuição, e a unit executa outro",
+		// ATAQUE AOS DOIS SINAIS MAIS FORTES DO CATÁLOGO, de uma vez.
+		//
+		// O RootDirectory já era tratado: ele desloca o alvo para dentro de um
+		// prefixo, e o prefixo é visível. O BindPaths faz o mesmo pelo mount
+		// namespace da unit, e é pior — o caminho continua sendo /usr/bin/agent,
+		// com dono de pacote e hash conferindo. As duas afirmações da ferramenta
+		// ficam verdadeiras e irrelevantes ao mesmo tempo.
+		//
+		// O mount não aparece na visão de mounts do host, então não adianta
+		// procurá-lo ali. O que denuncia é a própria unit.
+		Images: matriz,
+		Plant: `printf '#!/bin/sh\nexit 0\n' > /tmp/.implant
+			chmod +x /tmp/.implant
+			mkdir -p /etc/systemd/system
+			printf '[Service]\nBindReadOnlyPaths=/tmp/.implant:/usr/bin/agent\nExecStart=/usr/bin/agent\n' > /etc/systemd/system/agent.service`,
+		Expect: []Expect{
+			{ID: "persist.unit_bind_shadow", Sev: "CRITICAL", Subject: "agent.service"},
+			{ID: "persist.unit_bind_shadow", Evidence: "monta /tmp/.implant sobre /usr/bin/agent"},
+			// E a frase que muda o que o analista faz em seguida: perguntar
+			// hash do destino não responde por esta unit.
+			{ID: "persist.unit_bind_shadow", Evidence: "no host, /usr/bin/agent continua sendo o arquivo da distribuição"},
+		},
+		Exit: 2,
+	})
+
+	Register(Scenario{
+		ID:   "A12b-bind-de-endurecimento-nao-vira-achado",
+		Desc: "o contrapeso: BindReadOnlyPaths entre caminhos de sistema é o uso para o qual a diretiva existe",
+		// Sem esta metade o check seria uma parede: BindReadOnlyPaths é
+		// ENDURECIMENTO comum em unit de distribuição, e expor só um diretório
+		// de dados dentro do namespace é exatamente o que ele serve para fazer.
+		//
+		// As duas formas legítimas entram juntas: origem e destino de sistema, e
+		// bind SEM destino — que não troca arquivo nenhum, porque o caminho é o
+		// mesmo dentro e fora.
+		Images: matriz,
+		Plant: `mkdir -p /etc/systemd/system /var/lib/app /usr/share/foo
+			printf '[Service]\nBindReadOnlyPaths=/usr/share/foo\nBindPaths=/var/lib/app\nExecStart=/bin/true\n' > /etc/systemd/system/ok.service`,
+		Forbid: []string{"persist.unit_bind_shadow"},
+		Exit:   -1,
+		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
+		MaxWarn: SemAvisos,
+	})
+
 }
 
 // ---------------------------------------------------------------------------

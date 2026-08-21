@@ -124,6 +124,8 @@ type Unit struct {
 	// imagem, que não está montada na varredura — não dá para lê-lo. É lacuna
 	// declarada, não um arquivo de host para acusar em falso.
 	RootImage string `json:"root_image,omitempty"`
+	// Binds são os BindPaths=/BindReadOnlyPaths= da unit. Ver BindDaUnit.
+	Binds []BindDaUnit `json:"binds,omitempty"`
 
 	Restart  string   `json:"restart,omitempty"`
 	User     string   `json:"user,omitempty"`
@@ -169,6 +171,21 @@ type Unit struct {
 
 // ExecLine guarda a diretiva junto com o valor: ExecStartPre num drop-in é
 // persistência quase perfeita, e perder qual diretiva era apaga o achado.
+// BindDaUnit é um BindPaths=/BindReadOnlyPaths= — um mount que só existe DENTRO
+// do namespace da unit.
+//
+// É a irmã do RootDirectory pelo caminho do mount namespace, e a mais perigosa
+// das duas: o RootDirectory ao menos desloca o alvo para um prefixo visível no
+// host, enquanto isto TROCA o arquivo sob um caminho que continua parecendo
+// legítimo. O host mostra /usr/bin/agent com dono de pacote e hash conferindo; a
+// unit executa /tmp/.implant. As duas afirmações são verdadeiras e uma delas é
+// irrelevante.
+type BindDaUnit struct {
+	Origem   string `json:"source"`
+	Destino  string `json:"dest,omitempty"`
+	SomenteL bool   `json:"read_only,omitempty"`
+}
+
 type ExecLine struct {
 	Key string `json:"key"` // ExecStart | ExecStartPre | …
 	Cmd string `json:"cmd"`
@@ -1435,6 +1452,17 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope string, vendor bool) Unit {
 			u.RootDirectory = v
 		case k == "RootImage":
 			u.RootImage = v
+		case k == "BindPaths", k == "BindReadOnlyPaths":
+			// Vazio RESETA a lista, como as outras diretivas de lista.
+			if v == "" {
+				u.Binds = nil
+				break
+			}
+			for _, item := range camposComAspas(v) {
+				if b, ok := parseBindDaUnit(item, k == "BindReadOnlyPaths"); ok {
+					u.Binds = append(u.Binds, b)
+				}
+			}
 		case k == "Restart":
 			u.Restart = v
 		case k == "User":
@@ -1503,6 +1531,26 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope string, vendor bool) Unit {
 	return u
 }
 
+// parseBindDaUnit lê um item de BindPaths: ORIGEM[:DESTINO[:OPÇÕES]].
+//
+// Sem destino, o mount aparece no MESMO caminho — e aí não há troca de arquivo,
+// só disponibilização. O destino é o que interessa: é ele que decide sob qual
+// nome o conteúdo da origem vai aparecer para o processo.
+func parseBindDaUnit(item string, somenteLeitura bool) (BindDaUnit, bool) {
+	item = strings.Trim(strings.TrimSpace(item), `"'`)
+	if item == "" {
+		return BindDaUnit{}, false
+	}
+	// O `-` inicial é "ignore se a origem faltar", como no EnvironmentFile.
+	item = strings.TrimPrefix(item, "-")
+	partes := strings.Split(item, ":")
+	b := BindDaUnit{Origem: partes[0], SomenteL: somenteLeitura}
+	if len(partes) > 1 && partes[1] != "" {
+		b.Destino = partes[1]
+	}
+	return b, b.Origem != ""
+}
+
 // diretivaValeNaSecao diz se o systemd aplicaria esta diretiva nesta seção.
 //
 // O corte é por FAMÍLIA de seção, não por lista exaustiva de opções: o que
@@ -1549,7 +1597,7 @@ func diretivaValeNaSecao(secao, k string) bool {
 func ehDiretivaDeExecucao(k string) bool {
 	switch k {
 	case "ExecSearchPath", "RootDirectory", "RootImage", "Restart", "User",
-		"Environment", "EnvironmentFile":
+		"Environment", "EnvironmentFile", "BindPaths", "BindReadOnlyPaths":
 		return true
 	}
 	return strings.HasPrefix(k, "Exec")

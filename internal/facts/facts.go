@@ -151,10 +151,11 @@ import (
 //	     sem eles trocar uma CA por outra com o MESMO DN não muda nada que a
 //	     comparação olhe: a autoridade de confiança do host inteiro troca em
 //	     silêncio.
-//	   NSSServicos  a cadeia de resolução NA ORDEM, com os blocos de ação. Vazia
-//	     num dump v8, e sem ela `passwd: files sss` e `passwd: sss files` são o
-//	     mesmo fato — as mesmas fontes, e a autoridade sobre quem é usuário
-//	     trocada de lado.
+//	     NSSServicos  a cadeia de resolução NA ORDEM. Vazia num dump v8, e sem
+//	     ela `passwd: files sss` e `passwd: sss files` são o mesmo fato — as
+//	     mesmas fontes, e a autoridade sobre quem é usuário trocada de lado.
+//	     (Os blocos de ação só entraram na cadeia no 12; no 9 ela era só a
+//	     sequência de fontes.)
 //	10 ModulosLidos  separa "li /proc/modules" de "li a árvore /lib/modules",
 //	   que compartilhavam a chave de lacuna `modulo`. Falso num dump v9 faz a
 //	   família de módulos ser recusada por inteiro — o lado seguro, e ainda
@@ -171,7 +172,17 @@ import (
 //	   incluir os blocos de ação (`[notfound=return]`), que decidem se a próxima
 //	   fonte é consultada. Num dump v10 a cadeia vem sem eles, e duas
 //	   configurações de comportamento diferente seriam o mesmo fato.
-const SchemaVersion = 11
+//	12 NSSService.Cadeia de novo, e de novo só a semântica: os blocos de ação
+//	   passaram a ser resolvidos para a TABELA EFETIVA e colados na fonte a que
+//	   se aplicam, com o que É PADRÃO omitido.
+//
+//	   No 11 eles eram texto canonicalizado, e texto não sabe que
+//	   `[SUCCESS=return]` é exatamente o que a glibc faz sem bloco nenhum, nem
+//	   que a ordem dos termos de uma tabela não significa nada. As duas coisas
+//	   faziam reescrita de configuração virar drift. Num dump v11 a cadeia traz
+//	   os blocos crus, e compará-la com uma cadeia v12 acusaria mudança onde
+//	   houve reformatação.
+const SchemaVersion = 12
 
 // Facts é o retrato do host.
 type Facts struct {

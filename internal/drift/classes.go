@@ -162,10 +162,14 @@ var agendamento = Classe{
 	Lacunas:   []string{"cron"},
 	Exaustiva: true,
 	// DUAS LINHAS IDÊNTICAS NÃO SÃO A MESMA LINHA: o cron executa o job duas
-	// vezes. Com Multiplicidade, os campos viram multiconjunto e a repetição
-	// mora no próprio valor — `A,A,B` contra `A,B,B`. Ver Classe.Multiplicidade.
-	Multiplicidade: true,
-	Decide:         map[string]bool{"cmd": true, "user": true, "schedule": true},
+	// vezes. Só o COMANDO conta repetição — `user` e `schedule` fazem parte do
+	// ID e são iguais por construção dentro dele, então multiplicá-los fabricava
+	// "o usuário mudou de root para root, root". Ver Classe.Multiplicidade.
+	Multiplicidade: map[string]bool{"cmd": true},
+	// E pela mesma razão eles não DECIDEM: variar `user` ou `schedule` produz
+	// outra entidade, não uma mudança desta. O que varia dentro de um ID é o
+	// comando.
+	Decide: map[string]bool{"cmd": true},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.Cron))
 		for i := range f.Cron {
@@ -355,7 +359,7 @@ var conta = Classe{
 	Exaustiva: true,
 	Decide: map[string]bool{
 		"uid": true, "gid": true, "shell": true, "home": true,
-		"sem_senha": true, "bloqueada": true,
+		"sem_senha": true, "bloqueada": true, "sem_shadow": true,
 	},
 	// OS CAMPOS DO SHADOW SÃO OBSERVACIONAIS, e a família mistura duas fontes
 	// com privilégio diferente: `uid`, `gid`, `shell` e `home` saem do
@@ -367,7 +371,9 @@ var conta = Classe{
 	// "não sei" com "não sei" concluindo "não mudou". O extrator agora emite
 	// VAZIO quando o shadow não foi lido, que é o valor que esta comparação
 	// entende como "não observado".
-	Observacional: map[string]bool{"sem_senha": true, "bloqueada": true},
+	Observacional: map[string]bool{
+		"sem_senha": true, "bloqueada": true, "sem_shadow": true,
+	},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.Accounts))
 		for i := range f.Accounts {
@@ -381,6 +387,12 @@ var conta = Classe{
 					"home":      a.Home,
 					"sem_senha": seLido(f.ShadowLido, boolTxt(a.SemSenha)),
 					"bloqueada": seLido(f.ShadowLido, boolTxt(a.Bloqueada)),
+					// A conta que está no passwd e NÃO no shadow é assinatura de
+					// edição à mão — o `useradd` escreve nos dois, sempre. O
+					// priv.account_no_shadow já acusa o estado; o que faltava era
+					// a transição, que é outra informação: a inconsistência NÃO
+					// existia no retrato anterior.
+					"sem_shadow": seLido(f.ShadowLido, boolTxt(a.SemShadow)),
 				},
 			})
 		}

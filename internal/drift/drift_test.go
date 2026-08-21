@@ -616,6 +616,48 @@ func TestNSS2FonteEmNovoDatabaseEhMudanca(t *testing.T) {
 	}
 }
 
+// A ENTRADA DO SHADOW QUE SOME é transição, e não só estado.
+//
+// `priv.account_no_shadow` já acusa a conta que está no passwd e não no shadow —
+// é assinatura de edição à mão, porque o `useradd` escreve nos dois. O que
+// faltava era a TRANSIÇÃO: a inconsistência não existia no retrato anterior, e é
+// isso que datar o incidente exige.
+func TestEntradaDoShadowQueSomeEhMudanca(t *testing.T) {
+	conta := func(semShadow bool) *facts.Facts {
+		return &facts.Facts{
+			PasswdLido: true, ShadowLido: true,
+			Accounts: []facts.Account{{Name: "deploy", UID: 1000, SemShadow: semShadow}},
+		}
+	}
+	d := Comparar(
+		Lado{F: conta(false), Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: conta(true), Caps: tudoVisivel, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	var achou bool
+	for _, m := range d.Mudancas {
+		if m.Tipo == "conta" && m.Campo == "sem_shadow" {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Fatalf("a conta perdeu a entrada no shadow entre os dois retratos: %+v", d.Mudancas)
+	}
+	// E sem o shadow lido, o campo não é comparado — vazio ali é "não
+	// observado", como os outros dois que vêm da mesma fonte.
+	semLeitura := func() *facts.Facts {
+		f := conta(false)
+		f.ShadowLido = false
+		return f
+	}
+	d = Comparar(
+		Lado{F: semLeitura(), Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: conta(true), Caps: tudoVisivel, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	for _, m := range d.Mudancas {
+		if m.Campo == "sem_shadow" {
+			t.Errorf("sem o shadow lido, o campo não é comparável: %+v", m)
+		}
+	}
+}
+
 // CA1: mesmo arquivo, mesmo Subject, mesmo Issuer — CHAVE diferente. Para o
 // host, a autoridade de confiança mudou por inteiro.
 func TestCA1ChaveTrocadaComMesmoDN(t *testing.T) {
@@ -715,6 +757,37 @@ func TestCRON1DuasLinhasIdenticasSaoDuasExecucoes(t *testing.T) {
 	}
 	if !achou {
 		t.Fatalf("de uma execução para duas é mudança: %+v", d.Mudancas)
+	}
+}
+
+// A DUPLICAÇÃO NÃO PODE INVENTAR MUDANÇA DE `user` OU `schedule`.
+//
+// Os dois FAZEM PARTE DO ID do agendamento, então duas entradas do mesmo ID têm
+// os dois iguais por construção. A primeira versão aplicava o multiconjunto à
+// entidade inteira, e duplicar uma linha produzia TRÊS achados:
+//
+//	cmd       "A"          -> "A, A"        ← verdade
+//	user      "root"       -> "root, root"  ← falso
+//	schedule  "17 3 * * *" -> "…, …"        ← falso
+//
+// Acertar que houve drift não autoriza a mentir sobre qual campo mudou.
+func TestCRON1DuplicacaoNaoInventaOutrosCampos(t *testing.T) {
+	job := facts.CronEntry{File: "/etc/cron.d/x", Kind: "dropin", User: "root",
+		Schedule: "17 3 * * *", Cmd: "A"}
+	d := Comparar(
+		Lado{F: &facts.Facts{Cron: []facts.CronEntry{job}}, Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: &facts.Facts{Cron: []facts.CronEntry{job, job}}, Caps: tudoVisivel, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	var doCron []facts.MudancaDrift
+	for _, m := range d.Mudancas {
+		if m.Tipo == "cron" {
+			doCron = append(doCron, m)
+		}
+	}
+	if len(doCron) != 1 {
+		t.Fatalf("uma duplicação é UMA mudança, e saíram %d: %+v", len(doCron), doCron)
+	}
+	if doCron[0].Campo != "cmd" {
+		t.Errorf("o campo que muda é o comando, não `%s`", doCron[0].Campo)
 	}
 }
 

@@ -114,7 +114,8 @@ type Classe struct {
 	// lados. Só ela admite "sumiu" — ver a segunda regra no topo do arquivo.
 	Exaustiva bool
 
-	// Multiplicidade diz que DUAS entidades idênticas não são a mesma entidade.
+	// Multiplicidade diz QUAIS CAMPOS contam repetição quando duas entidades
+	// compartilham o ID.
 	//
 	// O índice colapsa por ID, e para quase toda família isso é o certo: duas
 	// leituras da mesma unit são a mesma unit. Para o cron não é — duas linhas
@@ -129,9 +130,21 @@ type Classe struct {
 	// A tinha duas execuções e passou a ter uma; B fez o contrário. O código
 	// existia para preservar multiplicidade e a perdia, porque contava
 	// ENTIDADES enquanto os valores viravam conjunto. Agora a multiplicidade
-	// mora no próprio valor: os campos viram MULTICONJUNTO ordenado, `A,A,B`
+	// mora no próprio valor: o campo vira MULTICONJUNTO ordenado, `A,A,B`
 	// contra `A,B,B`, e a cardinalidade sai de graça.
-	Multiplicidade bool
+	//
+	// E é POR CAMPO, não da entidade inteira. Aplicá-la a todos fabricava
+	// afirmação falsa: no cron, `user` e `schedule` FAZEM PARTE DO ID, então
+	// duas entradas do mesmo ID têm os dois iguais por construção — e o
+	// multiconjunto os transformava em
+	//
+	//	user      "root"       -> "root, root"
+	//	schedule  "17 3 * * *" -> "17 3 * * *, 17 3 * * *"
+	//
+	// Uma duplicação de linha virava TRÊS achados, dois deles dizendo que o
+	// usuário e o horário mudaram. Acertar que houve drift não autoriza a
+	// mentir sobre qual campo mudou.
+	Multiplicidade map[string]bool
 
 	// Incompleta é a pergunta que a família faz aos fatos de UM lado: "o
 	// conjunto que eu comparo está inteiro aqui?". Devolve o motivo quando não
@@ -437,18 +450,18 @@ func chavesDaUniao(a, b map[string]string) []string {
 // fundir junta duas entidades de mesmo ID num valor ESTÁVEL: campo divergente
 // vira a lista ordenada dos valores. Sem isto, a ordem da coleta decidiria qual
 // das duas venceu, e a mesma máquina daria drift contra si mesma.
-func fundir(a, b Entidade, multiplo bool) Entidade {
+func fundir(a, b Entidade, multiplo map[string]bool) Entidade {
 	out := Entidade{ID: a.ID, Campos: map[string]string{}, Alvos: unirAlvos(a.Alvos, b.Alvos)}
 	for k, v := range a.Campos {
 		out.Campos[k] = v
 	}
 	for k, v := range b.Campos {
 		ja, existe := out.Campos[k]
-		// MULTICONJUNTO quando a família declara Multiplicidade: valor repetido
-		// entra DE NOVO, e `A,A,B` deixa de ser igual a `A,B,B`. Sem isso, dois
-		// valores iguais colapsavam e a repetição sumia — que é o oposto do que
-		// a declaração pede.
-		if !existe || (ja == v && !multiplo) {
+		// MULTICONJUNTO nos campos que a família declarou: valor repetido entra
+		// DE NOVO, e `A,A,B` deixa de ser igual a `A,B,B`. Nos demais, valor
+		// igual colapsa — que é o certo para campo que faz parte do ID e não
+		// pode variar dentro dele.
+		if !existe || (ja == v && !multiplo[k]) {
 			out.Campos[k] = v
 			continue
 		}

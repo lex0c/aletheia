@@ -110,10 +110,26 @@ func TestCadeiaNSSPreservaAcoes(t *testing.T) {
 	}{
 		{"passwd: files sss", []string{"files", "sss"}},
 		{"passwd: files [NOTFOUND=return] sss",
-			[]string{"files", "[notfound=return]", "sss"}},
+			[]string{"files[notfound=return]", "sss"}},
 		{"passwd: files [ SUCCESS = merge ] sss",
-			[]string{"files", "[success=merge]", "sss"}},
-		{"group: files [!UNAVAIL=return]", []string{"files", "[!unavail=return]"}},
+			[]string{"files[success=merge]", "sss"}},
+		// O PADRÃO NÃO É MUDANÇA. `SUCCESS=return` é o que a glibc faz sem
+		// bloco nenhum, e escrevê-lo explicitamente não muda comportamento —
+		// então as duas linhas precisam produzir o MESMO fato, senão reescrever
+		// a configuração vira drift.
+		{"passwd: files [SUCCESS=return] sss", []string{"files", "sss"}},
+		{"passwd: files [SUCCESS=return NOTFOUND=continue] sss", []string{"files", "sss"}},
+		// E o bloco é uma TABELA: a ordem dos termos não significa nada.
+		{"passwd: files [NOTFOUND=return UNAVAIL=return] sss",
+			[]string{"files[notfound=return unavail=return]", "sss"}},
+		{"passwd: files [UNAVAIL=return NOTFOUND=return] sss",
+			[]string{"files[notfound=return unavail=return]", "sss"}},
+		// `!STATUS` aplica a ação a todos os OUTROS status.
+		{"group: files [!SUCCESS=return]",
+			[]string{"files[notfound=return tryagain=return unavail=return]"}},
+		// O que este parser não entende NÃO vira padrão: volta cru, porque
+		// tratar o desconhecido como equivalente afirmaria o que ninguém checou.
+		{"passwd: files [FOO=bar] sss", []string{"files[foo=bar]", "sss"}},
 	}
 	for _, c := range casos {
 		e := raizNSS(t, map[string]string{"etc/nsswitch.conf": c.linha + "\n"})

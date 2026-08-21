@@ -33,7 +33,7 @@ import (
 // teste: daria uma sensação de cobertura que não existe.
 func TestImpressaoDoEsquema(t *testing.T) {
 	const (
-		esquemaEsperado  = 11
+		esquemaEsperado  = 12
 		impressaoGravada = "149dde1898a49c46"
 	)
 	if SchemaVersion != esquemaEsperado {

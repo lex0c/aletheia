@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/lex0c/aletheia/internal/env"
@@ -27,19 +28,131 @@ import (
 
 // NSSModule é uma fonte declarada no nsswitch.conf e as bibliotecas candidatas
 // que ela poderia carregar.
-// normalizaAcaoNSS junta um bloco de ação num token só, em forma canônica:
-// minúsculas, sem espaço interno. `[ SUCCESS = return ]` e `[success=return]`
-// são a MESMA configuração escrita de dois jeitos, e uma reformatação do
-// arquivo não pode virar drift.
-func normalizaAcaoNSS(toks []string) string {
-	junto := strings.Join(toks, "")
-	var b strings.Builder
-	for _, r := range strings.ToLower(junto) {
-		if r != ' ' && r != '\t' {
-			b.WriteRune(r)
+// acoesPadraoNSS é o que a glibc faz quando NÃO há bloco de ação, e está
+// documentado no nsswitch.conf(5):
+//
+//	[SUCCESS=return NOTFOUND=continue UNAVAIL=continue TRYAGAIN=continue]
+var acoesPadraoNSS = map[string]string{
+	"success": "return", "notfound": "continue",
+	"unavail": "continue", "tryagain": "continue",
+}
+
+var statusNSS = []string{"success", "notfound", "tryagain", "unavail"}
+
+// tabelaNSS resolve um bloco de ação para a TABELA EFETIVA e devolve só o que
+// DIVERGE do padrão, em ordem estável.
+//
+// # Por que não basta normalizar a sintaxe
+//
+// A primeira versão só passava para minúsculas e tirava espaço. Aquilo resolvia
+// `[ SUCCESS = return ]` contra `[success=return]`, e deixava passar duas
+// classes de falso positivo:
+//
+//	passwd: files sss                    são a MESMA configuração —
+//	passwd: files [SUCCESS=return] sss   SUCCESS=return é o PADRÃO
+//
+//	[SUCCESS=return NOTFOUND=continue]   e o inverso, mesma tabela em
+//	[NOTFOUND=continue SUCCESS=return]   ordem diferente
+//
+// Um bloco é uma TABELA, não uma sequência: a ordem dos termos não significa
+// nada, e um termo que repete o padrão não muda comportamento nenhum. Comparar
+// o texto fazia reescrita de configuração virar drift, e o comentário do campo
+// prometia "configuração EFETIVA" — que era o que ele ainda não era.
+//
+// Devolve "" quando a tabela resultante É a padrão. Termo que este código não
+// entende NÃO é descartado: ele volta em forma crua, porque tratar o
+// desconhecido como padrão seria afirmar equivalência que ninguém verificou.
+func tabelaNSS(toks []string) string {
+	bruto := strings.ToLower(strings.Join(toks, " "))
+	bruto = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(bruto), "["), "]")
+
+	tab := map[string]string{}
+	for k, v := range acoesPadraoNSS {
+		tab[k] = v
+	}
+	var naoEntendidos []string
+	// Os termos são `[!]STATUS=ACTION`, e o `=` pode vir cercado de espaço.
+	for _, termo := range termosNSS(bruto) {
+		st, ac, ok := strings.Cut(termo, "=")
+		if !ok {
+			naoEntendidos = append(naoEntendidos, termo)
+			continue
+		}
+		negado := strings.HasPrefix(st, "!")
+		st = strings.TrimPrefix(st, "!")
+		if acoesPadraoNSS[st] == "" || !acaoValidaNSS(ac) {
+			naoEntendidos = append(naoEntendidos, termo)
+			continue
+		}
+		if !negado {
+			tab[st] = ac
+			continue
+		}
+		// `!STATUS` aplica a ação a TODOS os outros status.
+		for _, outro := range statusNSS {
+			if outro != st {
+				tab[outro] = ac
+			}
 		}
 	}
-	return b.String()
+
+	var partes []string
+	for _, st := range statusNSS {
+		if tab[st] != acoesPadraoNSS[st] {
+			partes = append(partes, st+"="+tab[st])
+		}
+	}
+	partes = append(partes, naoEntendidos...)
+	sort.Strings(partes)
+	if len(partes) == 0 {
+		return ""
+	}
+	return "[" + strings.Join(partes, " ") + "]"
+}
+
+// termosNSS quebra o miolo do bloco em termos, tolerando espaço em volta do `=`
+// (`[ SUCCESS = return ]` é sintaxe válida).
+func termosNSS(miolo string) []string {
+	var out []string
+	var atual strings.Builder
+	esperandoValor := false
+	for _, campo := range strings.Fields(miolo) {
+		switch {
+		case campo == "=":
+			atual.WriteString("=")
+			esperandoValor = true
+		case strings.HasSuffix(campo, "="):
+			atual.WriteString(campo)
+			esperandoValor = true
+		case esperandoValor:
+			atual.WriteString(campo)
+			out = append(out, atual.String())
+			atual.Reset()
+			esperandoValor = false
+		default:
+			if atual.Len() > 0 {
+				out = append(out, atual.String())
+				atual.Reset()
+			}
+			if strings.Contains(campo, "=") {
+				out = append(out, campo)
+				continue
+			}
+			atual.WriteString(campo)
+		}
+	}
+	if atual.Len() > 0 {
+		out = append(out, atual.String())
+	}
+	return out
+}
+
+func acaoValidaNSS(a string) bool {
+	switch a {
+	case "return", "continue", "merge":
+		return true
+	}
+	return false
 }
 
 // NSSService é a configuração EFETIVA de um database do nsswitch: a cadeia de
@@ -109,12 +222,21 @@ func collectNSS(f *Facts, e *env.Env) {
 		dentroColchete := false
 		var cadeia []string
 		var acao []string
+		// A ação vem DEPOIS da fonte a que se aplica, então ela é anexada ao
+		// último elemento da cadeia.
+		anexaAcao := func(toks []string) {
+			t := tabelaNSS(toks)
+			if t == "" || len(cadeia) == 0 {
+				return
+			}
+			cadeia[len(cadeia)-1] += t
+		}
 		for _, tok := range strings.Fields(resto) {
 			if dentroColchete {
 				acao = append(acao, tok)
 				if strings.HasSuffix(tok, "]") {
 					dentroColchete = false
-					cadeia = append(cadeia, normalizaAcaoNSS(acao))
+					anexaAcao(acao)
 					acao = nil
 				}
 				continue
@@ -125,7 +247,8 @@ func collectNSS(f *Facts, e *env.Env) {
 					acao = []string{tok}
 					continue
 				}
-				// O BLOCO DE AÇÃO ENTRA NA CADEIA, e não é fonte.
+				// O BLOCO DE AÇÃO ENTRA NA CADEIA, colado na fonte a que
+				// se aplica, e não é fonte.
 				//
 				// Ele foi descartado na primeira versão, sob o argumento de que
 				// "não é módulo". Verdade, e irrelevante: `[NOTFOUND=return]` e
@@ -135,7 +258,7 @@ func collectNSS(f *Facts, e *env.Env) {
 				// ordem, e comportamento efetivo diferente saíam idênticas —
 				// que é apagar a semântica antes de comparar, exatamente o que
 				// esta representação existe para não fazer.
-				cadeia = append(cadeia, normalizaAcaoNSS([]string{tok}))
+				anexaAcao([]string{tok})
 				continue
 			}
 			fonte := tok

@@ -27,6 +27,18 @@ import (
 
 // NSSModule é uma fonte declarada no nsswitch.conf e as bibliotecas candidatas
 // que ela poderia carregar.
+// NSSService é a configuração EFETIVA de um database do nsswitch: a cadeia de
+// fontes NA ORDEM em que a glibc as consulta.
+//
+// A primeira fonte que responde encerra a consulta (salvo ação explícita), então
+// a ordem é a autoridade. Ela não sobrevive ao NSSModule, que agrupa por fonte.
+type NSSService struct {
+	Nome string `json:"name"`
+	// Cadeia preserva a ordem e NÃO inclui os blocos de ação (`[NOTFOUND=return]`),
+	// que não são fonte.
+	Cadeia []string `json:"chain"`
+}
+
 type NSSModule struct {
 	Fonte string `json:"source"`
 	// Paths são TODAS as libnss_<fonte>.so.{2,1} encontradas nos diretórios de
@@ -78,6 +90,7 @@ func collectNSS(f *Facts, e *env.Env) {
 		// espaços (`[ SUCCESS = return ]`). Rastreia-se a profundidade do
 		// colchete para não confundir o conteúdo dele com nome de módulo.
 		dentroColchete := false
+		var cadeia []string
 		for _, tok := range strings.Fields(resto) {
 			if dentroColchete {
 				if strings.HasSuffix(tok, "]") {
@@ -99,6 +112,15 @@ func collectNSS(f *Facts, e *env.Env) {
 				ordem = append(ordem, fonte)
 			}
 			m.Servicos = append(m.Servicos, servico)
+			cadeia = append(cadeia, fonte)
+		}
+		// A CADEIA, na ORDEM. O agrupamento por fonte acima responde "quais
+		// bibliotecas podem ser carregadas"; ele não responde precedência, e
+		// precedência é o que decide QUEM É USUÁRIO neste host. `passwd: files
+		// sss` e `passwd: sss files` têm as mesmas fontes e as mesmas libs, e a
+		// autoridade invertida.
+		if len(cadeia) > 0 {
+			f.NSSServicos = append(f.NSSServicos, NSSService{Nome: servico, Cadeia: cadeia})
 		}
 	}
 

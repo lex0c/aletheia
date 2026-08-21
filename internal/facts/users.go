@@ -174,6 +174,11 @@ func lerShadow(f *Facts, e *env.Env) map[string]string {
 			"conta sem senha não pôde ser avaliada")
 		return out
 	}
+	// A lacuna acima é declarada em granularidade de FAMÍLIA. Este campo a
+	// declara por CAMPO: sem ele, `SemSenha=false` em toda conta é
+	// indistinguível de "todas têm senha", e quem compara dois retratos leria
+	// "não sei -> não sei" como "não mudou".
+	f.ShadowLido = true
 	for _, ln := range strings.Split(string(b), "\n") {
 		fs := strings.Split(ln, ":")
 		if len(fs) < 2 || strings.HasPrefix(ln, "#") {

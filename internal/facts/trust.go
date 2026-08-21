@@ -1,7 +1,9 @@
 package facts
 
 import (
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"net"
 	"strconv"
@@ -29,11 +31,24 @@ type CACert struct {
 	// AutoAssinado marca a CA raiz: emissor igual ao titular. É a forma de uma
 	// CA plantada, e também a de toda CA raiz legítima — o que separa é quem
 	// ela diz ser.
-	AutoAssinado bool   `json:"self_signed,omitempty"`
-	NotBefore    string `json:"not_before,omitempty"`
-	NotAfter     string `json:"not_after,omitempty"`
-	ModUTC       string `json:"mod_utc,omitempty"`
-	Erro         string `json:"err,omitempty"`
+	AutoAssinado bool `json:"self_signed,omitempty"`
+
+	// O DN NÃO IDENTIFICA UMA ÂNCORA DE CONFIANÇA: ele é texto que quem emite
+	// escolhe, e dois certificados com o mesmo `CN=Company Root CA` podem
+	// carregar CHAVES DIFERENTES. Para o host, isso é trocar a autoridade
+	// inteira; para qualquer comparação que olhasse só Subject/Issuer, nada
+	// mudou.
+	//
+	//	Fingerprint  é ESTE certificado, byte a byte. Muda numa renovação.
+	//	SPKI         é a CHAVE que ele carrega. NÃO muda numa renovação, e é
+	//	             por isso que ele responde "a autoridade continua a mesma?".
+	Fingerprint string `json:"fingerprint,omitempty"`
+	SPKI        string `json:"spki,omitempty"`
+
+	NotBefore string `json:"not_before,omitempty"`
+	NotAfter  string `json:"not_after,omitempty"`
+	ModUTC    string `json:"mod_utc,omitempty"`
+	Erro      string `json:"err,omitempty"`
 }
 
 // HostEntry é uma linha de /etc/hosts já resolvida.
@@ -115,6 +130,22 @@ func lerCA(e *env.Env, p string) CACert {
 	c.AutoAssinado = c.Subject == c.Issuer
 	c.NotBefore = cert.NotBefore.UTC().Format(time.RFC3339)
 	c.NotAfter = cert.NotAfter.UTC().Format(time.RFC3339)
+	// O DN NÃO IDENTIFICA UMA ÂNCORA DE CONFIANÇA — ele é texto que quem emite
+	// escolhe. Dois certificados com `CN=Company Root CA` de um lado e do outro
+	// podem ter CHAVES DIFERENTES, e para o host isso é trocar a autoridade
+	// inteira. Sem estes dois campos, substituir o arquivo por um self-signed de
+	// mesmo Subject/Issuer não mudava nada que qualquer comparação olhasse.
+	//
+	//	Fingerprint  é ESTE certificado, byte a byte. Muda numa renovação.
+	//	SPKI         é a CHAVE que ele carrega. NÃO muda numa renovação, e é
+	//	             por isso que ele responde "a autoridade é a mesma?" —
+	//	             a pergunta que interessa.
+	soma := sha256.Sum256(cert.Raw)
+	c.Fingerprint = "SHA256:" + hex.EncodeToString(soma[:])
+	if der, err := x509.MarshalPKIXPublicKey(cert.PublicKey); err == nil {
+		k := sha256.Sum256(der)
+		c.SPKI = "SHA256:" + hex.EncodeToString(k[:])
+	}
 	return c
 }
 

@@ -58,6 +58,7 @@ var classes = []Classe{
 	linhaDeBoot,
 	confiancaDeCertificado,
 	moduloNSS,
+	servicoNSS,
 	programaEmExecucao,
 }
 
@@ -123,17 +124,17 @@ var unidadeSystemd = Classe{
 				binds = append(binds, b.Origem+":"+b.Destino+":"+modo)
 			}
 			out = append(out, Entidade{ID: id, Alvos: []string{u.Name, u.Path}, Campos: map[string]string{
-				"exec":           juntar(execs),
+				"exec":           juntarSequencia(execs),
 				"user":           u.User,
-				"enabled_by":     juntar(u.EnabledBy),
+				"enabled_by":     juntarConjunto(u.EnabledBy),
 				"dropin_for":     u.DropInFor,
 				"root_directory": u.RootDirectory,
 				"root_image":     u.RootImage,
-				"listen":         juntar(u.Listen),
-				"watch_paths":    juntar(u.WatchPaths),
-				"on_calendar":    juntar(u.OnCalendar),
-				"environment":    juntar(envs),
-				"binds":          juntar(binds),
+				"listen":         juntarConjunto(u.Listen),
+				"watch_paths":    juntarConjunto(u.WatchPaths),
+				"on_calendar":    juntarConjunto(u.OnCalendar),
+				"environment":    juntarSequencia(envs),
+				"binds":          juntarSequencia(binds),
 				// BindReset (`BindPaths=` vazio) APAGA os binds herdados, e
 				// some da lista acima sem deixar rastro: sem este campo, zerar
 				// a lista e não ter lista nenhuma são o mesmo valor.
@@ -160,7 +161,13 @@ var agendamento = Classe{
 	Requires:  env.CapFilesystem,
 	Lacunas:   []string{"cron"},
 	Exaustiva: true,
-	Decide:    map[string]bool{"cmd": true, "user": true, "schedule": true},
+	// DUAS LINHAS IDÊNTICAS NÃO SÃO A MESMA LINHA: o cron executa o job duas
+	// vezes. O índice colapsa por ID e o valor fundido é igual ao original, então
+	// passar de uma para duas era invisível — ver Classe.Multiplicidade.
+	Multiplicidade: true,
+	Decide: map[string]bool{
+		"cmd": true, "user": true, "schedule": true, "_repeticoes": true,
+	},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.Cron))
 		for i := range f.Cron {
@@ -265,16 +272,37 @@ var chaveAutorizada = Classe{
 	},
 }
 
-// juntar serializa lista em valor comparável, com ordem estável. A ordem da
-// coleta já é determinística (medido), mas depender disso faria uma mudança de
-// ordem interna virar drift — e ninguém saberia dizer por quê.
-func juntar(v []string) string {
+// DUAS primitivas, porque "canonicalizar" não pode significar automaticamente
+// "destruir ordem".
+//
+// Havia só a de conjunto, com esta justificativa: "a ordem da coleta já é
+// determinística, mas depender disso faria uma mudança de ordem interna virar
+// drift". A frase confunde ORDEM DA COLETA — artefato de como se varre um
+// diretório — com ORDEM DO ARQUIVO, que é semântica. Para o `Exec` de uma unit
+// a ordem no fato É a do arquivo, e ordenar apagava isto:
+//
+//	antes            depois
+//	ExecStartPre=/usr/bin/a    ExecStartPre=/usr/bin/b
+//	ExecStartPre=/usr/bin/b    ExecStartPre=/usr/bin/a
+//
+// A unit passa a executar outra coisa primeiro, e o drift não via nada. O mesmo
+// vale para as libs de /etc/ld.so.preload, onde a ordem decide interposição de
+// símbolo, e para Environment, onde a última atribuição vence.
+func juntarConjunto(v []string) string {
 	if len(v) == 0 {
 		return ""
 	}
 	c := append([]string(nil), v...)
 	sort.Strings(c)
 	return strings.Join(c, "\x1f")
+}
+
+// juntarSequencia PRESERVA a ordem: use onde a posição tem significado.
+func juntarSequencia(v []string) string {
+	if len(v) == 0 {
+		return ""
+	}
+	return strings.Join(v, "\x1f")
 }
 
 func boolTxt(b bool) string { return strconv.FormatBool(b) }
@@ -305,6 +333,17 @@ var conta = Classe{
 		"uid": true, "gid": true, "shell": true, "home": true,
 		"sem_senha": true, "bloqueada": true,
 	},
+	// OS CAMPOS DO SHADOW SÃO OBSERVACIONAIS, e a família mistura duas fontes
+	// com privilégio diferente: `uid`, `gid`, `shell` e `home` saem do
+	// /etc/passwd, que qualquer um lê; `sem_senha` e `bloqueada` saem do
+	// /etc/shadow, que precisa de root.
+	//
+	// Sem isso, `false` significava as duas coisas ao mesmo tempo — "tem senha"
+	// e "não consegui olhar" —, e dois retratos sem root comparavam
+	// "não sei" com "não sei" concluindo "não mudou". O extrator agora emite
+	// VAZIO quando o shadow não foi lido, que é o valor que esta comparação
+	// entende como "não observado".
+	Observacional: map[string]bool{"sem_senha": true, "bloqueada": true},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.Accounts))
 		for i := range f.Accounts {
@@ -316,8 +355,8 @@ var conta = Classe{
 					"gid":       strconv.Itoa(a.GID),
 					"shell":     a.Shell,
 					"home":      a.Home,
-					"sem_senha": boolTxt(a.SemSenha),
-					"bloqueada": boolTxt(a.Bloqueada),
+					"sem_senha": seLido(f.ShadowLido, boolTxt(a.SemSenha)),
+					"bloqueada": seLido(f.ShadowLido, boolTxt(a.Bloqueada)),
 				},
 			})
 		}
@@ -342,7 +381,7 @@ var grupo = Classe{
 				ID: g.Name, Alvos: []string{g.Name},
 				Campos: map[string]string{
 					"gid":     strconv.Itoa(g.GID),
-					"membros": juntar(g.Members),
+					"membros": juntarConjunto(g.Members),
 				},
 			})
 		}
@@ -372,7 +411,7 @@ var precarga = Classe{
 			Alvos: append([]string{"/etc/ld.so.preload"}, f.Loader.PreloadLibs...),
 			Campos: map[string]string{
 				"existe": boolTxt(f.Loader.PreloadExists),
-				"libs":   juntar(f.Loader.PreloadLibs),
+				"libs":   juntarSequencia(f.Loader.PreloadLibs),
 			},
 		}}
 	},
@@ -452,17 +491,39 @@ var portaEmEscuta = Classe{
 	Tipo:     "porta",
 	Titulo:   "porta em escuta",
 	Requires: env.CapProcfs,
-	// SEM a lacuna `net`, e a razão é o alcance dela: aquela chave cobre desde
-	// "o módulo de diagnóstico de UDP não está carregado" até "o dono do socket
-	// não pôde ser lido". Nenhuma das duas afeta o CONJUNTO de quem escuta em
-	// TCP — ele sai de /proc/net/tcp{,6} e é exaustivo sem root. Usar a chave
-	// suprimia a direção `surgiu` em praticamente todo host, e uma porta nova
-	// deixava de aparecer por causa de um módulo de UDP.
+	// NÃO É a lacuna `net`, e não é a ausência dela — é a completude ESPECÍFICA
+	// da tabela que esta família compara.
 	//
-	// O que a falta de root de fato tira é o DONO, e isso é tratado por campo,
-	// em Observacional — que é o lugar certo, porque a incerteza é do campo e
-	// não da família.
-	Exaustiva:     true,
+	// A chave `net` é larga demais: carrega desde "o módulo de diagnóstico de
+	// UDP não está carregado" até "o dono do socket não pôde ser lido", e
+	// nenhuma das duas diz nada sobre o conjunto de quem escuta. Usá-la
+	// suprimia a direção `surgiu` em praticamente todo host.
+	//
+	// Só que tirá-la e ficar com `Exaustiva: true` foi TROCAR UMA REGRA
+	// GROSSEIRA E SEGURA POR UMA PRECISA E ERRADA. O comentário anterior
+	// afirmava que "/proc/net/tcp{,6} é exaustivo sem root" — e é exatamente
+	// esse arquivo que o coletor declara ilegível ou CORTADO no teto de linhas
+	// (net.go). Com a tabela truncada, uma porta que continua lá saía como
+	// REMOVIDA: "não vi" virando "não existe", que é a equivalência que esta
+	// ferramenta existe para recusar.
+	//
+	// O que faltava era o coletor dizer especificamente O QUE não leu — ver
+	// facts.SocketsIncompletos.
+	Exaustiva: true,
+	Incompleta: func(f *facts.Facts) string {
+		var tcp []string
+		for _, p := range f.SocketsIncompletos {
+			if strings.HasPrefix(p, "tcp") {
+				tcp = append(tcp, p)
+			}
+		}
+		if len(tcp) == 0 {
+			return ""
+		}
+		return "a tabela de " + strings.Join(tcp, " e ") + " não foi lida inteira " +
+			"(ilegível ou cortada no teto de linhas): o conjunto de quem escuta " +
+			"NÃO é exaustivo deste lado"
+	},
 	Decide:        map[string]bool{"comm": true, "uid": true},
 	Observacional: map[string]bool{"comm": true, "uid": true},
 	Extrair: func(f *facts.Facts) []Entidade {
@@ -581,14 +642,37 @@ var confiancaDeCertificado = Classe{
 	Requires:  env.CapFilesystem,
 	Lacunas:   []string{"trust"},
 	Exaustiva: true,
-	Decide:    map[string]bool{"emissor": true, "auto_assinado": true},
+	// O QUE DECIDE É A CHAVE, e não o nome.
+	//
+	// A versão anterior identificava a entidade por `Subject@File` e decidia por
+	// `emissor`/`auto_assinado` — todos campos de TEXTO que quem emite o
+	// certificado escolhe. Substituir o arquivo por outro self-signed com o
+	// mesmo `CN=Company Root CA` e chave diferente troca a autoridade INTEIRA do
+	// host, e não mexia em nada que a comparação olhasse.
+	//
+	//	spki         DECIDE: é a chave. Não muda numa renovação, então mudar
+	//	             significa que a autoridade é outra.
+	//	fingerprint  CORROBORA: muda na renovação, que é rotina.
+	Decide: map[string]bool{"spki": true, "emissor": true, "auto_assinado": true},
+	// Dump gravado antes destes campos existirem não os traz. Vazio aqui é
+	// "não observado" e não "sem chave" — embora o SchemaVersion já recuse
+	// aquele dump, a declaração é o que torna a leitura verdadeira.
+	Observacional: map[string]bool{"spki": true, "fingerprint": true},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.CACerts))
 		for i := range f.CACerts {
 			c := &f.CACerts[i]
 			out = append(out, Entidade{
-				ID: c.Subject + "@" + c.File, Alvos: []string{c.File},
+				// O ARQUIVO é a identidade: é ele que o host carrega e é ele que
+				// o atacante substitui. Com o Subject no ID, a troca aparecia
+				// como uma âncora que sumiu mais outra que surgiu quando o DN
+				// mudava — e como NADA quando ele não mudava, que é o caso que
+				// interessa.
+				ID: c.File, Alvos: []string{c.File},
 				Campos: map[string]string{
+					"spki":          c.SPKI,
+					"fingerprint":   c.Fingerprint,
+					"titular":       c.Subject,
 					"emissor":       c.Issuer,
 					"auto_assinado": boolTxt(c.AutoAssinado),
 					"nao_depois":    c.NotAfter,
@@ -599,23 +683,60 @@ var confiancaDeCertificado = Classe{
 	},
 }
 
-// O módulo NSS entra no caminho de TODA resolução de nome e de usuário do
-// sistema: uma lib acrescentada ali responde `getpwnam` para o processo que
-// perguntar, e é assim que uma conta existe sem estar no /etc/passwd.
+// # o módulo NSS: o inventário de quem PODE ser carregado
 var moduloNSS = Classe{
 	Tipo:      "nss",
 	Titulo:    "módulo de resolução (NSS)",
 	Requires:  env.CapFilesystem,
 	Lacunas:   []string{"nss"},
 	Exaustiva: true,
-	Decide:    map[string]bool{"libs": true},
+	Decide:    map[string]bool{"libs": true, "servicos": true},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.NSSModules))
 		for i := range f.NSSModules {
 			n := &f.NSSModules[i]
 			out = append(out, Entidade{
 				ID: n.Fonte, Alvos: []string{n.Fonte},
-				Campos: map[string]string{"libs": juntar(n.Paths)},
+				Campos: map[string]string{
+					"libs": juntarConjunto(n.Paths),
+					// EM QUAIS DATABASES esta fonte manda. Estava nos fatos e era
+					// descartado: uma fonte já existente passando a atender
+					// TAMBÉM o `shadow` não mudava lib nenhuma, e a comparação
+					// não via nada — enquanto o host passava a perguntar a ela
+					// quem tem qual senha.
+					"servicos": juntarConjunto(n.Servicos),
+				},
+			})
+		}
+		return out
+	},
+}
+
+// # a configuração EFETIVA do nsswitch, que é ORDEM
+//
+// A primeira fonte que responde encerra a consulta, então a ordem é a
+// autoridade. E ela não sobrevive ao inventário por fonte:
+//
+//	passwd: files sss     →     passwd: sss files
+//
+// As mesmas fontes, as mesmas bibliotecas, e quem decide quem é usuário deste
+// host trocado de lado. Nenhuma família anterior via isso, e é exatamente a
+// transição legítima-em-forma que o drift existe para pegar.
+var servicoNSS = Classe{
+	Tipo:      "nss_servico",
+	Titulo:    "cadeia de resolução (nsswitch)",
+	Requires:  env.CapFilesystem,
+	Lacunas:   []string{"nss"},
+	Exaustiva: true,
+	Decide:    map[string]bool{"cadeia": true},
+	Extrair: func(f *facts.Facts) []Entidade {
+		out := make([]Entidade, 0, len(f.NSSServicos))
+		for i := range f.NSSServicos {
+			sv := &f.NSSServicos[i]
+			out = append(out, Entidade{
+				ID: sv.Nome, Alvos: []string{sv.Nome},
+				// SEQUÊNCIA, e é o ponto inteiro da família.
+				Campos: map[string]string{"cadeia": juntarSequencia(sv.Cadeia)},
 			})
 		}
 		return out
@@ -672,7 +793,7 @@ var programaEmExecucao = Classe{
 			}
 			out = append(out, Entidade{
 				ID: exe, Alvos: []string{exe},
-				Campos: map[string]string{"uids": juntar(lista)},
+				Campos: map[string]string{"uids": juntarConjunto(lista)},
 			})
 		}
 		return out
@@ -696,4 +817,13 @@ func primeiroCampoDaLinha(texto string) string {
 		return ""
 	}
 	return campos[0]
+}
+
+// seLido devolve vazio quando a fonte do campo não foi lida. Vazio é o valor
+// que a comparação entende como "não observado" — ver Classe.Observacional.
+func seLido(lido bool, v string) string {
+	if !lido {
+		return ""
+	}
+	return v
 }

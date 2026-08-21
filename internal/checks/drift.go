@@ -676,7 +676,9 @@ var driftDeKernel = check.Check{
 				"interpretador por conta própria, sem nada mudar no userland",
 			[]string{
 				"módulo sem arquivo em disco, ou fora de /lib/modules, não veio de pacote",
-				"a linha de comando do kernel só muda com reboot: se ela mudou, houve um",
+				"a linha de comando do kernel só muda quando a máquina reinicia: se ela " +
+					"mudou entre os dois retratos, houve um reboot no meio — e o " +
+					"`uptime` diz se ele bate com a janela",
 			})
 	},
 }
@@ -699,11 +701,12 @@ var driftDeConfianca = check.Check{
 			"remove âncoras em BLOCO, com o pacote datando a mudança",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
-		return achadosDeDrift(self, f, mudancasDeVarios(f, "ca", "nss"),
+		return achadosDeDrift(self, f, mudancasDeVarios(f, "ca", "nss", "nss_servico"),
 			"uma CA acrescentada ao armazém faz o host aceitar certificado forjado "+
 				"para QUALQUER nome — é interceptação de TLS que não deixa rastro no "+
-				"tráfego. E um módulo NSS entra no caminho de toda resolução de nome "+
-				"e de usuário do sistema",
+				"tráfego. E a cadeia do nsswitch é a AUTORIDADE sobre quem é usuário "+
+				"deste host: a primeira fonte que responde encerra a consulta, então "+
+				"inverter a ordem troca quem decide",
 			[]string{
 				"confirme a âncora com quem administra a frota, por canal que não " +
 					"seja esta máquina",
@@ -732,15 +735,61 @@ var driftDePrograma = check.Check{
 			"sai como remoção",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
-		return achadosDeDrift(self, f, mudancasDe(f, "programa"),
-			"o PID não é identidade e o nome de kthread também não — o que "+
-				"identifica é o EXECUTÁVEL, e o que se pergunta dele é sob que "+
-				"identidade ele roda. `redis-server` que passa a rodar como root é a "+
-				"forma que esta família existe para pegar",
-			[]string{
+		var r check.Result
+		for _, m := range mudancasDe(f, "programa") {
+			fd := achadoDeDrift(self, f, m,
+				"o PID não é identidade e o nome de kthread também não — o que "+
+					"identifica é o EXECUTÁVEL, e o que se pergunta dele é sob que "+
+					"identidade ele roda. `redis-server` que passa a rodar como root é "+
+					"a forma que esta família existe para pegar")
+			fd.NextSteps = []string{
 				"`aletheia info process <pid>` monta o dossiê de quem está rodando",
 				"uid novo num programa de serviço costuma ser reinício com outra " +
 					"configuração — ou outro programa com o mesmo caminho",
-			})
+			}
+			// SÓ O UID 0 É AVISO, e a decisão sai do FATO — não do texto que o
+			// achado imprime.
+			//
+			// A primeira versão lia a evidência já renderizada atrás do "→" para
+			// descobrir os uids. É a armadilha que o check.Finding.Irreversible
+			// documenta com todas as letras: reescrever a string silencia a
+			// decisão enquanto todo teste continua verde na própria cópia do
+			// literal.
+			//
+			// O motivo do rebaixamento é seleção natural: num servidor
+			// multiusuário o conjunto de uids de um shell ou de um interpretador
+			// muda a cada login, e uma família que avisa sempre é uma que o
+			// operador aprende a ignorar — levando junto o caso que importa. O
+			// caso que importa é estreito e nomeável: um executável que NÃO
+			// rodava como root passa a rodar.
+			if !ganhouUIDZero(m) {
+				fd.Sev = check.SevInfo
+				fd.Evidence = append(fd.Evidence, "e NENHUM dos uids novos é 0: sai "+
+					"como contexto, não como aviso — o conjunto de uids de um shell "+
+					"muda a cada login, e uma família que avisa sempre é uma que se "+
+					"aprende a ignorar")
+			}
+			r.Findings = append(r.Findings, fd)
+		}
+		return r
 	},
+}
+
+// ganhouUIDZero diz se o uid 0 apareceu onde não havia. É a única transição
+// desta família que vale um aviso, e ela é lida do FATO.
+func ganhouUIDZero(m facts.MudancaDrift) bool {
+	if m.Campo != "uids" {
+		return false
+	}
+	return temUIDZero(m.Depois) && !temUIDZero(m.Antes)
+}
+
+// temUIDZero lê o conjunto serializado pelo juntarConjunto do motor de drift.
+func temUIDZero(lista string) bool {
+	for _, u := range strings.Split(lista, "\x1f") {
+		if strings.TrimSpace(u) == "0" {
+			return true
+		}
+	}
+	return false
 }

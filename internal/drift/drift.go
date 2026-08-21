@@ -114,6 +114,27 @@ type Classe struct {
 	// lados. Só ela admite "sumiu" — ver a segunda regra no topo do arquivo.
 	Exaustiva bool
 
+	// Multiplicidade diz que DUAS entidades idênticas não são a mesma entidade.
+	//
+	// O índice colapsa por ID, e para quase toda família isso é o certo: duas
+	// leituras da mesma unit são a mesma unit. Para o cron não é — duas linhas
+	// idênticas fazem o job rodar DUAS VEZES, e passar de uma para duas era
+	// invisível porque o valor fundido é igual ao original.
+	Multiplicidade bool
+
+	// Incompleta é a pergunta que a família faz aos fatos de UM lado: "o
+	// conjunto que eu comparo está inteiro aqui?". Devolve o motivo quando não
+	// está, e "" quando está.
+	//
+	// Existe porque a chave de lacuna é grosseira demais em alguns casos. A
+	// família de portas depende de /proc/net/tcp{,6} ter sido lido INTEIRO, e
+	// isso é um subconjunto estreito do que a chave `net` cobre — consumir a
+	// chave suprimia a família em quase todo host; ignorá-la fazia tabela
+	// truncada virar "porta removida". A pergunta específica é a saída.
+	//
+	// Lida como lacuna: presente nos dois lados é ESCOPO, num só é ASSIMETRIA.
+	Incompleta func(*facts.Facts) string
+
 	// Efemera é a família cuja PRESENÇA é volátil nos dois sentidos: o que não
 	// aparece num retrato não deixou de existir, e o que aparece no outro não
 	// nasceu ali. Só `mudou` vale.
@@ -150,6 +171,10 @@ type Classe struct {
 	// normalização — ver Entidade.
 	Extrair func(*facts.Facts) []Entidade
 }
+
+// campoRepeticoes é onde a multiplicidade mora, quando a família a declara.
+// O nome começa com `_` para não colidir com campo de extrator nenhum.
+const campoRepeticoes = "_repeticoes"
 
 // Kind é o que aconteceu com uma entidade.
 const (
@@ -246,6 +271,23 @@ func comparabilidadeDe(c Classe, antes, depois Lado) facts.CoberturaDrift {
 		cob.Motivos = append(cob.Motivos, "o retrato DEPOIS foi feito sem "+
 			strings.Join(so.Names(), "+")+" e o ANTES não: o que aparecer como REMOVIDO "+
 			"pode continuar lá, sem ter sido olhado")
+	}
+
+	// A pergunta ESPECÍFICA da família tem a mesma leitura das lacunas: nos
+	// dois lados é escopo, num só é assimetria.
+	if c.Incompleta != nil {
+		ia, id := c.Incompleta(antes.F), c.Incompleta(depois.F)
+		switch {
+		case ia != "" && id != "":
+			cob.SemSurgiu, cob.SemSumiu = true, true
+			cob.Motivos = append(cob.Motivos, "nos dois retratos, "+ia)
+		case ia != "":
+			cob.Simetrico, cob.SemSurgiu, cob.SemMudou = false, true, true
+			cob.Motivos = append(cob.Motivos, "só no retrato ANTES, "+ia)
+		case id != "":
+			cob.Simetrico, cob.SemSumiu, cob.SemMudou = false, true, true
+			cob.Motivos = append(cob.Motivos, "só no retrato DEPOIS, "+id)
+		}
 	}
 
 	// Lacuna declarada tem a mesma leitura, e é comparada pela CHAVE — nunca
@@ -362,8 +404,16 @@ func indexar(c Classe, f *facts.Facts) (map[string]Entidade, int) {
 			continue
 		}
 		if ja, dup := out[e.ID]; dup {
-			out[e.ID] = fundir(ja, e)
-			continue
+			e = fundir(ja, e)
+			if c.Multiplicidade {
+				n, _ := strconv.Atoi(e.Campos[campoRepeticoes])
+				if n == 0 {
+					n = 1
+				}
+				e.Campos[campoRepeticoes] = strconv.Itoa(n + 1)
+			}
+		} else if c.Multiplicidade {
+			e.Campos[campoRepeticoes] = "1"
 		}
 		out[e.ID] = e
 	}

@@ -126,3 +126,37 @@ func TestTodaFamiliaDeDriftEhLida(t *testing.T) {
 		}
 	}
 }
+
+// SÓ O UID 0 É AVISO, e a decisão sai do FATO.
+//
+// A primeira versão lia a evidência já renderizada atrás do "→" para descobrir
+// os uids — a armadilha que o check.Finding.Irreversible documenta: reescrever
+// a string silencia a decisão enquanto todo teste continua verde na própria
+// cópia do literal. Este teste monta a MUDANÇA, não o texto.
+func TestProgramaSoAvisaQuandoGanhaUIDZero(t *testing.T) {
+	muda := func(antes, depois string) facts.MudancaDrift {
+		return facts.MudancaDrift{
+			Tipo: "programa", Titulo: "programa em execução", ID: "/usr/bin/redis-server",
+			Kind: "mudou", Campo: "uids", Antes: antes, Depois: depois,
+		}
+	}
+	casos := []struct {
+		nome          string
+		antes, depois string
+		quer          check.Severity
+	}{
+		{"passou a rodar como root", "999", "0\x1f999", check.SevWarn},
+		{"já rodava como root", "0", "0\x1f1000", check.SevInfo},
+		{"login comum entrou", "1000", "1000\x1f1001", check.SevInfo},
+		{"deixou de rodar como root", "0\x1f999", "999", check.SevInfo},
+	}
+	for _, c := range casos {
+		r := driftDePrograma.Run(driftDePrograma, comDrift(muda(c.antes, c.depois)), testEnv())
+		if len(r.Findings) != 1 {
+			t.Fatalf("%s: %+v", c.nome, r.Findings)
+		}
+		if got := r.Findings[0].Sev; got != c.quer {
+			t.Errorf("%s: %q -> %q deu %v, queria %v", c.nome, c.antes, c.depois, got, c.quer)
+		}
+	}
+}

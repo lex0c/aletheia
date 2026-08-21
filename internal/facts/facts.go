@@ -136,7 +136,7 @@ import (
 //	     porque o truque mora numa linha de COMENTÁRIO, que Lines descarta. Num
 //	     dump v7 o campo vem 0, e 0 significa "este arquivo foi lido e não tem
 //	     escape nenhum" para `antiforense.hidden_text`.
-const SchemaVersion = 8
+const SchemaVersion = 9
 
 // Facts é o retrato do host.
 type Facts struct {
@@ -154,6 +154,17 @@ type Facts struct {
 	Host      Host      `json:"host"`
 	Processes []Process `json:"processes,omitempty"`
 	Sockets   []Socket  `json:"sockets,omitempty"`
+	// SocketsIncompletos são os protocolos cuja tabela de /proc/net NÃO foi
+	// lida inteira — ilegível ou cortada no teto de linhas.
+	//
+	// A lacuna já era declarada em texto sob a chave `net`, e isso não bastava:
+	// aquela chave carrega desde "o módulo de diagnóstico de UDP não está
+	// carregado" até "o dono do socket não pôde ser lido", e quem compara dois
+	// retratos precisa saber especificamente se o CONJUNTO que ele está
+	// comparando é exaustivo. Sem este campo, uma tabela truncada fazia uma
+	// porta que continua lá aparecer como REMOVIDA — "não vi" virando "não
+	// existe", que é a equivalência que esta ferramenta existe para recusar.
+	SocketsIncompletos []string `json:"sockets_incomplete,omitempty"`
 	// LimitesRede são os tetos contra os quais a contagem de conexões vale
 	// alguma coisa. Ver LimitesDeRede.
 	LimitesRede LimitesDeRede `json:"net_limits,omitempty"`
@@ -172,7 +183,16 @@ type Facts struct {
 	Units       []Unit       `json:"units,omitempty"`
 	// NSSModules são as fontes do /etc/nsswitch.conf e a lib que cada uma
 	// carrega — um libnss_ sem dono é backdoor carregado em toda resolução.
-	NSSModules    []NSSModule     `json:"nss_modules,omitempty"`
+	NSSModules []NSSModule `json:"nss_modules,omitempty"`
+	// NSSServicos é a configuração EFETIVA do nsswitch: um serviço, e a cadeia
+	// de fontes NA ORDEM em que ele as consulta.
+	//
+	// NSSModules responde "quais bibliotecas podem ser carregadas", e é
+	// inventário. Ele não responde precedência: agrupado por FONTE, ele perde
+	// que `passwd: files sss` e `passwd: sss files` são configurações
+	// diferentes — as mesmas fontes, as mesmas libs, e a autoridade sobre quem
+	// é usuário invertida.
+	NSSServicos   []NSSService    `json:"nss_services,omitempty"`
 	ToolArtifacts []ToolArtifact  `json:"tool_artifacts,omitempty"`
 	Cron          []CronEntry     `json:"cron,omitempty"`
 	SSH           SSHConfig       `json:"ssh"`
@@ -189,11 +209,17 @@ type Facts struct {
 	Pkg             PkgDB             `json:"pkg"`
 	Ownership       []Ownership       `json:"ownership,omitempty"`
 	Accounts        []Account         `json:"accounts,omitempty"`
-	Grupos          []Grupo           `json:"groups,omitempty"`
-	Sudoers         []SudoRule        `json:"sudoers,omitempty"`
-	Doas            []DoasRule        `json:"doas,omitempty"`
-	Suid            []SuidFile        `json:"suid,omitempty"`
-	Donos           []DonoDeArquivo   `json:"file_owners,omitempty"`
+	// ShadowLido diz se /etc/shadow pôde ser lido. Sem ele, Account.SemSenha e
+	// Account.Bloqueada vêm no zero-value `false` para TODA conta — e `false`
+	// ali significa "não sei", não "tem senha". A lacuna é declarada sob
+	// `users`, mas em granularidade de família: quem compara campo precisa
+	// saber por CAMPO.
+	ShadowLido bool            `json:"shadow_read,omitempty"`
+	Grupos     []Grupo         `json:"groups,omitempty"`
+	Sudoers    []SudoRule      `json:"sudoers,omitempty"`
+	Doas       []DoasRule      `json:"doas,omitempty"`
+	Suid       []SuidFile      `json:"suid,omitempty"`
+	Donos      []DonoDeArquivo `json:"file_owners,omitempty"`
 	// SuidDirs e SuidArquivos medem o CUSTO da varredura de filesystem, para o
 	// relatório de tempo dizer por que ela demorou.
 	SuidDirs     int `json:"suid_dirs,omitempty"`

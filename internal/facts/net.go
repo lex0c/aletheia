@@ -120,12 +120,14 @@ func collectSockets(f *Facts, e *env.Env) {
 			if !ehV6 || !procNetLido(err) {
 				f.partial("net", src.path+" ilegível ("+env.MotivoDoErro(err)+
 					"): nenhuma conexão desse protocolo foi avaliada")
+				f.SocketsIncompletos = append(f.SocketsIncompletos, src.proto)
 			}
 			continue
 		}
 		if cortou {
 			f.partial("net", src.path+" tem mais de "+strconv.Itoa(maxLinhasSocket)+
 				" linhas e foi CORTADO: as conexões seguintes NÃO foram avaliadas")
+			f.SocketsIncompletos = append(f.SocketsIncompletos, src.proto)
 		}
 		socks = append(socks, tabela...)
 	}

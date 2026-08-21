@@ -263,12 +263,22 @@ func TestTodoCampoQueDecideEhExtraido(t *testing.T) {
 		Carregados:  []facts.ModuloCarregado{{Nome: "overlay", Arquivo: "/lib/modules/x/overlay.ko"}},
 		Binfmt:      []facts.BinfmtRegistro{{Nome: "qemu-arm", Interpreter: "/usr/bin/qemu-arm"}},
 		CACerts:     []facts.CACert{{File: "/etc/ssl/certs/ca.pem", Subject: "CN=x", Issuer: "CN=x"}},
-		NSSModules:  []facts.NSSModule{{Fonte: "passwd", Paths: []string{"/lib/libnss_files.so.2"}}},
+		NSSModules:  []facts.NSSModule{{Fonte: "files", Paths: []string{"/lib/libnss_files.so.2"}, Servicos: []string{"passwd"}}},
+		NSSServicos: []facts.NSSService{{Nome: "passwd", Cadeia: []string{"files", "sss"}}},
+		ShadowLido:  true,
 		Processes:   []facts.Process{{PID: 1, Exe: "/usr/lib/systemd/systemd", UID: 0}},
 		Boot:        []facts.LinhaDeBoot{{Fonte: "/proc/cmdline", Valor: "ro quiet", Rodando: true}},
 	}
 	for _, c := range classes {
-		ents := c.Extrair(f)
+		// Pelo INDEXAR e não pelo Extrair: a invariante é sobre a entidade que
+		// de fato é comparada, e o índice acrescenta campo próprio (a
+		// multiplicidade, quando a família a declara). Conferir a saída crua do
+		// extrator deixaria esse campo de fora da conferência.
+		idx, _ := indexar(c, f)
+		ents := make([]Entidade, 0, len(idx))
+		for _, e := range idx {
+			ents = append(ents, e)
+		}
 		if len(ents) == 0 {
 			t.Errorf("%s: o fixture não produziu entidade — o teste deixaria de "+
 				"conferir esta família em silêncio", c.Tipo)
@@ -468,4 +478,197 @@ func TestLimitacaoSimetricaPreservaOMudou(t *testing.T) {
 		t.Fatalf("shell que deixa de ser nologin é o achado, e as duas pontas "+
 			"olharam igual: %+v", d.Mudancas)
 	}
+}
+
+// A BATERIA DA REVISÃO. Cada um destes é um caso em que a representação
+// normalizada perdia informação, ou em que cobertura incompleta podia ser
+// confundida com estado — que é a tese central desta ferramenta aplicada ao
+// próprio motor de comparação.
+
+// NET1: o listener continua lá e a segunda leitura de /proc/net/tcp foi cortada.
+// NÃO pode virar "sumiu", e a cobertura precisa cair.
+func TestNET1TabelaTruncadaNaoViraPortaRemovida(t *testing.T) {
+	porta := func() []facts.Socket {
+		return []facts.Socket{{Proto: "tcp", State: "LISTEN", LocalIP: "0.0.0.0",
+			LocalPort: 22, Comm: "sshd"}}
+	}
+	antes := &facts.Facts{Sockets: porta()}
+	// A porta CONTINUA existindo; o que faltou foi ler a tabela inteira.
+	depois := &facts.Facts{SocketsIncompletos: []string{"tcp"}}
+
+	d := Comparar(
+		Lado{F: antes, Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: depois, Caps: tudoVisivel, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	for _, m := range d.Mudancas {
+		if m.Tipo == "porta" {
+			t.Errorf("tabela truncada virou estado: %s %s", m.Kind, m.ID)
+		}
+	}
+	var vista bool
+	for _, c := range d.Cobertura {
+		if c.Tipo != "porta" {
+			continue
+		}
+		vista = true
+		if c.Simetrico || !c.SemSumiu {
+			t.Errorf("a cobertura precisa cair, e do lado certo: %+v", c)
+		}
+	}
+	if !vista {
+		t.Fatal("a família precisa aparecer na cobertura")
+	}
+}
+
+// NSS1: as mesmas fontes, a ORDEM invertida. A autoridade sobre quem é usuário
+// deste host trocou de lado.
+func TestNSS1OrdemDaCadeiaEhMudanca(t *testing.T) {
+	nss := func(cadeia ...string) *facts.Facts {
+		return &facts.Facts{NSSServicos: []facts.NSSService{{Nome: "passwd", Cadeia: cadeia}}}
+	}
+	d := Comparar(
+		Lado{F: nss("files", "sss"), Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: nss("sss", "files"), Caps: tudoVisivel, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	var achou bool
+	for _, m := range d.Mudancas {
+		if m.Tipo == "nss_servico" && m.Campo == "cadeia" {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Fatalf("inverter a cadeia troca quem responde primeiro: %+v", d.Mudancas)
+	}
+}
+
+// NSS2: uma fonte que já existia passa a atender OUTRO database. Nenhuma
+// biblioteca nova, e o host passa a perguntar a ela quem tem qual senha.
+func TestNSS2FonteEmNovoDatabaseEhMudanca(t *testing.T) {
+	mod := func(servicos ...string) *facts.Facts {
+		return &facts.Facts{NSSModules: []facts.NSSModule{{
+			Fonte: "sss", Paths: []string{"/lib/libnss_sss.so.2"}, Servicos: servicos}}}
+	}
+	d := Comparar(
+		Lado{F: mod("passwd"), Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: mod("passwd", "shadow"), Caps: tudoVisivel, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	var achou bool
+	for _, m := range d.Mudancas {
+		if m.Tipo == "nss" && m.Campo == "servicos" {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Fatalf("a mesma lib atendendo o shadow é outra coisa: %+v", d.Mudancas)
+	}
+}
+
+// CA1: mesmo arquivo, mesmo Subject, mesmo Issuer — CHAVE diferente. Para o
+// host, a autoridade de confiança mudou por inteiro.
+func TestCA1ChaveTrocadaComMesmoDN(t *testing.T) {
+	ca := func(spki, fp string) *facts.Facts {
+		return &facts.Facts{CACerts: []facts.CACert{{
+			File:    "/usr/local/share/ca-certificates/company.crt",
+			Subject: "CN=Company Root CA", Issuer: "CN=Company Root CA",
+			AutoAssinado: true, SPKI: spki, Fingerprint: fp,
+		}}}
+	}
+	d := Comparar(
+		Lado{F: ca("SHA256:aaa", "SHA256:111"), Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: ca("SHA256:bbb", "SHA256:222"), Caps: tudoVisivel, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	var achou bool
+	for _, m := range d.Mudancas {
+		if m.Tipo == "ca" && m.Campo == "spki" {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Fatalf("trocar a chave sob o mesmo DN é trocar a autoridade: %+v", d.Mudancas)
+	}
+	// E a RENOVAÇÃO — mesma chave, certificado novo — não é troca de
+	// autoridade: sai na contagem, não como achado.
+	d = Comparar(
+		Lado{F: ca("SHA256:aaa", "SHA256:111"), Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: ca("SHA256:aaa", "SHA256:222"), Caps: tudoVisivel, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	for _, m := range d.Mudancas {
+		if m.Tipo == "ca" {
+			t.Errorf("renovação com a MESMA chave não é troca de autoridade: %+v", m)
+		}
+	}
+}
+
+// UNIT1: dois ExecStartPre apenas trocam de ordem. A unit passa a executar
+// outra coisa primeiro.
+func TestUNIT1ReordenarExecEhMudanca(t *testing.T) {
+	unidade := func(a, b string) *facts.Facts {
+		return &facts.Facts{Units: []facts.Unit{{
+			Name: "u.service", Path: "/etc/systemd/system/u.service",
+			Exec: []facts.ExecLine{
+				{Key: "ExecStartPre", Cmd: a}, {Key: "ExecStartPre", Cmd: b}},
+		}}}
+	}
+	d := Comparar(
+		Lado{F: unidade("/usr/bin/a", "/usr/bin/b"), Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: unidade("/usr/bin/b", "/usr/bin/a"), Caps: tudoVisivel, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	var achou bool
+	for _, m := range d.Mudancas {
+		if m.Tipo == "systemd.unit" && m.Campo == "exec" {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Fatalf("a ORDEM do Exec é semântica, e ordenar a apagava: %+v", d.Mudancas)
+	}
+}
+
+// ACC1: dois retratos sem /etc/shadow. Os campos que vêm dele saem DECLARADOS
+// como não observados — "não sei" comparado com "não sei" não é "não mudou".
+func TestACC1CamposDoShadowSemLeituraNaoSaoComparados(t *testing.T) {
+	conta := func() *facts.Facts {
+		return &facts.Facts{
+			Accounts:   []facts.Account{{Name: "deploy", UID: 1000, Shell: "/bin/bash"}},
+			ShadowLido: false,
+		}
+	}
+	ents, _ := indexar(classePorTipo(t, "conta"), conta())
+	e := ents["deploy"]
+	for _, campo := range []string{"sem_senha", "bloqueada"} {
+		if e.Campos[campo] != "" {
+			t.Errorf("%s precisa sair VAZIO sem o shadow: %q", campo, e.Campos[campo])
+		}
+	}
+	// E com o shadow lido, o valor volta a valer.
+	f := conta()
+	f.ShadowLido = true
+	ents, _ = indexar(classePorTipo(t, "conta"), f)
+	if ents["deploy"].Campos["sem_senha"] != "false" {
+		t.Error("com o shadow lido, `false` significa `false`")
+	}
+}
+
+// CRON1: uma linha idêntica vira DUAS. O cron passa a executar o job duas
+// vezes, e o índice colapsava as duas na mesma entidade.
+func TestCRON1DuasLinhasIdenticasSaoDuasExecucoes(t *testing.T) {
+	job := facts.CronEntry{File: "/etc/cron.d/x", Kind: "dropin", User: "root",
+		Schedule: "17 3 * * *", Cmd: "/usr/bin/env true"}
+	d := Comparar(
+		Lado{F: &facts.Facts{Cron: []facts.CronEntry{job}}, Caps: tudoVisivel, Host: "h", Quando: "2026-01-01T00:00:00Z"},
+		Lado{F: &facts.Facts{Cron: []facts.CronEntry{job, job}}, Caps: tudoVisivel, Host: "h", Quando: "2026-01-02T00:00:00Z"})
+	var achou bool
+	for _, m := range d.Mudancas {
+		if m.Tipo == "cron" && m.Campo == campoRepeticoes {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Fatalf("de uma execução para duas é mudança: %+v", d.Mudancas)
+	}
+}
+
+func classePorTipo(t *testing.T, tipo string) Classe {
+	t.Helper()
+	for _, c := range classes {
+		if c.Tipo == tipo {
+			return c
+		}
+	}
+	t.Fatalf("classe %q não registrada", tipo)
+	return Classe{}
 }

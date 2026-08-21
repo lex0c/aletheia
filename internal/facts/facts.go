@@ -55,7 +55,18 @@ import (
 //	   não monta nada por cima de caminho de sistema", e "a autoria do segmento
 //	   está provada" — que era justamente a afirmação que produzia CRITICAL a
 //	   partir de PID reciclado.
-const SchemaVersion = 5
+//	6  Duas mudanças pós-schema-5, e as duas são exatamente o que a regra
+//	   acima descreve — ela foi escrita e violada no mesmo dia, duas vezes:
+//	   a semântica de SysVShmSeg.PIDReciclado ganhou tolerância temporal (dump
+//	   v5 antigo pode trazer `true` que hoje seria `false`, apagando o Ebury), e
+//	   o PersistDenied passou a carregar a lacuna de user manager, que dump v5
+//	   anterior não tem. Entra também o Unit.BindReset: num dump v5 os binds
+//	   foram gravados SEM o reset entre arquivos, então a base traz um bind que
+//	   um drop-in já tinha desfeito — o falso positivo que o reset conserta.
+//
+//	   É por isso que existe o TestImpressaoDoEsquema: regra que depende de
+//	   alguém lembrar continua sendo esquecida.
+const SchemaVersion = 6
 
 // Facts é o retrato do host.
 type Facts struct {

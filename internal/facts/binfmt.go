@@ -106,6 +106,8 @@ type BinfmtConfig struct {
 //	magic 7f454c46...
 //	mask ffffffff...
 func collectBinfmt(f *Facts) {
+	f.BinfmtVivoCompleto = true
+
 	const base = "/proc/sys/fs/binfmt_misc"
 	ents, err := os.ReadDir(base)
 	if err != nil {
@@ -114,6 +116,7 @@ func collectBinfmt(f *Facts) {
 		// kernel, então tratar os dois igual esconde justamente o caso em que
 		// alguém restringiu a leitura.
 		if !errors.Is(err, fs.ErrNotExist) {
+			f.BinfmtVivoCompleto = false
 			f.partial("binfmt", base+" existe e não pôde ser listado ("+
 				env.MotivoDoErro(err)+"): os interpretadores registrados NO KERNEL "+
 				"não foram examinados")
@@ -129,6 +132,7 @@ func collectBinfmt(f *Facts) {
 		corpo, err := readTrimErr(base + "/" + nome)
 		if err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
+				f.BinfmtVivoCompleto = false
 				f.partial("binfmt", "o registro "+nome+" não pôde ser lido ("+
 					env.MotivoDoErro(err)+"): para onde ele roteia a execução NÃO "+
 					"foi determinado")
@@ -147,6 +151,7 @@ func collectBinfmt(f *Facts) {
 		// a decisão "sequestra TODO ELF" DEPENDE do offset. Declarar a lacuna
 		// impede que a mudança vire silêncio.
 		if r.Magic != "" && !r.OffsetLido {
+			f.BinfmtVivoCompleto = false
 			f.partial("binfmt", "o registro "+nome+" tem magic e NÃO publicou offset: "+
 				"não foi possível determinar se ele casa o cabeçalho ELF no byte 0, "+
 				"que é a diferença entre sequestrar toda execução do host e casar "+
@@ -220,9 +225,12 @@ var dirsBinfmtConfig = []string{"/etc/binfmt.d", "/run/binfmt.d", "/usr/lib/binf
 //
 //	:qemu-aarch64:M::\x7fELF…:\xff…:/usr/bin/qemu-aarch64-static:OCF
 func collectBinfmtConfig(f *Facts, e *env.Env) {
+	f.BinfmtConfigCompleto = true
+
 	for _, dir := range dirsBinfmtConfig {
 		nomes, err := e.ReadDirNamesErr(dir)
 		if env.EhLacuna(err) {
+			f.BinfmtConfigCompleto = false
 			f.denyPersist("binfmt", dir+" não pôde ser listado ("+env.MotivoDoErro(err)+
 				"): a configuração de binfmt do próximo boot NÃO foi lida")
 			continue
@@ -234,6 +242,7 @@ func collectBinfmtConfig(f *Facts, e *env.Env) {
 			p := dir + "/" + nome
 			b, err := e.ReadFile(p)
 			if err != nil {
+				f.BinfmtConfigCompleto = false
 				f.denyPersist("binfmt", p+" ilegível ("+env.MotivoDoErro(err)+")")
 				continue
 			}
@@ -253,6 +262,7 @@ func collectBinfmtConfig(f *Facts, e *env.Env) {
 					// o byte cru, e a linha some. Um /etc/binfmt.d/x.conf assim
 					// registra sequestro de execução para o próximo boot e saía
 					// da coleta como ausência.
+					f.BinfmtConfigCompleto = false
 					f.partial("binfmt", p+": uma linha de registro não pôde ser "+
 						"interpretada e NÃO foi avaliada — o interpretador que "+
 						"ela registra não entrou na análise")

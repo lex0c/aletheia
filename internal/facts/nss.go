@@ -191,9 +191,12 @@ var nssLibDirs = []string{
 }
 
 func collectNSS(f *Facts, e *env.Env) {
+	f.NSSLido = true
+
 	b, err := e.ReadFile("/etc/nsswitch.conf")
 	if err != nil {
 		if env.EhLacuna(err) {
+			f.NSSLido = false
 			f.denyPersist("nss", "/etc/nsswitch.conf não pôde ser lido ("+
 				env.MotivoDoErro(err)+"): um módulo NSS malicioso — carregado em TODA "+
 				"resolução de nome, inclusive por daemon root — NÃO foi avaliado")

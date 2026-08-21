@@ -464,6 +464,9 @@ func expandHome(pat string, homes []string) []string {
 // --- linker dinâmico (runbook §7.8) ---
 
 func collectLoader(f *Facts, e *env.Env) {
+	f.LoaderPreloadLido = true
+	f.LoaderPathCompleto = true
+
 	l := &f.Loader
 
 	switch b, err := e.ReadFile("/etc/ld.so.preload"); {
@@ -480,12 +483,14 @@ func collectLoader(f *Facts, e *env.Env) {
 		// Existe e não pudemos ler: isso NÃO é "não existe".
 		l.PreloadExists = true
 		l.PreloadErr = err.Error()
+		f.LoaderPreloadLido = false
 		f.denyPersist("loader", "/etc/ld.so.preload existe e não pôde ser lido: "+err.Error())
 	}
 
 	confs := []string{"/etc/ld.so.conf"}
 	ents, errCD := e.ReadDir("/etc/ld.so.conf.d")
 	if env.EhLacuna(errCD) {
+		f.LoaderPathCompleto = false
 		f.denyPersist("loader", "/etc/ld.so.conf.d não pôde ser listado ("+
 			env.MotivoDoErro(errCD)+"): um diretório de busca de biblioteca "+
 			"injetado ali NÃO foi avaliado")
@@ -506,6 +511,7 @@ func collectLoader(f *Facts, e *env.Env) {
 		b, err := e.ReadFile(c)
 		if err != nil {
 			if env.EhLacuna(err) {
+				f.LoaderPathCompleto = false
 				f.denyPersist("loader", c+" não pôde ser lido ("+env.MotivoDoErro(err)+
 					"): os diretórios de busca de biblioteca que ele declara NÃO "+
 					"foram avaliados")
@@ -541,6 +547,7 @@ func collectLoader(f *Facts, e *env.Env) {
 	// de olhar" em "não há". Se a cadeia passou do teto, um diretório de busca
 	// gravável declarado além dele NÃO foi avaliado, e isso precisa constar.
 	if len(confs) > maxConfsLoader {
+		f.LoaderPathCompleto = false
 		f.denyPersist("loader", "a cadeia de include do ld.so.conf passou de "+
 			strconv.Itoa(maxConfsLoader)+" arquivos e foi cortada no teto: os "+
 			"diretórios de busca de biblioteca declarados além dele NÃO foram "+
@@ -552,6 +559,7 @@ func collectLoader(f *Facts, e *env.Env) {
 		b, err := e.ReadFile(p)
 		if err != nil {
 			if env.EhLacuna(err) {
+				f.LoaderPathCompleto = false
 				f.denyPersist("loader", p+" não pôde ser lido ("+env.MotivoDoErro(err)+
 					"): um LD_PRELOAD/LD_AUDIT global definido ali NÃO foi avaliado")
 			}
@@ -595,6 +603,7 @@ func expandirIncludeLoader(f *Facts, e *env.Env, padrao string) []string {
 	var out []string
 	nomes, err := e.ReadDirNamesErr(dir)
 	if env.EhLacuna(err) {
+		f.LoaderPathCompleto = false
 		f.denyPersist("loader", dir+" (include de ld.so.conf) não pôde ser listado ("+
 			env.MotivoDoErro(err)+"): os arquivos incluídos dali NÃO foram lidos")
 	}

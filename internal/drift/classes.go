@@ -91,7 +91,8 @@ var unidadeSystemd = Classe{
 	Requires: env.CapFilesystem,
 	// Duas chaves porque o coletor de unit usa as duas: `unit` para o
 	// diretório que não pôde ser listado, `persist` para o arquivo ilegível.
-	Lacunas: []string{"unit", "persist"},
+	Lacunas:         []string{"unit", "persist"},
+	LacunaConferida: "as duas chaves são do coletor de unit e só dele: `unit` para diretório não listado, `persist` para arquivo de unit ilegível e expansão de drop-in",
 	// A varredura das árvores de unit é exaustiva quando o filesystem está
 	// legível: as raízes são fixas e conhecidas. Por isso "sumiu" vale aqui —
 	// e unit que some é tão interessante quanto unit que nasce (é como se
@@ -171,11 +172,12 @@ var unidadeSystemd = Classe{
 // quando alguém edita o arquivo acima, então ele NÃO entra. O que identifica um
 // agendamento é onde ele mora, para quem, e o gatilho — o comando é o estado.
 var agendamento = Classe{
-	Tipo:      "cron",
-	Titulo:    "agendamento",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"cron"},
-	Exaustiva: true,
+	Tipo:            "cron",
+	Titulo:          "agendamento",
+	Requires:        env.CapFilesystem,
+	Lacunas:         []string{"cron"},
+	LacunaConferida: "a chave é escrita só pelo coletor de cron, em todos os diretórios e arquivos que ele varre — a fonte é uma",
+	Exaustiva:       true,
 	// DUAS LINHAS IDÊNTICAS NÃO SÃO A MESMA LINHA: o cron executa o job duas
 	// vezes. Só o COMANDO conta repetição — `user` e `schedule` fazem parte do
 	// ID e são iguais por construção dentro dele, então multiplicá-los fabricava
@@ -464,10 +466,15 @@ var grupo = Classe{
 // maior alcance por byte escrito que existe em Linux, e a lista dela é curta —
 // o que faz dela a classe de melhor razão valor/ruído do registro inteiro.
 var precarga = Classe{
-	Tipo:      "precarga",
-	Titulo:    "pré-carga de código",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"loader"},
+	Tipo:     "precarga",
+	Titulo:   "pré-carga de código",
+	Requires: env.CapFilesystem,
+	Incompleta: func(f *facts.Facts) string {
+		if f.LoaderPreloadLido {
+			return ""
+		}
+		return "/etc/ld.so.preload não pôde ser lido deste lado"
+	},
 	Exaustiva: true,
 	Decide:    map[string]bool{"libs": true, "existe": true},
 	Extrair: func(f *facts.Facts) []Entidade {
@@ -491,12 +498,13 @@ var precarga = Classe{
 // faria uma lacuna em `interpretador` suprimir a direção do ld.so.preload, que
 // não tem nada a ver.
 var hookDeInterpretador = Classe{
-	Tipo:      "hook_interp",
-	Titulo:    "hook de interpretador",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"interpretador"},
-	Exaustiva: true,
-	Decide:    map[string]bool{"valor": true},
+	Tipo:            "hook_interp",
+	Titulo:          "hook de interpretador",
+	Requires:        env.CapFilesystem,
+	Lacunas:         []string{"interpretador"},
+	LacunaConferida: "chave de escritor único: o coletor de hooks de interpretador",
+	Exaustiva:       true,
+	Decide:          map[string]bool{"valor": true},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.HooksInterp))
 		for i := range f.HooksInterp {
@@ -516,11 +524,12 @@ var hookDeInterpretador = Classe{
 // em verificação de hash nenhuma. É a porta que a varredura de integridade não
 // vê, e a mudança do MODO é a única coisa que a denuncia.
 var bitSuid = Classe{
-	Tipo:      "suid",
-	Titulo:    "arquivo com bit de privilégio",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"suid"},
-	Exaustiva: true,
+	Tipo:            "suid",
+	Titulo:          "arquivo com bit de privilégio",
+	Requires:        env.CapFilesystem,
+	Lacunas:         []string{"suid"},
+	LacunaConferida: "todos os sites são da varredura de SUID: teto de profundidade, diretório não aberto, árvore de contêiner pulada",
+	Exaustiva:       true,
 	Decide: map[string]bool{
 		"setuid": true, "setgid": true, "uid": true, "gid": true, "caps": true,
 	},
@@ -672,10 +681,15 @@ var moduloCarregado = Classe{
 // executar um arquivo com certa magia. Um registro novo faz o kernel executar
 // um binário do atacante sem que nada no userland mude.
 var interpretadorDoKernel = Classe{
-	Tipo:      "binfmt",
-	Titulo:    "interpretador registrado no kernel",
-	Requires:  env.CapProcfs,
-	Lacunas:   []string{"binfmt"},
+	Tipo:     "binfmt",
+	Titulo:   "interpretador registrado no kernel",
+	Requires: env.CapProcfs,
+	Incompleta: func(f *facts.Facts) string {
+		if f.BinfmtVivoCompleto {
+			return ""
+		}
+		return "os registros vivos de binfmt_misc não puderam ser lidos inteiros deste lado"
+	},
 	Exaustiva: true,
 	Decide:    map[string]bool{"interpretador": true, "magia": true, "extensao": true},
 	Extrair: func(f *facts.Facts) []Entidade {
@@ -700,12 +714,13 @@ var interpretadorDoKernel = Classe{
 // coletor, e `init=`, `apparmor=0` e `module.sig_enforce=0` desligam defesa
 // ANTES de o userland existir.
 var linhaDeBoot = Classe{
-	Tipo:      "boot",
-	Titulo:    "linha de comando do kernel",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"boot"},
-	Exaustiva: true,
-	Decide:    map[string]bool{"valor": true},
+	Tipo:            "boot",
+	Titulo:          "linha de comando do kernel",
+	Requires:        env.CapFilesystem,
+	Lacunas:         []string{"boot"},
+	LacunaConferida: "todos os sites são da configuração de boot: grub.cfg, partição EFI, entradas do systemd-boot",
+	Exaustiva:       true,
+	Decide:          map[string]bool{"valor": true},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.Boot))
 		for i := range f.Boot {
@@ -791,10 +806,15 @@ var confiancaDeCertificado = Classe{
 
 // # o módulo NSS: o inventário de quem PODE ser carregado
 var moduloNSS = Classe{
-	Tipo:      "nss",
-	Titulo:    "módulo de resolução (NSS)",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"nss"},
+	Tipo:     "nss",
+	Titulo:   "módulo de resolução (NSS)",
+	Requires: env.CapFilesystem,
+	Incompleta: func(f *facts.Facts) string {
+		if f.NSSLido {
+			return ""
+		}
+		return "/etc/nsswitch.conf não foi lido deste lado"
+	},
 	Exaustiva: true,
 	Decide:    map[string]bool{"libs": true, "servicos": true},
 	Extrair: func(f *facts.Facts) []Entidade {
@@ -829,10 +849,15 @@ var moduloNSS = Classe{
 // host trocado de lado. Nenhuma família anterior via isso, e é exatamente a
 // transição legítima-em-forma que o drift existe para pegar.
 var servicoNSS = Classe{
-	Tipo:      "nss_servico",
-	Titulo:    "cadeia de resolução (nsswitch)",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"nss"},
+	Tipo:     "nss_servico",
+	Titulo:   "cadeia de resolução (nsswitch)",
+	Requires: env.CapFilesystem,
+	Incompleta: func(f *facts.Facts) string {
+		if f.NSSLido {
+			return ""
+		}
+		return "/etc/nsswitch.conf não foi lido deste lado"
+	},
 	Exaustiva: true,
 	Decide:    map[string]bool{"cadeia": true},
 	Extrair: func(f *facts.Facts) []Entidade {
@@ -870,10 +895,11 @@ var servicoNSS = Classe{
 // todo servidor movimentado viraria uma lista de "surgiu" a cada comparação, e
 // o único sinal de verdade se perderia no meio.
 var programaEmExecucao = Classe{
-	Tipo:     "programa",
-	Titulo:   "programa em execução",
-	Requires: env.CapProcfs,
-	Lacunas:  []string{"proc"},
+	Tipo:            "programa",
+	Titulo:          "programa em execução",
+	Requires:        env.CapProcfs,
+	Lacunas:         []string{"proc"},
+	LacunaConferida: "todos os sites são da varredura de /proc, e a família é efêmera — só `mudou` conta nela",
 	// EFÊMERA nos dois sentidos: ver Classe.Efemera. O sinal desta família é o
 	// mesmo executável passando a rodar sob outra identidade, e não a lista de
 	// quem estava rodando na hora da coleta.
@@ -1101,12 +1127,13 @@ var regraDeDoas = Classe{
 // Os dois decidem, e por motivos diferentes: mudar o arquivo é persistência
 // (vale no próximo boot), mudar o runtime é agora.
 var controleMAC = Classe{
-	Tipo:      "mac",
-	Titulo:    "controle de acesso obrigatório (MAC)",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"mac"},
-	Exaustiva: true,
-	Decide:    map[string]bool{"configurado": true, "ativo": true},
+	Tipo:            "mac",
+	Titulo:          "controle de acesso obrigatório (MAC)",
+	Requires:        env.CapFilesystem,
+	Lacunas:         []string{"mac"},
+	LacunaConferida: "os dois sites são do coletor de MAC: /etc/selinux/config e /sys/fs/selinux/enforce",
+	Exaustiva:       true,
+	Decide:          map[string]bool{"configurado": true, "ativo": true},
 	// `Ativo` sai vazio quando o filesystem do MAC não está montado — e vazio
 	// ali é "não observado", não "desligado".
 	Observacional: map[string]bool{"ativo": true},
@@ -1130,11 +1157,12 @@ var controleMAC = Classe{
 // volta. E a regra que COBRE EXEC é a que decide se a execução de um binário
 // entra no log — tirá-la é apagar o rastro antes de ele existir.
 var controleAudit = Classe{
-	Tipo:      "audit",
-	Titulo:    "auditoria do kernel (auditd)",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"audit"},
-	Exaustiva: true,
+	Tipo:            "audit",
+	Titulo:          "auditoria do kernel (auditd)",
+	Requires:        env.CapFilesystem,
+	Lacunas:         []string{"audit"},
+	LacunaConferida: "chave do coletor de auditoria e só dele",
+	Exaustiva:       true,
 	Decide: map[string]bool{
 		"instalada": true, "desligada": true, "cobre_exec": true, "regras": true,
 	},
@@ -1166,10 +1194,11 @@ var controleAudit = Classe{
 // alguém desligando a trava, e nenhuma delas exige tocar num arquivo que a
 // varredura de persistência olhe.
 var protecaoDoKernel = Classe{
-	Tipo:     "kernel.protecao",
-	Titulo:   "endurecimento do kernel",
-	Requires: env.CapProcfs,
-	Lacunas:  []string{"taint"},
+	Tipo:            "kernel.protecao",
+	Titulo:          "endurecimento do kernel",
+	Requires:        env.CapProcfs,
+	Lacunas:         []string{"taint"},
+	LacunaConferida: "os sites são do endurecimento e do taint, e a família já pergunta por Protecao.Lido()",
 	// O coletor desta superfície é VIVO: em modo imagem ele não roda, e os dez
 	// campos vêm vazios dos dois lados. Sem esta pergunta, a cobertura diria
 	// "comparada sem restrição" sobre uma família que ninguém coletou — que é a
@@ -1339,12 +1368,13 @@ func nz(s, padrao string) string {
 // supervisor, ~/.bashrc, ~/.ssh/rc. Todas são arquivos que EXECUTAM em algum
 // gatilho, e o coletor já as normalizou numa forma só.
 var gatilhoDeExecucao = Classe{
-	Tipo:      "startup.trigger",
-	Titulo:    "arquivo que executa em gatilho",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"startup"},
-	Exaustiva: true,
-	Decide:    map[string]bool{"linhas": true, "usuario": true, "modo": true},
+	Tipo:            "startup.trigger",
+	Titulo:          "arquivo que executa em gatilho",
+	Requires:        env.CapFilesystem,
+	Lacunas:         []string{"startup"},
+	LacunaConferida: "todos os sites são da varredura de gatilhos, que é a fonte desta família",
+	Exaustiva:       true,
+	Decide:          map[string]bool{"linhas": true, "usuario": true, "modo": true},
 	// `ilegivel` é o próprio coletor dizendo que não leu o conteúdo: comparar as
 	// linhas de um arquivo ilegível é comparar o vazio com o vazio.
 	Observacional: map[string]bool{"linhas": true},
@@ -1379,12 +1409,13 @@ var gatilhoDeExecucao = Classe{
 // quando alguém tenta carregar aquele módulo — e o comando roda como root. É
 // persistência com gatilho, num arquivo que ninguém abre.
 var configDeModulo = Classe{
-	Tipo:      "module.config",
-	Titulo:    "configuração de módulo (modprobe.d/modules-load.d)",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"modprobe"},
-	Exaustiva: true,
-	Decide:    map[string]bool{"cmd": true},
+	Tipo:            "module.config",
+	Titulo:          "configuração de módulo (modprobe.d/modules-load.d)",
+	Requires:        env.CapFilesystem,
+	Lacunas:         []string{"modprobe"},
+	LacunaConferida: "chave do coletor de modprobe.d/modules-load.d e só dele",
+	Exaustiva:       true,
+	Decide:          map[string]bool{"cmd": true},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.Modules))
 		for i := range f.Modules {
@@ -1404,12 +1435,13 @@ var configDeModulo = Classe{
 // o caminho do modprobe, o do poweroff. Trocá-lo dá execução como root sem
 // nenhum processo do atacante estar rodando — o kernel chama por conta própria.
 var helperDoKernel = Classe{
-	Tipo:      "kernel.helper",
-	Titulo:    "programa que o kernel invoca",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"helper"},
-	Exaustiva: true,
-	Decide:    map[string]bool{"valor": true, "alvo": true},
+	Tipo:            "kernel.helper",
+	Titulo:          "programa que o kernel invoca",
+	Requires:        env.CapFilesystem,
+	Lacunas:         []string{"helper"},
+	LacunaConferida: "chave de escritor único: o coletor de helpers do kernel",
+	Exaustiva:       true,
+	Decide:          map[string]bool{"valor": true, "alvo": true},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.Helpers))
 		for i := range f.Helpers {
@@ -1430,10 +1462,15 @@ var helperDoKernel = Classe{
 // volta no próximo boot, e a família `binfmt` (viva) não o alcança em modo
 // imagem nem antes de o serviço rodar.
 var configDeBinfmt = Classe{
-	Tipo:      "binfmt.config",
-	Titulo:    "interpretador declarado em arquivo (binfmt.d)",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"binfmt"},
+	Tipo:     "binfmt.config",
+	Titulo:   "interpretador declarado em arquivo (binfmt.d)",
+	Requires: env.CapFilesystem,
+	Incompleta: func(f *facts.Facts) string {
+		if f.BinfmtConfigCompleto {
+			return ""
+		}
+		return "os arquivos de binfmt.d não puderam ser lidos inteiros deste lado"
+	},
 	Exaustiva: true,
 	Decide:    map[string]bool{"interpretador": true, "flags": true},
 	Extrair: func(f *facts.Facts) []Entidade {
@@ -1456,10 +1493,15 @@ var configDeBinfmt = Classe{
 // ANTES dos de sistema faz toda resolução de soname passar por ele — é o
 // LD_LIBRARY_PATH da máquina inteira, e sobrevive a reboot.
 var caminhoDoLoader = Classe{
-	Tipo:      "loader.path",
-	Titulo:    "caminho de busca do loader",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"loader"},
+	Tipo:     "loader.path",
+	Titulo:   "caminho de busca do loader",
+	Requires: env.CapFilesystem,
+	Incompleta: func(f *facts.Facts) string {
+		if f.LoaderPathCompleto {
+			return ""
+		}
+		return "a cadeia do ld.so.conf não foi lida inteira: os diretórios de busca NÃO são exaustivos deste lado"
+	},
 	Exaustiva: true,
 	Decide:    map[string]bool{"declarado_por": true, "existe": true},
 	Extrair: func(f *facts.Facts) []Entidade {
@@ -1482,12 +1524,13 @@ var caminhoDoLoader = Classe{
 // consegue escrever numa árvore de upload muda o que aquele diretório EXECUTA,
 // sem privilégio nenhum.
 var configWeb = Classe{
-	Tipo:      "web.config",
-	Titulo:    "configuração por diretório do servidor web",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"codigo"},
-	Exaustiva: true,
-	Decide:    map[string]bool{"linhas": true},
+	Tipo:            "web.config",
+	Titulo:          "configuração por diretório do servidor web",
+	Requires:        env.CapFilesystem,
+	Lacunas:         []string{"codigo"},
+	LacunaConferida: "a varredura de código e a de config web são a MESMA caminhada, com os mesmos tetos: um corte de orçamento torna as duas não exaustivas — aqui a chave larga é a dependência CERTA",
+	Exaustiva:       true,
+	Decide:          map[string]bool{"linhas": true},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.ConfigWeb))
 		for i := range f.ConfigWeb {

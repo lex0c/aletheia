@@ -102,6 +102,23 @@ type Classe struct {
 	// comparada.
 	Requires env.Cap
 
+	// LacunaConferida é a resposta ESCRITA para a pergunta que oito defeitos
+	// custaram para virar hábito:
+	//
+	//	esta chave de lacuna cobre mais de uma FONTE?
+	//
+	// Toda família que usa `Lacunas` precisa respondê-la. As chaves são do
+	// OPERADOR — elas nomeiam um subsistema para quem lê o relatório —, e usar
+	// uma como DEPENDÊNCIA de máquina só é correto quando ela cobre exatamente
+	// a fonte de que esta família depende. Não foi o caso em `net`, `modulo`,
+	// `users` (duas vezes), `ssh`, `trust`, `loader` e `binfmt`: em todas, a
+	// falha de UMA fonte suprimia a comparação de OUTRA, perfeitamente lida.
+	//
+	// Escrever a conferência não a torna verdadeira — nenhum campo faz isso. O
+	// que ele faz é obrigar a pergunta a ser feita UMA vez, por quem tem o
+	// contexto, no commit que cria a família. Nas oito vezes, ninguém a fez.
+	LacunaConferida string
+
 	// Lacunas são as chaves de f.Partial/PersistDenied que degradam esta
 	// classe. Presente em qualquer lado, mesma consequência do Requires.
 	//

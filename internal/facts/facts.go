@@ -187,6 +187,15 @@ import (
 //	   que suprimia `surgiu` de regra de doas em Alpine e Arch, onde o doas É o
 //	   mecanismo de escalada. Falso num dump v12 recusa a comparação da família,
 //	   que é o lado seguro.
+//	15 A sétima e a oitava, e as duas introduzidas pelos DOIS COMMITS
+//	   ANTERIORES: famílias novas herdando chave de lacuna já em uso. `loader`
+//	   cobre ld.so.preload, a cadeia do ld.so.conf e o env de unit; `binfmt`
+//	   cobre o registro vivo e os arquivos de binfmt.d. Num dump v14 os quatro
+//	   fatos vêm falsos e as famílias recusam a comparação — o lado seguro.
+//
+//	   Foi a repetição que motivou a catraca: nenhuma família nova pode
+//	   compartilhar chave de lacuna com outra, e toda que ainda usa uma precisa
+//	   declarar por escrito que conferiu o alcance dela.
 //	14 A quinta e a sexta vez que uma chave de lacuna cobria fontes demais, e a
 //	   última: `ssh` juntava sshd_config, authorized_keys e config do cliente;
 //	   `trust` juntava âncoras de TLS, /etc/hosts, resolvedor e rhosts. Um
@@ -202,7 +211,7 @@ import (
 //	     Vazio num dump v13, e sem ele dois ProxyCommand de destinos diferentes
 //	     colidem na mesma identidade: TROCAR os destinos entre si mantinha o
 //	     conjunto de comandos e invertia o comportamento, sem drift nenhum.
-const SchemaVersion = 14
+const SchemaVersion = 15
 
 // Facts é o retrato do host.
 type Facts struct {
@@ -311,6 +320,25 @@ type Facts struct {
 	HostsLido         bool `json:"hosts_read,omitempty"`
 	ResolverLido      bool `json:"resolver_read,omitempty"`
 	HostTrustCompleto bool `json:"host_trust_complete,omitempty"`
+
+	// A SÉTIMA E A OITAVA vez, e as duas fui EU quem introduziu: dar a uma
+	// família nova uma chave de lacuna que já estava em uso.
+	//
+	// `loader` cobre TRÊS superfícies — o /etc/ld.so.preload, a cadeia do
+	// ld.so.conf, e o arquivo de env de uma unit. `binfmt` cobre DUAS — o
+	// registro vivo em /proc/sys/fs/binfmt_misc e os arquivos de binfmt.d. Com
+	// uma chave só, um ld.so.conf.d ilegível suprimia a comparação do
+	// ld.so.preload, e um binfmt.d ilegível suprimia a do registro vivo.
+	// NSSLido serve às DUAS famílias de nsswitch — o inventário de módulos e a
+	// cadeia efetiva. Elas vêm do mesmo arquivo e do mesmo coletor, então o
+	// fato é um só; o que não pode é elas dependerem da CHAVE, que é do
+	// operador e pode ganhar outro escritor sem ninguém notar.
+	NSSLido bool `json:"nss_read,omitempty"`
+
+	LoaderPreloadLido    bool `json:"loader_preload_read,omitempty"`
+	LoaderPathCompleto   bool `json:"loader_path_complete,omitempty"`
+	BinfmtVivoCompleto   bool `json:"binfmt_live_complete,omitempty"`
+	BinfmtConfigCompleto bool `json:"binfmt_config_complete,omitempty"`
 
 	// DoasLido é o mesmo para /etc/doas.conf e /etc/doas.d — em Alpine e Arch o
 	// doas É o mecanismo de escalada, e a família dele não pode depender da

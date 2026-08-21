@@ -987,3 +987,52 @@ func TestTodoFatoEstaClassificado(t *testing.T) {
 		}
 	}
 }
+
+// A CATRACA QUE FALTAVA, e ela custou OITO defeitos para existir.
+//
+// Todos tinham a mesma forma: uma família dependia de uma chave de lacuna que
+// cobria mais fontes do que ela — `net`, `modulo`, `users` duas vezes, `ssh`,
+// `trust`, `loader`, `binfmt`. Em todas, a falha de UMA fonte suprimia a
+// comparação de OUTRA que tinha sido lida perfeitamente, e o resultado era
+// silêncio: o pior modo de falha desta base.
+//
+// Nenhuma das outras catracas pega isto. A de completude pega o campo
+// esquecido; a de extração pega o campo que decide e não sai. Esta pega a
+// DEPENDÊNCIA larga demais, das duas formas que dá para pegar mecanicamente.
+func TestNenhumaFamiliaHerdaChaveDeOutra(t *testing.T) {
+	dono := map[string]string{}
+	for _, c := range classes {
+		for _, k := range c.Lacunas {
+			if outro, ja := dono[k]; ja {
+				t.Errorf("as famílias `%s` e `%s` dependem da MESMA chave de lacuna "+
+					"`%s`.\n\nDuas famílias na mesma chave é a forma exata dos oito "+
+					"defeitos anteriores: a falha da fonte de uma suprime a comparação "+
+					"da outra. Cada uma precisa de um FATO de completude próprio, lido "+
+					"por Incompleta — a chave continua servindo ao operador, que é "+
+					"para quem ela foi escrita.", outro, c.Tipo, k)
+			}
+			dono[k] = c.Tipo
+		}
+	}
+}
+
+// E a metade que a máquina não consegue conferir sozinha: se a chave cobre
+// exatamente a fonte da família. Isso exige ler o coletor, e por isso a
+// resposta é ESCRITA — o que a catraca garante é que alguém a deu.
+func TestTodaDependenciaDeLacunaFoiConferida(t *testing.T) {
+	for _, c := range classes {
+		if len(c.Lacunas) == 0 {
+			continue
+		}
+		if strings.TrimSpace(c.LacunaConferida) == "" {
+			t.Errorf("`%s` depende da(s) chave(s) %v e não declara LacunaConferida.\n\n"+
+				"A pergunta a responder é uma só, e ela custou oito defeitos: ESTA "+
+				"CHAVE COBRE MAIS DE UMA FONTE? As chaves são do operador — elas "+
+				"nomeiam um subsistema no relatório —, e usar uma como dependência de "+
+				"máquina só é correto quando ela cobre exatamente a fonte de que esta "+
+				"família depende. Se cobrir mais, o caminho é um fato de completude "+
+				"próprio, como fizeram passwd, shadow, group, sudoers, doas, ssh, "+
+				"trust, loader e binfmt.", c.Tipo, c.Lacunas)
+		}
+	}
+}

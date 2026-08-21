@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,16 +38,61 @@ const (
 // de frota consome — testar por ele garante que o que a suíte valida é o que o
 // operador realmente recebe.
 type line struct {
-	ID            string   `json:"id"`
-	Ref           string   `json:"ref"`
-	Sev           string   `json:"sev"`
-	Subject       string   `json:"subject"`
-	Evidence      []string `json:"evidence"`
-	Total         int      `json:"total"`
-	Complete      int      `json:"complete"`
-	Verdict       string   `json:"verdict"`
-	Exit          int      `json:"exit"`
-	CollectorGaps []string `json:"collector_gaps"`
+	ID      string `json:"id"`
+	Ref     string `json:"ref"`
+	Sev     string `json:"sev"`
+	Subject string `json:"subject"`
+	// Title e NextSteps entram no contrato pelo mesmo motivo que Evidence já
+	// estava: são CONTEÚDO do achado, e o lugar durável deles é o JSONL.
+	//
+	// Antes, cenário que precisava afirmar um deles usava ExpectOutput sobre o
+	// relatório humano — e o relatório mudou de forma (o nível 0 virou decisão
+	// compacta, com evidência só no -v). Dezenove asserções quebraram de uma vez
+	// sem que nada no produto tivesse regredido: elas testavam a renderização
+	// achando que testavam o achado.
+	Title     string   `json:"title"`
+	Evidence  []string `json:"evidence"`
+	NextSteps []string `json:"next_steps"`
+
+	Total    int    `json:"total"`
+	Complete int    `json:"complete"`
+	Verdict  string `json:"verdict"`
+	Exit     int    `json:"exit"`
+	// Partial são as lacunas por CHECK; CollectorGaps as do coletor. Um cenário
+	// que cobra uma lacuna específica precisa das duas listas — ela pode estar
+	// em qualquer uma, e qual das duas é detalhe de implementação do motor.
+	Partial []partialJSON `json:"partial"`
+	// NotChecked é a terceira forma de lacuna, e esquecê-la deixava o número
+	// sem explicação: um check que NÃO RODOU some das duas listas acima e ainda
+	// assim derruba a cobertura. Ver "104/106" com uma lacuna listada foi o que
+	// denunciou a falta.
+	NotChecked    []notCheckedJSON `json:"not_checked"`
+	CollectorGaps []string         `json:"collector_gaps"`
+}
+
+type partialJSON struct {
+	ID      string   `json:"id"`
+	Reasons []string `json:"reasons"`
+}
+
+type notCheckedJSON struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+}
+
+// lacunas devolve TODO motivo de lacuna declarado na execução, venha ele de um
+// check ou do coletor.
+func (r result) lacunas() []string {
+	var out []string
+	for _, p := range r.coverage.Partial {
+		for _, m := range p.Reasons {
+			out = append(out, p.ID+": "+m)
+		}
+	}
+	for _, n := range r.coverage.NotChecked {
+		out = append(out, n.ID+" NÃO RODOU: "+n.Reason)
+	}
+	return append(out, r.coverage.CollectorGaps...)
 }
 
 type result struct {
@@ -68,6 +114,12 @@ func (r result) has(e scenario.Expect) bool {
 			continue
 		}
 		if e.Evidence != "" && !strings.Contains(strings.Join(f.Evidence, "\n"), e.Evidence) {
+			continue
+		}
+		if e.Title != "" && !strings.Contains(f.Title, e.Title) {
+			continue
+		}
+		if e.NextStep != "" && !strings.Contains(strings.Join(f.NextSteps, "\n"), e.NextStep) {
 			continue
 		}
 		return true
@@ -197,6 +249,33 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 				sc.Desc, want, r.stderr)
 		}
 	}
+	// As LACUNAS declaradas são contrato tanto quanto os achados: metade do que
+	// esta ferramenta promete é dizer o que NÃO pôde olhar. Conferir isso pelo
+	// texto do relatório não servia — o motivo da lacuna só sai com --coverage
+	// ou -v, e um cenário sem essas flags cobrava um texto que nunca ia aparecer.
+	anotarUsoDeAmbiente(r.lacunas())
+
+	if len(sc.ExpectGap) > 0 {
+		lac := strings.Join(r.lacunas(), "\n")
+		for _, quer := range sc.ExpectGap {
+			if !strings.Contains(lac, quer) {
+				t.Errorf("cenário %q: nenhuma lacuna declarada contém %q — a "+
+					"ferramenta precisa DIZER o que não pôde olhar.\nlacunas: %v",
+					sc.Desc, quer, r.lacunas())
+			}
+		}
+	}
+
+	for _, nao := range sc.ForbidGap {
+		for _, l := range r.lacunas() {
+			if strings.Contains(l, nao) {
+				t.Errorf("cenário %q: havia uma lacuna contendo %q, e o que este "+
+					"cenário afirma é o silêncio por CONHECIMENTO, não por cegueira"+
+					"\nlacuna: %s", sc.Desc, nao, l)
+			}
+		}
+	}
+
 	for _, nao := range sc.ForbidOutput {
 		if strings.Contains(r.stderr, nao) {
 			t.Errorf("cenário %q: o relatório humano NÃO podia conter %q — a "+
@@ -227,7 +306,7 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 			sc.Desc, avisos, orcamento, quais)
 	}
 
-	if sc.Exit >= 0 && r.exit != sc.Exit {
+	if sc.Exit >= 0 && r.exit != sc.Exit && !exitSoPorAmbiente(sc, r) {
 		t.Errorf("exit = %d, quer %d — o exit code é o que a automação de frota lê\nstderr:\n%s",
 			r.exit, sc.Exit, r.stderr)
 	}
@@ -245,9 +324,18 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 		}
 	}
 	if sc.MustBeComplete {
-		if r.coverage.Complete != r.coverage.Total {
-			t.Errorf("cobertura %d/%d: esperava completa neste cenário",
-				r.coverage.Complete, r.coverage.Total)
+		if fora := scenario.FiltraAmbientais(r.lacunas()); len(fora) == 0 {
+			// Cobertura completa A MENOS das lacunas que este ambiente impõe. É
+			// o contrato que o cenário sempre quis: ele afirma coisas sobre o
+			// host que MONTA, não sobre a máquina de quem roda a suíte.
+		} else if r.coverage.Complete != r.coverage.Total {
+			// As LACUNAS entram na mensagem porque sem elas o número sozinho não
+			// diz o que fazer. "103/106" manda o leitor rodar a ferramenta à mão
+			// e reproduzir o ambiente para descobrir quais três; a lista responde
+			// na hora, e foi o que faltou durante toda uma investigação.
+			t.Errorf("cobertura %d/%d: esperava completa neste cenário\nlacunas:\n  %s",
+				r.coverage.Complete, r.coverage.Total,
+				strings.Join(r.lacunas(), "\n  "))
 		}
 	}
 
@@ -276,6 +364,46 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 		t.Error("exit 3 é erro de invocação: não pode haver linha de cobertura, " +
 			"porque varredura nenhuma aconteceu")
 	}
+}
+
+// gapsAmbientaisUsados registra quais entradas da lista de ambiente casaram de
+// verdade durante a execução da suíte. Ver TestGapsDoAmbienteSaoUsados.
+var gapsAmbientaisUsados sync.Map
+
+func anotarUsoDeAmbiente(lacunas []string) {
+	for _, l := range lacunas {
+		for _, g := range scenario.GapsDoAmbiente {
+			if strings.Contains(l, g.Contem) {
+				gapsAmbientaisUsados.Store(g.Contem, true)
+			}
+		}
+	}
+}
+
+// exitSoPorAmbiente permite o exit 1 onde o cenário pediu 0, e SÓ quando a
+// única razão é uma lacuna que o ambiente da suíte impõe.
+//
+// O cenário diz "este host é limpo, logo exit 0". O exit 1 tem duas causas
+// possíveis — achado que precisa de olho humano, ou cobertura incompleta — e
+// esta função só perdoa a segunda, e só quando toda lacuna está na lista
+// nomeada. Achado nenhum é perdoado: qualquer WARN ou pior faz a asserção
+// valer como antes.
+//
+// Sem isso, `Exit: 0` dependia de o `udp_diag` estar carregado na máquina de
+// quem roda a suíte. Com isso, ele volta a significar o que diz.
+func exitSoPorAmbiente(sc scenario.Scenario, r result) bool {
+	if sc.Exit != 0 || r.exit != 1 || r.coverage.Verdict != "INCOMPLETE" {
+		return false
+	}
+	if len(scenario.FiltraAmbientais(r.lacunas())) > 0 {
+		return false
+	}
+	for _, f := range r.findings {
+		if f.Sev == "WARN" || f.Sev == "CRITICAL" {
+			return false
+		}
+	}
+	return true
 }
 
 // runLive roda a CLI DENTRO do contêiner, vendo o /proc dele.
@@ -763,5 +891,37 @@ func exigeImagemLocal(t *testing.T, img string) {
 	}
 	if err := exec.Command("docker", "image", "inspect", img).Run(); err != nil {
 		t.Skipf("imagem %s ausente — rode `%s` (precisa de rede)", img, alvo)
+	}
+}
+
+// TestGapsDoAmbienteSaoUsados impede que a lista de lacunas ambientais apodreça.
+//
+// Uma entrada que não casa com nada é pior que nenhuma: ela silencia uma classe
+// de falha que talvez já não exista, e a suíte segue verde afirmando que
+// tolerou algo que nunca aconteceu. Quando um módulo passa a vir carregado por
+// padrão, ou quando um cenário muda, a entrada correspondente tem de SAIR — e
+// este teste é quem lembra.
+//
+// Depende de a suíte inteira ter rodado, então ele vive aqui e não no pacote
+// scenario: só depois de todos os cenários é que se sabe o que casou. Roda por
+// último por ordem alfabética do arquivo? Não — o Go não garante ordem entre
+// testes, e por isso ele PULA quando a execução foi filtrada por -run.
+func TestGapsDoAmbienteSaoUsados(t *testing.T) {
+	if testing.Short() {
+		t.Skip("depende da suíte inteira")
+	}
+	total := 0
+	gapsAmbientaisUsados.Range(func(any, any) bool { total++; return true })
+	if total == 0 {
+		t.Skip("nenhum cenário rodou nesta invocação (-run filtrou): sem base para julgar a lista")
+	}
+	for _, g := range scenario.GapsDoAmbiente {
+		if _, ok := gapsAmbientaisUsados.Load(g.Contem); !ok {
+			t.Errorf("a lacuna ambiental %q não apareceu em execução nenhuma da suíte.\n"+
+				"Ou ela deixou de acontecer — e a entrada tem de SAIR, porque uma "+
+				"tolerância que não tolera nada só esconde a próxima —, ou o texto "+
+				"da lacuna mudou e a entrada parou de casar sem ninguém ver.\n"+
+				"motivo registrado: %s", g.Contem, g.Porque)
+		}
 	}
 }

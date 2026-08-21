@@ -50,6 +50,17 @@ type Expect struct {
 	// Existe para travar PARSING, não severidade: "o cgroup v1 nomeado virou
 	// /legado.service" só é verificável olhando o que foi impresso.
 	Evidence string
+
+	// Title e NextStep completam o conteúdo do achado, e existem para tirar do
+	// ExpectOutput o que nunca foi sobre o relatório.
+	//
+	// O título diz O QUE é o achado e o próximo passo diz o que FAZER com ele —
+	// os dois são contrato com quem lê o JSONL, e nenhum dos dois depende de
+	// como o texto humano decide se apresentar hoje. Afirmá-los pelo relatório
+	// amarrava o contrato à renderização: quando o nível 0 virou decisão
+	// compacta, dezenove asserções caíram sem nada ter regredido no produto.
+	Title    string
+	NextStep string
 }
 
 // Scenario é uma situação e o contrato de saída correspondente.
@@ -169,6 +180,25 @@ type Scenario struct {
 	// proibir o ID inteiro apagaria a distinção que o cenário existe para provar.
 	// É também a forma de AFIRMAR uma lacuna conhecida (ver KnownGap).
 	ForbidFinding []Expect
+
+	// ExpectGap são substrings que precisam aparecer em alguma LACUNA declarada
+	// — de check ou de coletor, tanto faz qual das duas.
+	//
+	// É o par do Expect para o outro lado do contrato. "A ferramenta DIZ que não
+	// pôde perguntar" é uma afirmação tão verificável quanto um achado, e ela
+	// também estava sendo cobrada pelo texto do relatório, onde o motivo da
+	// lacuna só aparece com --coverage ou -v.
+	ExpectGap []string
+
+	// ForbidGap é o simétrico, e vale tanto quanto: nenhuma lacuna declarada
+	// pode conter estas substrings.
+	//
+	// Existe para separar as DUAS razões de silêncio, que é a distinção central
+	// desta ferramenta. Um check que não acusa porque ATRIBUIU o objeto e um que
+	// não acusa porque não conseguiu olhar produzem a mesma saída vazia, e só a
+	// cobertura os distingue. Onde um cenário afirma que o silêncio é por
+	// conhecimento, ele precisa poder afirmar também que não há lacuna ali.
+	ForbidGap []string
 
 	// Exit é o código esperado. -1 = não verificar.
 	Exit int

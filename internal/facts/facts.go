@@ -17,12 +17,21 @@ import (
 // precisa saber o que mudou — e isso acontece no meio de incidente, com a VM
 // já destruída.
 //
-// A REGRA que dá sentido ao número: sobe SEMPRE que um coletor NOVO passa a
-// alimentar um check. Sem isso, um dump anterior ao coletor tem o campo VAZIO, e
-// o check novo lê vazio como "olhei e não achei" quando a verdade é "esta versão
+// A REGRA que dá sentido ao número: sobe sempre que um FATO SERIALIZADO novo, ou
+// uma mudança de SEMÂNTICA de um fato existente, puder alterar a conclusão de
+// quem analisar o dump depois. Sem isso, um dump anterior tem o campo VAZIO, e o
+// check novo lê vazio como "olhei e não achei" quando a verdade é "esta versão
 // nunca olhou" — a mentira central que a ferramenta existe para não cometer. O
 // Carregar() do dump recusa (ErrEsquema) o que não casa, então subir aqui obriga
 // a RE-COLETAR em vez de concluir ausência sobre o que não foi observado.
+//
+// A regra ANTERIOR dizia "sobe quando um coletor NOVO alimenta um check", e era
+// estreita demais: deixou passar três commits seguidos. Depois do bump para 2
+// entraram SysVShmSeg.CriadorEmRede (que decide o CRITICAL do perfil Ebury) e
+// Unit.Manager/RootDirectory/RootImage — todos fatos serializados, todos
+// alimentando decisão, nenhum coletor novo. Ficaram dois dumps declarando
+// `schema_version: 2` com significados diferentes, que é exatamente o que o
+// número existe para impedir.
 //
 //	2  coleta de /proc/sysvipc/shm (persist.sysv_shm_channel) e do config de
 //	   cliente ssh (persist.ssh_client_exec). Um dump v1 não os tem, e os dois
@@ -35,7 +44,12 @@ import (
 //	   afirmando alcance zero onde houve alcance. Não é falso "limpo", é pior de
 //	   um jeito: é evidência com a etiqueta errada, e é sobre ela que alguém
 //	   decide se o host tem rootkit.
-const SchemaVersion = 3
+//	4  ExecLine.AlvoIndeterminado e Timestomp.Cluster, com a REGRA acima
+//	   ampliada junto (ver abaixo). Num dump v3 os dois vêm zerados, e zerado
+//	   ali MENTE nas duas direções: "alvo provado" para uma linha de `sh -c` que
+//	   ninguém conseguiu resolver, e "não é lote" para o bloco de extração que
+//	   fazia o check gritar doze CRITICAL num contêiner saudável.
+const SchemaVersion = 4
 
 // Facts é o retrato do host.
 type Facts struct {

@@ -143,15 +143,24 @@ jobs:
           fi
           sudo apt-get update -qq && sudo apt-get install -y -qq minisign
 
-          printf '%s' "$CHAVE" > /tmp/minisign.key
-          chmod 600 /tmp/minisign.key
+          # '%s\n' e não '%s': o arquivo de chave do minisign tem duas linhas
+          # (comentário + base64), e um segredo colado sem quebra final deixaria
+          # a última linha sem terminador. Escrever a quebra é barato; depurar
+          # "invalid secret key" dentro de um release não é.
+          #
+          # O umask vem ANTES da criação: criar com 0644 e corrigir com chmod
+          # depois deixa uma janela em que a chave está legível no runner.
+          ( umask 077 && printf '%s\n' "$CHAVE" > /tmp/minisign.key )
+          # A remoção vai num trap: se a assinatura falhar, a chave não pode
+          # ficar no disco do runner esperando o próximo passo.
+          trap 'rm -f /tmp/minisign.key' EXIT
+
           cd dist
           # O comentário confiável é ASSINADO junto: quem verifica lê a tag e o
           # commit de dentro da assinatura, não de um campo que qualquer um
           # reescreve.
           minisign -S -s /tmp/minisign.key -m SHA256SUMS \
             -t "aletheia ${{ steps.ver.outputs.version }} commit ${GITHUB_SHA}"
-          rm -f /tmp/minisign.key
 
           # VERIFICAR A PRÓPRIA ASSINATURA antes de publicar: se o segredo não
           # corresponder à pública versionada, o erro aparece aqui e não na

@@ -182,6 +182,13 @@ type ExecLine struct {
 	// wrappers (env, sudo, sh -c, env -S). Computado UMA vez na coleta para que
 	// a pergunta de propriedade e os checks de execução usem a MESMA resposta.
 	Target string `json:"target,omitempty"`
+	// AlvoIndeterminado diz que a linha EXECUTA algo e não deu para provar o
+	// quê — `sh -c` com substituição de comando, subshell, ou só builtin.
+	//
+	// É diferente de Target vazio por não haver Exec: aqui há execução e não há
+	// nome. Sem esta distinção o check calaria igual nos dois casos, e um deles
+	// é uma lacuna que o operador precisa ver.
+	AlvoIndeterminado bool `json:"target_undetermined,omitempty"`
 }
 
 // Enabled diz se algo aponta para esta unit.
@@ -1116,7 +1123,14 @@ func mesclarUnits(f *Facts, units []Unit, e *env.Env) {
 				// agent` desembrulha para `agent`, e sem resolvê-lo o alvo ficava nome
 				// nu — fora do check de dono. `env` roda o programa via PATH, os
 				// mesmos `dirs`.
-				tgt := AlvoEfetivoDeExec(cmd)
+				tgt, indet := AlvoEfetivoDeExec(cmd)
+				units[i].Exec[j].AlvoIndeterminado = indet
+				if indet {
+					// Sem alvo provado não há o que resolver nem o que perguntar
+					// ao dono; quem declara a lacuna é o check.
+					units[i].Exec[j].Target = ""
+					continue
+				}
 				if len(dirs) > 0 && !strings.ContainsRune(strings.TrimLeft(tgt, "-@+!:"), '/') {
 					tgt = resolverNomeNu(e, tgt, dirs)
 				}
@@ -1484,7 +1498,7 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope string, vendor bool) Unit {
 	// checks de caminho suspeito e propriedade veem o alvo concreto.
 	resolverComandosUnit(&u, e)
 	for i := range u.Exec {
-		u.Exec[i].Target = AlvoEfetivoDeExec(u.Exec[i].Cmd)
+		u.Exec[i].Target, u.Exec[i].AlvoIndeterminado = AlvoEfetivoDeExec(u.Exec[i].Cmd)
 	}
 	return u
 }

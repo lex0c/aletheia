@@ -50,7 +50,7 @@ var sshClientExec = check.Check{
 			// O ALVO EFETIVO, não o primeiro token: `ProxyCommand /usr/bin/env
 			// /opt/.agent` roda /opt/.agent, e classificar /usr/bin/env como
 			// "binário de sistema" seria a evasão por wrapper.
-			bin := facts.AlvoEfetivoDeExec(d.Command)
+			bin, _ := facts.AlvoEfetivoDeExec(d.Command)
 			ev := []string{
 				d.Directive + ": " + d.Command,
 				"executa quando o usuário conecta, sem tocar em nada com dono root",

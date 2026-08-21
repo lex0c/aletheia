@@ -17,7 +17,7 @@ func TestUnitSemDono(t *testing.T) {
 		// pós-coleta faria.
 		return facts.Unit{
 			Name: baseDe(path), Path: path, Kind: "service", Vendor: vendor,
-			Exec: []facts.ExecLine{{Key: "ExecStart", Cmd: cmd, Target: facts.AlvoEfetivoDeExec(cmd)}},
+			Exec: []facts.ExecLine{{Key: "ExecStart", Cmd: cmd, Target: alvoDeTeste(cmd)}},
 		}
 	}
 	casos := []struct {
@@ -48,4 +48,11 @@ func TestUnitSemDono(t *testing.T) {
 			t.Errorf("[%s] severidade = %v, quer CRITICAL", c.nome, r.Findings[0].Sev)
 		}
 	}
+}
+
+// alvoDeTeste descarta o "indeterminado" — os casos deste arquivo têm alvo
+// provável, e quem exercita a indeterminação é o teste do próprio resolvedor.
+func alvoDeTeste(cmd string) string {
+	alvo, _ := facts.AlvoEfetivoDeExec(cmd)
+	return alvo
 }

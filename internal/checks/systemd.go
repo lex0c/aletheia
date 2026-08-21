@@ -74,6 +74,10 @@ var unitSemDono = check.Check{
 			return r
 		}
 		visto := map[string]bool{}
+		// UMA linha para todos, não uma por unit: servidor com muitos wrappers
+		// de shell produziria uma parede, e a parede enterra o que importa. É o
+		// mesmo formato que a isenção de JIT usa.
+		var indeterminados []string
 		for i := range f.Units {
 			u := &f.Units[i]
 			if !u.Efetiva() {
@@ -90,6 +94,15 @@ var unitSemDono = check.Check{
 			// pacote (dirDePacote), abaixo: unit legítima de pacote tem binário
 			// COM dono e não dispara.
 			for _, ex := range u.Exec {
+				if ex.AlvoIndeterminado {
+					// EXECUTA algo e não deu para provar o quê. Calar aqui
+					// seria dizer "olhei e não achei" sobre uma linha que nem
+					// foi resolvida — a confusão que esta ferramenta existe
+					// para não cometer.
+					indeterminados = append(indeterminados,
+						u.Name+": "+ex.Key+"="+ex.Cmd)
+					continue
+				}
 				// ex.Target é o ALVO EFETIVO já resolvido pelo coletor (com o
 				// ExecSearchPath/PATH/RootDirectory da unit e o wrapper
 				// desembrulhado) — a MESMA string que candidatosDePropriedade usou.
@@ -124,6 +137,13 @@ var unitSemDono = check.Check{
 				}
 				r.Findings = append(r.Findings, fd)
 			}
+		}
+		if n := len(indeterminados); n > 0 {
+			r.Partial = append(r.Partial, strconv.Itoa(n)+" linha(s) de Exec executam por "+
+				"shell e o alvo NÃO pôde ser provado ("+firstN(indeterminados, 3)+
+				"): a pergunta de propriedade não foi feita sobre elas. Substituição de "+
+				"comando e subshell resolvem o programa em tempo de execução, e afirmar "+
+				"um alvo ali seria inventar")
 		}
 		r.Partial = append(r.Partial, f.PersistDenied["unit"]...)
 		return r
@@ -508,7 +528,8 @@ func execSuspect(cmd string) (string, check.Severity, bool) {
 // de propriedade usa para montar os candidatos. Manter duas cópias divergiria;
 // facts é a camada baixa e é a autoridade (ver facts.AlvoEfetivoDeExec).
 func alvoEfetivo(cmd string) string {
-	return facts.AlvoEfetivoDeExec(cmd)
+	alvo, _ := facts.AlvoEfetivoDeExec(cmd)
+	return alvo
 }
 
 // pareceCaminho recusa o que não pode ser caminho de executável. Metacaractere

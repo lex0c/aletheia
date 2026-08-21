@@ -12,9 +12,21 @@ import "strings"
 //
 //	sudo|env|nohup|setsid|doas|exec|stdbuf|tcpd PROG  ->  PROG (pulando flags e VAR=val)
 //	env -S "PROG …"                                   ->  PROG (o -S vira linha)
-//	sh|bash|… -c "PROG …"                             ->  o primeiro caminho de PROG
+//	sh|bash|… -c "PROG …"                             ->  o primeiro PROG de verdade
 //	PROG (sem wrapper)                                ->  PROG
-func AlvoEfetivoDeExec(cmd string) string {
+//
+// O segundo retorno é INDETERMINADO: a linha executa algo e não deu para provar
+// o quê. Existe porque a alternativa é pior — a versão anterior devolvia o
+// primeiro token cru do `-c`, e isso produzia alvos que não são programa:
+//
+//	sh -c 'X=1 /bin/shellserver'         ->  "X=1"
+//	sh -c 'exec /bin/shellserver'        ->  "exec"
+//	sh -c 'cd /tmp && /bin/shellserver'  ->  "cd"
+//
+// Um alvo falso não é neutro: o unit_unowned pergunta propriedade DELE, não
+// acha nada em diretório de pacote e cala. Binário órfão em /bin escapava por
+// um prefixo `exec`, que ainda por cima é idioma legítimo de wrapper.
+func AlvoEfetivoDeExec(cmd string) (string, bool) {
 	toks := strings.Fields(colapsaBrancoExec(cmd))
 	for passo := 0; passo < 8 && len(toks) > 0; passo++ {
 		base := baseCaminhoExec(strings.TrimLeft(toks[0], "-@+!:"))
@@ -59,18 +71,133 @@ func AlvoEfetivoDeExec(cmd string) string {
 		case interpretadoresExec[base]:
 			for i := 1; i < len(toks); i++ {
 				if toks[i] == "-c" && i+1 < len(toks) {
-					if c := primeiroCaminhoExec(strings.Join(toks[i+1:], " ")); c != "" {
-						return descascaAspaBorda(c)
+					alvo, indet := alvoDeLinhaDeShell(strings.Join(toks[i+1:], " "))
+					if indet {
+						return "", true
 					}
-					return toks[0]
+					if alvo != "" {
+						return descascaAspaBorda(alvo), false
+					}
+					return toks[0], false
 				}
 			}
-			return toks[0]
+			return toks[0], false
 		default:
-			return descascaAspaBorda(toks[0])
+			return descascaAspaBorda(toks[0]), false
 		}
 	}
-	return ""
+	return "", false
+}
+
+// alvoDeLinhaDeShell acha o primeiro PROGRAMA de uma linha de `sh -c`.
+//
+// Não é um shell: é uma peneira conservadora com três regras, e ela prefere
+// dizer "não sei" a apontar para o token errado.
+//
+//	atribuição   VAR=val no começo não é o programa — o shell as consome
+//	transparente exec/command/nohup/setsid/time rodam o que vem depois
+//	builtin      cd/umask/export não executam arquivo nenhum; o programa, se
+//	             houver, está depois do próximo separador
+//
+// Encontrar um separador não interrompe a busca — `cd /tmp && /bin/x` roda
+// /bin/x, e apontar para /tmp seria pior que não apontar. O que interrompe é
+// substituição de comando e subshell: ali o alvo depende de execução, e afirmar
+// qualquer coisa seria inventar.
+func alvoDeLinhaDeShell(linha string) (string, bool) {
+	toks := strings.Fields(separaOperadoresDeShell(descascaAspaBorda(strings.TrimSpace(linha))))
+	for i := 0; i < len(toks); i++ {
+		t := descascaAspaBorda(toks[i])
+		switch {
+		case t == "":
+			continue
+		case ehSubstituicaoDeShell(t):
+			// $(...), `...`, subshell: o programa é resultado de execução.
+			return "", true
+		case ehSeparadorDeShell(t):
+			continue
+		case ehAtribuicaoDeShell(t), transparenteDeShell[t]:
+			continue
+		case builtinDeShell[t]:
+			// Consome até o próximo separador: o argumento do builtin não é
+			// programa, e devolvê-lo era o defeito.
+			for i+1 < len(toks) && !ehSeparadorDeShell(descascaAspaBorda(toks[i+1])) {
+				i++
+			}
+		default:
+			return strings.TrimLeft(t, "-@+!:"), false
+		}
+	}
+	// Só atribuição, prefixo e builtin: a linha não aponta para programa nenhum
+	// que este parser consiga nomear.
+	return "", true
+}
+
+// separaOperadoresDeShell põe espaço em volta de ;, &&, ||, | e &.
+//
+// O shell não exige espaço, e `umask 077; /bin/x` chega como um token "077;" —
+// sem isto o separador passava despercebido e a busca pelo programa depois do
+// builtin consumia a linha inteira. Um espaço a mais dentro de aspas no máximo
+// leva a "indeterminado", que é o lado seguro de errar.
+func separaOperadoresDeShell(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != ';' && c != '|' && c != '&' {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte(' ')
+		b.WriteByte(c)
+		if i+1 < len(s) && s[i+1] == c { // && e ||
+			b.WriteByte(c)
+			i++
+		}
+		b.WriteByte(' ')
+	}
+	return b.String()
+}
+
+func ehSeparadorDeShell(t string) bool {
+	switch t {
+	case ";", "&&", "||", "|", "&", ";;", "\n":
+		return true
+	}
+	return false
+}
+
+func ehSubstituicaoDeShell(t string) bool {
+	return strings.ContainsAny(t, "`$") || strings.HasPrefix(t, "(") ||
+		strings.HasPrefix(t, "{")
+}
+
+func ehAtribuicaoDeShell(t string) bool {
+	i := strings.IndexByte(t, '=')
+	if i <= 0 {
+		return false
+	}
+	for j := 0; j < i; j++ {
+		c := t[j]
+		if c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(j > 0 && c >= '0' && c <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// transparenteDeShell roda o que vem DEPOIS: o alvo real está adiante.
+var transparenteDeShell = map[string]bool{
+	"exec": true, "command": true, "builtin": true, "nohup": true,
+	"setsid": true, "time": true,
+}
+
+// builtinDeShell não executa arquivo: o argumento dele NÃO é programa.
+var builtinDeShell = map[string]bool{
+	"cd": true, "umask": true, "ulimit": true, "export": true, "set": true,
+	"unset": true, "trap": true, "read": true, "shift": true, "wait": true,
+	"echo": true, "printf": true, "true": true, "false": true, ":": true,
+	"source": true, ".": true, "eval": true, "sleep": true,
 }
 
 // descascaAspaBorda tira a aspa de abertura/fechamento que um argumento de

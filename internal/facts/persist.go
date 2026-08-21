@@ -1340,6 +1340,29 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope string, vendor bool) Unit {
 	}
 
 	var pending string
+	// A SEÇÃO decide se a diretiva vale, e ignorá-la era um bypass de três
+	// linhas.
+	//
+	// O parser pulava o cabeçalho e seguia aplicando qualquer diretiva
+	// reconhecida, viesse ela de onde viesse. Como `ExecStart=` VAZIO reseta a
+	// lista, bastava acrescentar uma seção que o systemd ignora:
+	//
+	//	[Service]
+	//	ExecStart=/tmp/.implant
+	//
+	//	[X-Aletheia]
+	//	ExecStart=
+	//
+	// O systemd executa o implante — seções X- são ignoradas por contrato. Esta
+	// ferramenta zerava o Exec e saía calada, com a cobertura completa. Medido
+	// contra o binário: a unit de controle saía CRITICAL e esta, silêncio.
+	// `[Install]` serve igual, porque ali `ExecStart=` também não é opção
+	// válida.
+	//
+	// A regra segue o systemd: diretiva fora da seção dela não existe. Sem
+	// seção nenhuma também não — arquivo de unit sem cabeçalho é erro para o
+	// systemd, e honrar essas linhas seria aceitar o que o alvo recusa.
+	secao := ""
 	for _, raw := range strings.Split(string(b), "\n") {
 		ln := strings.TrimSpace(raw)
 		if pending != "" {
@@ -1349,8 +1372,11 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope string, vendor bool) Unit {
 			pending = strings.TrimSpace(strings.TrimSuffix(ln, `\`))
 			continue
 		}
-		if ln == "" || strings.HasPrefix(ln, "#") || strings.HasPrefix(ln, ";") ||
-			strings.HasPrefix(ln, "[") {
+		if ln == "" || strings.HasPrefix(ln, "#") || strings.HasPrefix(ln, ";") {
+			continue
+		}
+		if strings.HasPrefix(ln, "[") {
+			secao = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(ln, "["), "]"))
 			continue
 		}
 		k, v, ok := strings.Cut(ln, "=")
@@ -1358,6 +1384,9 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope string, vendor bool) Unit {
 			continue
 		}
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if !diretivaValeNaSecao(secao, k) {
+			continue
+		}
 
 		switch {
 		case k == "ExecSearchPath":
@@ -1458,6 +1487,58 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope string, vendor bool) Unit {
 		u.Exec[i].Target = AlvoEfetivoDeExec(u.Exec[i].Cmd)
 	}
 	return u
+}
+
+// diretivaValeNaSecao diz se o systemd aplicaria esta diretiva nesta seção.
+//
+// O corte é por FAMÍLIA de seção, não por lista exaustiva de opções: o que
+// precisa ser impedido é a diretiva atravessar para uma seção onde o systemd a
+// ignora — e é justamente ali que o reset por atribuição vazia vira bypass.
+//
+//	execução   Service, Socket, Mount, Swap compartilham o contexto de
+//	           execução (Exec*, Environment*, RootDirectory/Image, User…)
+//	Install    só WantedBy/RequiredBy
+//	Timer      só as diretivas de agenda
+//	Socket     Listen* (além do contexto de execução)
+//	Path       as diretivas de observação
+//
+// Unit, X-* e qualquer seção desconhecida não contribuem com nada do que este
+// parser modela. Para X-* isso é o contrato do systemd; para a desconhecida é a
+// escolha conservadora — concordar com o alvo, que também a ignora.
+func diretivaValeNaSecao(secao, k string) bool {
+	switch secao {
+	case "Service", "Mount", "Swap":
+		return ehDiretivaDeExecucao(k)
+	case "Socket":
+		return ehDiretivaDeExecucao(k) || strings.HasPrefix(k, "Listen")
+	case "Install":
+		return k == "WantedBy" || k == "RequiredBy"
+	case "Timer":
+		switch k {
+		case "OnCalendar", "OnUnitActiveSec", "OnUnitInactiveSec",
+			"OnBootSec", "OnStartupSec":
+			return true
+		}
+		return false
+	case "Path":
+		switch k {
+		case "PathExists", "PathChanged", "PathModified", "PathExistsGlob",
+			"DirectoryNotEmpty":
+			return true
+		}
+		return false
+	}
+	return false
+}
+
+// ehDiretivaDeExecucao são as opções do contexto de execução que este parser lê.
+func ehDiretivaDeExecucao(k string) bool {
+	switch k {
+	case "ExecSearchPath", "RootDirectory", "RootImage", "Restart", "User",
+		"Environment", "EnvironmentFile":
+		return true
+	}
+	return strings.HasPrefix(k, "Exec")
 }
 
 // resolverComandosUnit resolve os Exec*= de nome NU contra o ExecSearchPath da

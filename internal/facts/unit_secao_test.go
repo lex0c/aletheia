@@ -1,0 +1,128 @@
+package facts
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/lex0c/aletheia/internal/env"
+)
+
+// A SEÇÃO decide se a diretiva existe, e ignorá-la era um bypass de três linhas.
+//
+// O parser pulava o cabeçalho e aplicava qualquer diretiva reconhecida viesse
+// ela de onde viesse. Como `ExecStart=` vazio RESETA a lista, bastava
+// acrescentar uma seção que o systemd ignora para o Exec sumir dos olhos desta
+// ferramenta enquanto o systemd continuava executando o implante — silêncio com
+// cobertura completa, que é a única classe de erro que esta base não pode
+// cometer.
+//
+// Medido contra o binário antes do conserto: a unit de controle saía CRITICAL e
+// a com `[X-Aletheia]\nExecStart=` saía nada.
+func TestUnitSecaoDecideSeADiretivaVale(t *testing.T) {
+	casos := []struct {
+		nome      string
+		conteudo  string
+		querExecs int
+		querCmd   string
+	}{
+		{
+			nome:      "controle: só [Service], o Exec fica",
+			conteudo:  "[Service]\nExecStart=/tmp/.implant\n",
+			querExecs: 1, querCmd: "/tmp/.implant",
+		},
+		{
+			// Seções X- são ignoradas POR CONTRATO pelo systemd — é o lugar
+			// documentado para metadado de terceiros.
+			nome:      "reset em [X-Qualquer] não tem efeito",
+			conteudo:  "[Service]\nExecStart=/tmp/.implant\n\n[X-Qualquer]\nExecStart=\n",
+			querExecs: 1, querCmd: "/tmp/.implant",
+		},
+		{
+			// Não precisa nem de X-: [Install] não aceita ExecStart.
+			nome:      "reset em [Install] não tem efeito",
+			conteudo:  "[Service]\nExecStart=/tmp/.implant\n\n[Install]\nExecStart=\n",
+			querExecs: 1, querCmd: "/tmp/.implant",
+		},
+		{
+			nome:      "reset em [Unit] não tem efeito",
+			conteudo:  "[Service]\nExecStart=/tmp/.implant\n\n[Unit]\nExecStart=\n",
+			querExecs: 1, querCmd: "/tmp/.implant",
+		},
+		{
+			// E o outro lado: plantar Exec numa seção que o systemd ignora não
+			// pode virar achado, senão o conserto trocaria FN por FP.
+			nome:      "Exec plantado em [X-] não vira achado",
+			conteudo:  "[Unit]\nDescription=x\n\n[X-Qualquer]\nExecStart=/tmp/.implant\n",
+			querExecs: 0,
+		},
+		{
+			// Sem cabeçalho nenhum o systemd recusa o arquivo; honrar a linha
+			// seria aceitar o que o alvo não aceita.
+			nome:      "diretiva antes de qualquer seção não vale",
+			conteudo:  "ExecStart=/tmp/.implant\n",
+			querExecs: 0,
+		},
+		{
+			// O reset LEGÍTIMO continua funcionando: é assim que um drop-in
+			// substitui o comando da unit original.
+			nome:      "reset dentro de [Service] continua resetando",
+			conteudo:  "[Service]\nExecStart=/tmp/.implant\nExecStart=\n",
+			querExecs: 0,
+		},
+	}
+	for _, c := range casos {
+		raiz := t.TempDir()
+		if err := os.WriteFile(filepath.Join(raiz, "svc.service"), []byte(c.conteudo), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		e := env.Probe(env.Options{Root: raiz, Version: "test"})
+		u := parseUnitFile(&Facts{}, e, "/svc.service", "system", false)
+		e.Close()
+
+		if len(u.Exec) != c.querExecs {
+			t.Errorf("[%s] %d Exec, queria %d: %+v", c.nome, len(u.Exec), c.querExecs, u.Exec)
+			continue
+		}
+		if c.querCmd != "" && u.Exec[0].Cmd != c.querCmd {
+			t.Errorf("[%s] Cmd=%q, queria %q", c.nome, u.Exec[0].Cmd, c.querCmd)
+		}
+	}
+}
+
+// O mesmo corte vale para o resto do contexto de execução: Environment= numa
+// seção ignorada não pode entrar no modelo, senão um LD_PRELOAD plantado em
+// [X-] viraria achado que o systemd nunca aplicaria — FP —, e um
+// `Environment=` de reset ali viraria a via de sumir com um preload real.
+func TestUnitEnvironmentRespeitaSecao(t *testing.T) {
+	raiz := t.TempDir()
+	os.WriteFile(filepath.Join(raiz, "svc.service"), []byte(
+		"[Service]\nExecStart=/bin/true\n\n[X-Qualquer]\nEnvironment=LD_PRELOAD=/tmp/.so\n"), 0o644)
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	t.Cleanup(func() { e.Close() })
+
+	u := parseUnitFile(&Facts{}, e, "/svc.service", "system", false)
+	if len(u.Environment) != 0 {
+		t.Errorf("Environment de seção ignorada entrou no modelo: %+v", u.Environment)
+	}
+}
+
+// E as seções que NÃO são de execução continuam contribuindo com o que é delas
+// — o conserto não pode cegar o timer nem o path.
+func TestUnitSecoesProprias(t *testing.T) {
+	raiz := t.TempDir()
+	os.WriteFile(filepath.Join(raiz, "t.timer"), []byte(
+		"[Timer]\nOnCalendar=*:0/5\n\n[Install]\nWantedBy=timers.target\n"), 0o644)
+	os.WriteFile(filepath.Join(raiz, "p.path"), []byte(
+		"[Path]\nPathChanged=/etc/cron.d\n"), 0o644)
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	t.Cleanup(func() { e.Close() })
+
+	if u := parseUnitFile(&Facts{}, e, "/t.timer", "system", false); len(u.OnCalendar) != 1 ||
+		len(u.WantedBy) != 1 {
+		t.Errorf("timer perdeu agenda ou habilitação: %+v", u)
+	}
+	if u := parseUnitFile(&Facts{}, e, "/p.path", "system", false); len(u.WatchPaths) != 1 {
+		t.Errorf("path perdeu o alvo observado: %+v", u)
+	}
+}

@@ -1,5 +1,27 @@
 package scenario
 
+import "strings"
+
+// registraDonoDePacote faz a base de pacotes da imagem REIVINDICAR um arquivo.
+//
+// Vários cenários precisam da diferença entre "binário plantado" e "binário que
+// veio da distribuição", e ela não é do arquivo: é da base de pacotes. Instalar
+// um pacote de verdade exigiria rede e dezenas de segundos por execução; anexar
+// à lista de arquivos é o que o dpkg e o apk leem, e é o que a ferramenta lê
+// também — ela não chama `dpkg -V`, lê o texto.
+//
+// Serve as duas bases da matriz. Onde não houver nenhuma das duas, não faz nada:
+// a imagem sem base de pacotes já é outro cenário.
+func registraDonoDePacote(caminho, pacote string) string {
+	dir := caminho[:strings.LastIndex(caminho, "/")]
+	nome := caminho[strings.LastIndex(caminho, "/")+1:]
+	return "if [ -d /var/lib/dpkg/info ]; then echo " + caminho +
+		" >> /var/lib/dpkg/info/coreutils.list; " +
+		"elif [ -f /lib/apk/db/installed ]; then printf 'P:" + pacote +
+		"\\nF:" + strings.TrimPrefix(dir, "/") + "\\nR:" + nome +
+		"\\n' >> /lib/apk/db/installed; fi"
+}
+
 // Os programas que o KERNEL invoca sozinho (§7.12).
 //
 // Todos em VM porque são sysctl e mecanismo de kernel: contêiner não os escreve,
@@ -65,9 +87,17 @@ func init() {
 			mkdir -p /proc/sys/fs/binfmt_misc
 			mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
 			printf ':relatorio:E::rel::/tmp/.interp:\n' > /proc/sys/fs/binfmt_misc/register`,
+		// O binfmt_misc SAIU do persist.kernel_helper.
+		//
+		// O 129ab2a dividiu a pergunta em duas: `persist.kernel_helper` ficou com
+		// o que o kernel executa por configuração (modprobe, core_pattern) e
+		// `kernel.binfmt_interpreter` ficou com o registro VIVO em
+		// /proc/sys/fs/binfmt_misc. O ID antigo continuou existindo, então nada
+		// falhou até alguém rodar a suíte — este contrato passou trinta commits
+		// cobrando de um check uma coisa que já não era dele.
 		Expect: []Expect{
-			{ID: "persist.kernel_helper", Sev: "CRITICAL", Subject: "binfmt:relatorio"},
-			{ID: "persist.kernel_helper", Evidence: "assinatura registrada"},
+			{ID: "kernel.binfmt_interpreter", Sev: "CRITICAL", Subject: "relatorio"},
+			{ID: "kernel.binfmt_interpreter", Evidence: "assinatura registrada"},
 		},
 		Exit: 2,
 	})

@@ -108,21 +108,30 @@ func init() {
 		// não deixa pin e não deixa link — quem segura é o CGROUP —, e é assim
 		// que o systemd aplica controle de dispositivo e de rede por unit.
 		//
-		// Resolver isso exigiria BPF_PROG_QUERY em cada cgroup da árvore, que
-		// esta ferramenta não faz. A resposta certa é DECLARAR a lacuna, com o
-		// número junto, em vez de acusar — e é o que este cenário trava.
+		// A LIMITAÇÃO QUE ESTE CENÁRIO REGISTRAVA FOI FECHADA.
 		//
-		// O `-vv` está aqui porque o motivo de cobertura parcial sai resumido no
-		// relatório compacto, e o que precisa ser verificado é a frase inteira.
+		// O texto anterior dizia: "resolver isso exigiria BPF_PROG_QUERY em cada
+		// cgroup da árvore, que esta ferramenta não faz. A resposta certa é
+		// DECLARAR a lacuna". A ferramenta passou a fazer exatamente isso
+		// (facts/bpf.go, `consultar`), e o programa agora é ATRIBUÍDO ao cgroup
+		// em vez de virar lacuna.
+		//
+		// O contrato inverteu junto, e é por isso que o ForbidGap está aqui: o
+		// silêncio deste cenário precisa ser por CONHECIMENTO, não por cegueira.
+		// Sem essa metade, ele passaria idêntico se a consulta voltasse a não
+		// existir — que é o mesmo defeito que ele nasceu para impedir, do outro
+		// lado.
+		//
+		// A lacuna é verificada onde ela VIVE — na cobertura do JSONL —, e não no
+		// texto: o relatório resume o motivo, e o "CGROUP" maiúsculo que este
+		// cenário cobrava saiu da frase sem que nada tivesse regredido.
 		Setup: `mkdir -p /sys/fs/cgroup
 			mount -t cgroup2 none /sys/fs/cgroup
 			mkdir -p /sys/fs/cgroup/teste
 			/helper bpf cgroup /sys/fs/cgroup/teste filtro`,
-		Args:             []string{"-vv"},
-		Forbid:           []string{"kernel.bpf_unowned"},
-		ExpectOutput:     []string{"CGROUP"},
-		MustBeIncomplete: true,
-		Exit:             -1,
+		Forbid:    []string{"kernel.bpf_unowned"},
+		ForbidGap: []string{"cgroup"},
+		Exit:      -1,
 		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
 		MaxWarn: SemAvisos,
 	})

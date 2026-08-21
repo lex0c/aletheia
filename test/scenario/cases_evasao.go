@@ -270,24 +270,37 @@ func init() {
 		// fazer é sair com cobertura completa — que era o comportamento antes
 		// deste cenário existir. Medido: 89/89, zero menção à isenção.
 		Images: matriz,
+		// O runtime é INSTALADO, e precisa ser.
+		//
+		// A isenção passou a exigir dono de pacote (900c5eb, fechando um bypass
+		// que a matriz achou), então um `node` copiado à mão já não é isentado —
+		// e sem isenção este cenário não tem o que medir: ele existe para provar
+		// que a isenção, QUANDO AGE, aparece como lacuna. O ataque à supressão
+		// só faz sentido contra uma supressão que valeria.
 		Plant: `mkdir -p /usr/lib/node
 			cp /helper /usr/lib/node/node
+			` + registraDonoDePacote("/usr/lib/node/node", "nodejs") + `
 			/usr/lib/node/node rwx &
 			sleep 0.5`,
 		// O achado de injeção NÃO sai: a isenção agiu, e ela é para agir.
 		Forbid: []string{"proc.maps_rwx_anon"},
-		// Mas a cobertura tem que dizer o que ficou de fora.
-		MustBeIncomplete: true,
-		Args:             []string{"-v"},
-		ExpectOutput: []string{
+		// Mas a cobertura tem que DIZER o que ficou de fora, com as duas metades:
+		// que houve isenção, e por que ela é inevitável.
+		//
+		// A cobrança saiu do texto do relatório e veio para a lacuna. Não é
+		// detalhe de estilo: com -v o motivo sai resumido, então o cenário
+		// dependia de a frase caber no resumo — e ela deixou de caber sem que
+		// nada tivesse regredido.
+		ExpectGap: []string{
 			"NÃO foram avaliados por serem runtime com JIT",
 			"não é distinguível daqui do código que o próprio runtime gera",
 		},
-		Exit: -1,
-		// Orçamento de ruído MEDIDO: o binário sem dono em /usr/lib continua
-		// sendo achado de propriedade (§24), e isso é correto — o que este
-		// cenário afirma é o silêncio do §3.10 acompanhado da lacuna.
-		MaxWarn: 2,
+		MustBeIncomplete: true,
+		Exit:             -1,
+		// Orçamento de ruído MEDIDO: com o runtime reivindicado por pacote, some
+		// também o achado de propriedade — o que sobra é o silêncio do §3.10
+		// acompanhado da lacuna, que é o contrato deste cenário.
+		MaxWarn: SemAvisos,
 	})
 
 	Register(Scenario{

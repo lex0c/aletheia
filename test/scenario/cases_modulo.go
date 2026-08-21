@@ -74,6 +74,10 @@ func init() {
 		Expect: []Expect{
 			{ID: "kernel.module_no_file", Sev: "CRITICAL", Subject: "dummy"},
 			{ID: "kernel.module_no_file", Evidence: "SEM assinatura válida"},
+			// O comando que preserva o módulo antes do rmmod é NextStep, e o
+			// lugar dele é o JSONL: o nível 0 do relatório resume a ação em uma
+			// linha e não imprime o comando.
+			{ID: "kernel.module_no_file", NextStep: "cp /proc/kcore"},
 			// O taint do kernel confirma pelo outro lado: a marca existe e tem
 			// dono declarado, então o check de taint sem dono NÃO dispara.
 			{ID: "kernel.protection_context", Sev: "INFO"},
@@ -81,7 +85,12 @@ func init() {
 		Forbid: []string{"kernel.taint_unexplained"},
 		// Sendo crítico, o passo irreversível sobe para o bloco de ações — que é
 		// a lista curta do que fazer AGORA, antes de qualquer outra coisa.
-		ExpectOutput: []string{"cp /proc/kcore", "irreversível se pulado"},
+		// O relatório precisa AVISAR que há passo irreversível antes de o operador
+		// agir — isso é trabalho dele, e por isso continua aqui. O texto mudou:
+		// "irreversível se pulado" era o sufixo do comando na saída antiga, e não
+		// é produzido por código nenhum desde a reformulação (só sobreviveu num
+		// comentário do preserve). Cobrar dele era cobrar de ninguém.
+		ExpectOutput: []string{"há passo irreversível"},
 		Exit:         2,
 	})
 

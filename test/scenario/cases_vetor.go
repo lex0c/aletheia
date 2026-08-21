@@ -35,13 +35,13 @@ func init() {
 			// Gravável por todos: não precisa de conta nenhuma antes.
 			{ID: "priv.root_runs_writable", Sev: "CRITICAL", Subject: "/usr/local/lib/x/rotate.sh"},
 			{ID: "priv.root_runs_writable", Evidence: "QUALQUER usuário"},
+			// O que muda a AÇÃO do operador: a correção é um chown, não um
+			// incidente de software. Estava sendo cobrado do relatório mesmo com
+			// -v, e ali não cabe — é a terceira linha de evidência, e o -v corta
+			// em maxEvidencia. No JSONL está inteira.
+			{ID: "priv.root_runs_writable", Evidence: "não é vulnerabilidade de software: é permissão"},
 		},
-		// `-v` porque a frase que importa é EVIDÊNCIA: o resumo compacto mostra
-		// o título, e o que muda a ação do operador é saber que a correção é um
-		// chown, não um incidente de software.
-		Args:         []string{"-v"},
-		ExpectOutput: []string{"não é vulnerabilidade de software: é permissão"},
-		Exit:         2,
+		Exit: 2,
 	})
 
 	Register(Scenario{

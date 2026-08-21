@@ -51,7 +51,12 @@ func init() {
 			"estar na baseline diz que não é novo, não que é legítimo",
 			// E o que apareceu DEPOIS precisa estar visivelmente marcado: é a
 			// informação mais valiosa de uma execução com referência.
-			"✳NOVO",
+			//
+			// Esta asserção é DELIBERADAMENTE sobre a renderização — "estar
+			// visivelmente marcado" não é propriedade do dado, é do relatório.
+			// A marca é "NEW" desde a reformulação; era "✳NOVO", e o ✳ só
+			// sobreviveu na ressalva de achado sem chave estável.
+			"NEW",
 		},
 		Exit: 2,
 	})
@@ -101,7 +106,7 @@ func init() {
 		// cenário cobra é a execução seguinte DIZER isso em voz alta.
 		Images: matriz,
 		Plant:  baselineIncompleta,
-		Args:   []string{"--baseline", "/base.json"},
+		Args:   []string{"--baseline", "/base/ref.json"},
 		ExpectOutput: []string{
 			"BASELINE",
 			"incompleta",
@@ -141,13 +146,27 @@ printf '[Unit]\nDescription=OOMD Helper\n[Service]\nExecStart=/usr/local/sbin/sy
 
 // baselineIncompleta captura sem privilégio, e o relatório seguinte precisa
 // dizer que a referência viu menos do que devia.
+// O plant é `set -e` e CONFIRMA o que produziu, e os dois vieram do mesmo bug.
+//
+// A versão anterior fazia `touch /base.json` para o usuário sem privilégio poder
+// escrever — e o `baseline` RECUSA sobrescrever arquivo existente (é a trava que
+// impede `scan --json /var/log/auth.log` de zerar um log do host). A captura
+// saía com exit 3, o `|| true` engolia, e o arquivo ficava vazio: o scan seguinte
+// morria em "unexpected end of JSON input", sem sequer imprimir linha de
+// cobertura. O cenário reportava "o relatório não contém BASELINE" — a mensagem
+// de um defeito de PRODUTO — quando o defeito era do plantio.
+//
+// A permissão vem do DIRETÓRIO, que é como se dá escrita sem criar o arquivo. E
+// a linha final é a que fecha a classe: plantio que não produziu o que promete
+// derruba o cenário ali, em vez de virar asserção enganosa três passos depois.
 const baselineIncompleta = `
+set -e
 mkdir -p /usr/local/sbin
 cp /helper /usr/local/sbin/agente
 
 id -u nobody >/dev/null 2>&1 || adduser -D -u 1000 comum 2>/dev/null || useradd -u 1000 -m comum 2>/dev/null || true
-chmod 644 /base.json 2>/dev/null || true
-touch /base.json && chmod 666 /base.json
-su nobody -s /bin/sh -c '/aletheia baseline -o /base.json' 2>/dev/null || \
-  su comum -s /bin/sh -c '/aletheia baseline -o /base.json' 2>/dev/null || true
+mkdir -p /base && chmod 1777 /base
+su nobody -s /bin/sh -c '/aletheia baseline -o /base/ref.json' 2>/dev/null || \
+  su comum -s /bin/sh -c '/aletheia baseline -o /base/ref.json' 2>/dev/null || true
+test -s /base/ref.json || { echo "PLANTIO FALHOU: baseline sem privilégio não escreveu /base/ref.json" >&2; exit 1; }
 `

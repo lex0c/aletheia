@@ -64,6 +64,9 @@ func init() {
 			{ID: "integrity.immutable_flag", Sev: "CRITICAL",
 				Subject: "/usr/local/sbin/.agent"},
 			{ID: "integrity.immutable_flag", Evidence: "FALHA até isso ser feito"},
+			// O título é o contrato de o QUE é o achado, e o lugar dele é o
+			// JSONL — o nível 0 do relatório mostra sujeito e id curto.
+			{ID: "integrity.immutable_flag", Title: "a remoção falha até ele sair"},
 			// E o motivo de ser crítico e não aviso: travar o que a distribuição
 			// não entregou é defesa de implante, não endurecimento.
 			{ID: "integrity.immutable_flag", Evidence: "nenhum pacote reivindica"},
@@ -77,8 +80,7 @@ func init() {
 		// imutável funciona, então a amostra não está em risco, e marcar este
 		// achado como irreversível para ganhar posição no relatório seria
 		// esvaziar o significado do campo que decide o que se preserva primeiro.
-		ExpectOutput: []string{"a remoção falha até ele sair"},
-		Exit:         2,
+		Exit: 2,
 	})
 }
 

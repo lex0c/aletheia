@@ -51,10 +51,12 @@ func init() {
 			{ID: "antiforense.shell_history", Evidence: "dispositivo nulo"},
 			// E a forma que mora no arquivo de inicialização.
 			{ID: "antiforense.shell_history", Sev: "WARN", Evidence: "sem onde gravar"},
+			// "rastro apagado de propósito" é o TÍTULO, e é ele que separa este
+			// achado de um histórico só vazio. Contrato do JSONL, não do texto.
+			{ID: "antiforense.shell_history", Title: "rastro apagado de propósito"},
 		},
 		// O roteiro precisa dizer onde procurar o que o histórico não guardou.
-		ExpectOutput: []string{"rastro apagado de propósito"},
-		Exit:         2,
+		Exit: 2,
 	})
 
 	Register(Scenario{
@@ -73,7 +75,11 @@ func init() {
 			{ID: "cred.known_hosts", Sev: "MANUAL"},
 			{ID: "cred.known_hosts", Evidence: "bastion.interno"},
 			{ID: "cred.known_hosts", Evidence: "embaralhado"},
-			{ID: "cred.known_hosts", Evidence: "runbook §23"},
+			// O que o Desc promete — "mandam procurar na frota, e esta diz em
+			// quais máquinas" — está na prosa, e é ela que o cenário trava. O
+			// "runbook §23" era ponteiro de seção embutido na evidência, tirado
+			// de todos os checks quando a referência virou campo estruturado.
+			{ID: "cred.known_hosts", Evidence: "dimensiona a busca na frota"},
 		},
 		Exit: -1,
 	})

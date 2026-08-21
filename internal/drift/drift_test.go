@@ -1,6 +1,7 @@
 package drift
 
 import (
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -255,22 +256,38 @@ func TestTodoCampoQueDecideEhExtraido(t *testing.T) {
 			Text: "root ALL=(ALL) ALL"}},
 		SSHKeys: []facts.SSHKey{{User: "root", File: "/root/.ssh/authorized_keys",
 			Type: "ssh-ed25519", Fingerprint: "SHA256:x"}},
-		Accounts:    []facts.Account{{Name: "root", UID: 0}},
-		Grupos:      []facts.Grupo{{Name: "sudo", GID: 27, Members: []string{"ana"}}},
-		HooksInterp: []facts.HookInterp{{Fonte: "/etc/environment", Key: "PERL5OPT", Value: "-Mx"}},
-		Suid:        []facts.SuidFile{{Path: "/usr/bin/sudo", Setuid: true}},
-		Sockets:     []facts.Socket{{Proto: "tcp", State: "LISTEN", LocalIP: "0.0.0.0", LocalPort: 22, Comm: "sshd"}},
-		Carregados:  []facts.ModuloCarregado{{Nome: "overlay", Arquivo: "/lib/modules/x/overlay.ko"}},
-		Binfmt:      []facts.BinfmtRegistro{{Nome: "qemu-arm", Interpreter: "/usr/bin/qemu-arm"}},
-		CACerts:     []facts.CACert{{File: "/etc/ssl/certs/ca.pem", Subject: "CN=x", Issuer: "CN=x"}},
-		NSSModules:  []facts.NSSModule{{Fonte: "files", Paths: []string{"/lib/libnss_files.so.2"}, Servicos: []string{"passwd"}}},
-		NSSServicos: []facts.NSSService{{Nome: "passwd", Cadeia: []string{"files", "sss"}}},
-		ShadowLido:  true,
-		Processes:   []facts.Process{{PID: 1, Exe: "/usr/lib/systemd/systemd", UID: 0}},
-		Boot:        []facts.LinhaDeBoot{{Fonte: "/proc/cmdline", Valor: "ro quiet", Rodando: true}},
-		SSH:         facts.SSHConfig{Files: []string{"/etc/ssh/sshd_config"}, PermitRootLogin: "no"},
+		Accounts:           []facts.Account{{Name: "root", UID: 0}},
+		Grupos:             []facts.Grupo{{Name: "sudo", GID: 27, Members: []string{"ana"}}},
+		HooksInterp:        []facts.HookInterp{{Fonte: "/etc/environment", Key: "PERL5OPT", Value: "-Mx"}},
+		Loader:             facts.Loader{SearchDirs: []facts.LoaderDir{{Dir: "/usr/lib", From: "/etc/ld.so.conf", Exists: true}}},
+		Suid:               []facts.SuidFile{{Path: "/usr/bin/sudo", Setuid: true}},
+		Sockets:            []facts.Socket{{Proto: "tcp", State: "LISTEN", LocalIP: "0.0.0.0", LocalPort: 22, Comm: "sshd"}},
+		Carregados:         []facts.ModuloCarregado{{Nome: "overlay", Arquivo: "/lib/modules/x/overlay.ko"}},
+		Binfmt:             []facts.BinfmtRegistro{{Nome: "qemu-arm", Interpreter: "/usr/bin/qemu-arm"}},
+		CACerts:            []facts.CACert{{File: "/etc/ssl/certs/ca.pem", Subject: "CN=x", Issuer: "CN=x"}},
+		NSSModules:         []facts.NSSModule{{Fonte: "files", Paths: []string{"/lib/libnss_files.so.2"}, Servicos: []string{"passwd"}}},
+		NSSServicos:        []facts.NSSService{{Nome: "passwd", Cadeia: []string{"files", "sss"}}},
+		ShadowLido:         true,
+		Processes:          []facts.Process{{PID: 1, Exe: "/usr/lib/systemd/systemd", UID: 0}},
+		Boot:               []facts.LinhaDeBoot{{Fonte: "/proc/cmdline", Valor: "ro quiet", Rodando: true}},
+		SSH:                facts.SSHConfig{Files: []string{"/etc/ssh/sshd_config"}, PermitRootLogin: "no"},
+		SSHServerColetado:  true,
+		SSHServerCompleto:  true,
+		SSHChavesCompleto:  true,
+		SSHClienteCompleto: true,
+		DoasLido:           true,
+		Triggers: []facts.Trigger{{File: "/etc/profile", Kind: "profile",
+			Lines: []facts.TriggerLine{{N: 1, Text: "export PATH=/usr/bin"}}}},
+		Modules:           []facts.ModuleConf{{File: "/etc/modprobe.d/x.conf", Kind: "install", Module: "foo", Cmd: "/bin/true"}},
+		Helpers:           []facts.HelperDoKernel{{Nome: "core_pattern", Valor: "|/usr/lib/systemd/systemd-coredump", Alvo: "/usr/lib/systemd/systemd-coredump"}},
+		BinfmtConfig:      []facts.BinfmtConfig{{Fonte: "/etc/binfmt.d/x.conf", Nome: "qemu", Interpreter: "/usr/bin/qemu"}},
+		ConfigWeb:         []facts.ConfigWeb{{Path: "/var/www/.htaccess", Tipo: "htaccess"}},
+		HostsLido:         true,
+		ResolverLido:      true,
+		CACertsCompleto:   true,
+		HostTrustCompleto: true,
 		SSHClientExec: []facts.SSHClientExec{{File: "/root/.ssh/config",
-			Directive: "ProxyCommand", Ativacao: "Host *", Command: "/usr/bin/nc %h %p"}},
+			Directive: "ProxyCommand", Escopo: "Host *", Command: "/usr/bin/nc %h %p"}},
 		Doas:            []facts.DoasRule{{File: "/etc/doas.conf", Text: "permit nopass :wheel", Permit: true}},
 		MAC:             facts.MAC{Configurado: "enforcing", Ativo: "enforcing"},
 		Hosts:           []facts.HostEntry{{IP: "127.0.0.1", Names: []string{"localhost"}}},
@@ -920,6 +937,53 @@ func TestTabelaDeCoberturaBateComORegistro(t *testing.T) {
 		}
 		if s.Tipo != "" {
 			t.Errorf("%q está entre as NÃO cobertas e nomeia uma família", s.Nome)
+		}
+	}
+}
+
+// E a de COMPLETUDE, que é outra coisa: todo campo de facts.Facts precisa estar
+// CLASSIFICADO, coberto ou não.
+//
+// A tabela sozinha provava consistência — "toda família registrada aparece
+// aqui". Não provava que ninguém esqueceu uma superfície: um campo novo em
+// Facts, estável e security-sensitive, passava sem que ninguém tivesse decidido
+// nada. Este teste força a decisão UMA vez, no commit que acrescenta o campo,
+// que é quando ela é barata e quando o contexto está fresco.
+//
+// Ele não julga se a decisão foi boa — nenhum teste pode. Ele garante que
+// houve uma.
+func TestTodoFatoEstaClassificado(t *testing.T) {
+	classificado := map[string]string{}
+	for _, s := range Cobertas {
+		if s.Campo == "" {
+			t.Errorf("a superfície coberta %q não aponta para campo nenhum de Facts", s.Nome)
+			continue
+		}
+		classificado[s.Campo] = s.Nome
+	}
+	for _, s := range NaoCobertas {
+		if s.Campo == "" {
+			t.Errorf("a superfície NÃO coberta %q não aponta para campo nenhum", s.Nome)
+			continue
+		}
+		classificado[s.Campo] = s.Nome
+	}
+	tp := reflect.TypeOf(facts.Facts{})
+	for i := 0; i < tp.NumField(); i++ {
+		campo := tp.Field(i)
+		nome := strings.Split(campo.Tag.Get("json"), ",")[0]
+		if nome == "" || nome == "-" {
+			// Sem forma serializada não há o que comparar entre dois retratos.
+			continue
+		}
+		if classificado[nome] == "" {
+			t.Errorf("o campo `%s` (facts.%s) não está classificado: acrescente-o a "+
+				"Cobertas — com a família que o compara — ou a NaoCobertas, com o "+
+				"MOTIVO.\n\nA pergunta a fazer não é \"dá para comparar?\", é: este é um "+
+				"ESTADO ESTÁVEL cujo desvio tem significado de segurança? Se a "+
+				"resposta for não, a linha de exclusão é a resposta — e ela é o que "+
+				"impede alguém, daqui a seis meses, de não saber se foi decisão ou "+
+				"esquecimento.", nome, campo.Name)
 		}
 	}
 }

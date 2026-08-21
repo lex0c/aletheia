@@ -26,6 +26,8 @@ func init() {
 	check.Register(driftDoas)
 	check.Register(driftDefesa)
 	check.Register(driftProtecaoDoKernel)
+	check.Register(driftDeGatilho)
+	check.Register(driftDeCarga)
 	check.Register(driftCobertura)
 }
 
@@ -902,7 +904,7 @@ var driftDoas = check.Check{
 var driftDefesa = check.Check{
 	ID:       "integrity.defense_drift",
 	Ref:      "34",
-	Title:    "um controle de segurança foi enfraquecido desde o retrato anterior",
+	Title:    "o estado de um controle de segurança mudou desde o retrato anterior",
 	Group:    "integrity",
 	Mode:     check.ModeAuto,
 	Sources:  env.SourceLive | env.SourceImage,
@@ -915,11 +917,13 @@ var driftDefesa = check.Check{
 		"atualização do pacote de política reescreve regra de audit em bloco, e " +
 			"a mudança aparece junto com a do pacote",
 		"o ENDURECIMENTO sai aqui do mesmo jeito: `permissive → enforcing` e " +
-			"uma regra de audit acrescentada são mudanças, e são as boas. A " +
-			"direção está na evidência",
+			"uma regra de audit acrescentada são mudanças, e são as boas. Por " +
+			"isso o título é NEUTRO — dizer \"foi enfraquecido\" sobre um host " +
+			"que acabou de ser endurecido é afirmar o contrário do fato, e a " +
+			"evidência marca a direção quando consegue reconhecê-la",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
-		return achadosDeDrift(self, f, mudancasDeVarios(f, "mac", "audit"),
+		r := achadosDeDrift(self, f, mudancasDeVarios(f, "mac", "audit"),
 			"desligar a auditoria é anti-forense por definição: o que ela deixa de "+
 				"gravar não volta. E `enforcing → permissive` não deixa rastro em "+
 				"arquivo de persistência nenhum",
@@ -927,7 +931,41 @@ var driftDefesa = check.Check{
 				"`getenforce`/`aa-status` e `auditctl -s` dizem o que vale AGORA",
 				"cruze a janela com o log de autenticação: quem estava na máquina",
 			})
+		// A DIREÇÃO, quando dá para reconhecê-la. Ela não muda severidade —
+		// endurecer também é mudança, e mudança é o que esta família reporta —,
+		// mas é a primeira coisa que o operador precisa saber, e deixá-la só
+		// implícita no par antes/depois faz cada leitor derivá-la de novo.
+		for i := range r.Findings {
+			if d := direcaoDoControle(f, r.Findings[i]); d != "" {
+				r.Findings[i].Evidence = append(r.Findings[i].Evidence, d)
+			}
+		}
+		return r
 	},
+}
+
+// direcaoDoControle nomeia o sentido da mudança quando ele é reconhecível.
+// Devolve "" quando não é — inventar um sentido seria pior que não dar nenhum.
+func direcaoDoControle(f *facts.Facts, fd check.Finding) string {
+	if f.DriftDados == nil {
+		return ""
+	}
+	for _, m := range f.DriftDados.Mudancas {
+		if m.ID != fd.Subject || m.Kind != "mudou" {
+			continue
+		}
+		fraco := map[string]bool{"permissive": true, "disabled": true, "false": true}
+		forte := map[string]bool{"enforcing": true, "true": true}
+		switch {
+		case fraco[m.Depois] && forte[m.Antes]:
+			return "DIREÇÃO: o controle foi ENFRAQUECIDO (`" + m.Antes + "` → `" +
+				m.Depois + "`)"
+		case forte[m.Depois] && fraco[m.Antes]:
+			return "DIREÇÃO: o controle foi ENDURECIDO (`" + m.Antes + "` → `" +
+				m.Depois + "`) — é mudança, e é a boa"
+		}
+	}
+	return ""
 }
 
 // driftProtecaoDoKernel — runbook §34.
@@ -959,6 +997,72 @@ var driftProtecaoDoKernel = check.Check{
 				"nenhum destes sobrevive a reboot sozinho: procure o que os REESCREVE " +
 					"— sysctl.d, cmdline do kernel, unit de boot",
 				"`sysctl -a` e /sys/kernel/security/lockdown dizem o que vale agora",
+			})
+	},
+}
+
+// driftDeGatilho — runbook §7.6.
+var driftDeGatilho = check.Check{
+	ID:       "persist.trigger_drift",
+	Ref:      "7.6",
+	Title:    "arquivo que executa em gatilho mudou desde o retrato anterior",
+	Group:    "persist",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Drift:    true,
+	FalsePositives: []string{
+		"esta é a família mais AMPLA do registro — /etc/profile e profile.d, " +
+			"rc.local, init.d, udev, PAM, hooks de gerenciador de pacote, " +
+			"generator de systemd, ~/.bashrc. Instalar software mexe em várias " +
+			"delas por desenho, e um ~/.bashrc muda porque o dono o editou",
+		"atualização de pacote reescreve hook e unidade de init em bloco: a " +
+			"mudança aparece junto com a do pacote, e é isso que a separa",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		return achadosDeDrift(self, f, mudancasDeVarios(f, "startup.trigger", "web.config"),
+			"todos estes são arquivos que EXECUTAM em algum gatilho — login, boot, "+
+				"conexão de dispositivo, requisição web. O coletor já os normalizava "+
+				"numa forma só; o que faltava era dizer que a linha NÃO estava lá "+
+				"ontem",
+			[]string{
+				"leia a linha como se fosse malware, e confira o dono do arquivo",
+				"o ctime data a escrita mesmo que o conteúdo pareça antigo",
+			})
+	},
+}
+
+// driftDeCarga — runbook §34.
+var driftDeCarga = check.Check{
+	ID:       "kernel.load_drift",
+	Ref:      "34",
+	Title:    "o que o kernel carrega ou invoca mudou desde o retrato anterior",
+	Group:    "kernel",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Drift:    true,
+	FalsePositives: []string{
+		"`install <mod> <cmd>` no modprobe.d tem uso legítimo e antigo: é como " +
+			"se desabilita um módulo (`install foo /bin/true`) e como se ajusta " +
+			"ordem de carga. O que decide é o comando apontado",
+		"o `core_pattern` é reescrito por systemd-coredump, por apport e por " +
+			"qualquer coletor de crash — e todos eles apontam para um programa",
+		"binfmt.d ganha arquivo com qemu-user-static, Java e .NET: o registro " +
+			"novo costuma vir junto de um pacote novo",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		return achadosDeDrift(self, f,
+			mudancasDeVarios(f, "module.config", "kernel.helper", "binfmt.config", "loader.path"),
+			"o que estas famílias têm em comum é o kernel (ou o loader) EXECUTANDO "+
+				"por conta própria: `install` no modprobe.d, o programa do "+
+				"core_pattern, o interpretador do binfmt.d e o diretório onde toda "+
+				"resolução de soname passa. Nenhum deles precisa de processo do "+
+				"atacante rodando",
+			[]string{
+				"leia o programa apontado, e confira se ele tem dono de pacote",
+				"um diretório de busca NOVO antes dos de sistema é o LD_LIBRARY_PATH " +
+					"da máquina inteira, e sobrevive a reboot",
 			})
 	},
 }

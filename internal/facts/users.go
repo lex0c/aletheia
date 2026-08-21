@@ -405,6 +405,14 @@ func resolverIncludeSudoers(dir, alvo string) string {
 //
 // options inclui `nopass` (sem senha), `keepenv`, `persist`, `setenv {...}`.
 // Uma linha de continuação termina em `\`; doas as junta antes de avaliar.
+// negarDoas declara a lacuna E desmarca o conjunto, pelo mesmo motivo do
+// negarSudoers: toda saída que não leu algo torna a lista NÃO exaustiva, e
+// marcar em cada ponto à mão é um a esquecer. Foi um a esquecer.
+func (f *Facts) negarDoas(motivo string) {
+	f.denyPersist("users", motivo)
+	f.DoasLido = false
+}
+
 func collectDoas(f *Facts, e *env.Env) {
 	// Otimismo com desmentido, como no sudoers: qualquer falha no caminho
 	// desmarca, e o conjunto deixa de ser exaustivo.
@@ -412,9 +420,8 @@ func collectDoas(f *Facts, e *env.Env) {
 	arquivos := []string{"/etc/doas.conf"}
 	nomes, errD := e.ReadDirNamesErr("/etc/doas.d")
 	if env.EhLacuna(errD) {
-		f.denyPersist("users", "/etc/doas.d não pôde ser listado: as regras de doas "+
+		f.negarDoas("/etc/doas.d não pôde ser listado: as regras de doas " +
 			"(escalada sem senha) NÃO foram avaliadas")
-		f.DoasLido = false
 	}
 	for _, n := range nomes {
 		if strings.HasSuffix(n, ".conf") {
@@ -425,7 +432,12 @@ func collectDoas(f *Facts, e *env.Env) {
 		b, err := e.ReadFile(p)
 		if err != nil {
 			if !os.IsNotExist(err) {
-				f.denyPersist("users", p+" ilegível: as regras de doas (escalada sem "+
+				// DESMARCA, e não só declara. Um arquivo de doas.d que existe e
+				// não abre torna o conjunto NÃO exaustivo: sem isto, a regra que
+				// ele continha aparecia como REMOVIDA na comparação — "não
+				// consegui mais observá-la" virando "sumiu", que é a
+				// equivalência que este pacote inteiro existe para recusar.
+				f.negarDoas(p + " ilegível: as regras de doas (escalada sem " +
 					"senha) NÃO foram avaliadas")
 			}
 			continue

@@ -68,6 +68,12 @@ var classes = []Classe{
 	nomeEmHosts,
 	resolvedor,
 	confiancaDeHost,
+	gatilhoDeExecucao,
+	configDeModulo,
+	helperDoKernel,
+	configDeBinfmt,
+	caminhoDoLoader,
+	configWeb,
 	programaEmExecucao,
 }
 
@@ -259,10 +265,19 @@ var regraDeSudo = Classe{
 // `command=`, o `restrict` e o `from=`, e tirá-los de uma chave existente é uma
 // escalada silenciosa que não muda mais nada no arquivo.
 var chaveAutorizada = Classe{
-	Tipo:      "ssh.authorized_key",
-	Titulo:    "chave autorizada de SSH",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"ssh"},
+	Tipo:     "ssh.authorized_key",
+	Titulo:   "chave autorizada de SSH",
+	Requires: env.CapFilesystem,
+	// A chave `ssh` cobre TRÊS fontes com donos diferentes, e usá-la aqui fazia
+	// um authorized_keys de outro usuário ilegível suprimir a comparação das
+	// chaves que FORAM lidas. Quinta vez a mesma lição.
+	Incompleta: func(f *facts.Facts) string {
+		if f.SSHChavesCompleto {
+			return ""
+		}
+		return "nem todo authorized_keys pôde ser lido: o conjunto de chaves NÃO é " +
+			"exaustivo deste lado"
+	},
 	Exaustiva: true,
 	Decide:    map[string]bool{"options": true, "type": true},
 	Extrair: func(f *facts.Facts) []Entidade {
@@ -711,10 +726,19 @@ var linhaDeBoot = Classe{
 // tráfego. E um módulo NSS novo entra no caminho de toda resolução de nome e de
 // usuário do sistema.
 var confiancaDeCertificado = Classe{
-	Tipo:      "ca",
-	Titulo:    "âncora de confiança de TLS",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"trust"},
+	Tipo:     "ca",
+	Titulo:   "âncora de confiança de TLS",
+	Requires: env.CapFilesystem,
+	// A chave `trust` cobre QUATRO fontes independentes — âncoras de TLS,
+	// /etc/hosts, o resolvedor e os arquivos de confiança entre hosts. Um
+	// diretório de CA ilegível suprimia a comparação de um nome fixado que
+	// tinha sido perfeitamente lido. Cada família pergunta pela SUA.
+	Incompleta: func(f *facts.Facts) string {
+		if f.CACertsCompleto {
+			return ""
+		}
+		return "nem toda âncora de confiança pôde ser lida: o conjunto NÃO é exaustivo deste lado"
+	},
 	Exaustiva: true,
 	// O QUE DECIDE É A CHAVE, e não o nome.
 	//
@@ -934,29 +958,40 @@ var servidorSSH = Classe{
 	Tipo:     "ssh.servidor",
 	Titulo:   "configuração do servidor SSH",
 	Requires: env.CapFilesystem,
-	// A LISTA DE ARQUIVOS LIDOS é o sinal, e não a chave `ssh` — aquela cobre
-	// também os authorized_keys de cada home, que não têm nada a ver com a
-	// configuração do daemon. É a mesma lição das outras cinco famílias.
+	// AUSÊNCIA É RESPOSTA, ILEGIBILIDADE É LACUNA — e a primeira versão desta
+	// família confundia as duas: ela usava `len(Files) > 0` como sinal de
+	// completude, então um host SEM servidor SSH era lido como "não sei". Um
+	// host que GANHA sshd entre dois retratos tinha o `surgiu` suprimido.
+	//
+	// Agora o coletor diz as duas coisas: Coletado (a pergunta foi feita) e
+	// Completo (nada falhou na leitura).
 	Incompleta: func(f *facts.Facts) string {
-		if len(f.SSH.Files) > 0 {
-			return ""
+		if !f.SSHServerColetado {
+			return "a configuração do servidor SSH não foi coletada deste lado"
 		}
-		return "nenhum sshd_config foi lido: a configuração do servidor NÃO é " +
-			"conhecida deste lado"
+		if !f.SSHServerCompleto {
+			return "nem todo sshd_config pôde ser lido: a configuração do servidor " +
+				"NÃO é exaustiva deste lado"
+		}
+		return ""
 	},
 	Exaustiva: true,
 	Decide: map[string]bool{
 		"permit_root_login": true, "password_authentication": true,
 		"authorized_keys_file": true, "authorized_keys_command": true,
-		"authorized_keys_command_user": true, "ports": true,
+		"authorized_keys_command_user": true, "ports": true, "presente": true,
 	},
 	Extrair: func(f *facts.Facts) []Entidade {
-		if len(f.SSH.Files) == 0 {
+		if !f.SSHServerColetado {
 			return nil
 		}
 		return []Entidade{{
 			ID: "sshd", Alvos: append([]string{"sshd", "sshd.service"}, f.SSH.Files...),
 			Campos: map[string]string{
+				// PRESENTE é campo, e não a existência da entidade: um host que
+				// passa a ter servidor SSH é uma MUDANÇA daquele host, e não uma
+				// entidade que nasceu.
+				"presente":                boolTxt(len(f.SSH.Files) > 0),
 				"permit_root_login":       f.SSH.PermitRootLogin,
 				"password_authentication": f.SSH.PasswordAuthentication,
 				// O AuthorizedKeysCommand é um programa que o sshd EXECUTA para
@@ -965,8 +1000,11 @@ var servidorSSH = Classe{
 				"authorized_keys_file":         f.SSH.AuthorizedKeysFile,
 				"authorized_keys_command":      f.SSH.AuthorizedKeysCommand,
 				"authorized_keys_command_user": f.SSH.AuthorizedKeysCommandUser,
-				// SEQUÊNCIA: a ordem dos Port é a ordem em que o sshd os abre.
-				"ports": juntarSequencia(f.SSH.Ports),
+				// CONJUNTO, e não sequência: o estado relevante é EM QUAIS portas
+				// o daemon atende. `Port 22` seguido de `Port 2222` e o inverso
+				// abrem as mesmas duas portas, e reordenar a diretiva não é
+				// mudança de superfície.
+				"ports": juntarConjunto(f.SSH.Ports),
 			},
 		}}
 	},
@@ -979,24 +1017,42 @@ var servidorSSH = Classe{
 // conexão. É persistência de conta comum, e o coletor já a tinha: o que faltava
 // era dizer que ELA NÃO ESTAVA LÁ ONTEM.
 var hookDeClienteSSH = Classe{
-	Tipo:      "ssh.cliente_exec",
-	Titulo:    "hook de execução do cliente SSH",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"ssh"},
+	Tipo:     "ssh.cliente_exec",
+	Titulo:   "hook de execução do cliente SSH",
+	Requires: env.CapFilesystem,
+	Incompleta: func(f *facts.Facts) string {
+		if f.SSHClienteCompleto {
+			return ""
+		}
+		return "nem todo config de cliente pôde ser lido: o conjunto de hooks NÃO " +
+			"é exaustivo deste lado"
+	},
 	Exaustiva: true,
-	Decide:    map[string]bool{"comando": true},
+	Decide:    map[string]bool{"comando": true, "ativacao": true},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.SSHClientExec))
 		for i := range f.SSHClientExec {
 			h := &f.SSHClientExec[i]
 			// A LINHA NÃO ENTRA na identidade: ela anda quando alguém edita o
-			// arquivo acima. O que identifica é o arquivo, a diretiva e o
-			// PADRÃO que a ativa — e o comando é o estado, para que trocá-lo
-			// apareça como mudança e não como um par sumiu+surgiu.
+			// arquivo acima. O que identifica é o arquivo, o BLOCO e a diretiva
+			// — e o comando é o estado, para que trocá-lo apareça como mudança
+			// e não como um par sumiu+surgiu.
+			//
+			// O bloco é essencial: a primeira versão usava a `Ativacao` no lugar
+			// dele, que é outra coisa (a confirmação do PermitLocalCommand).
+			// Dois ProxyCommand em `Host prod` e `Host dev` colidiam no mesmo
+			// ID, e TROCAR os destinos entre si mantinha o conjunto de comandos
+			// e invertia o comportamento por destino — sem mudança nenhuma.
 			out = append(out, Entidade{
-				ID:     h.File + "|" + h.Directive + "|" + h.Ativacao,
-				Alvos:  []string{h.File, h.User},
-				Campos: map[string]string{"comando": redact.Linha(h.Command)},
+				ID:    h.File + "|" + h.Escopo + "|" + h.Directive,
+				Alvos: []string{h.File, h.User},
+				Campos: map[string]string{
+					"comando": redact.Linha(h.Command),
+					// A ativação vira CAMPO: ela decide se o LocalCommand roda, e
+					// passar de "não confirmada" para "confirmada" é a mudança
+					// que arma um hook que já estava escrito.
+					"ativacao": h.Ativacao,
+				},
 			})
 		}
 		return out
@@ -1144,11 +1200,15 @@ var protecaoDoKernel = Classe{
 		return []Entidade{{
 			ID: "kernel", Alvos: []string{"kernel"},
 			Campos: map[string]string{
-				"lockdown":                  p.Lockdown,
-				"module_sig_enforce":        p.SigEnforce,
-				"modules_disabled":          p.ModulesDisabled,
-				"secure_boot":               p.SecureBoot,
-				"ima":                       boolTxt(p.IMA),
+				"lockdown":           p.Lockdown,
+				"module_sig_enforce": p.SigEnforce,
+				"modules_disabled":   p.ModulesDisabled,
+				"secure_boot":        p.SecureBoot,
+				// O IMA vem do securityfs, e `boolTxt` nunca devolve vazio — então
+				// `false` significava as duas coisas ao mesmo tempo: "não há IMA"
+				// e "não olhei". Sem o gate, um retrato sem securityfs contra um
+				// com ele afirmava `ima: false -> true`.
+				"ima":                       seLido(p.SecurityFS, boolTxt(p.IMA)),
 				"unprivileged_bpf_disabled": p.UnprivBPF,
 				"ptrace_scope":              p.PtraceScope,
 				"kptr_restrict":             p.KptrRestrict,
@@ -1168,10 +1228,19 @@ var protecaoDoKernel = Classe{
 // uma CA nova, os dois valem muito mais do que qualquer um sozinho — e é para
 // isso que a correlação por alvo existe.
 var nomeEmHosts = Classe{
-	Tipo:      "hosts",
-	Titulo:    "nome fixado em /etc/hosts",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"trust"},
+	Tipo:     "hosts",
+	Titulo:   "nome fixado em /etc/hosts",
+	Requires: env.CapFilesystem,
+	// A chave `trust` cobre QUATRO fontes independentes — âncoras de TLS,
+	// /etc/hosts, o resolvedor e os arquivos de confiança entre hosts. Um
+	// diretório de CA ilegível suprimia a comparação de um nome fixado que
+	// tinha sido perfeitamente lido. Cada família pergunta pela SUA.
+	Incompleta: func(f *facts.Facts) string {
+		if f.HostsLido {
+			return ""
+		}
+		return "/etc/hosts não foi lido: os nomes fixados NÃO são conhecidos deste lado"
+	},
 	Exaustiva: true,
 	Decide:    map[string]bool{"ip": true},
 	Extrair: func(f *facts.Facts) []Entidade {
@@ -1192,10 +1261,19 @@ var nomeEmHosts = Classe{
 // O resolvedor é SEQUÊNCIA: o primeiro servidor que responde encerra a
 // consulta, então acrescentar um na frente é assumir a resolução do host.
 var resolvedor = Classe{
-	Tipo:      "resolver",
-	Titulo:    "resolvedor de DNS",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"trust"},
+	Tipo:     "resolver",
+	Titulo:   "resolvedor de DNS",
+	Requires: env.CapFilesystem,
+	// A chave `trust` cobre QUATRO fontes independentes — âncoras de TLS,
+	// /etc/hosts, o resolvedor e os arquivos de confiança entre hosts. Um
+	// diretório de CA ilegível suprimia a comparação de um nome fixado que
+	// tinha sido perfeitamente lido. Cada família pergunta pela SUA.
+	Incompleta: func(f *facts.Facts) string {
+		if f.ResolverLido {
+			return ""
+		}
+		return "a configuração do resolvedor não foi lida deste lado"
+	},
 	Exaustiva: true,
 	Decide:    map[string]bool{"nameservers": true},
 	Extrair: func(f *facts.Facts) []Entidade {
@@ -1212,10 +1290,19 @@ var resolvedor = Classe{
 // `.rhosts` e `hosts.equiv` concedem login SEM senha a partir de outro host, e
 // um `+` neles confia em qualquer um. É a superfície mais antiga desta lista.
 var confiancaDeHost = Classe{
-	Tipo:      "host_trust",
-	Titulo:    "confiança entre hosts (rhosts/hosts.equiv)",
-	Requires:  env.CapFilesystem,
-	Lacunas:   []string{"trust"},
+	Tipo:     "host_trust",
+	Titulo:   "confiança entre hosts (rhosts/hosts.equiv)",
+	Requires: env.CapFilesystem,
+	// A chave `trust` cobre QUATRO fontes independentes — âncoras de TLS,
+	// /etc/hosts, o resolvedor e os arquivos de confiança entre hosts. Um
+	// diretório de CA ilegível suprimia a comparação de um nome fixado que
+	// tinha sido perfeitamente lido. Cada família pergunta pela SUA.
+	Incompleta: func(f *facts.Facts) string {
+		if f.HostTrustCompleto {
+			return ""
+		}
+		return "nem todo arquivo de confiança entre hosts pôde ser lido: o conjunto NÃO é exaustivo deste lado"
+	},
 	Exaustiva: true,
 	Decide:    map[string]bool{"entradas": true, "curinga": true},
 	Extrair: func(f *facts.Facts) []Entidade {
@@ -1239,4 +1326,184 @@ func nz(s, padrao string) string {
 		return padrao
 	}
 	return s
+}
+
+// # a terceira leva: as persistências que o coletor já normalizava
+//
+// Estas quatro famílias não exigiram fato novo nenhum — os coletores já as
+// entregavam prontas, e o que faltava era compará-las. É o caso mais barato de
+// cobertura que existe, e por isso ele estava esquecido: não doía.
+
+// O Trigger é a família mais ampla do registro: /etc/profile e profile.d,
+// rc.local, init.d, udev, PAM, hooks de apt/dnf, generator de systemd,
+// supervisor, ~/.bashrc, ~/.ssh/rc. Todas são arquivos que EXECUTAM em algum
+// gatilho, e o coletor já as normalizou numa forma só.
+var gatilhoDeExecucao = Classe{
+	Tipo:      "startup.trigger",
+	Titulo:    "arquivo que executa em gatilho",
+	Requires:  env.CapFilesystem,
+	Lacunas:   []string{"startup"},
+	Exaustiva: true,
+	Decide:    map[string]bool{"linhas": true, "usuario": true, "modo": true},
+	// `ilegivel` é o próprio coletor dizendo que não leu o conteúdo: comparar as
+	// linhas de um arquivo ilegível é comparar o vazio com o vazio.
+	Observacional: map[string]bool{"linhas": true},
+	Extrair: func(f *facts.Facts) []Entidade {
+		out := make([]Entidade, 0, len(f.Triggers))
+		for i := range f.Triggers {
+			t := &f.Triggers[i]
+			var linhas []string
+			for _, l := range t.Lines {
+				linhas = append(linhas, redact.Linha(l.Text))
+			}
+			conteudo := juntarSequencia(linhas)
+			if t.Ilegvel {
+				conteudo = ""
+			}
+			out = append(out, Entidade{
+				ID: t.File, Alvos: []string{t.File},
+				Campos: map[string]string{
+					"linhas":  conteudo,
+					"usuario": t.User,
+					"modo":    t.Modo,
+					"quando":  t.When,
+					"mod_utc": t.ModUTC,
+				},
+			})
+		}
+		return out
+	},
+}
+
+// `install <mod> <comando>` no modprobe.d faz o kernel executar um COMANDO
+// quando alguém tenta carregar aquele módulo — e o comando roda como root. É
+// persistência com gatilho, num arquivo que ninguém abre.
+var configDeModulo = Classe{
+	Tipo:      "module.config",
+	Titulo:    "configuração de módulo (modprobe.d/modules-load.d)",
+	Requires:  env.CapFilesystem,
+	Lacunas:   []string{"modprobe"},
+	Exaustiva: true,
+	Decide:    map[string]bool{"cmd": true},
+	Extrair: func(f *facts.Facts) []Entidade {
+		out := make([]Entidade, 0, len(f.Modules))
+		for i := range f.Modules {
+			m := &f.Modules[i]
+			// A linha não entra: ela anda. Arquivo, tipo e módulo identificam.
+			out = append(out, Entidade{
+				ID:     m.File + "|" + m.Kind + "|" + m.Module,
+				Alvos:  []string{m.File, m.Module},
+				Campos: map[string]string{"cmd": redact.Linha(m.Cmd)},
+			})
+		}
+		return out
+	},
+}
+
+// O helper do kernel é o programa que o KERNEL invoca sozinho: `core_pattern`,
+// o caminho do modprobe, o do poweroff. Trocá-lo dá execução como root sem
+// nenhum processo do atacante estar rodando — o kernel chama por conta própria.
+var helperDoKernel = Classe{
+	Tipo:      "kernel.helper",
+	Titulo:    "programa que o kernel invoca",
+	Requires:  env.CapFilesystem,
+	Lacunas:   []string{"helper"},
+	Exaustiva: true,
+	Decide:    map[string]bool{"valor": true, "alvo": true},
+	Extrair: func(f *facts.Facts) []Entidade {
+		out := make([]Entidade, 0, len(f.Helpers))
+		for i := range f.Helpers {
+			h := &f.Helpers[i]
+			out = append(out, Entidade{
+				ID: h.Nome, Alvos: []string{h.Nome, h.Alvo},
+				Campos: map[string]string{
+					"valor": redact.Linha(h.Valor),
+					"alvo":  h.Alvo,
+				},
+			})
+		}
+		return out
+	},
+}
+
+// O binfmt em ARQUIVO é o irmão em disco do registrado no kernel: ele é o que
+// volta no próximo boot, e a família `binfmt` (viva) não o alcança em modo
+// imagem nem antes de o serviço rodar.
+var configDeBinfmt = Classe{
+	Tipo:      "binfmt.config",
+	Titulo:    "interpretador declarado em arquivo (binfmt.d)",
+	Requires:  env.CapFilesystem,
+	Lacunas:   []string{"binfmt"},
+	Exaustiva: true,
+	Decide:    map[string]bool{"interpretador": true, "flags": true},
+	Extrair: func(f *facts.Facts) []Entidade {
+		out := make([]Entidade, 0, len(f.BinfmtConfig))
+		for i := range f.BinfmtConfig {
+			b := &f.BinfmtConfig[i]
+			out = append(out, Entidade{
+				ID: b.Fonte + "|" + b.Nome, Alvos: []string{b.Fonte, b.Interpreter},
+				Campos: map[string]string{
+					"interpretador": b.Interpreter,
+					"flags":         b.Flags,
+				},
+			})
+		}
+		return out
+	},
+}
+
+// Onde o loader PROCURA biblioteca. Um diretório novo em ld.so.conf.d que venha
+// ANTES dos de sistema faz toda resolução de soname passar por ele — é o
+// LD_LIBRARY_PATH da máquina inteira, e sobrevive a reboot.
+var caminhoDoLoader = Classe{
+	Tipo:      "loader.path",
+	Titulo:    "caminho de busca do loader",
+	Requires:  env.CapFilesystem,
+	Lacunas:   []string{"loader"},
+	Exaustiva: true,
+	Decide:    map[string]bool{"declarado_por": true, "existe": true},
+	Extrair: func(f *facts.Facts) []Entidade {
+		out := make([]Entidade, 0, len(f.Loader.SearchDirs))
+		for i := range f.Loader.SearchDirs {
+			d := &f.Loader.SearchDirs[i]
+			out = append(out, Entidade{
+				ID: d.Dir, Alvos: []string{d.Dir, d.From},
+				Campos: map[string]string{
+					"declarado_por": d.From,
+					"existe":        boolTxt(d.Exists),
+				},
+			})
+		}
+		return out
+	},
+}
+
+// A configuração POR DIRETÓRIO do servidor web (.htaccess, .user.ini): quem
+// consegue escrever numa árvore de upload muda o que aquele diretório EXECUTA,
+// sem privilégio nenhum.
+var configWeb = Classe{
+	Tipo:      "web.config",
+	Titulo:    "configuração por diretório do servidor web",
+	Requires:  env.CapFilesystem,
+	Lacunas:   []string{"codigo"},
+	Exaustiva: true,
+	Decide:    map[string]bool{"linhas": true},
+	Extrair: func(f *facts.Facts) []Entidade {
+		out := make([]Entidade, 0, len(f.ConfigWeb))
+		for i := range f.ConfigWeb {
+			c := &f.ConfigWeb[i]
+			var linhas []string
+			for _, l := range c.Linhas {
+				linhas = append(linhas, l.Motivo+":"+l.Text)
+			}
+			out = append(out, Entidade{
+				ID: c.Path, Alvos: []string{c.Path},
+				Campos: map[string]string{
+					"linhas":  juntarSequencia(linhas),
+					"mod_utc": c.ModUTC,
+				},
+			})
+		}
+		return out
+	},
 }

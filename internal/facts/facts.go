@@ -154,8 +154,8 @@ import (
 //	     NSSServicos  a cadeia de resolução NA ORDEM. Vazia num dump v8, e sem
 //	     ela `passwd: files sss` e `passwd: sss files` são o mesmo fato — as
 //	     mesmas fontes, e a autoridade sobre quem é usuário trocada de lado.
-//	     (Os blocos de ação só entraram na cadeia no 12; no 9 ela era só a
-//	     sequência de fontes.)
+//	     (No 9 a cadeia era só a sequência de FONTES. Os blocos de ação
+//	     entraram no 11, como texto, e viraram tabela efetiva no 12.)
 //	10 ModulosLidos  separa "li /proc/modules" de "li a árvore /lib/modules",
 //	   que compartilhavam a chave de lacuna `modulo`. Falso num dump v9 faz a
 //	   família de módulos ser recusada por inteiro — o lado seguro, e ainda
@@ -172,11 +172,6 @@ import (
 //	   incluir os blocos de ação (`[notfound=return]`), que decidem se a próxima
 //	   fonte é consultada. Num dump v10 a cadeia vem sem eles, e duas
 //	   configurações de comportamento diferente seriam o mesmo fato.
-//	13 DoasLido  a quarta vez que a chave `users` cobria demais. A família de
-//	   regras de doas dependia dela, e sem root o shadow é sempre ilegível — o
-//	   que suprimia `surgiu` de regra de doas em Alpine e Arch, onde o doas É o
-//	   mecanismo de escalada. Falso num dump v12 recusa a comparação da família,
-//	   que é o lado seguro.
 //	12 NSSService.Cadeia de novo, e de novo só a semântica: os blocos de ação
 //	   passaram a ser resolvidos para a TABELA EFETIVA e colados na fonte a que
 //	   se aplicam, com o que É PADRÃO omitido.
@@ -187,7 +182,27 @@ import (
 //	   faziam reescrita de configuração virar drift. Num dump v11 a cadeia traz
 //	   os blocos crus, e compará-la com uma cadeia v12 acusaria mudança onde
 //	   houve reformatação.
-const SchemaVersion = 13
+//	13 DoasLido  a quarta vez que a chave `users` cobria demais. A família de
+//	   regras de doas dependia dela, e sem root o shadow é sempre ilegível — o
+//	   que suprimia `surgiu` de regra de doas em Alpine e Arch, onde o doas É o
+//	   mecanismo de escalada. Falso num dump v12 recusa a comparação da família,
+//	   que é o lado seguro.
+//	14 A quinta e a sexta vez que uma chave de lacuna cobria fontes demais, e a
+//	   última: `ssh` juntava sshd_config, authorized_keys e config do cliente;
+//	   `trust` juntava âncoras de TLS, /etc/hosts, resolvedor e rhosts. Um
+//	   authorized_keys de outro usuário ilegível suprimia a comparação de um
+//	   ProxyCommand perfeitamente lido; um diretório de CA ilegível suprimia um
+//	   nome fixado no /etc/hosts.
+//
+//	   SSHServerColetado/Completo, SSHChavesCompleto, SSHClienteCompleto,
+//	   CACertsCompleto, HostsLido, ResolverLido, HostTrustCompleto  num dump v13
+//	   os oito vêm falsos, e as famílias correspondentes recusam a comparação
+//	   inteira — o lado seguro.
+//	   SSHClientExec.Escopo  o bloco `Host`/`Match` a que a diretiva pertence.
+//	     Vazio num dump v13, e sem ele dois ProxyCommand de destinos diferentes
+//	     colidem na mesma identidade: TROCAR os destinos entre si mantinha o
+//	     conjunto de comandos e invertia o comportamento, sem drift nenhum.
+const SchemaVersion = 14
 
 // Facts é o retrato do host.
 type Facts struct {
@@ -275,6 +290,28 @@ type Facts struct {
 	// pergunta pela SUA fonte.
 	PasswdLido bool `json:"passwd_read,omitempty"`
 	GroupLido  bool `json:"group_read,omitempty"`
+	// A CHAVE `ssh` COBRE TRÊS FONTES COM PRIVILÉGIOS E DONOS DIFERENTES —
+	// sshd_config, authorized_keys de cada home, e config do cliente —, e a
+	// consequência é a mesma que a chave `users` tinha: um authorized_keys de
+	// outro usuário ilegível suprimia a comparação de um ProxyCommand
+	// perfeitamente observado. Três fatos, um por fonte.
+	//
+	// SSHServerColetado separa "este host não tem servidor SSH" de "não
+	// consegui ler a configuração dele" — sem ele, um host que GANHA sshd entre
+	// dois retratos tinha o `surgiu` suprimido, porque a ausência de arquivos
+	// era lida como desconhecimento.
+	SSHServerColetado  bool `json:"ssh_server_collected,omitempty"`
+	SSHServerCompleto  bool `json:"ssh_server_complete,omitempty"`
+	SSHChavesCompleto  bool `json:"ssh_keys_complete,omitempty"`
+	SSHClienteCompleto bool `json:"ssh_client_complete,omitempty"`
+
+	// E a chave `trust` cobre QUATRO: âncoras de TLS, /etc/hosts, o resolvedor
+	// e os arquivos de confiança entre hosts. Mesma história, quatro fatos.
+	CACertsCompleto   bool `json:"ca_complete,omitempty"`
+	HostsLido         bool `json:"hosts_read,omitempty"`
+	ResolverLido      bool `json:"resolver_read,omitempty"`
+	HostTrustCompleto bool `json:"host_trust_complete,omitempty"`
+
 	// DoasLido é o mesmo para /etc/doas.conf e /etc/doas.d — em Alpine e Arch o
 	// doas É o mecanismo de escalada, e a família dele não pode depender da
 	// chave `users` pela mesma razão que as outras três não podem.

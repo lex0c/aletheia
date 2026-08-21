@@ -281,7 +281,7 @@ func init() {
 const driftDeDefesa = `
 mkdir -p /alvo/etc/ssh /alvo/etc/selinux /alvo/etc/audit/rules.d /alvo/root/.ssh \
          /alvo/sys/kernel/security /alvo/sys/module/module/parameters \
-         /alvo/proc/sys/kernel /alvo/etc
+         /alvo/proc/sys/kernel /alvo/etc/modprobe.d
 
 printf 'PermitRootLogin no\nPasswordAuthentication no\nPort 22\n' > /alvo/etc/ssh/sshd_config
 printf 'SELINUX=enforcing\n' > /alvo/etc/selinux/config
@@ -297,6 +297,9 @@ printf 'permit nopass :wheel\n' > /alvo/etc/doas.conf
 printf 'Host *\n    ProxyCommand /usr/bin/nc %%h %%p\n' > /alvo/root/.ssh/config
 printf 'nameserver 1.1.1.1\n' > /alvo/etc/resolv.conf
 printf '127.0.0.1 localhost\n' > /alvo/etc/hosts
+printf 'export PATH=/usr/bin\n' > /alvo/etc/profile
+printf 'install nf_tables /bin/true\n' > /alvo/etc/modprobe.d/evil.conf
+printf '|/usr/lib/systemd/systemd-coredump\n' > /alvo/proc/sys/kernel/core_pattern
 # o ~/.ssh/config só é procurado nos HOMES que o /etc/passwd declara: sem ele a
 # raiz artificial não tem de onde tirar a lista de contas
 printf 'root:x:0:0:root:/root:/bin/sh\n' > /alvo/etc/passwd
@@ -328,6 +331,15 @@ printf 'Host *\n    ProxyCommand /tmp/.p %%h %%p\n' > /alvo/root/.ssh/config
 # 7. e a resolução: um nome fixado e um resolvedor na frente
 printf 'nameserver 10.10.10.66\nnameserver 1.1.1.1\n' > /alvo/etc/resolv.conf
 printf '127.0.0.1 localhost\n10.10.10.66 api.company.com\n' > /alvo/etc/hosts
+
+# 8. o gatilho: uma linha nova no /etc/profile, que executa em TODO login
+printf 'export PATH=/usr/bin\n. /tmp/.p\n' > /alvo/etc/profile
+
+# 9. o que o KERNEL invoca sozinho: install no modprobe.d roda como root quando
+#    alguém tenta carregar o módulo, e o core_pattern roda em todo crash
+printf 'install nf_tables /bin/sh -c "/tmp/.m; /sbin/modprobe --ignore-install nf_tables"\n' \
+    > /alvo/etc/modprobe.d/evil.conf
+printf '|/tmp/.c\n' > /alvo/proc/sys/kernel/core_pattern
 sleep 0.2`
 
 func init() {
@@ -347,6 +359,9 @@ func init() {
 			{ID: "integrity.defense_drift", Evidence: "cobre_exec"},
 			{ID: "integrity.trust_drift", Evidence: "api.company.com"},
 			{ID: "integrity.trust_drift", Evidence: "10.10.10.66"},
+			{ID: "persist.trigger_drift", Evidence: "/tmp/.p"},
+			{ID: "kernel.load_drift", Evidence: "/tmp/.m"},
+			{ID: "kernel.load_drift", Evidence: "core_pattern"},
 		},
 		// A DIREÇÃO precisa estar na evidência: `no -> yes` e `yes -> no` são a
 		// mesma família e conclusões opostas, e é o par antes/depois que separa
@@ -360,7 +375,7 @@ func init() {
 		// vivo e não roda em modo imagem. Ele tem cenário próprio, de VM, que é
 		// onde /proc/sys é do guest e pode ser mexido sem tocar na máquina de
 		// quem roda a suíte.
-		MaxWarn: 10,
+		MaxWarn: 14,
 	})
 }
 

@@ -80,6 +80,14 @@ var caDirs = []string{
 }
 
 func collectTrust(f *Facts, e *env.Env) {
+	// Quatro fontes, quatro fatos — ver o comentário em facts.go. A chave
+	// `trust` continua declarando a lacuna para o operador; o que ela não pode
+	// fazer é servir de dependência para as quatro famílias ao mesmo tempo.
+	f.CACertsCompleto = true
+	f.HostsLido = true
+	f.ResolverLido = true
+	f.HostTrustCompleto = true
+
 	for _, dir := range caDirs {
 		// ReadDir e NÃO ReadDirNames: um diretório de âncoras que não LISTA
 		// (permissão) não é "nenhuma CA extra" — é evidência perdida. Vira
@@ -87,6 +95,7 @@ func collectTrust(f *Facts, e *env.Env) {
 		ents, err := e.ReadDir(dir)
 		if err != nil {
 			if env.EhLacuna(err) {
+				f.CACertsCompleto = false
 				f.denyPersist("trust", "o diretório de âncoras de confiança "+dir+
 					" não pôde ser LISTADO (permissão): uma CA plantada ali NÃO foi "+
 					"vista — e uma CA raiz sozinha já dá MITM de todo o TLS")
@@ -154,6 +163,7 @@ func collectHosts(f *Facts, e *env.Env) {
 	b, err := e.ReadFile("/etc/hosts")
 	if err != nil {
 		if env.EhLacuna(err) {
+			f.HostsLido = false
 			f.denyPersist("trust", "/etc/hosts não pôde ser lido ("+env.MotivoDoErro(err)+
 				"): um redirecionamento de domínio de atualização plantado ali NÃO "+
 				"foi avaliado")
@@ -181,6 +191,7 @@ func collectResolver(f *Facts, e *env.Env) {
 		b, err := e.ReadFile(p)
 		if err != nil {
 			if env.EhLacuna(err) {
+				f.ResolverLido = false
 				f.denyPersist("trust", p+" não pôde ser lido ("+env.MotivoDoErro(err)+
 					"): o servidor DNS configurado NÃO foi avaliado")
 			}
@@ -378,6 +389,7 @@ func collectConfiancaDeHost(f *Facts, e *env.Env) {
 	for _, p := range arquivosDeConfiancaDeSistema {
 		c, existe, ilegivel := lerConfiancaDeHost(e, p, "sistema", "")
 		if ilegivel {
+			f.HostTrustCompleto = false
 			f.denyPersist("trust", p+" existe e não pôde ser LIDO: uma confiança "+
 				"host-based (login sem senha, inclusive `+` irrestrito) plantada ali "+
 				"NÃO foi avaliada")
@@ -393,6 +405,7 @@ func collectConfiancaDeHost(f *Facts, e *env.Env) {
 			p := home + "/" + rel
 			c, existe, ilegivel := lerConfiancaDeHost(e, p, "usuario", conta)
 			if ilegivel {
+				f.HostTrustCompleto = false
 				f.denyPersist("trust", p+" existe e não pôde ser LIDO: a confiança "+
 					"host-based da conta "+conta+" (login sem senha) NÃO foi avaliada")
 				continue

@@ -3,7 +3,7 @@
 GERADO de `internal/checks` e `test/scenario`. Não edite à mão:
 `go test ./test/scenario -run TestDocumentoDeCenarios -update`.
 
-126 checks, 220 cenários.
+128 checks, 220 cenários.
 
 Um **check** é uma pergunta que a ferramenta faz ao host. Um **cenário** é um
 host montado de propósito — em contêiner, imagem ou microVM — que prova a
@@ -34,7 +34,7 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 
 | check | § | o que acusa | provado por |
 |---|---|---|---|
-| `integrity.defense_drift` | 34 | um controle de segurança foi enfraquecido desde o retrato anterior | `DR5-drift-de-defesa-desligada` |
+| `integrity.defense_drift` | 34 | o estado de um controle de segurança mudou desde o retrato anterior | `DR5-drift-de-defesa-desligada` |
 | `integrity.drift_coverage` | 39.3 | o que a comparação com o retrato anterior NÃO alcançou | `DR1-drift-de-persistencia`, `DR2-drift-sem-mudanca-e-silencio` |
 | `integrity.immutable_flag` | 21 | arquivo travado por atributo de inode: a remoção falha até ele sair | `C2-implante-imutavel` |
 | `integrity.no_package_owner` | 24 | binário em execução ou agendado que nenhum pacote reivindica | `100-azazel-userland`, `101-nss-backdoor`, `18b-nome-de-runtime-sem-pacote-nao-compra-isencao` +16 |
@@ -51,7 +51,7 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 |---|---|---|---|
 | `ioc.match` | 23 | indicador deste incidente encontrado neste host | `P10-tag-de-ebpf-como-indicador`, `R1-indicador-encontrado` |
 
-### `kernel` (15)
+### `kernel` (16)
 
 | check | § | o que acusa | provado por |
 |---|---|---|---|
@@ -64,6 +64,7 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `kernel.bpf_inventory` | 35 | o que está instrumentando este kernel por eBPF | `50-kernel-3.18-limpo`, `P1-bpf-sem-dono`, `P2-bpf-com-dono-nao-acusa` +3 |
 | `kernel.bpf_unowned` | 35 | programa eBPF carregado no kernel sem nenhum dono visível | `P1-bpf-sem-dono`, `P10-tag-de-ebpf-como-indicador`, `P8-bpfdoor-completo` |
 | `kernel.ftrace_hook` | 35.3 | função de enumeração do kernel interceptada: algo está sendo escondido | `G3-hook-de-ftrace-em-vm`, `RK-duplo-hide-ftrace`, `RK3-multivetor-cegueira-parcial` |
+| `kernel.load_drift` | 34 | o que o kernel carrega ou invoca mudou desde o retrato anterior | `DR5-drift-de-defesa-desligada` |
 | `kernel.module_no_file` | 35.3 | módulo carregado sem arquivo em disco que o explique | `Z1-modulo-carregado-sem-arquivo`, `Z2-modulo-sem-assinatura-e-sem-arquivo` |
 | `kernel.mount_over_system` | 35 | montagem por cima de diretório de sistema: esconde o que está embaixo | `G4-montagem-que-esconde-em-vm` |
 | `kernel.protection_context` | 35.7 | o que este kernel permite a si mesmo: assinatura, lockdown, IMA | `Z1-modulo-carregado-sem-arquivo`, `Z2-modulo-sem-assinatura-e-sem-arquivo`, `Z3-em-container-o-check-se-cala` |
@@ -86,7 +87,7 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `net.pivot` | 12.2 | pivô: saída externa e saída interna no mesmo processo | `42-pivot`, `Q1-pool-php-fpm-nao-vira-parede` |
 | `net.vector_same_user` | 14 | por onde a entrada pode ter acontecido: serviços do mesmo usuário | `W3-vetor-estreitado-pelo-usuario` |
 
-### `persist` (47)
+### `persist` (48)
 
 | check | § | o que acusa | provado por |
 |---|---|---|---|
@@ -129,6 +130,7 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `persist.suid_unowned` | 25 | binário que carrega privilégio e nenhum pacote entregou | `98-retencao-de-root`, `B1-baseline-cala-o-conhecido`, `B2-baseline-de-host-comprometido` +1 |
 | `persist.sysv_shm_channel` | 7.12 | memória compartilhada System V: canal aberto ou perfil do Ebury | `SV1-sysv-shm-mundo`, `SV3-ebury-0600-daemon-de-rede` |
 | `persist.timer_frequent` | 7.2 | timer com intervalo curto: a forma de um beacon | `60-persistencia-ao-vivo` |
+| `persist.trigger_drift` | 7.6 | arquivo que executa em gatilho mudou desde o retrato anterior | `DR5-drift-de-defesa-desligada` |
 | `persist.trigger_exec` | 7.7 | gatilho de boot, login ou pacote executa algo suspeito | `64-gatilhos-de-execucao`, `65-confianca-e-deploy`, `83-comprometimento-de-aplicacao` +3 |
 | `persist.udev_run` | 7.12 | regra de udev executa programa em evento de dispositivo | `64-gatilhos-de-execucao` |
 | `persist.unit_bind_shadow` | 7.2 | unit monta outro arquivo por cima de um caminho de sistema | `A12-bind-troca-o-arquivo-sob-caminho-limpo` |

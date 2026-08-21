@@ -63,7 +63,15 @@ type SSHConfig struct {
 }
 
 func collectSSH(f *Facts, e *env.Env) {
+	// OTIMISMO COM DESMENTIDO: as três fontes são dadas por completas, e cada
+	// falha de leitura desmarca a SUA. É o padrão que o sudoers e o doas já
+	// usam, e ele existe porque marcar em cada ponto de saída à mão é um a
+	// esquecer.
+	f.SSHServerCompleto = true
+	f.SSHChavesCompleto = true
+	f.SSHClienteCompleto = true
 	collectSSHConfig(f, e)
+	f.SSHServerColetado = true
 	collectAuthorizedKeys(f, e)
 	collectSSHClientConfig(f, e)
 }
@@ -90,7 +98,17 @@ type SSHClientExec struct {
 	// LocalCommand por isto — some-lo seria falso negativo; a incerteza vai para
 	// a evidência.
 	Ativacao string `json:"activation,omitempty"`
-	ModUTC   string `json:"mod_utc,omitempty"`
+
+	// Escopo é o bloco `Host`/`Match` a que a diretiva pertence, normalizado —
+	// `Host *` quando ela está fora de qualquer bloco.
+	//
+	// Sem ele, dois ProxyCommand em blocos diferentes do mesmo arquivo são
+	// indistinguíveis, e trocar os destinos entre si (prod↔dev) mantinha o
+	// CONJUNTO de comandos e invertia o comportamento por destino sem produzir
+	// mudança nenhuma para quem compara dois retratos.
+	Escopo string `json:"scope,omitempty"`
+
+	ModUTC string `json:"mod_utc,omitempty"`
 }
 
 // cortaDiretiva separa `keyword valor`. O OpenSSH aceita o separador como
@@ -214,6 +232,7 @@ func coletaDirsCliente(f *Facts, e *env.Env, arquivo, baseDir, home string, vist
 	b, err := e.ReadFile(arquivo)
 	if err != nil {
 		if env.EhLacuna(err) {
+			f.SSHClienteCompleto = false
 			f.denyPersist("ssh", arquivo+" não pôde ser lido ("+env.MotivoDoErro(err)+
 				"): config de cliente NÃO entrou na varredura")
 		}
@@ -286,6 +305,7 @@ func expandirIncludeCliente(f *Facts, e *env.Env, baseDir, home, padrao string) 
 		// profundidade de Include, e um único `*` pode abrir milhares de
 		// caminhos. Estourar vira lacuna declarada, nunca silêncio.
 		if len(prox) > maxExpansaoInclude {
+			f.SSHServerCompleto = false
 			f.denyPersist("ssh", "o Include `"+padrao+"` expandiu para mais de "+
 				strconv.Itoa(maxExpansaoInclude)+" caminhos no componente "+
 				strconv.Itoa(i+1)+": a expansão foi cortada e os arquivos restantes "+
@@ -318,11 +338,25 @@ func temPermitLocalYes(dirs []dirCliente) bool {
 // Match exec executam sem depender de outra diretiva.
 func execDeDirs(dirs []dirCliente, user string, permitLocal bool) []SSHClientExec {
 	var out []SSHClientExec
+	// O BLOCO A QUE A DIRETIVA PERTENCE. Um `ProxyCommand` sob `Host prod` e
+	// outro sob `Host dev` são coisas DIFERENTES, e sem este contexto os dois
+	// ficavam indistinguíveis para quem compara dois retratos: trocar os
+	// destinos entre si mantinha o conjunto de comandos e invertia o
+	// comportamento por destino, sem produzir mudança nenhuma.
+	//
+	// O escopo vale a partir da linha do bloco até o próximo — é assim que o
+	// ssh_config funciona, e por isso ele é rastreado em ORDEM.
+	escopo := "Host *"
 	for _, d := range dirs {
+		if strings.EqualFold(d.Kw, "host") {
+			escopo = "Host " + strings.Join(strings.Fields(d.Val), " ")
+			continue
+		}
 		if strings.EqualFold(d.Kw, "match") {
+			escopo = "Match " + strings.Join(strings.Fields(d.Val), " ")
 			if cmd, ok := matchExec(d.Val); ok {
 				out = append(out, SSHClientExec{
-					File: d.File, User: user, Line: d.Line,
+					File: d.File, User: user, Line: d.Line, Escopo: escopo,
 					Directive: "Match exec", Command: cmd, ModUTC: d.Mod,
 				})
 			}
@@ -333,7 +367,7 @@ func execDeDirs(dirs []dirCliente, user string, permitLocal bool) []SSHClientExe
 			continue
 		}
 		s := SSHClientExec{
-			File: d.File, User: user, Line: d.Line,
+			File: d.File, User: user, Line: d.Line, Escopo: escopo,
 			Directive: rotulo, Command: cmd, ModUTC: d.Mod,
 		}
 		if rotulo == "LocalCommand" {
@@ -422,6 +456,7 @@ func collectSSHConfig(f *Facts, e *env.Env) {
 		// login de root.
 		b, ok := f.lerNegando(e, "ssh", p)
 		if !ok {
+			f.SSHServerCompleto = false
 			continue
 		}
 		c.Files = append(c.Files, p)
@@ -528,6 +563,7 @@ func collectAuthorizedKeys(f *Facts, e *env.Env) {
 		}
 	}
 	if len(negados) > 0 {
+		f.SSHChavesCompleto = false
 		f.denyPersist("ssh", strconv.Itoa(len(negados))+
 			" arquivos authorized_keys não puderam ser lidos (permissão): "+
 			resumoCaminhos(negados))

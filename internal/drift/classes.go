@@ -555,12 +555,33 @@ var portaEmEscuta = Classe{
 // vem do kernel falando de si. Um módulo novo entre dois retratos é a coisa
 // mais próxima de um rootkit que uma comparação de estado alcança.
 var moduloCarregado = Classe{
-	Tipo:      "modulo",
-	Titulo:    "módulo carregado no kernel",
-	Requires:  env.CapProcfs,
-	Lacunas:   []string{"modulo"},
+	Tipo:     "modulo",
+	Titulo:   "módulo carregado no kernel",
+	Requires: env.CapProcfs,
+	// NÃO consome a chave `modulo`, e a razão é a mesma da família de portas:
+	// aquela chave cobre DUAS coisas com dependências diferentes — "/proc/modules
+	// ilegível" (o conjunto é desconhecido) e "a árvore em disco não foi lida"
+	// (só o ARQUIVO de cada módulo é desconhecido).
+	//
+	// Consumi-la tinha um efeito perverso, medido numa VM: a lacuna da árvore só
+	// nasce QUANDO HÁ MÓDULO CARREGADO. Carregar um módulo num guest sem
+	// /lib/modules criava a lacuna, a lacuna ficava assimétrica entre os dois
+	// retratos, e a assimetria suprimia justamente a comparação que denunciaria
+	// o módulo. O ato de se esconder apagava o detector.
+	Incompleta: func(f *facts.Facts) string {
+		if f.ModulosLidos {
+			return ""
+		}
+		return "/proc/modules não foi lido: o conjunto de módulos carregados NÃO é " +
+			"conhecido deste lado"
+	},
 	Exaustiva: true,
 	Decide:    map[string]bool{"arquivo": true, "taint": true},
+	// O ARQUIVO vem da árvore em disco, e sai vazio quando ela não foi lida —
+	// vazio ali é "não observado", não "não tem arquivo". Sem isso, comparar um
+	// retrato com a árvore lida contra um sem ela afirmaria que todo módulo
+	// perdeu o arquivo.
+	Observacional: map[string]bool{"arquivo": true},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.Carregados))
 		for i := range f.Carregados {
@@ -568,7 +589,7 @@ var moduloCarregado = Classe{
 			out = append(out, Entidade{
 				ID: m.Nome, Alvos: []string{m.Nome, m.Arquivo},
 				Campos: map[string]string{
-					"arquivo": m.Arquivo,
+					"arquivo": seLido(f.ArvoreDeModulos, m.Arquivo),
 					"taint":   m.Letras,
 					// Refs e tamanho mudam com o uso, não com a identidade.
 					"refs": strconv.Itoa(m.Refs),

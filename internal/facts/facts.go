@@ -136,7 +136,7 @@ import (
 //	     porque o truque mora numa linha de COMENTÁRIO, que Lines descarta. Num
 //	     dump v7 o campo vem 0, e 0 significa "este arquivo foi lido e não tem
 //	     escape nenhum" para `antiforense.hidden_text`.
-const SchemaVersion = 9
+const SchemaVersion = 10
 
 // Facts é o retrato do host.
 type Facts struct {
@@ -275,6 +275,14 @@ type Facts struct {
 	// Carregados são os módulos que o kernel tem DENTRO dele agora, cada um
 	// confrontado com o arquivo que deveria explicá-lo.
 	Carregados []ModuloCarregado `json:"loaded_modules,omitempty"`
+	// ModulosLidos diz que /proc/modules foi lido — o CONJUNTO é conhecido.
+	//
+	// Separado do ArvoreDeModulos logo abaixo de propósito: aquele diz que a
+	// árvore em DISCO foi lida, e é dela que sai o arquivo de cada módulo. Os
+	// dois compartilhavam a mesma chave de lacuna, e o efeito era perverso —
+	// a lacuna da árvore só nasce QUANDO HÁ MÓDULO CARREGADO, então carregar um
+	// módulo suprimia a comparação que o denunciaria. Medido numa VM.
+	ModulosLidos bool `json:"modules_read,omitempty"`
 	// ArvoreDeModulos diz que /lib/modules foi encontrada e lida. Sem ela,
 	// "módulo sem arquivo" não significa nada — significa que ninguém olhou.
 	ArvoreDeModulos bool `json:"module_tree_read,omitempty"`

@@ -56,6 +56,24 @@ docker rm -f "$cid" >/dev/null
 install -m 0755 "$root/dist/aletheia$sfx" "$rootfs/aletheia"
 install -m 0755 "$root/dist/helper$sfx"   "$rootfs/helper"
 
+# QUAIS binários entraram, por hash. O initramfs é artefato de build e NÃO é
+# reconstruído pelo `make scenarios`: ele fica com o que o último `make vm-image`
+# deixou ali. Sem este marcador, o tier de VM roda contra o binário que sobrou —
+# e passa, verde, testando outro programa.
+#
+# Foi medido: um initramfs de horas antes carregava um binário de SchemaVersion
+# 6 enquanto a árvore já estava no 9, e a suíte de VM vinha verde a sessão
+# inteira sobre código que não existia mais. Suíte que passa testando outra
+# coisa é o pior verde possível — é o mesmo defeito que esta ferramenta persegue
+# nos hosts alheios, dentro de casa.
+#
+# O runner compara este arquivo com o hash dos binários da árvore e PULA com o
+# motivo quando eles divergem. Pular alto é honesto; passar é que não era.
+{
+	echo "aletheia $(sha256sum "$root/dist/aletheia$sfx" | cut -d" " -f1)"
+	echo "helper $(sha256sum "$root/dist/helper$sfx" | cut -d" " -f1)"
+} > "$out/binarios$sfx.txt"
+
 # Um MÓDULO DE KERNEL de verdade para o guest, quando dá.
 #
 # O cenário de "módulo carregado sem arquivo em disco" não tem como ser montado

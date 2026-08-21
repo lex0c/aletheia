@@ -11,9 +11,12 @@ package test
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -561,6 +564,7 @@ func runVM(t *testing.T, sc scenario.Scenario) result {
 	if _, err := os.Stat(initramfs); err != nil {
 		t.Skipf("initramfs%s ausente — rode `make vm-image`: %v", suffix, err)
 	}
+	conferirInitramfs(t, suffix)
 	kernel := kernelFor(t, sc)
 
 	logf := filepath.Join(t.TempDir(), "serial.log")
@@ -602,6 +606,83 @@ func runVM(t *testing.T, sc scenario.Scenario) result {
 
 // kernelFor resolve o kernel do guest. Pular por ausência é aceitável; pular em
 // SILÊNCIO não é — a mensagem diz exatamente o que rodar.
+// conferirInitramfs recusa rodar o tier de VM contra um initramfs que NÃO
+// contém o binário desta árvore.
+//
+// # O verde mais caro que existe é o que testa outra coisa
+//
+// O initramfs é artefato de build, e nem `make scenarios` nem
+// `make scenarios-container` o reconstroem: eles usam o que o último
+// `make vm-image` deixou em dist/vm. O binário sob teste, então, é o que sobrou
+// — e o resultado é uma suíte que sobe seis microVMs, passa, e não diz nada
+// sobre o código que está na árvore.
+//
+// Não é hipótese. Foi medido nesta base: um initramfs de horas antes carregava
+// um aletheia de SchemaVersion 6 enquanto a árvore já estava no 9, e o tier de
+// VM vinha verde a sessão inteira sobre código que não existia mais. O que
+// denunciou foi um acidente — uma comparação de drift recusou o dump por
+// esquema incompatível.
+//
+// A recusa é PULO e não falha, pelo mesmo motivo dos outros guardas deste
+// arquivo: initramfs desatualizado é condição de ambiente de quem roda, não
+// defeito do código. E o pulo é alto — com motivo e com o comando que conserta.
+// O anti-apodrecimento das lacunas ambientais já sabe distinguir "o tier de VM
+// não participou" (vmRodou), então pular aqui não cobra ninguém por ausência.
+func conferirInitramfs(t *testing.T, suffix string) {
+	t.Helper()
+	marcador, err := filepath.Abs("../dist/vm/binarios" + suffix + ".txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(marcador)
+	if err != nil {
+		t.Skipf("o initramfs%s não declara quais binários carrega (dist/vm/binarios%s.txt "+
+			"ausente): ele é anterior a esta verificação e pode conter qualquer "+
+			"versão. Rode `make vm-image`", suffix, suffix)
+	}
+	embutido := map[string]string{}
+	for _, ln := range strings.Split(string(b), "\n") {
+		if campos := strings.Fields(ln); len(campos) == 2 {
+			embutido[campos[0]] = campos[1]
+		}
+	}
+	for _, nome := range []string{"aletheia", "helper"} {
+		atual, err := somaDoArquivo("../dist/" + nome + suffix)
+		if err != nil {
+			t.Skipf("dist/%s%s ilegível: %v", nome, suffix, err)
+		}
+		if embutido[nome] != atual {
+			t.Skipf("o initramfs%s carrega um %s DIFERENTE do que está na árvore "+
+				"(%s… no guest, %s… aqui): o tier de VM testaria outro binário e "+
+				"passaria verde sobre código que não existe mais. Rode `make vm-image`",
+				suffix, nome, primeiros(embutido[nome]), primeiros(atual))
+		}
+	}
+}
+
+func somaDoArquivo(caminho string) (string, error) {
+	fh, err := os.Open(caminho)
+	if err != nil {
+		return "", err
+	}
+	defer fh.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, fh); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func primeiros(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	if s == "" {
+		return "(ausente)"
+	}
+	return s
+}
+
 func kernelFor(t *testing.T, sc scenario.Scenario) string {
 	t.Helper()
 	if sc.Kernel == "" {

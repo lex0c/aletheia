@@ -847,6 +847,21 @@ func isUnitName(n string) bool {
 	return false
 }
 
+// kindOfDropin deduz o tipo a partir do NOME DO DIRETÓRIO de drop-in.
+//
+// `agent.service.d` dá `service` pelo sufixo, e é o caso comum. O que o kindOf
+// sozinho não resolve é o drop-in TYPE-WIDE, que esta base suporta de propósito:
+//
+//	/etc/systemd/system/service.d/90-x.conf   vale para TODA .service
+//
+// Ali o alvo é `service`, sem ponto, e o kindOf devolvia vazio — o que jogava o
+// arquivo no caminho de "tipo desconhecido" e reabria, inteiro, o bypass de
+// seção×tipo que o d3baf01 tinha fechado. Medido: com `[Socket] ExecStartPre=`
+// dentro de um service.d, os dez services do contêiner saíam em silêncio.
+//
+// O comentário daquele commit dizia que tipo indeduzível "exige um nome de
+// arquivo que o próprio systemd não carregaria". Era falso: `service.d` é
+// legítimo, e é o mais alcançável de todos, porque atinge toda unit de uma vez.
 // continuaNaProxima diz se a linha emenda na seguinte, contando a PARIDADE das
 // barras finais.
 //
@@ -1689,17 +1704,42 @@ func lacunaDeManagerDeUsuario(f *Facts, units []Unit) {
 	// subdiretórios do mesmo home, e repetir a linha não acrescenta nada.
 	vistos := map[string]bool{}
 	var colisoes []string
-	for i := range units {
-		u := &units[i]
-		if u.Scope != "user" || u.Manager == "" || !compartilhadas[u.Name] {
-			continue
-		}
-		k := u.Manager + "/" + u.Name
+	anota := func(manager, nome string) {
+		k := manager + "/" + nome
 		if vistos[k] {
-			continue
+			return
 		}
 		vistos[k] = true
 		colisoes = append(colisoes, k)
+	}
+	for i := range units {
+		u := &units[i]
+		if u.Scope != "user" || u.Manager == "" {
+			continue
+		}
+		if compartilhadas[u.Name] {
+			anota(u.Manager, u.Name)
+			continue
+		}
+		// O DROP-IN POR PADRÃO precisa ser casado aqui, e não pela expansão.
+		//
+		// A expansão foi separada por domínio para não cruzar Alice e Bob, e
+		// esse conserto está certo — mas ele também impede que o padrão da
+		// Alice alcance a base COMPARTILHADA, que é justamente o par mais
+		// provável do ataque: `~alice/.config/systemd/user/service.d/50-x.conf`
+		// sobre `/usr/lib/systemd/user/agent.service`.
+		//
+		// O padrão fica dormente com Name="service", nome que não colide com
+		// nada, e a comparação por nome não via colisão nenhuma. Cruzar aqui
+		// custa uma passada e mantém a decisão de não reconstruir o manager:
+		// declara-se exatamente onde a aproximação deixou de valer.
+		if ehPadraoDropin(u.DropInFor) {
+			for nome := range compartilhadas {
+				if dropinCasaUnit(u.DropInFor, nome) {
+					anota(u.Manager, nome)
+				}
+			}
+		}
 	}
 	if len(colisoes) == 0 {
 		return

@@ -821,12 +821,37 @@ var bindQueTrocaArquivo = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+		// O bind EFETIVO é da unit, não do arquivo — e o merge o copia para a
+		// base e para cada drop-in efetivo. Iterar artefato por artefato fazia o
+		// MESMO bind sair várias vezes, e com severidades diferentes: a base tem
+		// Exec para correlacionar e o drop-in não, então um único
+		// `/tmp/.x -> /usr/bin/x` saía como CRITICAL e WARN ao mesmo tempo.
+		// Medido num contêiner com um drop-in de `Restart=always`.
+		//
+		// A chave é a UNIT (escopo+manager+nome) e o Exec considerado é o de
+		// todos os artefatos dela. É o mesmo idioma do `visto` que o
+		// unit_unowned já usa.
+		execsPorUnit := map[string][]facts.ExecLine{}
+		for i := range f.Units {
+			u := &f.Units[i]
+			if u.Efetiva() {
+				k := u.Scope + "\x00" + u.Manager + "\x00" + u.Name
+				execsPorUnit[k] = append(execsPorUnit[k], u.Exec...)
+			}
+		}
+		visto := map[string]bool{}
 		for i := range f.Units {
 			u := &f.Units[i]
 			if !u.Efetiva() {
 				continue
 			}
+			chaveUnit := u.Scope + "\x00" + u.Manager + "\x00" + u.Name
 			for _, b := range u.Binds {
+				if k := chaveUnit + "\x00" + b.Origem + "\x00" + b.Destino; visto[k] {
+					continue
+				} else {
+					visto[k] = true
+				}
 				if b.Destino == "" || b.Destino == b.Origem {
 					continue // não troca arquivo: só disponibiliza
 				}
@@ -854,7 +879,7 @@ var bindQueTrocaArquivo = check.Check{
 				//
 				// O texto antigo dizia "leia a ORIGEM: é o que roda" para todos,
 				// e para o caso de configuração isso era simplesmente falso.
-				sombreiaExec, ondeExec := bindSombreiaExec(u, b.Destino)
+				sombreiaExec, ondeExec := bindSombreiaExec(execsPorUnit[chaveUnit], b.Destino)
 				sev := check.SevWarn
 				switch {
 				case gravavel && sombreiaExec:
@@ -909,8 +934,8 @@ var bindQueTrocaArquivo = check.Check{
 // O diretório conta porque trocar /usr/lib/app inteiro alcança a biblioteca que
 // o binário carrega, e o efeito é o mesmo de trocar o binário: código do
 // atacante dentro do processo, sob um caminho que o host mostra íntegro.
-func bindSombreiaExec(u *facts.Unit, destino string) (bool, string) {
-	for _, ex := range u.Exec {
+func bindSombreiaExec(execs []facts.ExecLine, destino string) (bool, string) {
+	for _, ex := range execs {
 		alvo := strings.TrimLeft(ex.Target, "-@+!:")
 		if alvo == "" {
 			continue

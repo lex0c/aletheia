@@ -134,3 +134,40 @@ func TestExpandirDropinsNaoCruzaManagers(t *testing.T) {
 		t.Error("o drop-in por padrão tem de continuar casando a unit do próprio manager")
 	}
 }
+
+// O par MAIS PROVÁVEL do ataque é drop-in por PADRÃO no home sobre base
+// compartilhada, e era o único que continuava silencioso.
+//
+// A separação da expansão por domínio (que conserta o cruzamento Alice×Bob)
+// impede, de propósito, que o padrão da Alice expanda contra a árvore
+// compartilhada. O efeito colateral é que ele fica dormente com Name="service"
+// — nome que não colide com coisa alguma —, e a comparação por nome não via
+// nada. Cruzar no detector custa uma passada e mantém a decisão de não
+// reconstruir o user manager.
+func TestLacunaDeManagerPegaPadraoContraCompartilhada(t *testing.T) {
+	f := &Facts{}
+	lacunaDeManagerDeUsuario(f, []Unit{
+		// A base só existe na árvore compartilhada: a Alice não tem cópia.
+		{Name: "agent.service", Scope: "user", Manager: ""},
+		// E o drop-in dela é por PADRÃO: casa qualquer .service.
+		{Name: "service", DropInFor: "service", Scope: "user", Manager: "alice",
+			Path: "/home/alice/.config/systemd/user/service.d/50-x.conf"},
+	})
+	got := strings.Join(f.PersistDenied["unit"], " | ")
+	if !strings.Contains(got, "alice/agent.service") {
+		t.Errorf("padrão por-home sobre base compartilhada tem de virar lacuna: %q", got)
+	}
+}
+
+// E o padrão que não casa nada da árvore compartilhada continua sem lacuna —
+// senão todo home com um `service.d` viraria degradação.
+func TestLacunaDeManagerPadraoQueNaoCasaNaoDeclara(t *testing.T) {
+	f := &Facts{}
+	lacunaDeManagerDeUsuario(f, []Unit{
+		{Name: "agent.timer", Scope: "user", Manager: ""},
+		{Name: "service", DropInFor: "service", Scope: "user", Manager: "alice"},
+	})
+	if n := len(f.PersistDenied["unit"]); n != 0 {
+		t.Errorf("padrão de .service não colide com .timer: %v", f.PersistDenied["unit"])
+	}
+}

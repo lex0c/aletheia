@@ -97,3 +97,40 @@ func TestLacunaDeManagerNaoRepetePorOrigem(t *testing.T) {
 		t.Errorf("a contagem tem de ser por par manager/unit: %q", f.PersistDenied["unit"][0])
 	}
 }
+
+// A expansão de drop-in por PADRÃO não pode cruzar managers.
+//
+// Sem separar por manager, um `~alice/.config/systemd/user/service.d/50-x.conf`
+// expandia contra toda unit de escopo `user` — inclusive as do bob. A cópia
+// mantinha Manager="alice" e passava a alegar que o drop-in da alice altera uma
+// unit que só existe no bob: uma composição que não acontece em máquina
+// nenhuma, afirmada com a confiança de um achado.
+func TestExpandirDropinsNaoCruzaManagers(t *testing.T) {
+	units := []Unit{
+		{Name: "so-do-bob.service", Scope: "user", Manager: "bob"},
+		{Name: "so-da-alice.service", Scope: "user", Manager: "alice"},
+		// O drop-in por padrão da alice: casa QUALQUER .service do domínio dela.
+		{Name: "service", DropInFor: "service", Scope: "user", Manager: "alice",
+			Path: "/home/alice/.config/systemd/user/service.d/50-x.conf"},
+	}
+	out := expandirDropins(&Facts{}, units)
+
+	for _, u := range out {
+		if u.DropInFor == "" || u.Path == "" {
+			continue
+		}
+		if u.Manager == "alice" && u.Name == "so-do-bob.service" {
+			t.Errorf("o drop-in da alice expandiu contra a unit do bob: %+v", u)
+		}
+	}
+	// E continua alcançando a unit DELA, senão o conserto viraria cegueira.
+	achou := false
+	for _, u := range out {
+		if u.DropInFor == "so-da-alice.service" && u.Manager == "alice" {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Error("o drop-in por padrão tem de continuar casando a unit do próprio manager")
+	}
+}

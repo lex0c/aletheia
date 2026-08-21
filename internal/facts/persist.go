@@ -707,7 +707,6 @@ func collectUnits(f *Facts, e *env.Env) {
 		f.denyPersist("unit", strconv.Itoa(len(negados))+
 			" diretórios de unit de usuário ilegíveis (permissão): "+resumoCaminhos(negados))
 	}
-	lacunaDeManagerDeUsuario(f, units)
 
 	for i := range units {
 		units[i].EnabledBy = wants[units[i].Name]
@@ -718,6 +717,12 @@ func collectUnits(f *Facts, e *env.Env) {
 	// TODA service, ou um `foo-.service.d/`, passava invisível. Expande para as
 	// bases que casa ANTES do merge, para o resto da fusão seguir 1:1.
 	units = expandirDropins(f, units)
+	// DEPOIS da expansão, e é a ordem que importa: antes dela um drop-in por
+	// padrão ainda se chama `service` (o nome do diretório `service.d`), não
+	// `agent.service`, e a colisão com a árvore compartilhada não seria vista.
+	// Era justamente o caso que a lacuna existe para cobrir — drop-in por-home
+	// sobre unit compartilhada.
+	lacunaDeManagerDeUsuario(f, units)
 
 	// Config EFETIVA: precedência por nome (a de maior precedência vence, as
 	// demais viram Shadowed), máscara propagada ao grupo, e resets de Exec/Env
@@ -1308,10 +1313,21 @@ func dropinCasaUnit(padrao, unit string) bool {
 // casa base nenhuma FICA (dormente): é um drop-in plantado que os checks ainda
 // devem ver. Drop-in exato e base passam intactos.
 func expandirDropins(f *Facts, units []Unit) []Unit {
-	basesPorScope := map[string][]string{}
+	// A chave é Scope+MANAGER, e não só o escopo.
+	//
+	// Sem o manager, um `~alice/.config/systemd/user/service.d/50-x.conf`
+	// expandia contra TODA unit de escopo `user` — inclusive as do bob e as da
+	// árvore compartilhada. A cópia mantinha Manager="alice" e passava a alegar
+	// que o drop-in da alice altera uma unit que só existe no bob, e o
+	// unit_dropin_exec afirmava "altera a unit X sem tocar no arquivo dela"
+	// sobre uma composição que não existe em lugar nenhum. Falso positivo.
+	//
+	// É a mesma separação que o merge já fazia na chave dele; faltava aqui.
+	basesPorDominio := map[string][]string{}
+	dominio := func(u Unit) string { return u.Scope + "\x00" + u.Manager }
 	for _, u := range units {
 		if u.DropInFor == "" {
-			basesPorScope[u.Scope] = append(basesPorScope[u.Scope], u.Name)
+			basesPorDominio[dominio(u)] = append(basesPorDominio[dominio(u)], u.Name)
 		}
 	}
 	out := make([]Unit, 0, len(units))
@@ -1325,7 +1341,7 @@ func expandirDropins(f *Facts, units []Unit) []Unit {
 			continue
 		}
 		var casou []string
-		for _, base := range basesPorScope[u.Scope] {
+		for _, base := range basesPorDominio[dominio(u)] {
 			if base != u.DropInFor && dropinCasaUnit(u.DropInFor, base) {
 				casou = append(casou, base)
 			}

@@ -842,13 +842,32 @@ var bindQueTrocaArquivo = check.Check{
 						b.Destino + " continua sendo o arquivo da distribuição, e é " +
 						"esse que a pergunta de propriedade e a de hash respondem",
 				}
+				// A CONFIANÇA vem da relação com o Exec, não do diretório
+				// sozinho.
+				//
+				// Bind de origem suspeita sobre caminho de pacote é anômalo em
+				// qualquer caso, mas só é EXECUÇÃO quando o destino é o alvo da
+				// unit — ou o diretório de onde ele carrega. Sem essa relação, o
+				// destino pode ser configuração ou dado gerado, e um
+				// `/tmp/gerado.conf:/usr/lib/app/gerado.conf` não merece o mesmo
+				// peso nem o mesmo próximo passo.
+				//
+				// O texto antigo dizia "leia a ORIGEM: é o que roda" para todos,
+				// e para o caso de configuração isso era simplesmente falso.
+				sombreiaExec, ondeExec := bindSombreiaExec(u, b.Destino)
 				sev := check.SevWarn
 				switch {
-				case gravavel && alvoDeSistema:
+				case gravavel && sombreiaExec:
 					sev = check.SevCritical
+					ev = append(ev, "a origem está "+motivo+" e o destino é "+ondeExec+
+						": o que esta unit EXECUTA vem de lá, e não do arquivo que o "+
+						"host mostra naquele caminho")
+				case gravavel && alvoDeSistema:
 					ev = append(ev, "a origem está "+motivo+" e o destino é diretório "+
-						"de PACOTE: distribuição nenhuma entrega binário assim, e a "+
-						"troca torna a verificação daquele caminho sem valor para esta unit")
+						"de PACOTE. Nada aqui prova que esse caminho é EXECUTADO por "+
+						"esta unit — pode ser configuração ou dado —, e por isso é "+
+						"aviso: o que se afirma é que a verificação daquele caminho "+
+						"não descreve o conteúdo que a unit enxerga")
 				case gravavel:
 					ev = append(ev, "a origem está "+motivo)
 				default:
@@ -863,16 +882,45 @@ var bindQueTrocaArquivo = check.Check{
 
 				fd := self.F(sev, u.Name, "", ev...)
 				fd.Quando, fd.QuandoFonte = u.ModUTC, "mtime do arquivo da unit"
-				fd.NextSteps = []string{
-					"leia a ORIGEM, não o destino: " + b.Origem + " é o que roda",
+				passos := []string{
 					"preserve " + b.Origem + " antes de mexer na unit",
 					"a comparação de hash de " + b.Destino + " não responde por esta " +
 						"unit — refaça a pergunta sobre a origem",
 				}
+				if sombreiaExec {
+					// Só aqui dá para afirmar execução. Dizer isso quando o
+					// destino é um .conf seria mandar o analista procurar
+					// código onde há configuração.
+					passos = append([]string{"leia a ORIGEM, não o destino: " +
+						b.Origem + " é o que roda"}, passos...)
+				}
+				fd.NextSteps = passos
 				r.Findings = append(r.Findings, fd)
 			}
 		}
 		r.Partial = append(r.Partial, f.PersistDenied["unit"]...)
 		return r
 	},
+}
+
+// bindSombreiaExec diz se o destino do bind é o que a unit EXECUTA — o próprio
+// alvo, ou o diretório de onde ele vem.
+//
+// O diretório conta porque trocar /usr/lib/app inteiro alcança a biblioteca que
+// o binário carrega, e o efeito é o mesmo de trocar o binário: código do
+// atacante dentro do processo, sob um caminho que o host mostra íntegro.
+func bindSombreiaExec(u *facts.Unit, destino string) (bool, string) {
+	for _, ex := range u.Exec {
+		alvo := strings.TrimLeft(ex.Target, "-@+!:")
+		if alvo == "" {
+			continue
+		}
+		if alvo == destino {
+			return true, "o próprio alvo de " + ex.Key
+		}
+		if strings.HasPrefix(alvo, strings.TrimSuffix(destino, "/")+"/") {
+			return true, "o diretório de onde " + ex.Key + " carrega (" + alvo + ")"
+		}
+	}
+	return false, ""
 }

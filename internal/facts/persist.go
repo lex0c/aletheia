@@ -126,6 +126,15 @@ type Unit struct {
 	RootImage string `json:"root_image,omitempty"`
 	// Binds são os BindPaths=/BindReadOnlyPaths= da unit. Ver BindDaUnit.
 	Binds []BindDaUnit `json:"binds,omitempty"`
+	// BindReset marca a atribuição VAZIA, que descarta os binds acumulados.
+	//
+	// Como todo reset por lista, ele alcança os ARQUIVOS ANTERIORES — é assim
+	// que um drop-in tira o bind da unit base. O reset dentro do mesmo arquivo
+	// era o caso fácil, e era o único que o parser tratava: um
+	// `foo.service.d/20-reset.conf` com `BindReadOnlyPaths=` não limpava nada, e
+	// a ferramenta continuava acusando uma troca de arquivo que o systemd já
+	// tinha desfeito. Falso positivo, e num check que sai CRITICAL.
+	BindReset bool `json:"bind_reset,omitempty"`
 
 	Restart  string   `json:"restart,omitempty"`
 	User     string   `json:"user,omitempty"`
@@ -1066,7 +1075,12 @@ func mesclarUnits(f *Facts, units []Unit, e *env.Env) {
 		var pathProprio []string // dirs do PATH via Environment=, na ordem
 		var rootDir, rootImg string
 		temPATH := false
+		var binds []BindDaUnit
 		for _, i := range efetivos {
+			if units[i].BindReset {
+				binds = nil
+			}
+			binds = append(binds, units[i].Binds...)
 			if units[i].ExecSearchPathReset {
 				searchPath = nil
 			}
@@ -1089,6 +1103,13 @@ func mesclarUnits(f *Facts, units []Unit, e *env.Env) {
 					pathProprio = dirsAbsolutos(strings.Split(s.Value, ":"))
 				}
 			}
+		}
+		// O conjunto EFETIVO de binds é o mesmo para todos os arquivos da unit:
+		// cada um enxerga o namespace que a soma deles montou. Sem propagar,
+		// o check leria só o que cada arquivo declarou sozinho, e o reset de um
+		// drop-in não alcançaria a base.
+		for _, i := range efetivos {
+			units[i].Binds = binds
 		}
 		for _, i := range efetivos {
 			// Os diretórios contra os quais o systemd resolve um nome NU, decididos
@@ -1457,6 +1478,7 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope, tipo string, vendor bool) 
 			// Vazio RESETA a lista, como as outras diretivas de lista.
 			if v == "" {
 				u.Binds = nil
+				u.BindReset = true
 				break
 			}
 			for _, item := range camposComAspas(v) {

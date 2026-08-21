@@ -21,6 +21,11 @@ func init() {
 	check.Register(driftDeKernel)
 	check.Register(driftDeConfianca)
 	check.Register(driftDePrograma)
+	check.Register(driftSSHServidor)
+	check.Register(driftSSHCliente)
+	check.Register(driftDoas)
+	check.Register(driftDefesa)
+	check.Register(driftProtecaoDoKernel)
 	check.Register(driftCobertura)
 }
 
@@ -694,6 +699,10 @@ var driftDeConfianca = check.Check{
 	Requires: env.CapFilesystem,
 	Drift:    true,
 	FalsePositives: []string{
+		"nome em /etc/hosts é a forma normal de apontar um serviço interno, e " +
+			"resolvedor muda com DHCP e com VPN — os dois são rotina em máquina " +
+			"que troca de rede. O que pesa é a COMBINAÇÃO: nome fixado mais CA " +
+			"nova, na mesma janela, vale muito mais que qualquer um sozinho",
 		"CA CORPORATIVA é a causa normal de âncora extra: empresa que inspeciona " +
 			"TLS na borda instala a própria em toda a frota. A mesma CA em vários " +
 			"hosts é política; em uma máquina só, não é",
@@ -701,12 +710,12 @@ var driftDeConfianca = check.Check{
 			"remove âncoras em BLOCO, com o pacote datando a mudança",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
-		return achadosDeDrift(self, f, mudancasDeVarios(f, "ca", "nss", "nss_servico"),
-			"uma CA acrescentada ao armazém faz o host aceitar certificado forjado "+
-				"para QUALQUER nome — é interceptação de TLS que não deixa rastro no "+
-				"tráfego. E a cadeia do nsswitch é a AUTORIDADE sobre quem é usuário "+
-				"deste host: a primeira fonte que responde encerra a consulta, então "+
-				"inverter a ordem troca quem decide",
+		return achadosDeDrift(self, f, mudancasDeVarios(f, "ca", "nss", "nss_servico", "hosts", "resolver", "host_trust"),
+			"esta família responde UMA pergunta: em quem, e em quê, este host "+
+				"confia para saber a verdade. Uma CA a mais faz ele aceitar "+
+				"certificado forjado para QUALQUER nome; a cadeia do nsswitch decide "+
+				"quem é usuário; um nome fixado no /etc/hosts e um resolvedor novo "+
+				"decidem para onde o tráfego vai antes de qualquer TLS acontecer",
 			[]string{
 				"confirme a âncora com quem administra a frota, por canal que não " +
 					"seja esta máquina",
@@ -792,4 +801,164 @@ func temUIDZero(lista string) bool {
 		}
 	}
 	return false
+}
+
+// driftSSHServidor — runbook §7.3.
+var driftSSHServidor = check.Check{
+	ID:       "persist.ssh_server_drift",
+	Ref:      "7.3",
+	Title:    "configuração do servidor SSH mudou desde o retrato anterior",
+	Group:    "persist",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Drift:    true,
+	FalsePositives: []string{
+		"endurecimento também é mudança: `PermitRootLogin yes → no` sai aqui do " +
+			"mesmo jeito que o contrário, e é o time fazendo a coisa certa. A " +
+			"DIREÇÃO está na evidência, e é ela que separa as duas",
+		"gerenciamento de configuração reescreve sshd_config a cada convergência: " +
+			"Ansible, Puppet e imagem de nuvem mexem nesse arquivo por desenho",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		return achadosDeDrift(self, f, mudancasDe(f, "ssh.servidor"),
+			"quatro campos deste arquivo decidem QUEM ENTRA, e todos são legítimos "+
+				"em alguma configuração do mundo — o que não é legítimo é a mudança. "+
+				"`AuthorizedKeysCommand` é o mais silencioso deles: é um programa que "+
+				"o sshd executa para decidir o acesso, e trocá-lo não toca em chave "+
+				"nenhuma",
+			[]string{
+				"`sshd -T` mostra a configuração EFETIVA, já com Match e Include " +
+					"resolvidos — o arquivo lido não é necessariamente o que vale",
+				"o ctime do arquivo data a escrita; o `systemctl status sshd` diz se " +
+					"o daemon já releu",
+			})
+	},
+}
+
+// driftSSHCliente — runbook §7.3.
+var driftSSHCliente = check.Check{
+	ID:       "persist.ssh_client_drift",
+	Ref:      "7.3",
+	Title:    "hook de execução do cliente SSH mudou desde o retrato anterior",
+	Group:    "persist",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Drift:    true,
+	FalsePositives: []string{
+		"`ProxyCommand` é a forma NORMAL de alcançar host atrás de bastião, e " +
+			"aparece no ~/.ssh/config de quase todo mundo que administra frota. " +
+			"`ProxyJump` moderno também vira ProxyCommand internamente",
+		"ferramenta de infraestrutura escreve nesses arquivos: cloud CLI, " +
+			"gerenciador de bastião e plugin de editor todos mexem em ~/.ssh/config",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		return achadosDeDrift(self, f, mudancasDe(f, "ssh.cliente_exec"),
+			"estas diretivas fazem o CLIENTE executar um programa a cada conexão, "+
+				"sem privilégio nenhum e sem tocar em serviço do sistema: é "+
+				"persistência de conta comum, no arquivo que o dono da conta edita",
+			[]string{
+				"leia o comando como se fosse malware, e confira quem é dono do arquivo",
+				"`ssh -G <host>` mostra a configuração efetiva do cliente para aquele destino",
+			})
+	},
+}
+
+// driftDoas — runbook §7.9.
+var driftDoas = check.Check{
+	ID:       "priv.doas_drift",
+	Ref:      "7.9",
+	Title:    "regra de doas mudou desde o retrato anterior",
+	Group:    "priv",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Drift:    true,
+	FalsePositives: []string{
+		"em Alpine e Arch o doas é o mecanismo NORMAL de escalada, e mexer no " +
+			"doas.conf é administração de rotina — o mesmo que mexer no sudoers " +
+			"em Debian",
+		"uma regra reescrita aparece como uma que SUMIU mais uma que SURGIU: a " +
+			"identidade é o texto, porque o número da linha anda",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		return achadosDeDrift(self, f, mudancasDe(f, "doas"),
+			"sem esta família, Alpine e Arch ficavam com metade da resposta: regra "+
+				"nova em sudoers virava drift e regra nova em doas.conf não, no host "+
+				"onde o doas é o mecanismo de escalada",
+			[]string{
+				"`doas -C /etc/doas.conf` valida a sintaxe e diz o que a regra concede",
+				"o que a regra concede está no priv.doas_nopasswd, no mesmo relatório",
+			})
+	},
+}
+
+// driftDefesa — runbook §34.
+//
+// A pergunta é uma só, e nenhum check estático a responde bem: UMA DEFESA FOI
+// DESLIGADA? SELinux permissivo e auditd parado não têm forma suspeita — metade
+// dos hosts do mundo sempre foi assim. É a transição que denuncia.
+var driftDefesa = check.Check{
+	ID:       "integrity.defense_drift",
+	Ref:      "34",
+	Title:    "um controle de segurança foi enfraquecido desde o retrato anterior",
+	Group:    "integrity",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Drift:    true,
+	FalsePositives: []string{
+		"depuração legítima desliga MAC temporariamente: `setenforce 0` para " +
+			"achar a causa de um AVC é procedimento normal, e quem o fez costuma " +
+			"lembrar. O que pesa é ninguém reconhecer a janela",
+		"atualização do pacote de política reescreve regra de audit em bloco, e " +
+			"a mudança aparece junto com a do pacote",
+		"o ENDURECIMENTO sai aqui do mesmo jeito: `permissive → enforcing` e " +
+			"uma regra de audit acrescentada são mudanças, e são as boas. A " +
+			"direção está na evidência",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		return achadosDeDrift(self, f, mudancasDeVarios(f, "mac", "audit"),
+			"desligar a auditoria é anti-forense por definição: o que ela deixa de "+
+				"gravar não volta. E `enforcing → permissive` não deixa rastro em "+
+				"arquivo de persistência nenhum",
+			[]string{
+				"`getenforce`/`aa-status` e `auditctl -s` dizem o que vale AGORA",
+				"cruze a janela com o log de autenticação: quem estava na máquina",
+			})
+	},
+}
+
+// driftProtecaoDoKernel — runbook §34.
+var driftProtecaoDoKernel = check.Check{
+	ID:       "kernel.protection_drift",
+	Ref:      "34",
+	Title:    "o endurecimento do kernel mudou desde o retrato anterior",
+	Group:    "kernel",
+	Mode:     check.ModeAuto,
+	Sources:  env.SourceLive | env.SourceImage,
+	Requires: env.CapFilesystem,
+	Drift:    true,
+	FalsePositives: []string{
+		"`kernel.protection_context` existe e é CONTEXTO de propósito: " +
+			"`ptrace_scope=0` e `lockdown=none` são o padrão de distribuição " +
+			"inteira, e acusá-los parados seria acusar o mundo. Aqui a pergunta é " +
+			"outra — a TRANSIÇÃO —, e ela não é o padrão de ninguém",
+		"boot com outro kernel muda vários destes de uma vez: o conjunto que " +
+			"cada versão expõe não é o mesmo. Mudança em BLOCO junto de kernel " +
+			"novo é atualização; isolada, não",
+	},
+	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
+		return achadosDeDrift(self, f, mudancasDe(f, "kernel.protecao"),
+			"`lockdown: integrity → none` e `module_sig_enforce: Y → N` não são o "+
+				"estado de fábrica de ninguém: são alguém desligando a trava, e "+
+				"nenhuma delas exige tocar num arquivo que a varredura de persistência "+
+				"olhe",
+			[]string{
+				"nenhum destes sobrevive a reboot sozinho: procure o que os REESCREVE " +
+					"— sysctl.d, cmdline do kernel, unit de boot",
+				"`sysctl -a` e /sys/kernel/security/lockdown dizem o que vale agora",
+			})
+	},
 }

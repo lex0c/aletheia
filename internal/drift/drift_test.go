@@ -268,6 +268,14 @@ func TestTodoCampoQueDecideEhExtraido(t *testing.T) {
 		ShadowLido:  true,
 		Processes:   []facts.Process{{PID: 1, Exe: "/usr/lib/systemd/systemd", UID: 0}},
 		Boot:        []facts.LinhaDeBoot{{Fonte: "/proc/cmdline", Valor: "ro quiet", Rodando: true}},
+		SSH:         facts.SSHConfig{Files: []string{"/etc/ssh/sshd_config"}, PermitRootLogin: "no"},
+		SSHClientExec: []facts.SSHClientExec{{File: "/root/.ssh/config",
+			Directive: "ProxyCommand", Ativacao: "Host *", Command: "/usr/bin/nc %h %p"}},
+		Doas:            []facts.DoasRule{{File: "/etc/doas.conf", Text: "permit nopass :wheel", Permit: true}},
+		MAC:             facts.MAC{Configurado: "enforcing", Ativo: "enforcing"},
+		Hosts:           []facts.HostEntry{{IP: "127.0.0.1", Names: []string{"localhost"}}},
+		Resolver:        facts.Resolver{File: "/etc/resolv.conf", Nameservers: []string{"1.1.1.1"}},
+		ConfiancaDeHost: []facts.ConfiancaDeHost{{Path: "/root/.rhosts", Conta: "root", Linhas: []string{"+"}, Curinga: true}},
 	}
 	for _, c := range classes {
 		// Pelo INDEXAR e não pelo Extrair: a invariante é sobre a entidade que
@@ -869,4 +877,49 @@ func classePorTipo(t *testing.T, tipo string) Classe {
 	}
 	t.Fatalf("classe %q não registrada", tipo)
 	return Classe{}
+}
+
+// A TABELA DE COBERTURA não pode apodrecer, nos dois sentidos.
+//
+// Ela existe para responder, seis meses depois, "por que X não tem drift?" — e
+// só serve se estiver certa. Família registrada fora da tabela é esquecimento
+// disfarçado de decisão; entrada na tabela sem família é decisão que já foi
+// tomada e ninguém apagou.
+func TestTabelaDeCoberturaBateComORegistro(t *testing.T) {
+	registrados := map[string]bool{}
+	for _, c := range classes {
+		registrados[c.Tipo] = true
+	}
+	naTabela := map[string]bool{}
+	for _, s := range Cobertas {
+		if s.Tipo == "" {
+			t.Errorf("%q está entre as COBERTAS e não nomeia família", s.Nome)
+			continue
+		}
+		if naTabela[s.Tipo] {
+			t.Errorf("%q aparece duas vezes na tabela", s.Tipo)
+		}
+		naTabela[s.Tipo] = true
+		if !registrados[s.Tipo] {
+			t.Errorf("a tabela diz que `%s` (%s) é coberta, e ela NÃO está "+
+				"registrada: ou a família foi removida, ou o nome mudou", s.Tipo, s.Nome)
+		}
+	}
+	for tipo := range registrados {
+		if !naTabela[tipo] {
+			t.Errorf("a família `%s` está registrada e NÃO aparece na tabela de "+
+				"cobertura: sem a linha, ninguém sabe daqui a seis meses se a "+
+				"superfície ao lado dela foi decisão ou esquecimento", tipo)
+		}
+	}
+	// Exclusão sem motivo é a mesma armadilha do `MaxWarn: 0`: parece decisão e
+	// não afirma nada.
+	for _, s := range NaoCobertas {
+		if s.Porque == "" {
+			t.Errorf("%q está entre as NÃO cobertas sem motivo escrito", s.Nome)
+		}
+		if s.Tipo != "" {
+			t.Errorf("%q está entre as NÃO cobertas e nomeia uma família", s.Nome)
+		}
+	}
 }

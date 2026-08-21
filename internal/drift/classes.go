@@ -59,6 +59,15 @@ var classes = []Classe{
 	confiancaDeCertificado,
 	moduloNSS,
 	servicoNSS,
+	servidorSSH,
+	hookDeClienteSSH,
+	regraDeDoas,
+	controleMAC,
+	controleAudit,
+	protecaoDoKernel,
+	nomeEmHosts,
+	resolvedor,
+	confiancaDeHost,
 	programaEmExecucao,
 }
 
@@ -899,4 +908,335 @@ func seLido(lido bool, v string) string {
 		return ""
 	}
 	return v
+}
+
+// # A SEGUNDA LEVA DE SUPERFÍCIES: o que uma defesa desligada tem em comum
+//
+// As famílias abaixo respondem a uma pergunta que o catálogo de checks responde
+// mal por construção: um controle DESLIGADO não tem forma suspeita nenhuma.
+//
+//	SELinux permissivo        metade dos hosts do mundo sempre foi assim
+//	auditd parado             idem
+//	PermitRootLogin yes       era o padrão até ontem em muita distribuição
+//	ptrace_scope 0            é o padrão de várias
+//
+// Nenhuma dessas leituras, parada, distingue "este host é assim" de "alguém fez
+// isto ontem". O check estático só pode dizer o estado, e por isso o
+// kernel.protection_context desta base é declaradamente CONTEXTO e não achado.
+// Com um retrato anterior, a TRANSIÇÃO deixa de ser contexto — e transição é
+// exatamente o que o drift tem para oferecer.
+
+// # sshd: a configuração do que atende a porta 22
+//
+// Quatro campos deste arquivo decidem quem entra, e todos os quatro são
+// legítimos em alguma configuração do mundo. O que não é legítimo é a mudança.
+var servidorSSH = Classe{
+	Tipo:     "ssh.servidor",
+	Titulo:   "configuração do servidor SSH",
+	Requires: env.CapFilesystem,
+	// A LISTA DE ARQUIVOS LIDOS é o sinal, e não a chave `ssh` — aquela cobre
+	// também os authorized_keys de cada home, que não têm nada a ver com a
+	// configuração do daemon. É a mesma lição das outras cinco famílias.
+	Incompleta: func(f *facts.Facts) string {
+		if len(f.SSH.Files) > 0 {
+			return ""
+		}
+		return "nenhum sshd_config foi lido: a configuração do servidor NÃO é " +
+			"conhecida deste lado"
+	},
+	Exaustiva: true,
+	Decide: map[string]bool{
+		"permit_root_login": true, "password_authentication": true,
+		"authorized_keys_file": true, "authorized_keys_command": true,
+		"authorized_keys_command_user": true, "ports": true,
+	},
+	Extrair: func(f *facts.Facts) []Entidade {
+		if len(f.SSH.Files) == 0 {
+			return nil
+		}
+		return []Entidade{{
+			ID: "sshd", Alvos: append([]string{"sshd", "sshd.service"}, f.SSH.Files...),
+			Campos: map[string]string{
+				"permit_root_login":       f.SSH.PermitRootLogin,
+				"password_authentication": f.SSH.PasswordAuthentication,
+				// O AuthorizedKeysCommand é um programa que o sshd EXECUTA para
+				// decidir quem entra: apontá-lo para outro caminho troca a
+				// autoridade sobre o acesso sem tocar em chave nenhuma.
+				"authorized_keys_file":         f.SSH.AuthorizedKeysFile,
+				"authorized_keys_command":      f.SSH.AuthorizedKeysCommand,
+				"authorized_keys_command_user": f.SSH.AuthorizedKeysCommandUser,
+				// SEQUÊNCIA: a ordem dos Port é a ordem em que o sshd os abre.
+				"ports": juntarSequencia(f.SSH.Ports),
+			},
+		}}
+	},
+}
+
+// # os hooks de execução do CLIENTE ssh
+//
+// `ProxyCommand`, `LocalCommand`, `Match exec` e `KnownHostsCommand` fazem o
+// cliente executar um programa — do usuário, sem privilégio nenhum, e em toda
+// conexão. É persistência de conta comum, e o coletor já a tinha: o que faltava
+// era dizer que ELA NÃO ESTAVA LÁ ONTEM.
+var hookDeClienteSSH = Classe{
+	Tipo:      "ssh.cliente_exec",
+	Titulo:    "hook de execução do cliente SSH",
+	Requires:  env.CapFilesystem,
+	Lacunas:   []string{"ssh"},
+	Exaustiva: true,
+	Decide:    map[string]bool{"comando": true},
+	Extrair: func(f *facts.Facts) []Entidade {
+		out := make([]Entidade, 0, len(f.SSHClientExec))
+		for i := range f.SSHClientExec {
+			h := &f.SSHClientExec[i]
+			// A LINHA NÃO ENTRA na identidade: ela anda quando alguém edita o
+			// arquivo acima. O que identifica é o arquivo, a diretiva e o
+			// PADRÃO que a ativa — e o comando é o estado, para que trocá-lo
+			// apareça como mudança e não como um par sumiu+surgiu.
+			out = append(out, Entidade{
+				ID:     h.File + "|" + h.Directive + "|" + h.Ativacao,
+				Alvos:  []string{h.File, h.User},
+				Campos: map[string]string{"comando": redact.Linha(h.Command)},
+			})
+		}
+		return out
+	},
+}
+
+// # doas
+//
+// A ferramenta já compara regra de sudo. Sem esta família, Alpine e Arch —
+// onde o doas é o mecanismo NORMAL de escalada — ficavam com metade da
+// resposta: regra nova em sudoers virava drift, regra nova em doas.conf não.
+var regraDeDoas = Classe{
+	Tipo:     "doas",
+	Titulo:   "regra de doas",
+	Requires: env.CapFilesystem,
+	// A QUARTA vez que a chave `users` cobria demais — ela junta passwd, shadow,
+	// group, sudoers e doas, e sem root o shadow suja todas. Usá-la aqui
+	// suprimia `surgiu` de regra de doas justamente em Alpine e Arch, onde o
+	// doas É o mecanismo de escalada.
+	Incompleta: func(f *facts.Facts) string {
+		if f.DoasLido {
+			return ""
+		}
+		return "as regras de doas não foram lidas: o conjunto NÃO é exaustivo deste lado"
+	},
+	Exaustiva: true,
+	// Mesma modelagem do sudoers: a identidade É o texto da regra, então não há
+	// campo que possa mudar sem virar outra entidade. O sinal é a presença.
+	Extrair: func(f *facts.Facts) []Entidade {
+		out := make([]Entidade, 0, len(f.Doas))
+		for i := range f.Doas {
+			d := &f.Doas[i]
+			out = append(out, Entidade{
+				ID:     d.File + "|" + strings.Join(strings.Fields(d.Text), " "),
+				Alvos:  []string{d.File, d.Identidade},
+				Campos: map[string]string{},
+			})
+		}
+		return out
+	},
+}
+
+// # MAC: SELinux e AppArmor
+//
+// `Configurado` é o que o arquivo pede; `Ativo` é o que o kernel está fazendo.
+// Os dois decidem, e por motivos diferentes: mudar o arquivo é persistência
+// (vale no próximo boot), mudar o runtime é agora.
+var controleMAC = Classe{
+	Tipo:      "mac",
+	Titulo:    "controle de acesso obrigatório (MAC)",
+	Requires:  env.CapFilesystem,
+	Lacunas:   []string{"mac"},
+	Exaustiva: true,
+	Decide:    map[string]bool{"configurado": true, "ativo": true},
+	// `Ativo` sai vazio quando o filesystem do MAC não está montado — e vazio
+	// ali é "não observado", não "desligado".
+	Observacional: map[string]bool{"ativo": true},
+	Extrair: func(f *facts.Facts) []Entidade {
+		if f.MAC.Configurado == "" && f.MAC.Ativo == "" {
+			return nil
+		}
+		return []Entidade{{
+			ID: "mac", Alvos: []string{"mac", "selinux", "apparmor"},
+			Campos: map[string]string{
+				"configurado": f.MAC.Configurado,
+				"ativo":       f.MAC.Ativo,
+			},
+		}}
+	},
+}
+
+// # auditoria
+//
+// Desligar o auditd é anti-forense por definição: o que ele deixa de gravar não
+// volta. E a regra que COBRE EXEC é a que decide se a execução de um binário
+// entra no log — tirá-la é apagar o rastro antes de ele existir.
+var controleAudit = Classe{
+	Tipo:      "audit",
+	Titulo:    "auditoria do kernel (auditd)",
+	Requires:  env.CapFilesystem,
+	Lacunas:   []string{"audit"},
+	Exaustiva: true,
+	Decide: map[string]bool{
+		"instalada": true, "desligada": true, "cobre_exec": true, "regras": true,
+	},
+	Extrair: func(f *facts.Facts) []Entidade {
+		var regras []string
+		for _, r := range f.Audit.Regras {
+			regras = append(regras, strings.Join(strings.Fields(r.Texto), " "))
+		}
+		return []Entidade{{
+			ID: "audit", Alvos: []string{"audit", "auditd", "auditd.service"},
+			Campos: map[string]string{
+				"instalada":  boolTxt(f.Audit.Instalada),
+				"desligada":  boolTxt(f.Audit.Desligada),
+				"cobre_exec": boolTxt(f.Audit.CobreExec),
+				"regras":     juntarConjunto(regras),
+			},
+		}}
+	},
+}
+
+// # o endurecimento do kernel
+//
+// O kernel.protection_context desta base é declaradamente CONTEXTO e não
+// achado, e a razão está escrita lá: `ptrace_scope=0` e `lockdown=none` são o
+// padrão de distribuição inteira, então acusá-los seria acusar o mundo.
+//
+// A TRANSIÇÃO é outra coisa. `lockdown: integrity -> none` e
+// `module_sig_enforce: Y -> N` não são o estado de fábrica de ninguém: são
+// alguém desligando a trava, e nenhuma delas exige tocar num arquivo que a
+// varredura de persistência olhe.
+var protecaoDoKernel = Classe{
+	Tipo:     "kernel.protecao",
+	Titulo:   "endurecimento do kernel",
+	Requires: env.CapProcfs,
+	Lacunas:  []string{"taint"},
+	// O coletor desta superfície é VIVO: em modo imagem ele não roda, e os dez
+	// campos vêm vazios dos dois lados. Sem esta pergunta, a cobertura diria
+	// "comparada sem restrição" sobre uma família que ninguém coletou — que é a
+	// forma mais educada de mentir que existe neste relatório.
+	Incompleta: func(f *facts.Facts) string {
+		if f.Protecao.Lido() {
+			return ""
+		}
+		return "nada do endurecimento do kernel pôde ser lido deste lado (o coletor " +
+			"é vivo: em modo imagem ele não roda)"
+	},
+	Exaustiva: true,
+	Decide: map[string]bool{
+		"lockdown": true, "module_sig_enforce": true, "modules_disabled": true,
+		"secure_boot": true, "ima": true, "unprivileged_bpf_disabled": true,
+		"ptrace_scope": true, "kptr_restrict": true, "dmesg_restrict": true,
+	},
+	// TODOS observacionais: `leOuRegistra` devolve vazio tanto para "o arquivo
+	// não existe neste kernel" quanto para "não deu para ler", e vazio de um
+	// lado só nunca é uma mudança de política.
+	Observacional: map[string]bool{
+		"lockdown": true, "module_sig_enforce": true, "modules_disabled": true,
+		"secure_boot": true, "ima": true, "unprivileged_bpf_disabled": true,
+		"ptrace_scope": true, "kptr_restrict": true, "dmesg_restrict": true,
+	},
+	Extrair: func(f *facts.Facts) []Entidade {
+		p := f.Protecao
+		return []Entidade{{
+			ID: "kernel", Alvos: []string{"kernel"},
+			Campos: map[string]string{
+				"lockdown":                  p.Lockdown,
+				"module_sig_enforce":        p.SigEnforce,
+				"modules_disabled":          p.ModulesDisabled,
+				"secure_boot":               p.SecureBoot,
+				"ima":                       boolTxt(p.IMA),
+				"unprivileged_bpf_disabled": p.UnprivBPF,
+				"ptrace_scope":              p.PtraceScope,
+				"kptr_restrict":             p.KptrRestrict,
+				"dmesg_restrict":            p.DmesgRestrict,
+			},
+		}}
+	},
+}
+
+// # para onde os nomes resolvem
+//
+// A entidade é o NOME, e não a linha: é assim que
+//
+//	api.company.com: (ausente) -> 10.10.10.66
+//
+// aparece como MUDANÇA de um nome, e não como uma linha que surgiu. Junto de
+// uma CA nova, os dois valem muito mais do que qualquer um sozinho — e é para
+// isso que a correlação por alvo existe.
+var nomeEmHosts = Classe{
+	Tipo:      "hosts",
+	Titulo:    "nome fixado em /etc/hosts",
+	Requires:  env.CapFilesystem,
+	Lacunas:   []string{"trust"},
+	Exaustiva: true,
+	Decide:    map[string]bool{"ip": true},
+	Extrair: func(f *facts.Facts) []Entidade {
+		var out []Entidade
+		for i := range f.Hosts {
+			h := &f.Hosts[i]
+			for _, nome := range h.Names {
+				out = append(out, Entidade{
+					ID: nome, Alvos: []string{nome, h.IP},
+					Campos: map[string]string{"ip": h.IP},
+				})
+			}
+		}
+		return out
+	},
+}
+
+// O resolvedor é SEQUÊNCIA: o primeiro servidor que responde encerra a
+// consulta, então acrescentar um na frente é assumir a resolução do host.
+var resolvedor = Classe{
+	Tipo:      "resolver",
+	Titulo:    "resolvedor de DNS",
+	Requires:  env.CapFilesystem,
+	Lacunas:   []string{"trust"},
+	Exaustiva: true,
+	Decide:    map[string]bool{"nameservers": true},
+	Extrair: func(f *facts.Facts) []Entidade {
+		if f.Resolver.File == "" && len(f.Resolver.Nameservers) == 0 {
+			return nil
+		}
+		return []Entidade{{
+			ID: nz(f.Resolver.File, "/etc/resolv.conf"), Alvos: []string{f.Resolver.File},
+			Campos: map[string]string{"nameservers": juntarSequencia(f.Resolver.Nameservers)},
+		}}
+	},
+}
+
+// `.rhosts` e `hosts.equiv` concedem login SEM senha a partir de outro host, e
+// um `+` neles confia em qualquer um. É a superfície mais antiga desta lista.
+var confiancaDeHost = Classe{
+	Tipo:      "host_trust",
+	Titulo:    "confiança entre hosts (rhosts/hosts.equiv)",
+	Requires:  env.CapFilesystem,
+	Lacunas:   []string{"trust"},
+	Exaustiva: true,
+	Decide:    map[string]bool{"entradas": true, "curinga": true},
+	Extrair: func(f *facts.Facts) []Entidade {
+		out := make([]Entidade, 0, len(f.ConfiancaDeHost))
+		for i := range f.ConfiancaDeHost {
+			c := &f.ConfiancaDeHost[i]
+			out = append(out, Entidade{
+				ID: c.Path, Alvos: []string{c.Path, c.Conta},
+				Campos: map[string]string{
+					"entradas": juntarConjunto(c.Linhas),
+					"curinga":  boolTxt(c.Curinga),
+				},
+			})
+		}
+		return out
+	},
+}
+
+func nz(s, padrao string) string {
+	if s == "" {
+		return padrao
+	}
+	return s
 }

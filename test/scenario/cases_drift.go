@@ -264,3 +264,138 @@ func init() {
 		MaxWarn: 12,
 	})
 }
+
+// DR5: as superfícies onde uma DEFESA é desligada.
+//
+// Nenhuma delas tem forma suspeita parada — SELinux permissivo, auditd
+// desligado, `PermitRootLogin yes` e `ptrace_scope 0` são o estado de fábrica
+// de alguma distribuição, e acusá-los seria acusar o mundo. É por isso que o
+// `kernel.protection_context` desta base é declaradamente contexto e não
+// achado. A TRANSIÇÃO é outra coisa, e é a única que o drift oferece.
+//
+// O cenário roda sobre uma RAIZ ARTIFICIAL montada dentro do contêiner
+// (`--root /alvo`), e não sobre o /proc do próprio contêiner. Não é atalho: é
+// a única forma honesta de plantar `/sys/kernel/security/lockdown` e
+// `/sys/fs/selinux/enforce`, que num contêiner são do HOST e não se mexem — e
+// mexer neles seria alterar a máquina de quem roda a suíte.
+const driftDeDefesa = `
+mkdir -p /alvo/etc/ssh /alvo/etc/selinux /alvo/etc/audit/rules.d /alvo/root/.ssh \
+         /alvo/sys/kernel/security /alvo/sys/module/module/parameters \
+         /alvo/proc/sys/kernel /alvo/etc
+
+printf 'PermitRootLogin no\nPasswordAuthentication no\nPort 22\n' > /alvo/etc/ssh/sshd_config
+printf 'SELINUX=enforcing\n' > /alvo/etc/selinux/config
+printf '\-a always,exit -F arch=b64 -S execve -k exec\n' > /alvo/etc/audit/rules.d/exec.rules
+# o formato do kernel é a lista com o ATIVO entre colchetes, e não a palavra
+# solta: ler o arquivo é ler aquilo, e plantar outra coisa testaria o parser
+# contra uma realidade que não existe
+printf 'none [integrity] confidentiality\n' > /alvo/sys/kernel/security/lockdown
+printf 'Y\n' > /alvo/sys/module/module/parameters/sig_enforce
+printf '2\n' > /alvo/proc/sys/kernel/yama/ptrace_scope 2>/dev/null || \
+    { mkdir -p /alvo/proc/sys/kernel/yama; printf '2\n' > /alvo/proc/sys/kernel/yama/ptrace_scope; }
+printf 'permit nopass :wheel\n' > /alvo/etc/doas.conf
+printf 'Host *\n    ProxyCommand /usr/bin/nc %%h %%p\n' > /alvo/root/.ssh/config
+printf 'nameserver 1.1.1.1\n' > /alvo/etc/resolv.conf
+printf '127.0.0.1 localhost\n' > /alvo/etc/hosts
+# o ~/.ssh/config só é procurado nos HOMES que o /etc/passwd declara: sem ele a
+# raiz artificial não tem de onde tirar a lista de contas
+printf 'root:x:0:0:root:/root:/bin/sh\n' > /alvo/etc/passwd
+
+/aletheia collect --root /alvo --out /tmp/antes.json >/dev/null 2>&1
+
+# --- daqui para baixo, uma defesa de cada vez ---
+
+# 1. o servidor SSH passa a aceitar root e senha
+printf 'PermitRootLogin yes\nPasswordAuthentication yes\nPort 22\nPort 2222\n' > /alvo/etc/ssh/sshd_config
+
+# 2. o MAC sai de enforcing na CONFIGURAÇÃO — vale no próximo boot
+printf 'SELINUX=permissive\n' > /alvo/etc/selinux/config
+
+# 3. a regra que cobre execve some: o rastro deixa de existir antes de nascer
+rm -f /alvo/etc/audit/rules.d/exec.rules
+
+# 4. a trava do kernel abre
+printf '[none] integrity confidentiality\n' > /alvo/sys/kernel/security/lockdown
+printf 'N\n' > /alvo/sys/module/module/parameters/sig_enforce
+printf '0\n' > /alvo/proc/sys/kernel/yama/ptrace_scope
+
+# 5. regra de doas nova, no host onde o doas É o mecanismo de escalada
+printf 'permit nopass :wheel\npermit nopass deploy\n' > /alvo/etc/doas.conf
+
+# 6. o cliente SSH passa a executar outra coisa em toda conexão
+printf 'Host *\n    ProxyCommand /tmp/.p %%h %%p\n' > /alvo/root/.ssh/config
+
+# 7. e a resolução: um nome fixado e um resolvedor na frente
+printf 'nameserver 10.10.10.66\nnameserver 1.1.1.1\n' > /alvo/etc/resolv.conf
+printf '127.0.0.1 localhost\n10.10.10.66 api.company.com\n' > /alvo/etc/hosts
+sleep 0.2`
+
+func init() {
+	Register(Scenario{
+		ID:     "DR5-drift-de-defesa-desligada",
+		Desc:   "sete controles enfraquecidos entre dois retratos, nenhum suspeito parado",
+		Images: minimal,
+		Plant:  driftDeDefesa,
+		Cmd:    "drift",
+		Args:   []string{"-vv", "--root", "/alvo", "/tmp/antes.json"},
+		Expect: []Expect{
+			{ID: "persist.ssh_server_drift", Evidence: "permit_root_login"},
+			{ID: "persist.ssh_server_drift", Evidence: "password_authentication"},
+			{ID: "persist.ssh_client_drift", Evidence: "/tmp/.p"},
+			{ID: "priv.doas_drift", Evidence: "deploy"},
+			{ID: "integrity.defense_drift", Evidence: "permissive"},
+			{ID: "integrity.defense_drift", Evidence: "cobre_exec"},
+			{ID: "integrity.trust_drift", Evidence: "api.company.com"},
+			{ID: "integrity.trust_drift", Evidence: "10.10.10.66"},
+		},
+		// A DIREÇÃO precisa estar na evidência: `no -> yes` e `yes -> no` são a
+		// mesma família e conclusões opostas, e é o par antes/depois que separa
+		// enfraquecimento de endurecimento.
+		ExpectOutput: []string{"no   →   yes"},
+		Exit:         1,
+		// MEDIDO. O teto existe para que uma família nova ruidosa falhe aqui, e
+		// não no host de alguém.
+		//
+		// O endurecimento do kernel NÃO entra neste cenário: o coletor dele é
+		// vivo e não roda em modo imagem. Ele tem cenário próprio, de VM, que é
+		// onde /proc/sys é do guest e pode ser mexido sem tocar na máquina de
+		// quem roda a suíte.
+		MaxWarn: 10,
+	})
+}
+
+// DR6: o endurecimento do kernel, no único lugar onde ele pode ser medido.
+//
+// Um contêiner compartilha /proc/sys com o HOST: mexer ali para testar seria
+// alterar a máquina de quem roda a suíte, e o modo imagem não ajuda porque o
+// coletor desta superfície é vivo. Sobra a microVM, onde o /proc/sys é do
+// guest, é descartável, e o guest é root.
+//
+// O que se prova aqui é a diferença entre CONTEXTO e ACHADO. `ptrace_scope=0` é
+// o padrão de distribuição inteira, e o `kernel.protection_context` desta base
+// o reporta como contexto de propósito. A TRANSIÇÃO de 1 para 0 não é o padrão
+// de ninguém: é alguém desligando a trava que impede um processo de ler a
+// memória de outro.
+func init() {
+	Register(Scenario{
+		ID:   "DR6-drift-de-endurecimento-do-kernel",
+		Desc: "sysctl de proteção afrouxado entre dois retratos, num kernel de verdade",
+		Mode: VM,
+		Setup: `
+cat /proc/sys/kernel/yama/ptrace_scope > /tmp/antes.txt 2>/dev/null || echo indisponivel > /tmp/antes.txt
+/aletheia collect --out /tmp/antes.json
+echo 0 > /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || true
+echo 0 > /proc/sys/kernel/dmesg_restrict 2>/dev/null || true`,
+		// O /init do guest roda `scan`, então a comparação entra por --drift —
+		// que é a mesma máquina do comando `drift`, no caminho do scan.
+		Args: []string{"--drift", "/tmp/antes.json", "-vv"},
+		Expect: []Expect{
+			{ID: "kernel.protection_drift", Sev: "WARN", Subject: "kernel"},
+			{ID: "kernel.protection_drift", Evidence: "ptrace_scope"},
+		},
+		ExpectOutput: []string{"mudou ENTRE"},
+		Exit:         -1,
+		// MEDIDO: dois, um por sysctl afrouxado.
+		MaxWarn: 2,
+	})
+}

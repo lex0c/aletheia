@@ -172,6 +172,11 @@ import (
 //	   incluir os blocos de ação (`[notfound=return]`), que decidem se a próxima
 //	   fonte é consultada. Num dump v10 a cadeia vem sem eles, e duas
 //	   configurações de comportamento diferente seriam o mesmo fato.
+//	13 DoasLido  a quarta vez que a chave `users` cobria demais. A família de
+//	   regras de doas dependia dela, e sem root o shadow é sempre ilegível — o
+//	   que suprimia `surgiu` de regra de doas em Alpine e Arch, onde o doas É o
+//	   mecanismo de escalada. Falso num dump v12 recusa a comparação da família,
+//	   que é o lado seguro.
 //	12 NSSService.Cadeia de novo, e de novo só a semântica: os blocos de ação
 //	   passaram a ser resolvidos para a TABELA EFETIVA e colados na fonte a que
 //	   se aplicam, com o que É PADRÃO omitido.
@@ -182,7 +187,7 @@ import (
 //	   faziam reescrita de configuração virar drift. Num dump v11 a cadeia traz
 //	   os blocos crus, e compará-la com uma cadeia v12 acusaria mudança onde
 //	   houve reformatação.
-const SchemaVersion = 12
+const SchemaVersion = 13
 
 // Facts é o retrato do host.
 type Facts struct {
@@ -270,6 +275,10 @@ type Facts struct {
 	// pergunta pela SUA fonte.
 	PasswdLido bool `json:"passwd_read,omitempty"`
 	GroupLido  bool `json:"group_read,omitempty"`
+	// DoasLido é o mesmo para /etc/doas.conf e /etc/doas.d — em Alpine e Arch o
+	// doas É o mecanismo de escalada, e a família dele não pode depender da
+	// chave `users` pela mesma razão que as outras três não podem.
+	DoasLido bool `json:"doas_read,omitempty"`
 	// SudoersLido é falso quando QUALQUER arquivo da árvore de include não pôde
 	// ser lido: aí a lista de regras deixa de ser exaustiva, e comparar dois
 	// retratos com conjuntos diferentes inventa "regra removida".

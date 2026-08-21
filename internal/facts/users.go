@@ -406,11 +406,15 @@ func resolverIncludeSudoers(dir, alvo string) string {
 // options inclui `nopass` (sem senha), `keepenv`, `persist`, `setenv {...}`.
 // Uma linha de continuação termina em `\`; doas as junta antes de avaliar.
 func collectDoas(f *Facts, e *env.Env) {
+	// Otimismo com desmentido, como no sudoers: qualquer falha no caminho
+	// desmarca, e o conjunto deixa de ser exaustivo.
+	f.DoasLido = true
 	arquivos := []string{"/etc/doas.conf"}
 	nomes, errD := e.ReadDirNamesErr("/etc/doas.d")
 	if env.EhLacuna(errD) {
 		f.denyPersist("users", "/etc/doas.d não pôde ser listado: as regras de doas "+
 			"(escalada sem senha) NÃO foram avaliadas")
+		f.DoasLido = false
 	}
 	for _, n := range nomes {
 		if strings.HasSuffix(n, ".conf") {

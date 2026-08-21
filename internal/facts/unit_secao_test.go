@@ -155,8 +155,6 @@ func TestUnitSecoesProprias(t *testing.T) {
 func TestUnitSecaoDoProprioTipoContinuaValendo(t *testing.T) {
 	casos := []struct{ arquivo, tipo, conteudo string }{
 		{"/x.socket", "socket", "[Socket]\nListenStream=1234\nExecStartPre=/tmp/.i\n"},
-		{"/x.mount", "mount", "[Mount]\nExecStartPre=/tmp/.i\n"},
-		{"/x.swap", "swap", "[Swap]\nExecStartPre=/tmp/.i\n"},
 	}
 	for _, c := range casos {
 		raiz := t.TempDir()
@@ -198,5 +196,41 @@ func TestUnitDropinHerdaTipoDoDiretorio(t *testing.T) {
 		"system", kindOf("agent.service"), false)
 	if len(u.Exec) != 1 || u.Exec[0].Cmd != "/tmp/.implant" {
 		t.Errorf("drop-in de .service não pode aceitar reset em [Socket]: %+v", u.Exec)
+	}
+}
+
+// .mount e .swap NÃO têm comandos de execução, e o teste anterior travava o
+// contrário.
+//
+// Eles compartilham o ExecContext — Environment, RootDirectory, BindPaths,
+// ExecSearchPath —, mas quem monta é o systemd, não um ExecStart. Medido contra
+// o systemd-analyze: `ExecStartPre` numa .mount sai como "Unknown key
+// 'ExecStartPre' in section [Mount], ignoring". Aceitá-lo fazia a ferramenta
+// afirmar execução de um caminho que o alvo descarta.
+//
+// O caso anterior exigia o oposto: eu escrevi um teste que cimentava um falso
+// positivo, ao generalizar "os quatro tipos têm contexto de execução" para "os
+// quatro aceitam Exec*".
+func TestMountSwapNaoTemComandoDeExec(t *testing.T) {
+	for _, c := range []struct{ arquivo, tipo, secao string }{
+		{"/x.mount", "mount", "Mount"},
+		{"/x.swap", "swap", "Swap"},
+	} {
+		raiz := t.TempDir()
+		os.WriteFile(filepath.Join(raiz, filepath.Base(c.arquivo)),
+			[]byte("["+c.secao+"]\nExecStartPre=/tmp/.i\nExecSearchPath=/tmp/bin\n"), 0o644)
+		e := env.Probe(env.Options{Root: raiz, Version: "test"})
+		u := parseUnitFile(&Facts{}, e, c.arquivo, "system", c.tipo, false)
+		e.Close()
+
+		if len(u.Exec) != 0 {
+			t.Errorf("[%s] comando de exec não existe neste tipo: %+v", c.tipo, u.Exec)
+		}
+		// Mas o CONTEXTO continua valendo, e ExecSearchPath é contexto apesar do
+		// prefixo — cortar por HasPrefix("Exec") cegaria a resolução de nome nu.
+		if len(u.ExecSearchPath) != 1 {
+			t.Errorf("[%s] ExecSearchPath é ExecContext e tem de valer: %+v",
+				c.tipo, u.ExecSearchPath)
+		}
 	}
 }

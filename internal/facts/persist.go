@@ -798,7 +798,7 @@ func coletarDirDeUnits(f *Facts, e *env.Env, dir, scope string, vendor bool, uni
 						truncated = true
 						break
 					}
-					u := parseUnitFile(f, e, full+"/"+c, scope, kindOf(target), vendor)
+					u := parseUnitFile(f, e, full+"/"+c, scope, kindOfDropin(target), vendor)
 					u.Name = target
 					u.DropInFor = target
 					u.Kind = kindOf(target)
@@ -845,6 +845,48 @@ func isUnitName(n string) bool {
 		}
 	}
 	return false
+}
+
+// continuaNaProxima diz se a linha emenda na seguinte, contando a PARIDADE das
+// barras finais.
+//
+// O systemd percorre a linha mantendo estado de escape: uma barra escapa a
+// próxima, então `\\` é uma barra literal e NÃO continua. Testar só o último
+// caractere errava metade dos casos:
+//
+//	foo\      ímpar  -> continua
+//	foo\\    par     -> NÃO continua
+//
+// A diferença é um bypass: `Description=foo\\` seguido de `[Service]` faz o
+// systemd ler a seção normalmente, e fazia esta ferramenta engolir o cabeçalho
+// dentro da Description — o ExecStart caía numa seção que nunca abriu, e sumia.
+// Medido contra o systemd-analyze: com uma barra ele reclama "Unknown key
+// 'ExecStart' in section [Unit]"; com duas, verifica limpo.
+func continuaNaProxima(ln string) bool {
+	n := 0
+	for i := len(ln) - 1; i >= 0 && ln[i] == '\\'; i-- {
+		n++
+	}
+	return n%2 == 1
+}
+
+func kindOfDropin(target string) string {
+	if strings.Contains(target, ".") {
+		return kindOf(target)
+	}
+	if tiposDeUnit[target] {
+		return target
+	}
+	return ""
+}
+
+// tiposDeUnit é a lista fechada do systemd.unit(5). Fechada de propósito: um
+// diretório `qualquercoisa.d` que NÃO seja tipo não é drop-in type-wide, e
+// tratá-lo como tal daria um tipo inventado a um arquivo qualquer.
+var tiposDeUnit = map[string]bool{
+	"service": true, "socket": true, "target": true, "device": true,
+	"mount": true, "automount": true, "swap": true, "path": true,
+	"timer": true, "slice": true, "scope": true,
 }
 
 func kindOf(n string) string {
@@ -1408,6 +1450,14 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope, tipo string, vendor bool) 
 		return u
 	}
 
+	// O BOM é comido ANTES de qualquer coisa, como o systemd faz (`bom_seen`
+	// no config_parse). O TrimSpace do Go NÃO remove U+FEFF — desde o Unicode
+	// 4.0 ele é caractere de formatação, não espaço —, então um arquivo salvo
+	// com BOM tinha a primeira linha começando por \uFEFF e o `[Service]` não
+	// era reconhecido como seção. Medido: systemd-analyze verifica limpo e
+	// executa; esta ferramenta saía calada.
+	texto := strings.TrimPrefix(string(b), "\ufeff")
+
 	var pending string
 	// A SEÇÃO decide se a diretiva vale, e ignorá-la era um bypass de três
 	// linhas.
@@ -1432,12 +1482,12 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope, tipo string, vendor bool) 
 	// seção nenhuma também não — arquivo de unit sem cabeçalho é erro para o
 	// systemd, e honrar essas linhas seria aceitar o que o alvo recusa.
 	secao := ""
-	for _, raw := range strings.Split(string(b), "\n") {
+	for _, raw := range strings.Split(texto, "\n") {
 		ln := strings.TrimSpace(raw)
 		if pending != "" {
 			ln, pending = pending+" "+ln, ""
 		}
-		if strings.HasSuffix(ln, `\`) {
+		if continuaNaProxima(ln) {
 			pending = strings.TrimSpace(strings.TrimSuffix(ln, `\`))
 			continue
 		}
@@ -1713,10 +1763,21 @@ func diretivaValeNaSecao(tipo, secao, k string) bool {
 		return false
 	}
 	switch secao {
-	case "Service", "Mount", "Swap":
-		return ehDiretivaDeExecucao(k)
+	case "Service":
+		return ehComandoDeExec(k) || ehContextoDeExecucao(k) || k == "Restart"
 	case "Socket":
-		return ehDiretivaDeExecucao(k) || strings.HasPrefix(k, "Listen")
+		return ehComandoDeExec(k) || ehContextoDeExecucao(k) || strings.HasPrefix(k, "Listen")
+	case "Mount", "Swap":
+		// SÓ o contexto. Mount e Swap compartilham ExecContext — Environment,
+		// RootDirectory, User, BindPaths, ExecSearchPath — e NÃO têm comandos
+		// próprios: quem monta é o systemd, não um ExecStart. Medido contra o
+		// systemd-analyze: `ExecStartPre` numa .mount sai como "Unknown key
+		// 'ExecStartPre' in section [Mount], ignoring".
+		//
+		// Aceitá-lo fazia esta ferramenta afirmar execução de um caminho que o
+		// systemd descarta — falso positivo —, e o teste que eu tinha escrito
+		// travava justamente esse comportamento errado.
+		return ehContextoDeExecucao(k)
 	case "Timer":
 		switch k {
 		case "OnCalendar", "OnUnitActiveSec", "OnUnitInactiveSec",
@@ -1735,14 +1796,27 @@ func diretivaValeNaSecao(tipo, secao, k string) bool {
 	return false
 }
 
-// ehDiretivaDeExecucao são as opções do contexto de execução que este parser lê.
-func ehDiretivaDeExecucao(k string) bool {
+// ehContextoDeExecucao são as opções de ExecContext que este parser lê. Elas
+// valem em Service, Socket, Mount e Swap — os quatro tipos que rodam código com
+// um contexto configurável.
+//
+// ExecSearchPath mora AQUI, e não entre os comandos, apesar do prefixo: ele
+// descreve onde procurar o programa, não um programa a executar. Cortar por
+// `HasPrefix(k,"Exec")` o mandaria para o lado errado e cegaria a resolução de
+// nome nu em .mount e .swap.
+func ehContextoDeExecucao(k string) bool {
 	switch k {
-	case "ExecSearchPath", "RootDirectory", "RootImage", "Restart", "User",
+	case "ExecSearchPath", "RootDirectory", "RootImage", "User",
 		"Environment", "EnvironmentFile", "BindPaths", "BindReadOnlyPaths":
 		return true
 	}
-	return strings.HasPrefix(k, "Exec")
+	return false
+}
+
+// ehComandoDeExec são as diretivas que mandam EXECUTAR alguma coisa. Só Service
+// e Socket as têm.
+func ehComandoDeExec(k string) bool {
+	return strings.HasPrefix(k, "Exec") && !ehContextoDeExecucao(k)
 }
 
 // resolverComandosUnit resolve os Exec*= de nome NU contra o ExecSearchPath da

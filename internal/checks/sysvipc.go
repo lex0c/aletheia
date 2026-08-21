@@ -80,9 +80,20 @@ var sysvShmChannel = check.Check{
 				}
 				ev = append(ev, "criado pelo processo "+s.Criador+" (pid "+
 					strconv.Itoa(s.CPID)+")"+dr)
+			} else if s.PIDReciclado {
+				// O número existe e é de OUTRO processo. Dizer "criado por X"
+				// aqui seria atribuir o segmento a quem nasceu depois dele.
+				ev = append(ev, "o criador (pid "+strconv.Itoa(s.CPID)+") já saiu e o "+
+					"PID foi RECICLADO: o processo que hoje tem esse número começou "+
+					"depois do segmento, e não é o criador")
 			} else {
 				ev = append(ev, "o criador (pid "+strconv.Itoa(s.CPID)+") já saiu; "+
 					"o segmento sobreviveu a ele")
+			}
+			if s.CriadorNaoConfirmado && !s.PIDReciclado {
+				ev = append(ev, "a autoria NÃO pôde ser confirmada pela data (sem hora "+
+					"de início do processo ou sem ctime do segmento): o perfil de daemon "+
+					"de rede não é afirmado sobre atribuição não provada")
 			}
 			if s.NAttch > 0 {
 				ev = append(ev, strconv.Itoa(s.NAttch)+" processo(s) anexado(s) agora")

@@ -3,6 +3,7 @@ package facts
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/lex0c/aletheia/internal/env"
 )
@@ -33,6 +34,15 @@ type SysVShmSeg struct {
 	// permissão, mas o CANAL continua sendo criado por um daemon de rede (o
 	// sshd), e é isso que não muda.
 	CriadorEmRede bool `json:"creator_networked,omitempty"`
+	// CriadoEm é o ctime do segmento (epoch). É a âncora temporal que prova, ou
+	// desmente, que o processo de CPID é mesmo o criador.
+	CriadoEm int `json:"created_at,omitempty"`
+	// PIDReciclado marca que existe processo com o CPID e ele começou DEPOIS do
+	// segmento: o número foi reaproveitado, e aquele processo não é o criador.
+	PIDReciclado bool `json:"pid_recycled,omitempty"`
+	// CriadorNaoConfirmado é o caso honesto do meio — não deu para comparar as
+	// datas. A atribuição não é usada para subir severidade.
+	CriadorNaoConfirmado bool `json:"creator_unconfirmed,omitempty"`
 }
 
 // collectSysVShm lê /proc/sysvipc/shm e correlaciona o criador (cpid) com a
@@ -75,10 +85,37 @@ func collectSysVShm(f *Facts, e *env.Env) {
 			NAttch: atoiSeg(fs[6]),
 			UID:    atoiSeg(fs[7]),
 		}
+		// O ctime do segmento é a coluna 14 do /proc/sysvipc/shm, e é ele que
+		// separa o criador de verdade de um PID reciclado.
+		if len(fs) >= 14 {
+			seg.CriadoEm = atoiSeg(fs[13])
+		}
+		// PID RECICLADO NÃO É O CRIADOR, e casar por número era suficiente para
+		// inventar um.
+		//
+		// O próprio comentário deste coletor já dizia que o segmento SOBREVIVE à
+		// morte do criador. O PID some junto, e o kernel o reaproveita: horas
+		// depois, um processo novo com o mesmo número abre um socket de escuta e
+		// o segmento órfão de 3 MiB vira "canal do Ebury" — CRITICAL, direto,
+		// sem atacante nenhum. Em servidor com uptime longo isso é questão de
+		// tempo, e CRITICAL falso é o que ensina o operador a ignorar o próximo.
+		//
+		// A prova é temporal: processo que começou DEPOIS do segmento não pode
+		// tê-lo criado. Onde não dá para comparar — sem ctime ou sem hora de
+		// início — a atribuição fica NÃO CONFIRMADA, e o check não a usa para
+		// subir a severidade. Preferir o aviso ao crítico inventado.
 		if p := f.ProcessByPID(seg.CPID); p != nil {
 			seg.Criador = p.Comm
+			switch depois, ok := processoComecouDepois(p, seg.CriadoEm); {
+			case !ok:
+				seg.CriadorNaoConfirmado = true
+			case depois:
+				seg.CriadorNaoConfirmado = true
+				seg.Criador = ""
+				seg.PIDReciclado = true
+			}
 		}
-		seg.CriadorEmRede = emRede[seg.CPID]
+		seg.CriadorEmRede = emRede[seg.CPID] && !seg.CriadorNaoConfirmado
 		f.SysVShm = append(f.SysVShm, seg)
 	}
 
@@ -124,3 +161,23 @@ func atou64Seg(s string) uint64 { n, _ := strconv.ParseUint(s, 10, 64); return n
 // atoiOctal lê a coluna de permissão, que o kernel imprime em OCTAL (%o): "666"
 // é 0666. Interpretar como decimal daria 666 e quebraria toda a lógica de bit.
 func atoiOctal(s string) int { n, _ := strconv.ParseInt(s, 8, 32); return int(n) }
+
+// processoComecouDepois diz se o processo começou DEPOIS do instante dado.
+//
+// O segundo retorno é "deu para comparar": sem hora de início do processo ou
+// sem ctime do segmento não há prova em direção nenhuma, e inventar uma seria
+// pior que não ter.
+//
+// A granularidade dos dois é o SEGUNDO, e a comparação é estrita de propósito:
+// um processo que começou em t=10,9 e criou o segmento em t=11,0 aparece como
+// (10, 11) e não pode ser acusado de reciclagem por arredondamento.
+func processoComecouDepois(p *Process, criadoEm int) (bool, bool) {
+	if p.StartUTC == "" || criadoEm <= 0 {
+		return false, false
+	}
+	t, err := time.Parse(time.RFC3339, p.StartUTC)
+	if err != nil {
+		return false, false
+	}
+	return t.Unix() > int64(criadoEm), true
+}

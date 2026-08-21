@@ -322,9 +322,26 @@ var sudoSemSenha = check.Check{
 			"exatamente essa linha",
 		"sem root o /etc/sudoers é ilegível, e a ausência de achado passa a ser " +
 			"desconhecimento em vez de resposta — a cobertura diz qual dos dois",
+		"REGRA DE OUTRO HOST não é achado deste host: sudoers distribuído por " +
+			"configuração central manda o mesmo arquivo para a frota inteira, e " +
+			"`ops db01=(root) NOPASSWD: ALL` não vale em web01. Elas saem juntas " +
+			"num único INFO com a contagem. O que NÃO dá para resolver — " +
+			"Host_Alias, netgroup, endereço de rede — mantém a severidade e sai " +
+			"dito na evidência",
+		"CURINGA em argumento sobe a severidade mesmo havendo literal depois " +
+			"dele, e isso alcança regra de limpeza de log escrita de boa-fé " +
+			"(`find /var/log -name *.gz -delete`). Não é conservadorismo gratuito: " +
+			"o sudo compara os argumentos como UMA string e o `*` casa espaço, " +
+			"então o confinamento não é demonstrável. A saída é fixar o argumento " +
+			"sem curinga, ou usar a regex ancorada do sudo 1.9.10+",
+		"a tag `NOEXEC:` REBAIXA o achado, e ela é a única do sudoers que " +
+			"responde à primitiva. O freio depende de link dinâmico: binário " +
+			"estático não é interceptado, e por isso o achado continua saindo " +
+			"como aviso em vez de sumir",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+		var deOutroHost []string
 		for i := range f.Sudoers {
 			s := &f.Sudoers[i]
 			up := strings.ToUpper(s.Text)
@@ -335,16 +352,17 @@ var sudoSemSenha = check.Check{
 			}
 
 			quem := campoInicial(s.Text)
-			// ALL como especificação de comando concede QUALQUER comando; e o
-			// runas diz como QUEM. As duas perguntas são diferentes, e confundi-las
-			// custou um crítico contra um servidor de banco limpo.
-			amplo := regraAmpla(s.Text)
-			comoRoot, runas := viraRoot(s.Text)
-			spec := specDeComando(s.Text)
-			cmds := comandosDaSpec(spec)
-			cmdExec, concedeExec := concedeExecucao(cmds)
-			cmdLe, concedeLe := concedeLeitura(cmds)
-			cmdPreso, temPreso := primitivaPresa(cmds)
+			// A LEITURA É DE PARSER, e não mais de `strings.Index` sobre a
+			// linha. Runas, Host_List, tags e o `ALL` que é comando (contra o
+			// `ALL` que é argumento) são posições da gramática, e respondê-las
+			// por substring custou um crítico falso e três achados perdidos.
+			// Ver sudoers.go.
+			reg := parseRegraSudo(s.Text)
+			var v vereditoSudo
+			if reg.Ok {
+				v = vereditoDaRegra(reg, naoAutentica, f.Host.Hostname, quem)
+			}
+
 			sev := check.SevWarn
 			ev := []string{
 				s.File + ":" + strconv.Itoa(s.Line) + " — " + s.Text,
@@ -354,100 +372,63 @@ var sudoSemSenha = check.Check{
 					"alvo inteiro, e quase ninguém procura por essa forma")
 			}
 			switch {
-			case amplo && comoRoot:
-				sev = check.SevCritical
-				ev = append(ev, "e a especificação de comando é ALL, como "+runas+
-					": é root inteiro, sem responder nada")
-			case comoRoot && concedeExec:
-				// "restrita a UM comando" só é menor privilégio se aquele comando
-				// não devolver execução arbitrária. `NOPASSWD: /bin/bash` como
-				// root É root irrestrito — e `NOPASSWD: /usr/bin/find` também,
-				// porque `find . -exec /bin/sh \;` é um passo, não uma exploração.
+			case v.Achou:
+				sev = v.Sev
+				ev = append(ev, v.Ev...)
+				if v.Indeterminado {
+					// Alias, netgroup ou endereço no Host_List. NÃO absolve: a
+					// severidade é a mesma, e a evidência diz o que não foi
+					// resolvido para quem lê poder resolver.
+					ev = append(ev, "o Host_List desta regra (`"+v.Host+"`) NÃO foi "+
+						"resolvido — há alias, netgroup ou endereço ali, e esta "+
+						"ferramenta não os expande. A regra é tratada como se valesse "+
+						"AQUI, porque não saber não é o mesmo que não valer")
+				}
+			case reg.Ok && v.Vistas > 0 && v.Vistas == v.OutroHost:
+				// TODA a linha é de outro host, e nenhuma parte dela vale aqui.
 				//
-				// O discriminador anterior conhecia dezesseis nomes e dizia
-				// "desenho de menor privilégio" para os outros duzentos e
-				// tantos, que é uma afirmação FALSA no meio de um incidente.
-				// Ver checks/primitiva.go.
-				sev = check.SevCritical
-				ev = append(ev, "e o comando `"+cmdExec.Bin+"` "+cmdExec.Classe.frase()+
-					" — como "+runas+", chamar isto de restrição é falso")
-				ev = append(ev, cmdExec.notaDeArgumento())
-			case amplo:
-				// Conceder TUDO como outra conta não é root, e dizer que é seria
-				// afirmar o que a regra não diz. Continua valendo olhar — quem
-				// usa vira aquela conta sem senha —, mas é aviso.
-				ev = append(ev, "a especificação de comando é ALL, mas como "+runas+
-					" — NÃO como root: quem usa a regra vira aquela conta sem "+
-					"responder nada, que é como se entrega um serviço a um time")
+				// Sem esta leitura, um sudoers distribuído por configuração
+				// central fazia a regra do banco sair CRITICAL em cada servidor
+				// web da frota. A linha não some do relatório: vira UM achado
+				// informativo no fim, com a contagem.
+				deOutroHost = append(deOutroHost,
+					s.File+":"+strconv.Itoa(s.Line)+" — "+s.Text+" (vale em `"+v.Host+"`)")
+				continue
 			case naoAutentica && defaultsGlobal(s.Text):
 				// `Defaults !authenticate` SEM alvo desliga a senha para o host
 				// inteiro — é NOPASSWD amplo escrito de outro jeito, e o coletor
-				// guarda essa linha justamente por isso. Como ela não tem
-				// `NOPASSWD:` nem `=`, regraAmpla varria a linha inteira, não
-				// achava ALL, e o caso caía no `default` — que imprimia
-				// "restrita a comando nomeado", contradizendo a evidência
-				// anterior do próprio achado, com exit 1 em vez de 2.
+				// guarda essa linha justamente por isso.
 				sev = check.SevCritical
 				ev = append(ev, "e é um `Defaults` SEM alvo: vale para TODO usuário "+
 					"e TODO comando deste host — é NOPASSWD amplo escrito de outra "+
 					"forma, não uma restrição")
-			case concedeExec:
-				// Mesmo poder, outra identidade: quem usar a regra executa o que
-				// quiser COMO aquela conta. Não é root, e por isso é aviso.
-				ev = append(ev, "e o comando `"+cmdExec.Bin+"` "+cmdExec.Classe.frase()+
-					" — como "+runas+", e não como root")
-			case concedeLe:
-				// Leitura arbitrária não é root no ato: entrega o /etc/shadow, e
-				// o hash ainda precisa ser quebrado. Continua sendo aviso, e
-				// deixa de ser chamado de menor privilégio.
-				//
-				// O ramo era `comoRoot && concedeLe` e ficava ACIMA do `concedeExec`.
-				// Com o `comoRoot`, uma regra `(postgres) NOPASSWD: /bin/cat` caía
-				// no `default` e imprimia "esta ferramenta NÃO reconhece" sobre
-				// um binário que a tabela reconhece — a mesma afirmação falsa de
-				// ignorância que o primitivaPresa foi escrito para tirar do
-				// relatório, reaparecendo por um caminho diferente.
-				ev = append(ev, "e o comando `"+cmdLe.Bin+"` "+cmdLe.Classe.frase())
-				if !comoRoot {
-					ev = append(ev, "e é como "+runas+", não como root: o que ele lê é "+
-						"o que aquela conta lê")
-				}
-				ev = append(ev, cmdLe.notaDeArgumento())
-			case temPreso:
-				// A tabela RECONHECE este binário, e o que segura a regra é o
-				// argumento fixado. Dizer "não reconheço" aqui seria afirmar uma
-				// ignorância que não existe — e esconder que o freio é uma
-				// string.
-				ev = append(ev, cmdPreso.notaDePrisao()...)
-			case ehAliasDeComando(primeiroToken(spec)):
-				// Alias não é binário: o que ele expande está em outra linha do
-				// sudoers, e esta ferramenta não resolve alias. Dizer "não
-				// reconheço como primitiva" aqui seria enganoso — não há o que
-				// reconhecer até alguém expandir.
-				ev = append(ev, "restrita a comando nomeado pelo alias `"+
-					primeiroToken(spec)+"`: o que ele expande está em OUTRA linha do "+
-					"sudoers, e esta ferramenta não resolve alias — `sudo -l -U "+
-					quem+"` resolve, e é ali que se vê o que a regra concede de fato")
 			case naoAutentica:
 				// Ramo de EVIDÊNCIA, e por isso ele é o último antes do default.
 				//
 				// Ele estava acima dos ramos de primitiva, e engolia todos eles:
 				// uma regra que combinasse `!authenticate` com um comando
 				// reconhecido perdia a única frase que diz o que aquele comando
-				// concede. A nota do `!authenticate` já é acrescentada
-				// incondicionalmente antes do switch, então subir este ramo não
-				// comprava nada e custava a evidência inteira.
+				// concede.
 				ev = append(ev, "o `!authenticate` está restrito a um alvo nomeado, "+
 					"mas continua desligando a senha para ele")
+			case ehDefinicaoDeAliasSudo(s.Text):
+				// Definição de alias NOMEIA um conjunto e não concede nada:
+				// quem concede é a User_Spec que cita o nome. Uma linha dessas
+				// só chega até aqui quando o NOME do alias contém o texto
+				// `NOPASSWD`, e emitir achado sobre ela seria acusar a
+				// nomenclatura de alguém.
+				continue
 			default:
-				// A frase anterior era "é desenho de menor privilégio", e ela
-				// AFIRMAVA sobre um binário que a ferramenta não examinou. A
-				// tabela de primitivas cobre ~110 nomes; o universo é maior, e
-				// não reconhecer não é o mesmo que não haver.
-				ev = append(ev, "restrita a comando nomeado (`"+nz(spec, "?")+
-					"`), que esta ferramenta NÃO reconhece como primitiva de escalada — "+
-					"o que a regra concede depende do que aquele binário faz com "+
-					"privilégio, e a tabela de referência do assunto é a GTFOBins")
+				// FALHA DE LEITURA, e ela sai dita. A linha tem `NOPASSWD` e o
+				// parser não achou nela um comando sem senha: ou é sintaxe que
+				// ele não representa, ou o único comando está negado. Chamar
+				// isso de "nada aqui" seria a ferramenta transformando o próprio
+				// limite em absolvição.
+				ev = append(ev, "esta linha tem `NOPASSWD`, e o leitor de sudoers "+
+					"desta ferramenta NÃO extraiu dela um comando concedido sem "+
+					"senha — pode ser negação (`!`), pode ser sintaxe que ele não "+
+					"representa. `sudo -l -U "+quem+"` resolve o que a regra concede "+
+					"de fato")
 			}
 			if strings.HasPrefix(s.File, "/etc/sudoers.d/") {
 				// Um arquivo novo em sudoers.d não altera nada existente: ele
@@ -475,49 +456,223 @@ var sudoSemSenha = check.Check{
 			}
 			r.Findings = append(r.Findings, fd)
 		}
+		if len(deOutroHost) > 0 {
+			// INFO, e de propósito: o fato fica no relatório sem gastar o
+			// crítico nem o exit code de um host onde a regra não vale.
+			ev := append([]string{
+				"o sudoers deste host declara " + strconv.Itoa(len(deOutroHost)) +
+					" regra(s) sem senha cujo Host_List nomeia OUTRO host — elas " +
+					"estão no arquivo e não valem aqui",
+				"é o desenho normal de sudoers distribuído por configuração " +
+					"central: o mesmo arquivo vai para a frota inteira e cada host " +
+					"usa a parte dele",
+				"o que confirma: `sudo -l` neste host não lista esses comandos",
+			}, deOutroHost...)
+			fd := self.F(check.SevInfo, "regras de outro host", "", ev...)
+			fd.Chave = "host-alheio"
+			r.Findings = append(r.Findings, fd)
+		}
 		r.Partial = append(r.Partial, f.PersistDenied["users"]...)
 		return r
 	},
 }
 
-// viraRoot lê o RUNAS da regra — o `(...)` depois do `=` — e diz se ela leva a
-// root, junto do texto para a evidência citar.
-//
-// Foi a metade que faltava, e a falta produziu um CRÍTICO contra um servidor de
-// banco perfeitamente normal:
-//
-//	%dba    ALL=(postgres) NOPASSWD: ALL
-//
-// A ferramenta dizia "é root inteiro". Não é: vira `postgres`, que é como um
-// time de DBA recebe o serviço que administra. Root sem senha e serviço sem
-// senha são achados diferentes, e chamá-los de iguais gasta o crítico — que é a
-// severidade que faz a frota parar.
-//
-// Ausência de runas é root: é o padrão do sudo, e escrever `ALL=NOPASSWD: ALL`
-// concede root do mesmo jeito.
-func viraRoot(texto string) (bool, string) {
-	i := strings.Index(texto, "(")
-	j := strings.Index(texto, ")")
-	if i < 0 || j < i {
-		return true, "root (padrão do sudo, sem runas declarado)"
-	}
-	dentro := texto[i+1 : j]
-	// O runas tem duas metades: usuários antes do `:`, grupos depois. Root
-	// entra pela primeira.
-	usuarios, _, _ := strings.Cut(dentro, ":")
-	for _, campo := range strings.FieldsFunc(usuarios, func(r rune) bool {
-		return r == ',' || r == ' ' || r == '\t'
-	}) {
-		c := strings.TrimSpace(campo)
-		if c == "root" || c == "ALL" || c == "#0" {
-			return true, c
-		}
-	}
-	return false, strings.TrimSpace(dentro)
+// vereditoSudo é o resultado da leitura de UMA linha de sudoers: a pior spec
+// sem senha que ela concede NESTE host, e o que sobrou de fora.
+type vereditoSudo struct {
+	Achou bool
+	Sev   check.Severity
+	Ev    []string
+
+	// Vistas é quantas specs sem senha a linha tem; OutroHost, quantas delas
+	// pertencem a um Host_List que não é este host. Iguais, a linha inteira é
+	// de outra máquina.
+	Vistas    int
+	OutroHost int
+
+	Indeterminado bool
+	Host          string
+
+	rank int
 }
 
-// regraAmpla diz se a regra concede QUALQUER comando. É o que separa "root
-// inteiro sem senha" de "pode reiniciar o nginx sem senha".
+// rankDaSpec ordena o que a evidência cita quando duas specs pesam igual:
+// `ALL` primeiro, depois shell, depois execução, escrita e leitura.
+func rankDaSpec(sp specSudo) int {
+	if sp.Tudo {
+		return 0
+	}
+	switch sp.Cmd.Classe {
+	case primShell:
+		return 1
+	case primExec:
+		return 2
+	case primEscrita:
+		return 3
+	case primLeitura:
+		return 4
+	}
+	return 5
+}
+
+// vereditoDaRegra escolhe a PIOR spec sem senha da linha.
+//
+// Uma linha pode conceder vários comandos com tags diferentes —
+// `NOPASSWD: /bin/true, PASSWD: /bin/ls, NOPASSWD: /usr/bin/find` são três
+// decisões distintas na mesma linha. A leitura anterior cortava no último
+// `NOPASSWD:` e olhava só o que vinha depois; esta olha todas e fica com a
+// que pesa mais.
+func vereditoDaRegra(reg regraSudo, semSenhaSempre bool, hostname, quem string) vereditoSudo {
+	var v vereditoSudo
+	for _, sp := range reg.Specs {
+		if !sp.Nopasswd && !semSenhaSempre {
+			continue
+		}
+		if sp.Negado {
+			// `!/bin/su` TIRA da concessão em vez de conceder.
+			continue
+		}
+		v.Vistas++
+		apl, ondeH := aplicabilidadeSudo(sp.Hosts, hostname)
+		if apl == sudoOutroHost {
+			v.OutroHost++
+			if v.Host == "" {
+				v.Host = ondeH
+			}
+			continue
+		}
+		sev, ev := vereditoDoSpec(sp, quem)
+		// Empate de severidade é decidido pela primitiva MAIS DIRETA: quando a
+		// linha concede `find` e `bash` juntos, a evidência precisa citar o
+		// shell. Era o que o `concedeExecucao` fazia com a ordem das classes, e
+		// a ordem não podia se perder ao trocar de leitor.
+		rank := rankDaSpec(sp)
+		if !v.Achou || sev > v.Sev || (sev == v.Sev && rank < v.rank) {
+			v.Achou, v.Sev, v.Ev, v.rank = true, sev, ev, rank
+			v.Indeterminado, v.Host = apl == sudoIndeterminado, ondeH
+		}
+	}
+	return v
+}
+
+// vereditoDoSpec é a escada inteira para UM Cmnd_Spec.
+func vereditoDoSpec(sp specSudo, quem string) (check.Severity, []string) {
+	c := sp.Cmd
+	sev := check.SevWarn
+	var ev []string
+	switch {
+	case sp.Tudo && sp.ComoRoot:
+		sev = check.SevCritical
+		ev = []string{"e a especificação de comando é ALL, como " + sp.RunasTexto +
+			": é root inteiro, sem responder nada"}
+	case sp.Tudo:
+		// Conceder TUDO como outra conta não é root, e dizer que é seria
+		// afirmar o que a regra não diz. Continua valendo olhar — quem usa vira
+		// aquela conta sem senha —, mas é aviso.
+		ev = []string{"a especificação de comando é ALL, mas como " + sp.RunasTexto +
+			" — NÃO como root: quem usa a regra vira aquela conta sem responder " +
+			"nada, que é como se entrega um serviço a um time"}
+	case c.CaminhoAmplo:
+		sev, ev = vereditoDeCaminhoAmplo(sp, quem)
+	case sp.ComoRoot && c.Concede():
+		// "restrita a UM comando" só é menor privilégio se aquele comando
+		// não devolver execução arbitrária. `NOPASSWD: /bin/bash` como
+		// root É root irrestrito — e `NOPASSWD: /usr/bin/find` também,
+		// porque `find . -exec /bin/sh \;` é um passo, não uma exploração.
+		sev = check.SevCritical
+		ev = []string{
+			"e o comando `" + c.Bin + "` " + c.Classe.frase() +
+				" — como " + sp.RunasTexto + ", chamar isto de restrição é falso",
+			c.notaDeArgumento(),
+		}
+	case c.Concede():
+		// Mesmo poder, outra identidade: quem usar a regra executa o que
+		// quiser COMO aquela conta. Não é root, e por isso é aviso.
+		ev = []string{"e o comando `" + c.Bin + "` " + c.Classe.frase() +
+			" — como " + sp.RunasTexto + ", e não como root"}
+	case c.Classe == primLeitura && (!c.PresoPorArgumento || c.Curinga || c.RegexLarga):
+		// Leitura arbitrária não é root no ato: entrega o /etc/shadow, e o hash
+		// ainda precisa ser quebrado. Continua sendo aviso, e deixa de ser
+		// chamado de menor privilégio.
+		ev = []string{"e o comando `" + c.Bin + "` " + c.Classe.frase()}
+		if !sp.ComoRoot {
+			ev = append(ev, "e é como "+sp.RunasTexto+", não como root: o que ele lê "+
+				"é o que aquela conta lê")
+		}
+		ev = append(ev, c.notaDeArgumento())
+	case c.Classe != primNenhuma && c.PresoPorArgumento:
+		// A tabela RECONHECE este binário, e o que segura a regra é o argumento
+		// fixado. Dizer "não reconheço" aqui seria afirmar uma ignorância que
+		// não existe — e esconder que o freio é uma string.
+		ev = c.notaDePrisao()
+	case ehAliasDeComando(c.Bin):
+		// Alias não é binário: o que ele expande está em outra linha do
+		// sudoers, e esta ferramenta não resolve alias.
+		ev = []string{"restrita a comando nomeado pelo alias `" + c.Bin +
+			"`: o que ele expande está em OUTRA linha do sudoers, e esta " +
+			"ferramenta não resolve alias — `sudo -l -U " + quem + "` resolve, e " +
+			"é ali que se vê o que a regra concede de fato"}
+	default:
+		// A frase anterior era "é desenho de menor privilégio", e ela AFIRMAVA
+		// sobre um binário que a ferramenta não examinou. A tabela de primitivas
+		// cobre ~110 nomes; o universo é maior, e não reconhecer não é o mesmo
+		// que não haver.
+		ev = []string{"restrita a comando nomeado (`" + nz(c.Bin, "?") +
+			"`), que esta ferramenta NÃO reconhece como primitiva de escalada — " +
+			"o que a regra concede depende do que aquele binário faz com " +
+			"privilégio, e a tabela de referência do assunto é a GTFOBins"}
+	}
+	if sp.Noexec && sev == check.SevCritical && !sp.Tudo {
+		// NOEXEC é a tag que de fato restringe: o sudo pré-carrega uma
+		// biblioteca que intercepta a família exec, e o `-exec` do find, o `:!sh`
+		// do vim e o `--to-command` do tar passam todos por ela. Manter CRITICAL
+		// aqui seria ignorar a única tag do sudoers que responde à primitiva.
+		sev = check.SevWarn
+		ev = append(ev, "MAS a regra tem a tag `NOEXEC:`, e ela responde justamente "+
+			"a esta primitiva: o sudo pré-carrega uma biblioteca que intercepta a "+
+			"família `exec`, e é por ali que o escape passa")
+		ev = append(ev, "o freio NÃO é absoluto: ele depende de link dinâmico. "+
+			"Binário estático, ou que chame o syscall direto, não é interceptado")
+	}
+	return sev, ev
+}
+
+// vereditoDeCaminhoAmplo lê a regra cujo COMANDO é um diretório ou um curinga
+// de caminho.
+//
+// `ops ALL=(root) NOPASSWD: /usr/bin/*` concede todo executável direto de
+// /usr/bin — o que inclui `bash`, `find`, `python`, `vim`. A leitura anterior
+// era por basename: o binário chamava-se `*`, a tabela não o reconhecia, e a
+// evidência saía dizendo "esta ferramenta NÃO reconhece como primitiva de
+// escalada" sobre uma regra que entrega root em um passo.
+func vereditoDeCaminhoAmplo(sp specSudo, quem string) (check.Severity, []string) {
+	c := sp.Cmd
+	forma := "curinga"
+	if strings.HasSuffix(c.Bin, "/") {
+		forma = "diretório"
+	}
+	ev := []string{
+		"o CAMINHO do comando é um " + forma + " (`" + c.Bin + "`) e não um " +
+			"binário: a regra concede TODO executável que esse padrão alcança em `" +
+			nz(c.DirDoCaminho, "/") + "`",
+	}
+	if !dirDeExecutaveisGerais[c.DirDoCaminho] {
+		return check.SevWarn, append(ev,
+			"esta ferramenta NÃO enumera o diretório: quantos executáveis o padrão "+
+				"alcança, e o que cada um faz com privilégio, é a conferência que "+
+				"sobra — `sudo -l -U "+quem+"` mostra o alcance efetivo")
+	}
+	ev = append(ev, "e `"+c.DirDoCaminho+"` é diretório de ferramentas do sistema: "+
+		"dentro dele estão o shell, o interpretador e o `find`")
+	if !sp.ComoRoot {
+		return check.SevWarn, append(ev, "e é como "+sp.RunasTexto+", não como root")
+	}
+	return check.SevCritical, append(ev,
+		"como root e sem senha, isto é `ALL` escrito de outra forma",
+		"o `/` não é casado pelo curinga de caminho (sudoers(5)), então o alcance "+
+			"é aquele diretório e não a árvore inteira — e o diretório já basta")
+}
+
 // defaultsGlobal diz se a linha é um `Defaults` sem alvo. O sudoers permite
 // restringir com `Defaults:usuario`, `Defaults@host`, `Defaults>runas` e
 // `Defaults!comando`; sem nenhum desses, a diretiva vale para o host inteiro.
@@ -535,30 +690,6 @@ func defaultsGlobal(texto string) bool {
 		return false
 	}
 	return resto[0] == ' ' || resto[0] == '\t'
-}
-
-// specDeComando devolve a especificação de comando da regra: o que vem depois
-// do `NOPASSWD:` ou, sem ele, do último `=`.
-func specDeComando(texto string) string {
-	if i := indiceSemCaixa(texto, "NOPASSWD:"); i >= 0 {
-		return strings.TrimSpace(texto[i+len("NOPASSWD:"):])
-	}
-	if i := strings.LastIndex(texto, "="); i >= 0 {
-		return strings.TrimSpace(texto[i+1:])
-	}
-	return texto
-}
-
-func regraAmpla(texto string) bool {
-	corte := specDeComando(texto)
-	for _, campo := range strings.FieldsFunc(corte, func(r rune) bool {
-		return r == ',' || r == ' ' || r == '\t'
-	}) {
-		if strings.TrimSpace(campo) == "ALL" {
-			return true
-		}
-	}
-	return false
 }
 
 // campoInicial é o alvo da regra: usuário, %grupo ou Defaults:alvo.
@@ -686,23 +817,6 @@ func campoInicial(texto string) string {
 		return alvo
 	}
 	return fs[0]
-}
-
-// indiceSemCaixa acha a última ocorrência ignorando maiúsculas, devolvendo o
-// índice na string ORIGINAL.
-//
-// A versão anterior indexava `strings.ToUpper(texto)` e fatiava `texto`. Em
-// ASCII os dois coincidem, mas ToUpper muda o tamanho em bytes de alguns
-// caracteres (o `ı` turco vira `I`, de dois bytes para um) — e aí o corte cai
-// no lugar errado e a severidade sai trocada. É improvável num sudoers e é
-// barato de não deixar acontecer.
-func indiceSemCaixa(texto, alvo string) int {
-	for i := len(texto) - len(alvo); i >= 0; i-- {
-		if strings.EqualFold(texto[i:i+len(alvo)], alvo) {
-			return i
-		}
-	}
-	return -1
 }
 
 // concedeNopassEfetivo aplica o last-match do doas: a regra `permit nopass` no

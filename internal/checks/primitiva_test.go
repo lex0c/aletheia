@@ -35,14 +35,59 @@ func TestEscadaDaPrimitivaNoSudo(t *testing.T) {
 		{"web ALL=(root) NOPASSWD: /usr/bin/tar *", check.SevCritical,
 			"curinga",
 			"o `*` na ÚLTIMA posição devolve o que o argumento fixo tinha tirado"},
-		// E o outro lado, que a primeira versão errava: um curinga no MEIO é
-		// fechado pelo literal que vem depois dele. `find /var/log -name '*.gz'
-		// -delete` é limpeza de log, não escalada — o sudo casa a linha inteira
-		// com fnmatch, e o `-delete` no fim não deixa nada ser acrescentado.
-		{"web ALL=(root) NOPASSWD: /usr/bin/find /var/log -name *.gz -delete", check.SevWarn,
-			"HÁ curinga na linha, fora da última posição",
-			"curinga no meio não reabre a regra, e dizer que reabre é gritar em cima " +
-				"de uma regra de limpeza de log"},
+		// O CURINGA NO MEIO, e esta linha já esteve travada ao contrário.
+		//
+		// A versão anterior dizia WARN aqui, com a evidência afirmando que "o
+		// literal que vem depois dele fecha o que ele abriu". É falso, e o
+		// sudoers(5) avisa exatamente sobre isto: os argumentos são comparados
+		// como UMA string concatenada e o `*` casa até espaço. Contra o padrão
+		// `/var/log -name *.gz -delete`, isto casa:
+		//
+		//	sudo find /var/log -name '*' -exec /bin/sh \; -name x.gz -delete
+		//
+		// O literal `.gz -delete` continua no fim e o curinga absorveu um
+		// `-exec` no meio. Confinamento não provado volta a ser o que era.
+		{"web ALL=(root) NOPASSWD: /usr/bin/find /var/log -name *.gz -delete", check.SevCritical,
+			"em QUALQUER posição",
+			"o curinga do sudoers atravessa a fronteira entre argumentos, e literal " +
+				"depois dele não fecha nada"},
+		// O CAMINHO que não nomeia binário. `primitivaDoBinario` lia o basename,
+		// achava um binário chamado `*` e a tabela não o reconhecia — a regra
+		// que entrega /usr/bin/bash saía com "esta ferramenta NÃO reconhece".
+		{"ops ALL=(root) NOPASSWD: /usr/bin/*", check.SevCritical,
+			"diretório de ferramentas do sistema",
+			"o padrão alcança bash, find e python juntos: é ALL escrito de outra forma"},
+		{"ops ALL=(root) NOPASSWD: /usr/bin/", check.SevCritical,
+			"é um diretório",
+			"caminho terminado em barra concede todo comando daquele diretório"},
+		// E o outro lado do curinga: `?` e `[...]` casam UM caractere cada.
+		// Tratá-los como o `*` tornaria crítica a regra de webhook que qualquer
+		// produção tem — eles entram como nota, não como severidade.
+		{"ops ALL=(root) NOPASSWD: /usr/bin/curl https://api.x/?token=y", check.SevWarn,
+			"casa UM caractere",
+			"um caractere não é onde cabe uma opção injetada"},
+		{"ops ALL=(root) NOPASSWD: /opt/app/bin/*", check.SevWarn,
+			"NÃO enumera o diretório",
+			"fora dos diretórios de sistema o alcance é desconhecido, e desconhecido " +
+				"não vira crítico nem absolvição"},
+		// O `ALL` que é ARGUMENTO. Produzia um CRITICAL determinístico falso.
+		{"ops ALL=(root) NOPASSWD: /usr/bin/printf ALL", check.SevWarn,
+			"restrita a comando nomeado",
+			"o ALL aqui é argumento do printf, e lê-lo como especificação de comando " +
+				"gasta o crítico que faz a frota parar"},
+		// O RUNAS na posição SINTÁTICA dele. O parêntese do regex de argumento
+		// (sudoers 1.9.10+) fazia a regra de root sair "e não como root".
+		{"web ALL=NOPASSWD: /usr/bin/vim ^(/etc/motd|/etc/issue)$", check.SevCritical,
+			"como root",
+			"sem runas declarado é root, e o parêntese do regex não é runas"},
+		// A TAG que engolia o comando seguinte.
+		{"ops ALL=(root) NOPASSWD: SETENV: /usr/bin/find", check.SevCritical,
+			"executa comando arbitrário",
+			"`SETENV:` é tag, não binário — lê-la como comando escondia o find"},
+		// E a tag que de fato restringe, que antes caía em "não reconheço".
+		{"ops ALL=(root) NOPASSWD: NOEXEC: /usr/bin/vim", check.SevWarn,
+			"tag `NOEXEC:`",
+			"o sudo intercepta a família exec, e é por ali que o escape passa"},
 		{"web ALL=(root) NOPASSWD: /usr/bin/tar czf /b.tgz /srv", check.SevWarn,
 			"SÓ isso que a segura",
 			"argumento fixado prende a primitiva do tar — e o relatório precisa " +

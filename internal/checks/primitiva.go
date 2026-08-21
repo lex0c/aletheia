@@ -241,10 +241,10 @@ var primitivaDe = map[string]classePrimitiva{
 // soaria como absolvição, e casar por nome nunca casaria. Dizer que é alias, e
 // mandar resolver com `sudo -l`, é a resposta honesta.
 func ehAliasDeComando(tok string) bool {
-	// `ALL` casa a forma de um alias e não é um: quem o lê é o regraAmpla, e o
-	// ramo dele vem antes deste no switch. A guarda é redundante hoje e barata
-	// — reordenar o switch amanhã não pode transformar "root irrestrito" em
-	// "isto é um alias, resolva com sudo -l".
+	// `ALL` casa a forma de um alias e não é um: quem o lê é o parser, que o
+	// marca como `specSudo.Tudo`, e o ramo dele vem antes deste no switch. A
+	// guarda é redundante hoje e barata — reordenar o switch amanhã não pode
+	// transformar "root irrestrito" em "isto é um alias, resolva com sudo -l".
 	if tok == "" || tok == "ALL" || strings.ContainsAny(tok, "/.") {
 		return false
 	}
@@ -268,6 +268,8 @@ func primitivaDoBinario(caminho string) classePrimitiva {
 type Comando struct {
 	// Bin é o caminho como a regra o escreveu.
 	Bin string
+	// Args são os argumentos fixados, como a regra os escreveu.
+	Args []string
 	// Classe é a primitiva conhecida, ou primNenhuma quando a tabela não
 	// reconhece o nome — e aí a resposta é "não sei", não "não tem".
 	Classe classePrimitiva
@@ -285,38 +287,137 @@ type Comando struct {
 	// justamente a que parece mais restrita para quem lê depressa.
 	PresoPorArgumento bool
 
-	// Curinga marca a regra cujo ÚLTIMO token é um `*` sozinho — e só essa
-	// forma, porque só ela devolve o que o argumento fixo tinha tirado:
+	// Curinga marca glob (`*`, `?`, `[...]`) em argumento — em QUALQUER
+	// posição, e essa é a correção.
 	//
-	//	/usr/bin/tar *                          REABRE: o usuário acrescenta
-	//	                                        `--to-command=/bin/sh` e a regra
-	//	                                        volta a valer o que valia sem
-	//	                                        argumento nenhum
-	//	/usr/bin/find /var/log -name '*.gz' -delete   NÃO reabre: o sudo casa a
-	//	                                        linha inteira com fnmatch, e o
-	//	                                        `-delete` literal DEPOIS do
-	//	                                        curinga fecha o que ele abriu
+	// A versão anterior só contava o `*` sozinho na ÚLTIMA posição, e escrevia
+	// na evidência que "o literal que vem depois dele fecha o que ele abriu".
+	// A afirmação é FALSA, e o sudoers(5) avisa exatamente sobre isto: os
+	// argumentos são comparados como UMA string concatenada, e o `*` casa
+	// inclusive espaço — ele atravessa a fronteira entre argumentos.
 	//
-	// A primeira versão marcava qualquer `*` em qualquer posição, e teria
-	// gritado CRÍTICO na segunda linha — que é uma regra de limpeza de log
-	// perfeitamente comum. O sudoers(5) avisa sobre curinga em argumento
-	// justamente na forma de cima.
+	//	regra   /usr/bin/find /var/log -name *.gz -delete
+	//	chamada sudo find /var/log -name '*' -exec /bin/sh \; -name x.gz -delete
+	//
+	// O `-delete` continua no fim, o literal `.gz -delete` casa o fim da
+	// string, e o `*` absorveu `-exec /bin/sh \;` no meio. É root, num passo.
+	//
+	// Por isso glob em argumento deixou de ser nota e voltou a ser o que era:
+	// confinamento NÃO PROVADO. A ferramenta não simula fnmatch, e o lado
+	// seguro de não simular é não afirmar que a regra segura.
 	Curinga bool
 
-	// CuringaNoMeio registra o curinga que NÃO reabre — o do meio da linha. Ele
-	// não muda severidade e entra na nota: quem lê precisa saber que há um
-	// curinga ali, porque a análise de fnmatch é sutil e o operador conhece a
-	// regra melhor que a ferramenta.
-	CuringaNoMeio bool
+	// GlobFraco é `?` ou `[...]` em argumento. Os dois casam UM caractere —
+	// inclusive o espaço, e por isso atravessam a fronteira entre argumentos —,
+	// mas um caractere não é onde cabe uma opção injetada. Eles saem na nota e
+	// NÃO mudam a severidade: tratá-los como o `*` transformaria a regra de
+	// `curl https://x/?a=b` em crítico, e essa é a linha que qualquer webhook
+	// de produção tem.
+	GlobFraco bool
+
+	// Regex marca argumento em expressão regular ancorada — a forma que o
+	// sudoers 1.9.10+ introduziu JUSTAMENTE como alternativa mais segura ao
+	// glob, e que por isso é lida diferente dele.
+	Regex bool
+	// RegexLarga é a regex que casa qualquer coisa (`.*`, `.+`): ancorada no
+	// papel, aberta na prática.
+	RegexLarga bool
+
+	// CaminhoAmplo diz que o CAMINHO do comando não nomeia um binário: é um
+	// diretório (`/usr/bin/`) ou um glob (`/usr/bin/*`), e o sudoers concede
+	// com isso TODO executável que o padrão alcança.
+	//
+	// A leitura anterior era por basename: `/usr/bin/*` virava um binário
+	// chamado `*`, a tabela não o reconhecia, e uma regra que entrega
+	// `/usr/bin/bash`, `/usr/bin/find` e `/usr/bin/python` saía com a frase
+	// "esta ferramenta NÃO reconhece como primitiva de escalada".
+	CaminhoAmplo bool
+	// DirDoCaminho é o diretório que o padrão alcança — o que decide se ele
+	// vale um binário específico ou o /usr/bin inteiro.
+	DirDoCaminho string
+}
+
+// dirDeExecutaveisGerais são os diretórios cujo conteúdo é, por desenho, o
+// conjunto de ferramentas do sistema. Um padrão que alcança qualquer um deles
+// alcança shell, interpretador e `find` junto: conceder isso sem senha é o
+// mesmo que conceder ALL, escrito de outro jeito.
+var dirDeExecutaveisGerais = map[string]bool{
+	"/bin": true, "/sbin": true,
+	"/usr/bin": true, "/usr/sbin": true,
+	"/usr/local/bin": true, "/usr/local/sbin": true,
+}
+
+// temGlob é o metacaractere que de fato REABRE: só o `*` casa uma string de
+// tamanho arbitrário. `?` e `[...]` casam um caractere cada (ver GlobFraco).
+func temGlob(s string) bool { return strings.Contains(s, "*") }
+
+func temGlobFraco(s string) bool { return strings.ContainsAny(s, "?[") }
+
+// ehRegexSudo: o sudoers trata como expressão regular o que começa com `^`.
+func ehRegexSudo(s string) bool { return strings.HasPrefix(s, "^") }
+
+// regexLarga é a regex ancorada que não prende nada.
+func regexLarga(s string) bool {
+	return strings.Contains(s, ".*") || strings.Contains(s, ".+")
+}
+
+// classificaComando monta o Comando a partir do caminho e dos argumentos que a
+// regra fixou.
+func classificaComando(bin string, args []string) Comando {
+	c := Comando{
+		Bin:               bin,
+		Args:              args,
+		Classe:            primitivaDoBinario(bin),
+		PresoPorArgumento: len(args) > 0,
+	}
+	base := baseDe(bin)
+	switch {
+	case strings.HasSuffix(bin, "/"):
+		// `/usr/bin/` concede todo comando daquele diretório — está no
+		// sudoers(5), e é a forma que menos parece ampla de todas.
+		c.CaminhoAmplo, c.DirDoCaminho = true, strings.TrimSuffix(bin, "/")
+	case temGlob(base) || temGlobFraco(base) || ehRegexSudo(bin):
+		c.CaminhoAmplo, c.DirDoCaminho = true, dirDe(bin)
+		c.Regex = ehRegexSudo(bin)
+	}
+	for _, a := range args {
+		switch {
+		case ehRegexSudo(a):
+			c.Regex = true
+			if regexLarga(a) {
+				c.RegexLarga = true
+			}
+		case temGlob(a):
+			c.Curinga = true
+		case temGlobFraco(a):
+			c.GlobFraco = true
+		}
+	}
+	return c
+}
+
+func dirDe(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i > 0 {
+		return p[:i]
+	}
+	return ""
 }
 
 // Concede diz se este comando entrega execução ou escrita arbitrária a quem
 // puder rodá-lo — ou seja, se chamar a regra de "menor privilégio" seria falso.
 func (c Comando) Concede() bool {
+	// Caminho amplo é a resposta ANTES da tabela: o padrão não nomeia um
+	// binário, então não há basename para classificar. O que decide é o
+	// diretório que ele alcança.
+	if c.CaminhoAmplo {
+		return dirDeExecutaveisGerais[c.DirDoCaminho]
+	}
 	if c.Classe != primShell && c.Classe != primExec && c.Classe != primEscrita {
 		return false
 	}
-	if !c.PresoPorArgumento || c.Curinga {
+	// Glob em argumento NÃO prova confinamento (ver Comando.Curinga), e regex
+	// que casa qualquer coisa também não.
+	if !c.PresoPorArgumento || c.Curinga || c.RegexLarga {
 		return true
 	}
 	// Argumento fixado, sem curinga: o editor e o paginador ESCAPAM mesmo
@@ -373,76 +474,21 @@ var escapaMesmoPreso = map[string]bool{
 // Ela existe porque a leitura anterior era `Fields(spec)[0]`: numa regra
 // `NOPASSWD: /usr/bin/tar, /bin/bash` só o `tar` era olhado, e o `bash` — que
 // é o caso CRÍTICO já implementado — sumia por estar depois de uma vírgula.
+//
+// Hoje ela é uma casca sobre o parser (sudoers.go): quem quebra a lista é quem
+// entende tag, runas e negação, e não um `strings.Split` por vírgula.
 func comandosDaSpec(spec string) []Comando {
 	var out []Comando
-	for _, parte := range strings.Split(spec, ",") {
-		campos := strings.Fields(parte)
-		if len(campos) == 0 {
+	for _, sp := range specsDaSecao(palavrasSpec(spec)) {
+		if sp.Tudo || sp.Negado {
+			// `ALL` não é binário e `!` nega em vez de conceder: nenhum dos
+			// dois tem primitiva, e tratá-los como caminho produziria
+			// conclusão inventada.
 			continue
 		}
-		bin := campos[0]
-		// ALL não é binário, e `!` nega em vez de conceder: os dois já são
-		// lidos por regraAmpla e não têm primitiva.
-		if bin == "ALL" || strings.HasPrefix(bin, "!") {
-			continue
-		}
-		args := campos[1:]
-		c := Comando{
-			Bin:               bin,
-			Classe:            primitivaDoBinario(bin),
-			PresoPorArgumento: len(args) > 0,
-		}
-		for i, a := range args {
-			if !strings.Contains(a, "*") {
-				continue
-			}
-			// Só o ÚLTIMO token, e só quando ele é o curinga SOZINHO. Um `*`
-			// colado num prefixo (`nginx*`) ainda obriga o começo; um `*` no
-			// meio é fechado pelo literal que vem depois.
-			if i == len(args)-1 && strings.Trim(a, `"'`) == "*" {
-				c.Curinga = true
-				continue
-			}
-			c.CuringaNoMeio = true
-		}
-		out = append(out, c)
+		out = append(out, sp.Cmd)
 	}
 	return out
-}
-
-// As três predicadas recebem a lista JÁ DECODIFICADA, e não a spec: o
-// chamador as invoca em sequência sobre a mesma regra, e cada uma refazia o
-// `strings.Split` mais um `strings.Fields` por vírgula, alocando um
-// `[]Comando` novo. Eram seis parses por linha de sudoers — quatro deles
-// dentro do laço de classes do primitivaPresa, refazendo o mesmo trabalho a
-// cada iteração.
-//
-// concedeExecucao devolve o primeiro comando da spec que entrega execução ou
-// escrita arbitrária. É o substituto de `ehShellOuInterp`, que olhava dezesseis
-// nomes e só o primeiro campo.
-func concedeExecucao(cs []Comando) (Comando, bool) {
-	// Shell primeiro, depois exec, depois escrita: quando a regra concede mais
-	// de um, a evidência precisa citar o mais direto.
-	for _, alvo := range []classePrimitiva{primShell, primExec, primEscrita} {
-		for _, c := range cs {
-			if c.Classe == alvo && c.Concede() {
-				return c, true
-			}
-		}
-	}
-	return Comando{}, false
-}
-
-// concedeLeitura devolve o primeiro comando que entrega leitura arbitrária.
-// Separado de concedeExecucao porque a conclusão é outra: lê o /etc/shadow, e
-// isso é aviso, não root imediato.
-func concedeLeitura(cs []Comando) (Comando, bool) {
-	for _, c := range cs {
-		if c.Classe == primLeitura && (!c.PresoPorArgumento || c.Curinga) {
-			return c, true
-		}
-	}
-	return Comando{}, false
 }
 
 // notaDeArgumento explica, na evidência, por que o argumento não segurou.
@@ -453,9 +499,14 @@ func (c Comando) notaDeArgumento() string {
 			"isso significa QUALQUER argumento — é a forma mais ampla das três, e a " +
 			"que mais parece restrita para quem lê depressa"
 	case c.Curinga:
-		return "a regra fixa argumento, MAS há curinga (`*`): o curinga devolve o " +
-			"que o argumento fixo tinha tirado, porque o usuário acrescenta o que " +
-			"quiser onde ele está"
+		return "a regra fixa argumento, MAS há curinga (`*`, `?` ou `[...]`) — e " +
+			"em QUALQUER posição, porque o sudo compara os argumentos como UMA " +
+			"string concatenada e o curinga casa até espaço: ele atravessa a " +
+			"fronteira entre argumentos e absorve o que for acrescentado no meio, " +
+			"mesmo havendo literal depois dele"
+	case c.RegexLarga:
+		return "a regra fixa argumento por REGEX, mas a regex casa qualquer coisa " +
+			"(`.*`/`.+`): ancorada no papel, aberta na prática"
 	default:
 		return "a regra fixa argumento, e ainda assim a primitiva vale: ela mora no " +
 			"modo interativo deste binário, e abrir já basta"
@@ -475,37 +526,12 @@ func comandoDoDoas(cmd string, temArgs bool) Comando {
 	if len(campos) == 0 {
 		return Comando{}
 	}
-	return Comando{
-		Bin:               campos[0],
-		Classe:            primitivaDoBinario(campos[0]),
-		PresoPorArgumento: temArgs || len(campos) > 1,
-	}
-}
-
-// primitivaPresa devolve o comando cuja primitiva a tabela RECONHECE e que o
-// argumento fixado segurou.
-//
-// Existe porque a primeira versão deste arquivo produziu, contra um sudoers de
-// teste, exatamente o defeito que ele foi escrito para consertar:
-//
-//	NOPASSWD: /usr/bin/tar czf /backup/x.tgz /srv
-//	  → "restrita a comando nomeado, que esta ferramenta NÃO reconhece
-//	     como primitiva de escalada"
-//
-// A ferramenta reconhece o `tar` — reconhece tão bem que a linha de cima do
-// mesmo relatório o chama de root irrestrito quando não há argumento. Dizer
-// "não reconheço" ali é afirmar ignorância que não existe, e joga fora
-// justamente a informação de que o operador precisa: o que segura esta regra é
-// UMA string de argumento, e argumento é frágil.
-func primitivaPresa(cs []Comando) (Comando, bool) {
-	for _, alvo := range []classePrimitiva{primShell, primExec, primEscrita, primLeitura} {
-		for _, c := range cs {
-			if c.Classe == alvo && c.PresoPorArgumento && !c.Concede() {
-				return c, true
-			}
-		}
-	}
-	return Comando{}, false
+	c := classificaComando(campos[0], campos[1:])
+	// O `args` do doas NÃO faz globbing: o curinga que o sudoers expandiria é
+	// literal aqui, e por isso a marca sai.
+	c.Curinga, c.CaminhoAmplo = false, false
+	c.PresoPorArgumento = temArgs || len(campos) > 1
+	return c
 }
 
 // notaDePrisao é a evidência do caso acima: o que a regra concede, e o que
@@ -520,11 +546,17 @@ func (c Comando) notaDePrisao() []string {
 			"CONTROLA (um diretório gravável por ele), a primitiva volta por " +
 			"dentro — o comando é o mesmo e o conteúdo é dele",
 	}
-	if c.CuringaNoMeio {
-		out = append(out, "e HÁ curinga na linha, fora da última posição: o `*` do "+
-			"sudoers é fnmatch sobre a linha inteira, e o literal que vem depois "+
-			"dele fecha o que ele abriu. Esta ferramenta não simula o casamento — "+
-			"leia a regra sabendo que o curinga está lá")
+	if c.GlobFraco {
+		out = append(out, "e há `?` ou `[...]` no argumento: cada um casa UM "+
+			"caractere, inclusive o espaço — afrouxa o casamento sem abrir espaço "+
+			"para uma opção inteira, e por isso entra como nota e não como "+
+			"severidade")
+	}
+	if c.Regex {
+		out = append(out, "o argumento é REGEX ancorada (`^...$`), que o sudoers "+
+			"1.9.10+ introduziu como alternativa mais segura ao curinga: ela casa a "+
+			"string inteira, e por isso prende de verdade — desde que a própria "+
+			"regex não seja ampla")
 	}
 	return out
 }

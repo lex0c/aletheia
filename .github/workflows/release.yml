@@ -50,6 +50,12 @@ jobs:
       attestations: write # gravar a atestação no repositório
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # As TAGS são necessárias: `make repro` tira a versão de
+          # `git describe --exact-match`, que é o que tira do usuário a chance
+          # de digitar a versão errada ao conferir o release.
+          fetch-tags: true
+          fetch-depth: 0
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -75,6 +81,22 @@ jobs:
       # depois amd64, 386 e arm64.
       - name: build
         run: make dist VERSION="${{ steps.ver.outputs.version }}"
+
+      # A RECEITA DE RECONSTRUÇÃO É CONFERIDA AQUI, contra o artefato que acabou
+      # de ser compilado.
+      #
+      # Ela já esteve errada em release publicado: o build usava
+      # `VERSION=${GITHUB_REF_NAME#v}` e as notas mandavam
+      # `make repro VERSION=${GITHUB_REF_NAME}` — com o `v`. A versão entra no
+      # binário por `-ldflags`, então os hashes NÃO PODIAM bater, e nenhum teste
+      # do projeto era capaz de perceber: o build passava, a suíte passava, e só
+      # quem baixasse o release descobriria.
+      #
+      # Fora de tag não roda: `git describe --exact-match` não tem o que
+      # descrever, e o ensaio não publica receita nenhuma.
+      - name: a receita de reconstrução reproduz o release
+        if: steps.ver.outputs.publicar == 'tag'
+        run: make repro-confere
 
       # A propriedade que justificou escolher Go, conferida em CADA arquitetura
       # e não só na do runner: um binário dinâmico linka contra a glibc do host
@@ -239,7 +261,7 @@ jobs:
             echo
             echo '```sh'
             echo "git clone --branch ${GITHUB_REF_NAME} https://github.com/${{ github.repository }}"
-            echo "cd aletheia && make repro VERSION=${GITHUB_REF_NAME}"
+            echo "cd aletheia && make repro"
             echo '```'
             echo
             echo 'Os hashes impressos têm que bater com o `SHA256SUMS` acima. É a única'

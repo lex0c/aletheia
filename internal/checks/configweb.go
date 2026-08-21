@@ -56,10 +56,13 @@ var configWebExecuta = check.Check{
 			"legítima de qualquer aplicação CGI, e ainda existem: painel antigo, " +
 			"webmail, script de relatório. Saem como AVISO, e o que decide é o " +
 			"time reconhecer o diretório",
-		"AFROUXAR `disable_functions` ou `open_basedir` é feito de propósito por " +
-			"aplicação que precisa de `exec` (conversor de imagem, gerador de " +
-			"PDF, integração com binário externo). Continua valendo perguntar " +
-			"quem afrouxou e quando — o ctime do arquivo responde a segunda",
+		"DIRETIVA DE PROTEÇÃO do PHP escrita num arquivo por diretório quase " +
+			"nunca é afrouxamento efetivo: `disable_functions`, `disable_classes` " +
+			"e `allow_url_*` são PHP_INI_SYSTEM e o PHP as IGNORA vindas de " +
+			"`.user.ini`/`.htaccess`; `open_basedir` vale, mas só ESTREITA. As " +
+			"duas famílias saem como INFO — o achado diz o que alguém TENTOU, e " +
+			"não o estado do host. O afrouxamento de verdade mora no php.ini, no " +
+			"pool do PHP-FPM ou no vhost",
 		"a varredura destes arquivos herda os LIMITES da varredura de código: as " +
 			"mesmas raízes, os mesmos tetos, a mesma poda de node_modules e " +
 			"vendor, e a mesma cegueira sobre docroot fora da lista de raízes " +
@@ -164,19 +167,7 @@ func pesoDaLinhaWeb(cw *facts.ConfigWeb, ln facts.LinhaConfigWeb) (check.Severit
 		return check.SevCritical, ev, true
 
 	case "afrouxa":
-		ev := []string{
-			ln.Text,
-			"uma proteção do PHP é desligada NESTE diretório, e por configuração " +
-				"que não exige root",
-		}
-		if strings.Contains(strings.ToLower(ln.Text), "disable_functions") &&
-			strings.TrimSpace(ln.Alvo) == "" {
-			return check.SevCritical, append(ev,
-				"e o valor está VAZIO: a lista de funções proibidas foi zerada, o "+
-					"que devolve `system`, `exec` e `passthru` a um host que os "+
-					"tinha tirado — é o pré-requisito de todo webshell"), true
-		}
-		return check.SevWarn, ev, true
+		return pesoDaDiretivaPHP(cw, ln)
 
 	case "cgi":
 		return check.SevWarn, []string{
@@ -188,6 +179,133 @@ func pesoDaLinhaWeb(cw *facts.ConfigWeb, ln facts.LinhaConfigWeb) (check.Severit
 		}, true
 	}
 	return 0, nil, false
+}
+
+// # ARQUIVO ENCONTRADO NÃO É CONFIGURAÇÃO EFETIVA
+//
+// É a regra arquitetural desta ferramenta, e esta função existe porque a
+// primeira versão do check a quebrou justamente aqui.
+//
+// Ela dizia "uma proteção do PHP é desligada NESTE diretório" para qualquer uma
+// de cinco diretivas, em qualquer dos dois tipos de arquivo, com qualquer valor
+// — e subia para CRÍTICO quando encontrava:
+//
+//	.user.ini:
+//	disable_functions =
+//
+// O PHP IGNORA essa linha. `disable_functions` é PHP_INI_SYSTEM, e um
+// `.user.ini` só honra o que é PHP_INI_ALL, PHP_INI_PERDIR ou PHP_INI_USER; o
+// `.htaccess` está no mesmo caso, porque `php_value` não seta diretiva de
+// sistema e `php_admin_value` não é permitido em `.htaccess`. Ou seja: a
+// ferramenta gritava CRÍTICO sobre uma configuração sem efeito nenhum.
+//
+// A leitura passou a ter quatro eixos, e o que muda a conclusão são os dois
+// primeiros:
+//
+//	diretiva      qual é
+//	origem        de que tipo de arquivo ela veio
+//	mudabilidade  o PHP aceita mudá-la DALI?
+//	direção       o valor afrouxa, ou aperta?
+//
+// A decisão mora no CHECK e não no coletor de propósito: o fato guardado
+// continua sendo a linha, e um dump gravado antes desta correção é reanalisado
+// com ela.
+//
+// phpPorDiretorio responde o terceiro eixo.
+var phpPorDiretorio = map[string]bool{
+	// PHP_INI_SYSTEM: só php.ini ou `php_admin_value` na configuração do
+	// servidor. Escritas num arquivo por diretório, são IGNORADAS pelo PHP.
+	"disable_functions": false,
+	"disable_classes":   false,
+	"allow_url_fopen":   false,
+	// PHP_INI_SYSTEM também, e ainda por cima removida no PHP 8.
+	"allow_url_include": false,
+
+	// PHP_INI_ALL e PHP_INI_PERDIR: estas VALEM daqui.
+	"open_basedir":      true,
+	"auto_prepend_file": true,
+	"auto_append_file":  true,
+}
+
+// diretivaDaLinhaWeb devolve o NOME da diretiva. A sintaxe é diferente nos dois
+// arquivos, e é por isso que a origem entra na conta:
+//
+//	.user.ini    disable_functions =
+//	.htaccess    php_value disable_functions ""
+func diretivaDaLinhaWeb(cw *facts.ConfigWeb, texto string) string {
+	t := strings.TrimSpace(texto)
+	if cw.Tipo == "user.ini" {
+		nome, _, _ := strings.Cut(t, "=")
+		return strings.ToLower(strings.TrimSpace(nome))
+	}
+	campos := strings.Fields(t)
+	if len(campos) >= 2 && strings.HasPrefix(strings.ToLower(campos[0]), "php_") {
+		return strings.ToLower(campos[1])
+	}
+	return ""
+}
+
+func nomeDoArquivoWeb(cw *facts.ConfigWeb) string {
+	if cw.Tipo == "user.ini" {
+		return "`.user.ini`"
+	}
+	return "`.htaccess`"
+}
+
+func pesoDaDiretivaPHP(cw *facts.ConfigWeb, ln facts.LinhaConfigWeb) (check.Severity, []string, bool) {
+	dir := diretivaDaLinhaWeb(cw, ln.Text)
+	vale, conhecida := phpPorDiretorio[dir]
+	arq := nomeDoArquivoWeb(cw)
+	switch {
+	case !conhecida:
+		// Não saber qual diretiva é não vira absolvição nem crítico: sai como
+		// aviso dizendo o que não foi lido.
+		return check.SevWarn, []string{
+			ln.Text,
+			"esta linha mexe numa diretiva de proteção do PHP, e o nome dela NÃO " +
+				"foi lido desta linha — o que ela muda de fato depende da " +
+				"mudabilidade da diretiva (`PHP_INI_*`), e é uma conferência que " +
+				"sobra",
+		}, true
+
+	case !vale:
+		// O achado NÃO some: a linha continua sendo sinal de intenção, e num
+		// diretório de upload ela é sinal de quem a escreveu. Some é o que a
+		// ferramenta não pode fazer com um fato que leu. O que muda é a
+		// AFIRMAÇÃO — de "a proteção foi desligada" para "isto não desliga".
+		return check.SevInfo, []string{
+			ln.Text,
+			"`" + dir + "` é PHP_INI_SYSTEM: o PHP só a aceita do php.ini ou de " +
+				"`php_admin_value` na configuração do servidor. Escrita num " + arq +
+				", ela é IGNORADA — a proteção NÃO foi desligada aqui",
+			"o que a linha diz é sobre QUEM a escreveu, não sobre o estado do " +
+				"host: alguém tentou afrouxar o PHP a partir de um arquivo que o " +
+				"PHP não obedece. O ctime do arquivo data a tentativa",
+			"o afrouxamento de verdade estaria no php.ini, no pool do PHP-FPM ou " +
+				"no vhost — e é ali que vale conferir",
+		}, true
+
+	case dir == "open_basedir":
+		// A diretiva VALE daqui (PHP_INI_ALL), mas a direção é a contrária:
+		// depois da inicialização o PHP rejeita um valor que AMPLIE o que já
+		// valia. Um `open_basedir` por diretório aperta, e a versão anterior
+		// chamava isso de "proteção desligada" — sobre a linha que endurece.
+		return check.SevInfo, []string{
+			ln.Text,
+			"`open_basedir` num arquivo por diretório só ESTREITA: passada a " +
+				"inicialização, o PHP recusa valor que amplie o alcance anterior",
+			"esta linha LIMITA o que o PHP alcança neste diretório — é " +
+				"endurecimento, e chamá-la de afrouxamento invertia o fato",
+		}, true
+
+	default:
+		return check.SevWarn, []string{
+			ln.Text,
+			"`" + dir + "` vale a partir de um " + arq + " (é PHP_INI_PERDIR ou " +
+				"PHP_INI_ALL), e esta linha muda o comportamento do PHP NESTE " +
+				"diretório — por configuração que não exige root",
+		}, true
+	}
 }
 
 func passosDaLinhaWeb(cw *facts.ConfigWeb, ln facts.LinhaConfigWeb) []string {

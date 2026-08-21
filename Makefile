@@ -14,6 +14,12 @@ VERSION ?= 0.1.0-dev
 COMMIT     ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null)
 COMMIT_AT  ?= $(shell TZ=UTC0 git show -s --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd HEAD 2>/dev/null)
 
+# TAG_VERSION é a tag EXATA deste commit, sem o `v`. É o que o workflow de
+# release embute (`${GITHUB_REF_NAME#v}`), e é o que `make repro` usa quando
+# ninguém passa VERSION — a receita de conferência não pode depender de quem a
+# digita acertar o formato. Ver o alvo `repro`.
+TAG_VERSION ?= $(shell git describe --exact-match --tags 2>/dev/null | sed 's/^v//')
+
 LDFLAGS := -s -w -X main.version=$(VERSION) \
 	-X main.commit=$(COMMIT) -X main.commitTime=$(COMMIT_AT)
 GOFLAGS := -trimpath
@@ -23,7 +29,7 @@ GOFLAGS := -trimpath
 # LD_PRELOAD e a binário de sistema trojanizado (SPEC 4).
 export CGO_ENABLED = 0
 
-.PHONY: all build helper vm-image test race race-unit lint verify clean dist binarios repro scenarios scenarios-container images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix vm-matrix arches
+.PHONY: all build helper vm-image test race race-unit lint verify clean dist binarios repro repro-confere scenarios scenarios-container images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix vm-matrix arches
 
 all: verify
 
@@ -130,16 +136,56 @@ dist: verify binarios
 # e à identidade da build vir do GIT — nunca do relógio de quem compila. Medido:
 # três builds seguidos e um a partir de outro diretório dão o mesmo sha256.
 #
-# VERSION é obrigatória e precisa ser a MESMA da tag: ela entra no binário por
-# -ldflags, então `make repro` sem ela produz outro hash e a conferência falha
-# por motivo errado.
+# A VERSÃO SAI DA TAG DO COMMIT, e isso é o conserto de um defeito publicado.
+#
+# O workflow de release compila com `VERSION=${GITHUB_REF_NAME#v}` — o `v` da
+# tag é DESCASCADO, e é o texto sem ele que entra no binário por
+# `-X main.version`. A receita de reconstrução dizia, no README e nas notas do
+# release:
+#
+#	make repro VERSION=v0.2.0
+#
+# Ou seja: o release tinha `main.version=0.2.0` e quem conferia produzia
+# `main.version=v0.2.0`. Os binários diferem por construção, e os hashes NÃO
+# PODIAM bater — a promessa de "a mesma tag reconstrói byte a byte" falhava para
+# todo mundo que a seguisse ao pé da letra.
+#
+# Duas defesas, porque uma receita de conferência é copiada e colada:
+#
+#	1. sem VERSION, ela sai de `git describe` do commit que está sendo
+#	   conferido — não há o que digitar errado
+#	2. com VERSION, o `v` da frente é descascado, então a forma antiga da
+#	   receita passa a produzir o hash certo em vez de falhar
 repro:
-	@test -n "$(filter-out 0.1.0-dev,$(VERSION))" || { \
-		echo "repro: informe a VERSION da tag, ex.: make repro VERSION=v0.2.0" >&2; \
+	@v="$(patsubst v%,%,$(strip $(filter-out 0.1.0-dev,$(VERSION))))"; \
+	if [ -z "$$v" ]; then v="$(TAG_VERSION)"; fi; \
+	if [ -z "$$v" ]; then \
+		echo "repro: este commit não tem tag exata; informe a versão do release," >&2; \
+		echo "       ex.: make repro VERSION=0.2.0" >&2; \
+		exit 1; \
+	fi; \
+	echo "reconstruindo a versão $$v"; \
+	$(MAKE) --no-print-directory binarios VERSION="$$v"
+	sha256sum dist/aletheia-linux-*
+
+# repro-confere é a CATRACA da receita acima, e ela existe porque o defeito que
+# a receita tinha não era detectável por teste nenhum: o build passava, a suíte
+# passava, e só quem baixasse o release descobriria que os hashes não batem.
+#
+# Compila como o release compila, guarda os hashes, reconstrói pela receita
+# PUBLICADA e compara. Divergiu, a receita está errada.
+repro-confere:
+	@test -n "$(strip $(TAG_VERSION))" || { \
+		echo "repro-confere: precisa de um commit com tag exata (ex.: v0.2.0)" >&2; \
 		exit 1; \
 	}
-	@$(MAKE) --no-print-directory binarios
-	sha256sum dist/aletheia-linux-*
+	@$(MAKE) --no-print-directory binarios VERSION="$(TAG_VERSION)"
+	@sha256sum dist/aletheia-linux-* > dist/.repro-esperado
+	@rm -f dist/aletheia-linux-*
+	@$(MAKE) --no-print-directory repro >/dev/null
+	@sha256sum -c dist/.repro-esperado && \
+		echo "repro: a receita publicada reproduz o release byte a byte"
+	@rm -f dist/.repro-esperado
 
 # scenarios roda a CLI de verdade contra /proc de verdade, em distribuições de
 # verdade. Fica separado de `test` porque exige docker e leva dezenas de

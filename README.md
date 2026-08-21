@@ -162,7 +162,7 @@ relógio de quem compila. A mesma tag reconstrói byte a byte:
 
 ```sh
 git clone --branch v0.2.0 https://github.com/lex0c/aletheia
-cd aletheia && make repro VERSION=v0.2.0
+cd aletheia && make repro
 ```
 
 Os hashes impressos têm que bater com o `SHA256SUMS` do release. É a única
@@ -982,13 +982,20 @@ make mutacao
 Reconstruir um release (o que quem baixa roda para conferir):
 
 ```sh
-make repro VERSION=v0.2.0
+git checkout v0.2.0 && make repro
 ```
 
 `repro` compila as três arquiteturas com os mesmos flags do release e imprime os
-hashes, **sem** rodar a suíte. `dist` e `repro` compartilham a receita de build
-(`binarios`) de propósito: duas cópias divergiriam em silêncio, e a conferência
-passaria a falhar sem nada de errado com o código.
+hashes, **sem** rodar a suíte. A versão embutida sai de `git describe` do commit
+conferido — o release compila com o `v` da tag **descascado**, e uma receita que
+mandasse digitar `VERSION=v0.2.0` produziria outro binário e hashes que nunca
+bateriam. `make repro-confere` é a catraca disso: compila como o release,
+reconstrói pela receita publicada e compara os hashes; ela roda no workflow de
+release, contra o artefato que está sendo publicado.
+
+`dist` e `repro` compartilham a receita de build (`binarios`) de propósito: duas
+cópias divergiriam em silêncio, e a conferência passaria a falhar sem nada de
+errado com o código.
 
 ### Chave de assinatura do release
 

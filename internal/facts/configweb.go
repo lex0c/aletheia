@@ -63,7 +63,9 @@ type LinhaConfigWeb struct {
 	//	handler   um mapeamento faz o servidor EXECUTAR o que não executava
 	//	codigo    o próprio arquivo de configuração contém código PHP
 	//	expoe     a configuração torna os próprios `.ht*` servíveis pela web
-	//	afrouxa   uma proteção do PHP é desligada aqui
+	//	afrouxa   a linha mexe numa diretiva de PROTEÇÃO do PHP. Se ela chega a
+	//	          valer NESTE arquivo é pergunta do check — a maioria delas é
+	//	          PHP_INI_SYSTEM e não vale
 	//	cgi       execução de CGI/SSI é habilitada neste diretório
 	Motivo string `json:"why"`
 
@@ -83,9 +85,18 @@ func configWebPorNome(nome string) string {
 	return ""
 }
 
-// phpProtecoes são as diretivas cujo AFROUXAMENTO abre execução: desligar a
-// lista de funções proibidas devolve `system()` a um host que a tinha tirado, e
-// `allow_url_include` transforma todo include em RFI.
+// phpProtecoes são as diretivas de PROTEÇÃO do PHP — as que decidem se
+// `system()` existe e até onde o interpretador enxerga.
+//
+// O nome do motivo continua sendo "afrouxa" por compatibilidade de dump: quem
+// decide se a linha AFROUXA alguma coisa é o check, e não este mapa. A
+// diferença não é cosmética — a maioria destas diretivas é PHP_INI_SYSTEM, e
+// escrita num `.user.ini` ou num `.htaccess` o PHP simplesmente a IGNORA.
+// Ver checks/configweb.go (phpPorDiretorio), que faz essa leitura e por isso
+// alcança também os dumps já gravados.
+//
+// O que este mapa faz é SELECIONAR a linha para o dump: guardá-la é certo em
+// qualquer dos casos, porque ela diz algo sobre quem a escreveu.
 var phpProtecoes = map[string]bool{
 	"disable_functions": true, "disable_classes": true,
 	"open_basedir": true, "allow_url_include": true, "allow_url_fopen": true,

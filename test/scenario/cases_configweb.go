@@ -51,8 +51,13 @@ func init() {
 			// upload, que é onde bootstrap de framework não mora.
 			{ID: "persist.web_prepend", Sev: "CRITICAL",
 				Evidence: "árvore de UPLOAD"},
-			{ID: "app.web_config_exec", Sev: "CRITICAL",
-				Subject: "/var/www/html/uploads/.user.ini", Evidence: "lista de funções proibidas foi zerada"},
+			// E o `disable_functions =` da MESMA linha do plantio sai INFO, não
+			// crítico: `disable_functions` é PHP_INI_SYSTEM e um `.user.ini` não
+			// a muda — o PHP ignora a linha. O achado fica (diz o que alguém
+			// TENTOU), a afirmação é que muda. Esta expectativa já esteve
+			// travando o crítico falso.
+			{ID: "app.web_config_exec", Sev: "INFO",
+				Subject: "/var/www/html/uploads/.user.ini", Evidence: "IGNORADA"},
 
 			// E a OUTRA metade do conserto: o arquivo agora chega ao motor de
 			// código. Ele só chega porque TEM tag de PHP — um .htaccess comum

@@ -82,9 +82,18 @@ func TestExecCGIEhAviso(t *testing.T) {
 	}
 }
 
-// `disable_functions =` VAZIO devolve system/exec/passthru: é o pré-requisito
-// de todo webshell, e pesa diferente de afrouxar a lista pela metade.
-func TestDisableFunctionsZeradoEhCritico(t *testing.T) {
+// ARQUIVO ENCONTRADO NÃO É CONFIGURAÇÃO EFETIVA — e este teste trava o lado do
+// PHP dessa regra, porque a primeira versão do check a quebrou aqui.
+//
+// `disable_functions =` num `.user.ini` parece o pré-requisito de todo webshell
+// e sai CRÍTICO em qualquer leitura ingênua. Só que o PHP IGNORA a linha:
+// `disable_functions` é PHP_INI_SYSTEM, e um `.user.ini` só honra
+// PHP_INI_ALL/PERDIR/USER. Gritar crítico ali é gritar sobre configuração sem
+// efeito nenhum.
+//
+// O achado não some — a linha diz algo sobre QUEM a escreveu —, mas a
+// AFIRMAÇÃO muda: de "a proteção foi desligada" para "isto não desliga".
+func TestDiretivaDeSistemaNoUserIniNaoEhAfrouxamento(t *testing.T) {
 	f := fConfigWeb(facts.ConfigWeb{
 		Path: "/var/www/uploads/.user.ini", Tipo: "user.ini",
 		Linhas: []facts.LinhaConfigWeb{
@@ -93,16 +102,60 @@ func TestDisableFunctionsZeradoEhCritico(t *testing.T) {
 		},
 	})
 	r := configWebExecuta.Run(configWebExecuta, f, imgEnv())
-	sev := map[int]check.Severity{}
-	for _, fd := range r.Findings {
-		sev[len(fd.Evidence)] = fd.Sev
-	}
 	if len(r.Findings) != 2 {
-		t.Fatalf("%+v", r.Findings)
+		t.Fatalf("as duas linhas continuam no relatório: %+v", r.Findings)
 	}
-	if r.Findings[0].Sev != check.SevCritical || r.Findings[1].Sev != check.SevWarn {
-		t.Errorf("lista zerada é crítica, restrição de basedir é aviso: %v %v",
-			r.Findings[0].Sev, r.Findings[1].Sev)
+	for _, fd := range r.Findings {
+		if fd.Sev != check.SevInfo {
+			t.Errorf("nenhuma das duas afrouxa nada a partir de um .user.ini: %v — %v",
+				fd.Sev, fd.Evidence)
+		}
+		if ev := strings.Join(fd.Evidence, " "); strings.Contains(ev, "é desligada") {
+			t.Errorf("a evidência não pode afirmar desligamento:\n%s", ev)
+		}
+	}
+	if ev := strings.Join(r.Findings[0].Evidence, " "); !strings.Contains(ev, "IGNORADA") {
+		t.Errorf("a evidência precisa dizer POR QUE não vale:\n%s", ev)
+	}
+	// E a segunda inverte o sinal: `open_basedir` por diretório só ESTREITA.
+	if ev := strings.Join(r.Findings[1].Evidence, " "); !strings.Contains(ev, "endurecimento") {
+		t.Errorf("open_basedir com valor é restrição, não afrouxamento:\n%s", ev)
+	}
+}
+
+// E o outro lado da MESMA tabela: o que ela não conhece não vira absolvição.
+//
+// Sem esta trava, a correção acima teria um jeito silencioso de errar — bastaria
+// uma diretiva fora do mapa para o check devolver INFO sobre algo que ele não
+// examinou.
+func TestDiretivaDesconhecidaNaoViraAbsolvicao(t *testing.T) {
+	f := fConfigWeb(facts.ConfigWeb{
+		Path: "/var/www/uploads/.user.ini", Tipo: "user.ini",
+		Linhas: []facts.LinhaConfigWeb{
+			{N: 1, Motivo: "afrouxa", Text: "diretiva_que_nao_existe = x", Alvo: "x"},
+		},
+	})
+	r := configWebExecuta.Run(configWebExecuta, f, imgEnv())
+	if len(r.Findings) != 1 || r.Findings[0].Sev != check.SevWarn {
+		t.Fatalf("o que a tabela não conhece continua com peso: %+v", r.Findings)
+	}
+	if ev := strings.Join(r.Findings[0].Evidence, " "); !strings.Contains(ev, "NÃO") {
+		t.Errorf("e precisa DIZER que não leu:\n%s", ev)
+	}
+}
+
+// O prepend é do persist.web_prepend e sai deste check de propósito: duas
+// linhas para o mesmo fato é o que a divisão evita.
+func TestPrependNaoDuplicaNesteCheck(t *testing.T) {
+	f := fConfigWeb(facts.ConfigWeb{
+		Path: "/var/www/uploads/.user.ini", Tipo: "user.ini",
+		Linhas: []facts.LinhaConfigWeb{
+			{N: 1, Motivo: "prepend", Text: "auto_prepend_file = /var/www/uploads/.i.php",
+				Alvo: "/var/www/uploads/.i.php"},
+		},
+	})
+	if r := configWebExecuta.Run(configWebExecuta, f, imgEnv()); len(r.Findings) != 0 {
+		t.Fatalf("%+v", r.Findings)
 	}
 }
 

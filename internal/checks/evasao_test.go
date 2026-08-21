@@ -130,8 +130,11 @@ func TestEvasaoChamaShell(t *testing.T) {
 
 // ---------------------------------------------------------------- sudoers
 func TestEvasaoSudoers(t *testing.T) {
-	fRoot := func(s string) bool { ok, _ := viraRoot(s); return ok }
-	roda(t, "viraRoot", fRoot, []ev{
+	fRoot := func(s string) bool {
+		sp := parseRegraSudo(s).Specs
+		return len(sp) > 0 && sp[0].ComoRoot
+	}
+	roda(t, "runas vira root", fRoot, []ev{
 		{"ana ALL=(ALL) NOPASSWD: ALL", true, "ALL como runas"},
 		{"ana ALL=(root) NOPASSWD: ALL", true, "root nomeado"},
 		{"ana ALL=(#0) NOPASSWD: ALL", true, "root por UID numérico"},
@@ -140,13 +143,55 @@ func TestEvasaoSudoers(t *testing.T) {
 		{"ana ALL=( root ) NOPASSWD: ALL", true, "espaço dentro do runas"},
 		{"ana ALL=(postgres) NOPASSWD: ALL", false, "outra conta não é root"},
 		{"ana ALL=NOPASSWD: ALL", true, "sem runas: root é o padrão"},
+		// As três formas que a leitura por `strings.Index` errava.
+		{"ana ALL=(:www-data) NOPASSWD: ALL", true,
+			"só o GRUPO declarado: o usuário continua sendo root"},
+		{"ana ALL=NOPASSWD: /usr/bin/vim ^(/etc/motd|/etc/issue)$", true,
+			"o parêntese é do REGEX de argumento, não do runas"},
+		{"ana ALL=(postgres) NOPASSWD: /bin/sh -c 'echo (x)'", false,
+			"o runas verdadeiro está na posição dele, e o outro parêntese não o troca"},
 	})
-	roda(t, "regraAmpla", regraAmpla, []ev{
+	fAmpla := func(s string) bool {
+		for _, sp := range parseRegraSudo(s).Specs {
+			if sp.Tudo {
+				return true
+			}
+		}
+		return false
+	}
+	roda(t, "spec de comando é ALL", fAmpla, []ev{
 		{"ana ALL=(ALL) NOPASSWD: ALL", true, "forma base"},
 		{"ana ALL=(ALL) NOPASSWD:ALL", true, "sem espaço depois dos dois-pontos"},
 		{"ana ALL=(ALL) NOPASSWD: /bin/ls, ALL", true, "ALL no fim de uma lista"},
 		{"ana ALL=(ALL) NOPASSWD:\tALL", true, "TAB depois dos dois-pontos"},
 		{"ana ALL=(ALL) NOPASSWD: /usr/bin/systemctl", false, "comando nomeado"},
+		// O `ALL` que é ARGUMENTO, e que produzia um CRITICAL falso.
+		{"ana ALL=(root) NOPASSWD: /usr/bin/printf ALL", false,
+			"aqui o ALL é argumento do printf, não a especificação de comando"},
+		{"ana ALL=(root) NOPASSWD: /bin/grep ALL /var/log/x", false,
+			"idem, com o argumento no meio"},
+	})
+	// As tags são HERDADAS pelos comandos seguintes, e um token de tag no meio
+	// da lista fazia o comando depois dele virar "argumento" — o `find` sumia.
+	fSemSenha := func(s string) bool {
+		for _, sp := range parseRegraSudo(s).Specs {
+			if sp.Nopasswd && baseDe(sp.Cmd.Bin) == "find" {
+				return true
+			}
+		}
+		return false
+	}
+	roda(t, "tag não engole o comando", fSemSenha, []ev{
+		{"ops ALL=(root) NOPASSWD: /usr/bin/find", true, "forma base"},
+		{"ops ALL=(root) NOPASSWD: SETENV: /usr/bin/find", true, "tag SETENV depois do NOPASSWD"},
+		{"ops ALL=(root) NOPASSWD:SETENV:/usr/bin/find", true, "as duas tags coladas"},
+		{"ops ALL=(root) NOPASSWD: /bin/true, /usr/bin/find", true, "segundo da lista"},
+		{"ops ALL=(root) NOPASSWD: /bin/true, PASSWD: /usr/bin/find", false,
+			"PASSWD: reverte a tag para os comandos seguintes"},
+		{"ops ALL=(root) CWD=/tmp NOPASSWD: /usr/bin/find", true, "Option_Spec antes da tag"},
+		{"ops ALL=(root) NOPASSWD : /usr/bin/find", true, "branco antes do dois-pontos"},
+		{"ops ALL=(root) NOPASSWD: /usr/bin/env FOO=bar /usr/bin/find", false,
+			"aqui o find é ARGUMENTO do env, e o comando concedido é o env"},
 	})
 }
 

@@ -5198,7 +5198,13 @@ O que é rota, na regra do sudoers:
 ```text
 NOPASSWD para binário com shell/leitura     vim, less, awk, find, python, tar, git, systemctl
 ALL=(ALL) ALL sem restrição de comando      é root com um passo a mais
-curinga no argumento  (/bin/cat /var/log/*) traversal: ../../etc/shadow
+curinga no argumento  (/bin/cat /var/log/*) traversal: ../../etc/shadow — e o curinga
+                                            casa ESPAÇO: os argumentos são comparados
+                                            como uma string só, então `*` atravessa a
+                                            fronteira entre argumentos e literal depois
+                                            dele não fecha nada
+curinga/diretório no CAMINHO (/usr/bin/*)   concede todo executável do diretório: é
+                                            `ALL` escrito de outra forma
 comando por caminho RELATIVO                PATH hijack
 env_keep com LD_PRELOAD / LD_LIBRARY_PATH   carrega lib do atacante como root
 (ALL, !root) para "excluir" root            bypass conhecido (CVE-2019-14287)

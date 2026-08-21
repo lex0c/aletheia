@@ -91,8 +91,12 @@ memory_limit = 256M
 	if cw.Linhas[0].Motivo != "prepend" || cw.Linhas[0].Alvo != "/var/www/uploads/.i.php" {
 		t.Errorf("prepend = %+v", cw.Linhas[0])
 	}
+	// O motivo marca a FAMÍLIA da diretiva, não a conclusão: se um
+	// `disable_functions` escrito num .user.ini chega a valer é pergunta do
+	// check (ele é PHP_INI_SYSTEM, e não vale). Aqui só se exige que a linha
+	// seja guardada, porque ela diz algo sobre quem a escreveu.
 	if cw.Linhas[1].Motivo != "afrouxa" {
-		t.Errorf("disable_functions vazio é afrouxamento: %+v", cw.Linhas[1])
+		t.Errorf("a linha de diretiva de proteção precisa ser guardada: %+v", cw.Linhas[1])
 	}
 }
 

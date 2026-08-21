@@ -228,7 +228,7 @@ func coletaDirsCliente(f *Facts, e *env.Env, arquivo, baseDir, home string, vist
 		k, v := cortaDiretiva(ln)
 		if strings.EqualFold(k, "include") {
 			for _, campo := range strings.Fields(v) {
-				for _, inc := range expandirIncludeCliente(e, baseDir, home, campo) {
+				for _, inc := range expandirIncludeCliente(f, e, baseDir, home, campo) {
 					coletaDirsCliente(f, e, inc, baseDir, home, vistos, out, prof+1)
 				}
 			}
@@ -239,9 +239,19 @@ func coletaDirsCliente(f *Facts, e *env.Env, arquivo, baseDir, home string, vist
 }
 
 // expandirIncludeCliente resolve o alvo de um Include de cliente. `~/` vira o
-// home; relativo é sob baseDir; glob é expandido pelo diretório (sem
+// home; relativo é sob baseDir; o glob é expandido COMPONENTE A COMPONENTE (sem
 // filepath.Glob, que fugiria da raiz travada em modo image).
-func expandirIncludeCliente(e *env.Env, baseDir, home, padrao string) []string {
+//
+// O GLOB VALE EM QUALQUER COMPONENTE, e supor o contrário era um ponto cego.
+// A versão anterior recusava padrão com curinga no diretório, com o comentário
+// "fora do que o ssh aceita" — e isso é FALSO. Medido contra o OpenSSH 9.2:
+//
+//	Include ~/.ssh/profiles/*/ops.conf   ->  ssh -G aplica o ProxyCommand de lá
+//
+// Pior que o ponto cego era a forma dele: o `return nil` saía calado, sem
+// lacuna, então um ProxyCommand plantado um nível abaixo simplesmente não
+// existia para esta ferramenta.
+func expandirIncludeCliente(f *Facts, e *env.Env, baseDir, home, padrao string) []string {
 	p := padrao
 	switch {
 	case strings.HasPrefix(p, "~/") && home != "":
@@ -252,20 +262,47 @@ func expandirIncludeCliente(e *env.Env, baseDir, home, padrao string) []string {
 	if !strings.ContainsAny(p, "*?[") {
 		return []string{p}
 	}
-	dir, base := path.Split(p)
-	dir = strings.TrimSuffix(dir, "/")
-	if strings.ContainsAny(dir, "*?[") {
-		return nil // glob no diretório: fora do que o ssh aceita
-	}
-	var incs []string
-	for _, n := range e.ReadDirNames(dir) {
-		if ok, err := path.Match(base, n); err == nil && ok {
-			incs = append(incs, dir+"/"+n)
+	// Caminha os componentes mantendo o conjunto de diretórios que casaram até
+	// aqui. Componente sem curinga só concatena; com curinga, lista e filtra.
+	atuais := []string{""}
+	comps := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	for i, comp := range comps {
+		if comp == "" {
+			continue
+		}
+		var prox []string
+		for _, base := range atuais {
+			if !strings.ContainsAny(comp, "*?[") {
+				prox = append(prox, base+"/"+comp)
+				continue
+			}
+			for _, n := range e.ReadDirNames(base + "/" + "") {
+				if ok, err := path.Match(comp, n); err == nil && ok {
+					prox = append(prox, base+"/"+n)
+				}
+			}
+		}
+		// TETO GLOBAL, e ele é por QUANTIDADE — o teto anterior era só de
+		// profundidade de Include, e um único `*` pode abrir milhares de
+		// caminhos. Estourar vira lacuna declarada, nunca silêncio.
+		if len(prox) > maxExpansaoInclude {
+			f.denyPersist("ssh", "o Include `"+padrao+"` expandiu para mais de "+
+				strconv.Itoa(maxExpansaoInclude)+" caminhos no componente "+
+				strconv.Itoa(i+1)+": a expansão foi cortada e os arquivos restantes "+
+				"NÃO foram lidos")
+			prox = prox[:maxExpansaoInclude]
+		}
+		atuais = prox
+		if len(atuais) == 0 {
+			return nil
 		}
 	}
-	sort.Strings(incs)
-	return incs
+	sort.Strings(atuais)
+	return atuais
 }
+
+// maxExpansaoInclude limita quantos caminhos um único Include pode abrir.
+const maxExpansaoInclude = 512
 
 func temPermitLocalYes(dirs []dirCliente) bool {
 	for _, d := range dirs {

@@ -18,9 +18,11 @@ import (
 // escrever; o que denuncia é a transição.
 
 var toolSnapshotCompare = Ferramenta{
-	Dados:  DadosRedigidosNaOrigem,
-	Nome:   "snapshot.compare",
-	Titulo: "O que mudou entre dois retratos",
+	Anotacoes: SomenteLeitura,
+	Dados:     DadosRedigidosNaOrigem,
+	EscopoMin: EscopoCompleto,
+	Nome:      "snapshot.compare",
+	Titulo:    "O que mudou entre dois retratos",
 	Descricao: "Compara dois retratos declarados no lançamento e devolve o que " +
 		"surgiu, sumiu e mudou. A mudança é datada por INTERVALO ('entre t0 e t1'), " +
 		"nunca por instante: a ferramenta não estava presente na hora. LEIA " +
@@ -74,6 +76,29 @@ var toolSnapshotCompare = Ferramenta{
 		depois, er := s.retratoDe(a.Depois)
 		if er != nil {
 			return nil, er
+		}
+		// ESCOPOS DIFERENTES NÃO SE COMPARAM.
+		//
+		// Um retrato volátil não tem unit, cron, pacote nem hash — não porque o
+		// host não os tenha, mas porque ninguém olhou. Comparado com um
+		// completo, TUDO que só existe no completo sai como "sumiu": medido,
+		// 771 mudanças, 770 delas remoções. Um modelo leria isso como um evento
+		// catastrófico de remoção em massa, e o evento não aconteceu.
+		//
+		// É a mesma regra que o `drift` do CLI já aplica às CAPACIDADES —
+		// comparar um retrato com root contra um sem root fabricaria "sumiu"
+		// para tudo que só root enxerga. O escopo é o mesmo eixo, um nível
+		// acima.
+		if antes.Escopo() != depois.Escopo() {
+			return nil, erroComDados(CodInvalidParams,
+				"os dois retratos têm ALCANCES diferentes ("+string(antes.Escopo())+
+					" e "+string(depois.Escopo())+"): o volátil não examina unit, cron, "+
+					"pacote nem hash, e comparar os dois faria TUDO que só o completo "+
+					"vê sair como \"sumiu\" — uma remoção em massa que não aconteceu",
+				map[string]any{
+					"before_scope": string(antes.Escopo()),
+					"after_scope":  string(depois.Escopo()),
+				})
 		}
 		la, ld := ladoDe(antes), ladoDe(depois)
 		ressalva, er := conferirOrdem(la, ld)

@@ -1209,6 +1209,16 @@ func assertChamada(t *testing.T, sc scenario.Scenario, c scenario.Chamada, resp 
 		t.Errorf("%s: erro inesperado: %v", ctx, resp.erro["message"])
 		return
 	}
+	if ehErro, _ := resp.resultado["isError"].(bool); ehErro != c.ErroDeTool {
+		if c.ErroDeTool {
+			t.Errorf("%s: esperava falha DE TOOL (isError:true) e a chamada deu "+
+				"certo\n%s", ctx, corta(resp.linha, 900))
+		} else {
+			t.Errorf("%s: a tool falhou e o cenário não esperava\n%s",
+				ctx, corta(resp.linha, 900))
+		}
+		return
+	}
 
 	for _, e := range c.Espera {
 		if !strings.Contains(resp.linha, e) {

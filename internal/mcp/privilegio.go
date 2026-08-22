@@ -2,8 +2,8 @@ package mcp
 
 import (
 	"os"
-	"strconv"
-	"strings"
+
+	"github.com/lex0c/aletheia/internal/env"
 )
 
 // O privilégio DESTE processo, declarado em voz alta.
@@ -21,12 +21,6 @@ import (
 // A lista abaixo é deliberadamente CURTA: só as capabilities que mudam o que
 // este servidor consegue OBSERVAR. Um dump completo das 40+ seria inventário,
 // e inventário longo é o que ninguém lê.
-
-// A leitura é de /proc/self/status com os.ReadFile, e não com env.Env, de
-// propósito: o Env em modo snapshot é o ambiente DA COLETA — travado na raiz da
-// imagem, quando houver — e a pergunta aqui é sobre ESTE processo, na máquina
-// onde ele roda. Passar pelo Env leria o /proc de outro host.
-const statusDoProprioProcesso = "/proc/self/status"
 
 // Toda entrada tem `efeito` preenchido, e isso não é estilo: é o critério de
 // pertencer à lista. Havia um CAP_CHOWN aqui, com efeito vazio — e ele não é
@@ -84,8 +78,12 @@ func LerPrivilegio() Privilegio {
 	p := Privilegio{UID: os.Getuid(), EUID: os.Geteuid()}
 	p.Root = p.EUID == 0
 
-	b, err := os.ReadFile(statusDoProprioProcesso)
-	if err != nil {
+	// O leitor de CapEff mora em internal/env porque é LÁ que ele decide algo:
+	// a concessão de env.CapRoot passou a olhar capability, e não só euid. Duas
+	// cópias do mesmo parser divergiriam em silêncio — e a divergência seria
+	// entre o que o servidor ANUNCIA de privilégio e o que a coleta ASSUME dele.
+	eff, lidas := env.CapsEfetivasDoProcesso()
+	if !lidas {
 		// Sem /proc não há como saber, e "não sei" é a resposta. Root continua
 		// verdadeiro pelo euid, que veio de uma syscall e não do filesystem.
 		p.Elevado = p.Root
@@ -94,24 +92,13 @@ func LerPrivilegio() Privilegio {
 		}
 		return p
 	}
-	for _, ln := range strings.Split(string(b), "\n") {
-		k, v, ok := strings.Cut(ln, ":")
-		if !ok || k != "CapEff" {
+	p.CapsLidas = true
+	for _, c := range capsDeObservacao {
+		if eff&(1<<c.bit) == 0 {
 			continue
 		}
-		eff, err := strconv.ParseUint(strings.TrimSpace(v), 16, 64)
-		if err != nil {
-			break
-		}
-		p.CapsLidas = true
-		for _, c := range capsDeObservacao {
-			if eff&(1<<c.bit) == 0 {
-				continue
-			}
-			p.CapsEfetivas = append(p.CapsEfetivas, c.nome)
-			p.Explicacao = append(p.Explicacao, c.nome+": "+c.efeito)
-		}
-		break
+		p.CapsEfetivas = append(p.CapsEfetivas, c.nome)
+		p.Explicacao = append(p.Explicacao, c.nome+": "+c.efeito)
 	}
 	// Da LISTA, e não do texto: estar na tabela é o critério, e toda entrada
 	// dela muda o que este servidor consegue observar.

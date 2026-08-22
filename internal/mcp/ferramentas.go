@@ -46,6 +46,39 @@ type Ferramenta struct {
 	// PerfilMin é o perfil mínimo. PerfilPadrao = sempre disponível.
 	PerfilMin Perfil
 
+	// EscopoMin é o alcance de coleta que a PERGUNTA desta tool exige.
+	//
+	// Vazio significa que ela se sustenta sobre qualquer retrato. EscopoCompleto
+	// significa que ela consulta famílias que a coleta volátil nem examina — e
+	// respondê-la ali produziria uma AUSÊNCIA que se lê como resposta.
+	//
+	// Medido antes deste campo existir: `file.inspect` sobre um retrato volátil
+	// devolvia found:false com o sinal "este caminho não aparece em nada que
+	// esta coleta examinou: nem em execução, nem em pacote, nem em
+	// agendamento". Pacote e agendamento NÃO FORAM examinados — a frase é
+	// factualmente falsa, e é exatamente a confusão que a ferramenta inteira
+	// existe para não cometer.
+	EscopoMin Escopo
+
+	// Anotacoes é o vocabulário de RISCO desta tool, e ele é POR TOOL.
+	//
+	// Ele era global: todas se anunciavam readOnly, não destrutivas e de mundo
+	// fechado. Isso era verdade na entrega 1, em que nenhuma tool mudava nada.
+	// A aquisição trouxe duas que mudam — snapshot.capture cria e RETÉM um
+	// objeto, snapshot.release o DESTRÓI — e as duas continuavam anunciadas
+	// como somente-leitura.
+	//
+	// O cliente usa esses hints para decidir se pede confirmação ao operador. E
+	// o release é o que mais importa numa resposta a incidente: um retrato
+	// volátil que capturou um processo memfd pode não ser reproduzível, porque o
+	// processo terminou. Anunciá-lo como não destrutivo faz o cliente descartar
+	// evidência sem perguntar.
+	//
+	// Os hints NÃO são a proteção — a spec é explícita, e um cliente pode
+	// ignorá-los. A proteção é o registry. Eles são o que permite ao cliente
+	// perguntar, e mentir neles tira do operador a chance de dizer não.
+	Anotacoes Anotacoes
+
 	// Dados declara a classe do que esta tool emite. OBRIGATÓRIO: o zero value
 	// é inválido e quebra o teste de catálogo. Ver projecao.go.
 	Dados ClasseDeDados
@@ -79,6 +112,34 @@ func contemModo(ms []Modo, m Modo) bool {
 	}
 	return false
 }
+
+// Anotacoes é o vocabulário de risco do MCP.
+type Anotacoes struct {
+	// SomenteLeitura: a tool NÃO modifica o ambiente dela. O padrão é o valor
+	// zero `false`, e é o lado seguro: uma tool nova é tratada como se mudasse
+	// algo até dizer que não.
+	SomenteLeitura bool
+	// Destrutiva só tem sentido quando SomenteLeitura é falso.
+	Destrutiva bool
+	// Idempotente: repetir com os mesmos argumentos é seguro.
+	Idempotente bool
+	// MundoAberto: a tool alcança algo fora deste processo. Nenhuma alcança.
+	MundoAberto bool
+}
+
+// JSON monta o mapa de hints do protocolo.
+func (a Anotacoes) JSON() map[string]any {
+	return map[string]any{
+		"readOnlyHint":    a.SomenteLeitura,
+		"destructiveHint": a.Destrutiva,
+		"idempotentHint":  a.Idempotente,
+		"openWorldHint":   a.MundoAberto,
+	}
+}
+
+// SomenteLeitura é a anotação da maioria: elas respondem sobre um retrato
+// imutável, então repetir é sempre seguro.
+var SomenteLeitura = Anotacoes{SomenteLeitura: true, Idempotente: true}
 
 // Indisponivel é a ausência DECLARADA. Ver Ferramenta.Fontes.
 type Indisponivel struct {

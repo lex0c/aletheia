@@ -89,6 +89,17 @@ type Procedencia struct {
 	// número que o operador registrou FORA do host.
 	Sidecar string `json:"sidecar"`
 
+	// Escopo é O QUANTO este retrato leu, e ele faz parte da IDENTIDADE
+	// EPISTEMOLÓGICA da resposta — não é um detalhe de como ela foi obtida.
+	//
+	// Na entrega 1 todo retrato era completo, e `source` bastava para dizer o
+	// que uma resposta significa. Com a aquisição, passaram a existir retratos
+	// de alcances diferentes: um volátil leu /proc e sockets, e mais nada. Sem
+	// este campo, um `snap-live-a123` a três chamadas de distância da captura
+	// não diz se contém unit, cron e pacote — e "não achei" ali não distingue
+	// "não existe" de "nem foi coletado".
+	Escopo string `json:"scope"`
+
 	// Autenticado é sempre false, e está escrito para não deixar dúvida: nada
 	// neste artefato prova origem. Ele existe para o dia em que existir
 	// assinatura — e, até lá, para impedir a leitura otimista de `sidecar`.
@@ -96,7 +107,7 @@ type Procedencia struct {
 }
 
 // ProcedenciaDeDump monta a procedência a partir do artefato.
-func ProcedenciaDeDump(id string, d *dump.Dump, sidecar string) Procedencia {
+func ProcedenciaDeDump(id string, d *dump.Dump, sidecar, escopo string) Procedencia {
 	a := d.Ambiente
 	p := Procedencia{
 		SnapshotID: id, Fonte: a.Source,
@@ -105,6 +116,7 @@ func ProcedenciaDeDump(id string, d *dump.Dump, sidecar string) Procedencia {
 		// DO ARTEFATO, e não do modo do servidor.
 		Redacao: string(d.Redacao.Estado()),
 		Sidecar: sidecar,
+		Escopo:  escopo,
 	}
 	if d.Facts != nil {
 		p.Host = d.Facts.Host.Hostname

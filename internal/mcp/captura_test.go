@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/lex0c/aletheia/internal/checks" // registra o catálogo
 	"github.com/lex0c/aletheia/internal/env"
@@ -170,5 +171,161 @@ func TestVolatilNaoSeAplicaAImagem(t *testing.T) {
 	}
 	if !strings.Contains(er.Message, "host vivo") {
 		t.Fatalf("a recusa precisa dizer por quê: %q", er.Message)
+	}
+}
+
+// AS ANOTAÇÕES SÃO POR TOOL, e as duas que mudam estado não podem se anunciar
+// somente-leitura.
+//
+// O cliente usa esses hints para decidir se pede confirmação ao operador. O
+// release é o que mais importa numa resposta a incidente: um retrato volátil que
+// capturou um processo memfd pode não ser reproduzível — o processo terminou —, e
+// anunciá-lo como não destrutivo faz o cliente descartar evidência sem perguntar.
+//
+// A catraca do M4 não pega isto: ela roda em ModoSnapshot, onde as duas nem
+// entram no registry.
+func TestAquisicaoNaoSeAnunciaSomenteLeitura(t *testing.T) {
+	s := servidorVivo(t, ModoLive, "")
+
+	quer := map[string]struct{ leitura, destrutiva bool }{
+		"snapshot.capture": {leitura: false, destrutiva: false},
+		"snapshot.release": {leitura: false, destrutiva: true},
+	}
+	for nome, q := range quer {
+		f, ok := s.porNome[nome]
+		if !ok {
+			t.Fatalf("%s devia existir em modo live", nome)
+		}
+		if f.Anotacoes.SomenteLeitura != q.leitura {
+			t.Errorf("%s: readOnlyHint=%v, queria %v — ela MUDA o estado do servidor",
+				nome, f.Anotacoes.SomenteLeitura, q.leitura)
+		}
+		if f.Anotacoes.Destrutiva != q.destrutiva {
+			t.Errorf("%s: destructiveHint=%v, queria %v", nome,
+				f.Anotacoes.Destrutiva, q.destrutiva)
+		}
+	}
+
+	// E toda tool de LEITURA continua se anunciando como tal — a mudança não
+	// pode ter passado o pincel em todas.
+	for _, f := range s.ativas {
+		if f.Nome == "snapshot.capture" || f.Nome == "snapshot.release" {
+			continue
+		}
+		if !f.Anotacoes.SomenteLeitura {
+			t.Errorf("%s não muda nada e não se anuncia somente-leitura", f.Nome)
+		}
+	}
+}
+
+// E o escopo do retrato é parte da resposta, não só da captura.
+func TestEscopoViajaNaProcedenciaENaListagem(t *testing.T) {
+	s := servidorVivo(t, ModoLive, "")
+	capturar(t, s, "volatile")
+
+	env := chamar(t, s, "host.overview", `{}`)
+	if got := env["provenance"].(map[string]any)["scope"]; got != "volatile" {
+		t.Errorf("provenance.scope = %v", got)
+	}
+	lista := chamar(t, s, "snapshot.list", `{}`)
+	itens := lista["data"].(map[string]any)["snapshots"].([]any)
+	it := itens[0].(map[string]any)
+	if it["scope"] != "volatile" || it["supports_findings"] != false {
+		t.Errorf("snapshot.list não carrega o alcance: %v", it)
+	}
+}
+
+// O dossiê que a coleta volátil não sustenta é RECUSADO, e não respondido com
+// uma ausência que se lê como resposta.
+func TestDossieQueExigeCompletoRecusaOVolatil(t *testing.T) {
+	s := servidorVivo(t, ModoLive, "")
+	capturar(t, s, "volatile")
+
+	for _, c := range []struct{ tool, args string }{
+		{"file.inspect", `{"path":"/etc/cron.d/backdoor"}`},
+		{"net.ip", `{"address":"198.51.100.7"}`},
+	} {
+		_, er := s.porNome[c.tool].Rodar(s, json.RawMessage(c.args))
+		if er == nil {
+			t.Errorf("%s respondeu sobre um retrato que não examinou pacote nem "+
+				"agendamento — 'não achei' ali não é resposta", c.tool)
+			continue
+		}
+		if !strings.Contains(er.Message, "volátil") {
+			t.Errorf("%s: a recusa precisa dizer por quê: %q", c.tool, er.Message)
+		}
+	}
+	// E o que a coleta volátil SUSTENTA continua respondendo.
+	if _, er := s.porNome["process.census"].Rodar(s, json.RawMessage(`{}`)); er != nil {
+		t.Fatalf("process.census se sustenta em volátil: %v", er)
+	}
+}
+
+// O TETO LIMITA MEMÓRIA; O ORÇAMENTO LIMITA TRABALHO.
+//
+// Capturar e liberar em laço mantém sempre um só retrato vivo, então o teto
+// nunca dispara — e cada volta cobra uma varredura do host investigado. É o
+// laço que um modelo faz sozinho quando o resultado parece estranho.
+func TestCapturarEliberarEmLacoEsbarraNoOrcamento(t *testing.T) {
+	s := servidorVivo(t, ModoLive, "")
+	// Um orçamento de um nanossegundo: a primeira captura já o consome, e a
+	// segunda é recusada mesmo com o acervo vazio.
+	s.pol.OrcamentoDeColeta = time.Nanosecond
+
+	primeira := capturar(t, s, "volatile")
+	id := primeira["data"].(map[string]any)["snapshot_id"].(string)
+	if _, er := s.porNome["snapshot.release"].Rodar(s,
+		json.RawMessage(`{"snapshot_id":"`+id+`"}`)); er != nil {
+		t.Fatalf("release: %v", er)
+	}
+	if n := len(s.acervo.Todos()); n != 0 {
+		t.Fatalf("o acervo devia estar vazio, tem %d", n)
+	}
+
+	_, er := s.porNome["snapshot.capture"].Rodar(s, json.RawMessage(`{"scope":"volatile"}`))
+	if er == nil {
+		t.Fatal("com o acervo vazio o TETO não impede nada — e sem orçamento " +
+			"nada impede o laço de varrer o host para sempre")
+	}
+	for _, quer := range []string{"orçamento", "release NÃO devolve orçamento"} {
+		if !strings.Contains(er.Message, quer) {
+			t.Errorf("a recusa precisa explicar o que acabou e que liberar não "+
+				"resolve; falta %q em: %s", quer, er.Message)
+		}
+	}
+}
+
+// E o limite é LEGÍVEL antes de ser batido.
+func TestOrcamentoDeColetaEhPublicado(t *testing.T) {
+	s := servidorVivo(t, ModoLive, "")
+	st := chamar(t, s, "session.status", `{}`)
+	b, ok := st["data"].(map[string]any)["capture_budget"].(map[string]any)
+	if !ok {
+		t.Fatal("session.status não publica o orçamento: um limite que só se " +
+			"descobre batendo nele custa uma captura inteira para ser aprendido")
+	}
+	if b["remaining_ms"].(float64) <= 0 {
+		t.Error("uma sessão nova nasce sem orçamento")
+	}
+	if b["reclaimable"] != false {
+		t.Error("reclaimable tem de ser false: release devolve memória, não trabalho")
+	}
+
+	capturar(t, s, "volatile")
+	depois := chamar(t, s, "session.status", `{}`)
+	b2 := depois["data"].(map[string]any)["capture_budget"].(map[string]any)
+	if b2["spent_ms"].(float64) <= 0 {
+		t.Error("a captura não cobrou nada do orçamento")
+	}
+	if b2["remaining_ms"].(float64) >= b["remaining_ms"].(float64) {
+		t.Error("o que sobra não diminuiu depois de uma captura")
+	}
+
+	// E em modo snapshot não há aquisição a orçar: o campo tem de estar AUSENTE,
+	// e não zerado — zero se leria como "orçamento esgotado".
+	sn, _ := servidorDeTeste(t, fatosDeTeste())
+	st2 := chamar(t, sn, "session.status", `{}`)
+	if _, tem := st2["data"].(map[string]any)["capture_budget"]; tem {
+		t.Error("modo snapshot publicou orçamento de coleta: não há o que orçar")
 	}
 }

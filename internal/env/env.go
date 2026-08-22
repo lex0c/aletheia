@@ -273,6 +273,11 @@ type Env struct {
 	// todo coletor.
 	Progress ProgressSink
 
+	// selado marca o ambiente RECONSTRUÍDO — o que dump.Env() devolve. Ele
+	// descreve as condições de uma coleta que já terminou, então todo acesso a
+	// filesystem por ele é recusado com ErrSelado. Ver raizIndisponivel.
+	selado bool
+
 	Now   time.Time // sempre UTC
 	Clock ClockState
 
@@ -331,6 +336,14 @@ type Env struct {
 }
 
 // Close libera a raiz travada.
+// Selar torna o ambiente incapaz de ler filesystem, para sempre. Não há como
+// dessselar: quem precisa do host vivo constrói um Env com env.Novo, que é o
+// caminho onde o operador já disse o que autoriza.
+func (e *Env) Selar() { e.selado = true }
+
+// Selado responde se este ambiente descreve uma coleta encerrada.
+func (e *Env) Selado() bool { return e.selado }
+
 func (e *Env) Close() {
 	if e.root != nil {
 		e.root.Close()
@@ -511,9 +524,9 @@ func (e *Env) grant(c Cap, ok bool, reason string) {
 }
 
 func (e *Env) probeCaps() {
-	// root
-	e.grant(CapRoot, os.Geteuid() == 0,
-		"não estamos como root: environ, dono de socket, /etc/shadow e /root ficam invisíveis")
+	// root — pelo ALCANCE, e não pelo euid. Ver alcancaSuperficiePrivilegiada.
+	alcanca, porQue := alcancaSuperficiePrivilegiada()
+	e.grant(CapRoot, alcanca, porQue)
 
 	// filesystem — em image depende da raiz travada ter aberto.
 	if e.Source == SourceImage && e.root == nil {

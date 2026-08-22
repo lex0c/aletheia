@@ -46,6 +46,24 @@ var (
 	ErrGrandeDemais = errors.New("arquivo maior que o teto de leitura: NÃO foi lido")
 	ErrNaoEhArquivo = errors.New("não é arquivo comum (fifo, socket ou dispositivo): " +
 		"NÃO foi lido, porque abrir isto bloqueia ou consome sem fim")
+	// ErrSelado recusa QUALQUER leitura num Env reconstruído a partir de um
+	// artefato. Um dump é o registro de uma coleta que TERMINOU: o ambiente que
+	// dump.Env() devolve descreve as condições daquela coleta, e não é uma porta
+	// para o filesystem de agora.
+	//
+	// Sem isto a recusa cobria só metade do problema. Um dump com Source=image
+	// batia em ErrSemRaiz — mas um dump coletado no HOST VIVO tem Root vazio e
+	// Source=live, e aí ReadFile caía direto no os.ReadFile do processo. Medido:
+	// `d.Env(nil).ReadFile("/etc/hostname")` devolveu o hostname da máquina do
+	// ANALISTA, sete bytes, sem erro nenhum. A ferramenta responderia sobre a
+	// estação de quem investiga achando que fala do alvo.
+	//
+	// Nenhum check e nenhum dossiê lê filesystem hoje — todos são função pura
+	// sobre Facts —, então a porta nunca foi atravessada. É exatamente por isso
+	// que ela se fecha agora: uma porta que ninguém usa é barata de trancar, e
+	// cara de descobrir aberta depois que alguém passou.
+	ErrSelado = errors.New("este ambiente descreve uma coleta ENCERRADA: a " +
+		"leitura foi RECUSADA para não responder sobre o host de agora")
 	// ErrSemRaiz recusa leitura num Env de IMAGEM cuja raiz travada não está
 	// aberta. Ver raizIndisponivel.
 	ErrSemRaiz = errors.New("raiz travada da imagem indisponível: a leitura foi " +
@@ -65,6 +83,9 @@ var (
 // probeCaps já trata este par como ausência de CapFilesystem; aqui ele vira
 // recusa explícita, para que um acessor chamado mesmo assim erre alto.
 func (e *Env) raizIndisponivel() error {
+	if e.selado {
+		return ErrSelado
+	}
 	if e.Source == SourceImage && e.root == nil {
 		return ErrSemRaiz
 	}

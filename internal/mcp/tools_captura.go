@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/lex0c/aletheia/internal/env"
@@ -15,14 +16,17 @@ import (
 // tool capaz de provocá-la contradiria a promessa daquele modo.
 
 var toolSnapshotCapture = Ferramenta{
-	Dados:  DadosRedigidosNaOrigem,
-	Nome:   "snapshot.capture",
-	Titulo: "Tirar um retrato do host AGORA",
+	Anotacoes: Anotacoes{Idempotente: false},
+	Dados:     DadosRedigidosNaOrigem,
+	Nome:      "snapshot.capture",
+	Titulo:    "Tirar um retrato do host AGORA",
 	Descricao: "Lê o host e cunha um snapshot_id. Todas as outras tools respondem " +
 		"sobre um retrato, nunca sobre o estado do momento — é isso que impede uma " +
 		"investigação de trinta chamadas de misturar quatro instantes diferentes, e " +
 		"de perguntar sobre um pid que já morreu (ou pior, que já foi reciclado).\n\n" +
-		"scope=volatile lê /proc e sockets, e é ~9x mais barato: é o que pega " +
+		"scope=volatile lê /proc, os sockets e a base de usuários — o par que o " +
+		"dossiê já usa para dizer QUEM é o dono de um processo —, e é ~9x mais " +
+		"barato: é o que pega " +
 		"processo efêmero. Ele NÃO sustenta achado — findings.list sobre um retrato " +
 		"volátil devolve zero achados COM o catálogo inteiro em not_checked, porque " +
 		"um check de unit encontraria zero units e diria 'nada encontrado' onde o " +
@@ -31,10 +35,22 @@ var toolSnapshotCapture = Ferramenta{
 		"Ela custa segundos no host investigado e, enquanto roda, este servidor não " +
 		"responde outra chamada — inclusive um cancelamento, que só é notado depois. " +
 		"É o limite real: os coletores não são interrompíveis.",
+	// O ESCOPO É OBRIGATÓRIO, sem padrão.
+	//
+	// Ele era `default:"complete"`, e um default ali escolhe pelo modelo a
+	// pergunta mais cara do servidor — segundos de varredura no host
+	// investigado, com o servidor mudo enquanto roda — a partir de um argumento
+	// que o cliente simplesmente esqueceu de mandar. E escolhe também o
+	// ALCANCE: complete e volatile respondem coisas diferentes sobre o mesmo
+	// host, e um retrato volátil pedido por omissão é a resposta certa para a
+	// pergunta errada.
+	//
+	// Custo declarado tem de ser custo pedido.
 	Entrada: json.RawMessage(`{"type":"object","additionalProperties":false,
+"required":["scope"],
 "properties":{
- "scope":{"type":"string","enum":["volatile","complete"],"default":"complete",
-  "description":"volatile: /proc e sockets, barato, NAO sustenta achado. complete: varredura inteira, custa segundos no host."}}}`),
+ "scope":{"type":"string","enum":["volatile","complete"],
+  "description":"volatile: /proc e sockets, barato, NAO sustenta achado. complete: varredura inteira, custa segundos no host. Nao ha padrao: as duas respondem perguntas diferentes, e escolher por voce responderia a errada."}}}`),
 	Saida: esquemaEnvelope(`{"type":"object","required":["snapshot_id","scope"],
 "properties":{
  "snapshot_id":{"type":"string","description":"o handle. O prefixo snap-live- diz que ele NAO é hash de conteudo: uma captura nunca virou bytes em disco, entao nao ha o que verificar depois."},
@@ -49,16 +65,39 @@ var toolSnapshotCapture = Ferramenta{
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
-		escopo := Escopo(a.Escopo)
 		if a.Escopo == "" {
-			escopo = EscopoCompleto
+			return nil, erro(CodInvalidParams,
+				"scope é obrigatório: \"volatile\" lê /proc e sockets e NÃO sustenta "+
+					"achado; \"complete\" é a varredura inteira, custa segundos no host "+
+					"investigado e é a única que sustenta findings. Escolher por você "+
+					"responderia a pergunta errada, ou cobraria o custo maior sem "+
+					"ninguém ter pedido.")
 		}
+		escopo := Escopo(a.Escopo)
 		if escopo != EscopoVolatil && escopo != EscopoCompleto {
 			return nil, erro(CodInvalidParams,
 				`scope desconhecido: use "volatile" ou "complete"`)
 		}
 		if s.adquirir == nil {
 			return nil, erro(CodInternalError, "este servidor não tem aquisição")
+		}
+		// O ORÇAMENTO DE TRABALHO, conferido ANTES de custar qualquer coisa.
+		//
+		// O teto de retratos vivos limita memória, e capturar-liberar em laço
+		// nunca esbarra nele: há sempre no máximo um vivo. Cada volta, porém,
+		// cobra uma varredura do host investigado. Sem este portão, a única
+		// coisa entre um laço de correção do modelo e uma carga contínua na
+		// máquina comprometida era a boa vontade do cliente.
+		if _, resta := s.orcamentoDeColeta(); resta <= 0 {
+			gasto, _ := s.orcamentoDeColeta()
+			return nil, erro(CodInvalidParams, fmt.Sprintf(
+				"o orçamento de coleta desta sessão acabou: %s já foram gastos "+
+					"lendo o host investigado, de um teto de %s.\n\n"+
+					"snapshot.release NÃO devolve orçamento — ele devolve memória, e "+
+					"trabalho já feito não volta. Os retratos já capturados continuam "+
+					"respondendo normalmente; o que acabou é a capacidade de tirar "+
+					"outro. Para continuar, o operador reinicia o servidor.",
+				gasto.Round(time.Millisecond), s.pol.OrcamentoDeColeta))
 		}
 		e, err := s.adquirir()
 		if err != nil {
@@ -73,9 +112,14 @@ var toolSnapshotCapture = Ferramenta{
 		if escopo == EscopoCompleto && s.pol.Budget > 0 {
 			e.WalkDeadline = time.Now().Add(s.pol.Budget)
 		}
+		// A cobrança é do tempo REAL, e acontece tenha a captura dado certo ou
+		// não: o host pagou pela varredura de qualquer jeito, e cobrar só o
+		// sucesso deixaria a falha repetível de graça. Capturar assume a posse
+		// do Env e sempre o fecha.
+		inicio := time.Now()
 		r, err := s.acervo.Capturar(e, escopo)
+		s.cobrarColeta(time.Since(inicio))
 		if err != nil {
-			e.Close()
 			return nil, erro(CodInvalidParams, err.Error())
 		}
 		return envelopar(r, ObservabilidadeDeFatos(r.Fatos), map[string]any{
@@ -86,9 +130,10 @@ var toolSnapshotCapture = Ferramenta{
 }
 
 var toolSnapshotRelease = Ferramenta{
-	Dados:  DadosDoMotor,
-	Nome:   "snapshot.release",
-	Titulo: "Descartar um retrato",
+	Anotacoes: Anotacoes{Destrutiva: true},
+	Dados:     DadosDoMotor,
+	Nome:      "snapshot.release",
+	Titulo:    "Descartar um retrato",
 	Descricao: "Libera a memória de um retrato capturado. Cada um segura os fatos " +
 		"INTEIROS deste host na memória de um processo que roda NO host investigado " +
 		"— e a ferramenta promete passar pouco recurso ali. Libere o que já não vai " +

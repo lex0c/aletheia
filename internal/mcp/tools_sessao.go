@@ -95,9 +95,12 @@ func (s *Servidor) ids() []string {
 // existiu processo nenhum para ter terminado. É a confusão que a ferramenta
 // inteira existe para não cometer — ausência lida como resposta, quando o certo
 // é "esta pergunta não se aplica a esta fonte".
-func (s *Servidor) retratoComFonte(id string, fontes env.Source) (*Retrato, *ErroRPC) {
+func (s *Servidor) retratoComFonte(id string, fontes env.Source, escopoMin Escopo) (*Retrato, *ErroRPC) {
 	r, er := s.retratoDe(id)
 	if er != nil {
+		return nil, er
+	}
+	if er := exigirEscopo(r, escopoMin); er != nil {
 		return nil, er
 	}
 	if fontes != 0 && r.Fonte&fontes == 0 {
@@ -109,6 +112,26 @@ func (s *Servidor) retratoComFonte(id string, fontes env.Source) (*Retrato, *Err
 			map[string]any{"snapshot_id": r.ID, "source": r.Fonte.String()})
 	}
 	return r, nil
+}
+
+// exigirEscopo recusa a pergunta que o retrato não sustenta.
+//
+// A recusa é melhor que a resposta degradada porque a degradação aqui é MUDA:
+// as famílias que o volátil não coletou saem vazias, e o dossiê conclui
+// "não aparece em nada que esta coleta examinou" sobre algo que ninguém
+// examinou. É a distinção entre "não achei" e "não consegui olhar", perdida
+// dentro da própria tool que existe para mantê-la.
+func exigirEscopo(r *Retrato, minimo Escopo) *ErroRPC {
+	if minimo != EscopoCompleto || r.Escopo() == EscopoCompleto {
+		return nil
+	}
+	return erroComDados(CodInvalidParams,
+		"esta pergunta exige um retrato COMPLETO, e "+r.ID+" é volátil: ele leu "+
+			"/proc e sockets, e não examinou pacote, agendamento, unit, hash nem "+
+			"atributo de inode. Responder aqui produziria uma ausência que se lê "+
+			"como resposta. Capture com scope=complete.",
+		map[string]any{"snapshot_id": r.ID, "scope": string(r.Escopo()),
+			"required_scope": string(EscopoCompleto)})
 }
 
 func (s *Servidor) rotulos() []map[string]string {
@@ -157,6 +180,12 @@ type dadosStatus struct {
 
 	Retratos []map[string]string `json:"snapshots,omitempty"`
 
+	// Coleta é o orçamento de TRABALHO, e ele é publicado porque um limite que
+	// só se descobre batendo nele obriga o modelo a gastar uma captura inteira
+	// para aprender que não podia. Ausente em modo snapshot, onde não há
+	// aquisição a orçar.
+	Coleta *orcamento `json:"capture_budget,omitempty"`
+
 	// FerramentasIndisponiveis é a AUSÊNCIA DECLARADA.
 	//
 	// A tool que não se aplica some de tools/list — superfície que não existe
@@ -167,6 +196,14 @@ type dadosStatus struct {
 	FerramentasIndisponiveis []Indisponivel `json:"unavailable_tools,omitempty"`
 }
 
+type orcamento struct {
+	TetoMs  int64 `json:"total_ms"`
+	GastoMs int64 `json:"spent_ms"`
+	RestaMs int64 `json:"remaining_ms"`
+	// Devolvivel é sempre false: release devolve MEMÓRIA, não trabalho.
+	Devolvivel bool `json:"reclaimable"`
+}
+
 const notaDeRedacaoSnapshot = "este servidor responde sobre um DUMP. Quando o " +
 	"artefato traz o carimbo (redaction: applied), toda superfície textual dele " +
 	"passou pela redação na ORIGEM, e não existe flag que destrave o que não está " +
@@ -175,6 +212,7 @@ const notaDeRedacaoSnapshot = "este servidor responde sobre um DUMP. Quando o " 
 	"em claro, e desconfie da procedência do arquivo."
 
 var toolStatus = Ferramenta{
+	Anotacoes: SomenteLeitura,
 	// NÃO é DadosDoMotor: a resposta lista os retratos carregados, e o rótulo
 	// de cada um é o hostname lido do dump. A classe declara o conteúdo mais
 	// forte que a tool emite, e "não há dado do alvo" aqui era falso.
@@ -198,9 +236,16 @@ var toolStatus = Ferramenta{
  "network_egress":{"type":"boolean","description":"sempre false: nenhuma tool inicia conexao nem resolve nome"},
  "host_mutation":{"type":"boolean","description":"sempre false: nenhuma tool escreve no host"},
  "command_execution":{"type":"boolean","description":"sempre false: nao existe tool que execute comando"},
+ "capture_budget":{"type":"object","description":"quanto tempo de leitura do host esta sessao ainda pode gastar em snapshot.capture. Ausente em modo snapshot, onde nao ha aquisicao. Esgotado, os retratos ja tirados continuam respondendo — o que acaba é a capacidade de tirar outro.",
+  "properties":{"total_ms":{"type":"integer"},"spent_ms":{"type":"integer"},
+   "remaining_ms":{"type":"integer"},
+   "reclaimable":{"type":"boolean","description":"sempre false: snapshot.release devolve memoria, nao trabalho ja feito"}}},
  "root_authorized":{"type":"boolean"},
  "secrets_authorized":{"type":"boolean"},
- "redacted_at_source":{"type":"boolean"},
+ "redaction":{"type":"array","description":"o que cada retrato PROVA sobre a propria redacao, lido do carimbo do artefato — nunca o que este servidor afirma. Ausente fora do modo snapshot, onde os retratos nascem de captura e nao de arquivo.",
+  "items":{"type":"object","properties":{
+   "snapshot_id":{"type":"string"},
+   "redaction":{"type":"string","enum":["applied","absent","unknown_version"]}}}},
  "redaction_note":{"type":"string"},
  "snapshots":{"type":"array","items":{"type":"object"}},
  "unavailable_tools":{"type":"array","items":{"type":"object",
@@ -218,6 +263,14 @@ var toolStatus = Ferramenta{
 			Retratos:                 s.rotulos(),
 			FerramentasIndisponiveis: s.fora,
 		}
+		if s.pol.Modo != ModoSnapshot {
+			gasto, resta := s.orcamentoDeColeta()
+			d.Coleta = &orcamento{
+				TetoMs:  s.pol.OrcamentoDeColeta.Milliseconds(),
+				GastoMs: gasto.Milliseconds(),
+				RestaMs: resta.Milliseconds(),
+			}
+		}
 		if s.pol.Modo == ModoSnapshot {
 			for _, r := range s.acervo.Todos() {
 				d.Redacao = append(d.Redacao, map[string]string{
@@ -233,27 +286,38 @@ var toolStatus = Ferramenta{
 // ------------------------------------------------------------- snapshot.list
 
 type itemRetrato struct {
-	SnapshotID  string   `json:"snapshot_id"`
-	Rotulo      string   `json:"label"`
-	Host        string   `json:"host,omitempty"`
-	Fonte       string   `json:"source"`
-	ColetadoEm  string   `json:"collected_at,omitempty"`
-	ColetadoPor string   `json:"collected_by,omitempty"`
-	Caps        []string `json:"caps,omitempty"`
+	SnapshotID string `json:"snapshot_id"`
+	Rotulo     string `json:"label"`
+	Host       string `json:"host,omitempty"`
+	Fonte      string `json:"source"`
+	// Escopo e SustentaAchado viajam na LISTAGEM porque é ali que o modelo
+	// reencontra um handle cuja captura já saiu do contexto dele.
+	Escopo         string   `json:"scope"`
+	SustentaAchado bool     `json:"supports_findings"`
+	ColetadoEm     string   `json:"collected_at,omitempty"`
+	ColetadoPor    string   `json:"collected_by,omitempty"`
+	Caps           []string `json:"caps,omitempty"`
 }
 
 var toolSnapshotList = Ferramenta{
-	Dados:  DadosRedigidosNaOrigem,
-	Nome:   "snapshot.list",
-	Titulo: "Os retratos que este servidor pode consultar",
-	Descricao: "Lista os dumps declarados no lançamento, com seu snapshot_id. " +
+	Anotacoes: SomenteLeitura,
+	Dados:     DadosRedigidosNaOrigem,
+	Nome:      "snapshot.list",
+	Titulo:    "Os retratos que este servidor pode consultar",
+	Descricao: "Lista os retratos carregados: id, alcance, e se sustentam achado.\n\n" +
+		"Em modo snapshot são os dumps que o operador fixou no lançamento. Em live " +
+		"e image são os que snapshot.capture cunhou nesta sessão, e a lista começa " +
+		"VAZIA — lista vazia ali significa 'ninguém tirou retrato ainda', nunca " +
+		"'não há o que ver'.\n\n" +
 		"Nenhuma tool aceita caminho de arquivo: tudo que este processo pode abrir " +
 		"foi fixado pelo operador quando ele iniciou o servidor.",
 	Entrada: json.RawMessage(entradaVazia),
 	Saida: esquemaSimples(`{"type":"object","required":["snapshots"],"properties":{
- "snapshots":{"type":"array","items":{"type":"object","required":["snapshot_id","source"],
+ "snapshots":{"type":"array","items":{"type":"object","required":["snapshot_id","source","scope"],
   "properties":{"snapshot_id":{"type":"string"},"label":{"type":"string"},
    "host":{"type":"string"},"source":{"type":"string","enum":["live","image"]},
+   "scope":{"type":"string","enum":["volatile","complete"],"description":"volatile leu /proc e sockets e mais nada — nem pacote, nem agendamento, nem unit"},
+   "supports_findings":{"type":"boolean"},
    "collected_at":{"type":"string"},"collected_by":{"type":"string"},
    "caps":{"type":"array","items":{"type":"string"}}}}}}}`),
 	Rodar: func(s *Servidor, args json.RawMessage) (any, *ErroRPC) {
@@ -266,7 +330,9 @@ var toolSnapshotList = Ferramenta{
 			p := r.Procedencia()
 			itens = append(itens, itemRetrato{
 				SnapshotID: r.ID, Rotulo: r.Rotulo, Host: p.Host, Fonte: p.Fonte,
-				ColetadoEm: p.ColetadoEm, ColetadoPor: p.ColetadoPor, Caps: p.Caps,
+				Escopo:         string(r.Escopo()),
+				SustentaAchado: r.Escopo() == EscopoCompleto,
+				ColetadoEm:     p.ColetadoEm, ColetadoPor: p.ColetadoPor, Caps: p.Caps,
 			})
 		}
 		return EnvelopeSimples{
@@ -279,9 +345,10 @@ var toolSnapshotList = Ferramenta{
 // ------------------------------------------------------------- snapshot.info
 
 var toolSnapshotInfo = Ferramenta{
-	Dados:  DadosRedigidosNaOrigem,
-	Nome:   "snapshot.info",
-	Titulo: "Em que condições este retrato foi tirado",
+	Anotacoes: SomenteLeitura,
+	Dados:     DadosRedigidosNaOrigem,
+	Nome:      "snapshot.info",
+	Titulo:    "Em que condições este retrato foi tirado",
 	Descricao: "Procedência completa de um retrato: quando, por quem, de onde, com " +
 		"que capacidades, e o que a coleta não conseguiu ler. É o que decide o peso " +
 		"de tudo o mais que você perguntar sobre ele.",
@@ -308,9 +375,10 @@ var toolSnapshotInfo = Ferramenta{
 // ------------------------------------------------------------- host.overview
 
 var toolHostOverview = Ferramenta{
-	Dados:  DadosRedigidosNaOrigem,
-	Nome:   "host.overview",
-	Titulo: "Que host é este",
+	Anotacoes: SomenteLeitura,
+	Dados:     DadosRedigidosNaOrigem,
+	Nome:      "host.overview",
+	Titulo:    "Que host é este",
 	Descricao: "Kernel, sistema, libc, virtualização, carga contra número de CPUs e " +
 		"tempo de boot. É o contexto que pesa todo o resto: load 8.0 é rotina em 12 " +
 		"CPUs e é um host afogado sob cota de 0,5.",
@@ -353,9 +421,10 @@ type itemCheck struct {
 }
 
 var toolChecksCatalog = Ferramenta{
-	Dados:  DadosDoMotor,
-	Nome:   "checks.catalog",
-	Titulo: "O que o motor determinístico sabe concluir",
+	Anotacoes: SomenteLeitura,
+	Dados:     DadosDoMotor,
+	Nome:      "checks.catalog",
+	Titulo:    "O que o motor determinístico sabe concluir",
 	Descricao: "O catálogo de checks deste binário: id, seção do runbook, grupo, o " +
 		"que cada um exige do ambiente e os FALSOS POSITIVOS conhecidos. Leia os " +
 		"falsos positivos antes de acusar. Você não pode criar finding — este é o " +

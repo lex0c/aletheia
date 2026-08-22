@@ -70,6 +70,20 @@ type Chamada struct {
 	// ErroCodigo espera um erro JSON-RPC com este código.
 	ErroCodigo int
 
+	// ErroDeTool espera a OUTRA forma de falha, e ela não é a mesma coisa.
+	//
+	// Erro de PROTOCOLO — método inexistente, era ambígua, frame acima do teto —
+	// é um `error` de JSON-RPC: a requisição não chegou a ser uma chamada. Erro
+	// de TOOL — argumento faltando, escopo que não se aplica — é um `result`
+	// bem-sucedido com `isError:true`, porque a chamada aconteceu e a resposta é
+	// sobre o domínio.
+	//
+	// A spec separa os dois de propósito: o cliente reencaminha o segundo para o
+	// modelo, que pode corrigir o argumento e tentar de novo, e trata o primeiro
+	// como defeito de integração. Um cenário que confundisse as duas formas
+	// aprovaria o servidor mandando a mensagem certa pelo canal errado.
+	ErroDeTool bool
+
 	// ProibeTool recusa nomes em `tools/list`. Vale para provar a ausência de
 	// superfície de execução — o que não está no registry não pode ser induzido.
 	ProibeTool []string

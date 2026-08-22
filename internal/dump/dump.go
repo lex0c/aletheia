@@ -642,6 +642,10 @@ func (d *Dump) Env(local *env.Env) (*env.Env, error) {
 		e.CapReason["dump:"+n] = "a coleta declarou a capacidade " + n +
 			", que este binário não conhece: use a versão que coletou"
 	}
+	// O ambiente do artefato NÃO abre porta para o host de agora — nem quando a
+	// coleta foi feita num host vivo, caso em que Root é vazio e um ReadFile
+	// caía no filesystem do analista. Ver env.ErrSelado.
+	e.Selar()
 	return e, nil
 }
 

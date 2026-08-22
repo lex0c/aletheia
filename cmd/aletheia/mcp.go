@@ -41,6 +41,8 @@ func runMCP(args []string) int {
 		permitirRoot = fs.Bool("allow-root", false, "autorizar a execução como root")
 		permitirSeg  = fs.Bool("allow-secrets", false, "desligar a redação (exige --profile full)")
 		auditoria    = fs.String("audit-log", "", "gravar a trilha de auditoria em FILE além do stderr")
+		orcamento    = fs.Duration("capture-budget", mcp.OrcamentoDeColetaPadrao,
+			"tempo total de leitura do host que esta sessão pode gastar em snapshot.capture")
 	)
 	fs.Var(&retratos, "snapshot", "servir um dump do collect (repetível)")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
@@ -52,20 +54,53 @@ func runMCP(args []string) int {
 	if code != 0 {
 		return code
 	}
+	// O orçamento de TRABALHO é do operador: é a máquina dele que paga a
+	// varredura. Um teto que ele não pode levantar viraria armadilha numa
+	// investigação longa; um que ele não pode baixar, numa máquina em produção.
+	if *orcamento < 0 {
+		fmt.Fprintln(os.Stderr, "mcp: --capture-budget não pode ser negativo")
+		return 3
+	}
+	pol.OrcamentoDeColeta = *orcamento
+	if pol.Modo != mcp.ModoSnapshot && *orcamento == 0 {
+		fmt.Fprintln(os.Stderr,
+			"mcp: --capture-budget=0 desliga o teto de trabalho da aquisição.\n"+
+				"Capturar e liberar em laço passa a poder varrer o host investigado\n"+
+				"sem fim, e o teto de retratos vivos não impede isso — ele limita\n"+
+				"memória, não trabalho.")
+	}
 
 	// O PORTÃO DE ROOT. Ele fica aqui e não em `env`, que só sonda: a decisão
 	// de rodar privilegiado é do operador, e precisa ser dita antes de o
 	// servidor abrir a boca. `sudo aletheia mcp` falha; só passa quem escreveu
 	// --allow-root.
-	if os.Geteuid() == 0 && !pol.PermitirRoot {
+	// O PORTÃO OLHA O PRIVILÉGIO EFETIVO, e não o euid.
+	//
+	// Ele conferia `os.Geteuid() == 0` enquanto o session.status do mesmo
+	// binário explica, em prosa, que euid NÃO BASTA: um uid=1000 com
+	// CAP_DAC_READ_SEARCH lê /etc/shadow, com CAP_SYS_PTRACE lê a memória de
+	// qualquer processo, com CAP_BPF enumera programas eBPF. O servidor
+	// afirmava uma coisa e o portão media outra.
+	//
+	// A contradição custa mais no --live, que é justamente onde a capability
+	// muda o que a captura consegue mandar para o modelo.
+	//
+	// A flag continua se chamando --allow-root porque ela é documentada, mas o
+	// que o operador autoriza é ALCANCE DE OBSERVAÇÃO PRIVILEGIADO — e a
+	// mensagem diz isso.
+	priv := mcp.LerPrivilegio()
+	if priv.Elevado && !pol.PermitirRoot {
 		fmt.Fprintln(os.Stderr,
-			"mcp: recusei iniciar como root.\n"+
-				"O servidor herda o privilégio deste processo, e como root ele enxerga o\n"+
-				"host inteiro — incluindo o que uma tool de inspeção devolveria a um modelo\n"+
+			"mcp: recusei iniciar com observação privilegiada.\n"+
+				"O servidor herda o privilégio deste processo, e com ele enxerga mais do\n"+
+				"host — incluindo o que uma tool de inspeção devolveria a um modelo\n"+
 				"remoto. Isso é decisão sua, e precisa ser dita:\n\n"+
 				"    sudo -n aletheia mcp --allow-root ...\n\n"+
 				"Sem sudo interativo: a senha viria pelo stdin, que é o canal do protocolo.\n"+
 				"Rode `sudo -v` antes.")
+		for _, m := range priv.Explicacao {
+			fmt.Fprintln(os.Stderr, "  · "+m)
+		}
 		return 3
 	}
 

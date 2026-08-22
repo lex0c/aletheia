@@ -41,10 +41,6 @@ type Retrato struct {
 	// prefixo dele, para caber num handle; a identidade guardada é a inteira.
 	Digest string
 
-	// Escopo é o quanto uma CAPTURA leu. Vazio num retrato carregado de arquivo:
-	// ali o escopo é o que a coleta original decidiu, e ele viaja no ambiente.
-	Escopo Escopo
-
 	// Soma é o que o sidecar .sha256 respondeu sobre este arquivo.
 	//
 	// O `collect` escreve `<dump>.sha256` ao lado do artefato, e `analyze` e
@@ -113,9 +109,22 @@ func relatorioQueFalhou(causa string) *check.Report {
 	return rel
 }
 
+// Escopo é o quanto ESTE retrato leu, e ele sai dos próprios fatos.
+//
+// Guardá-lo num campo à parte seria uma segunda verdade sobre a mesma coisa, e
+// as duas divergem no dia em que alguém montar um Retrato por outro caminho.
+// `Facts.Volatil` é o que o motor de checks já consulta para recusar conclusão;
+// é ele que manda aqui também.
+func (r *Retrato) Escopo() Escopo {
+	if r.Fatos != nil && r.Fatos.Volatil {
+		return EscopoVolatil
+	}
+	return EscopoCompleto
+}
+
 // Procedencia é a deste retrato, já montada.
 func (r *Retrato) Procedencia() Procedencia {
-	return ProcedenciaDeDump(r.ID, r.Dump, r.Soma.String())
+	return ProcedenciaDeDump(r.ID, r.Dump, r.Soma.String(), string(r.Escopo()))
 }
 
 // EstadoDaSoma é a resposta do sidecar .sha256.
@@ -358,14 +367,38 @@ func (a *Acervo) Capturar(e *env.Env, escopo Escopo) (*Retrato, error) {
 	d := dump.De(e, f)
 	d.Facts.Index()
 
+	// O ENV É CONGELADO, e a captura é a ÚLTIMA operação que toca o alvo.
+	//
+	// O Retrato guardava o Env VIVO da aquisição — com o descritor da raiz
+	// travada aberto, em modo imagem — e o passava para check.Run em toda
+	// chamada de findings.list. Os checks são função pura sobre Facts hoje,
+	// então nada relia; mas a porta ficava aberta: um check novo que chamasse
+	// `e.ReadFile` faria uma consulta a um retrato ANTIGO ler o estado ATUAL, e
+	// a invariante do servidor quebraria sem uma linha mudar aqui dentro.
+	//
+	// dump.Env(nil) reconstrói o ambiente DA COLETA a partir do artefato — sem
+	// raiz, sem descritor, sem sondar nada. É exatamente o que o modo snapshot
+	// já usa, e agora os dois convergem na mesma estrutura.
+	congelado, err := d.Env(nil)
+	if err != nil {
+		e.Close()
+		return nil, err
+	}
+	// A captura assume a POSSE do Env vivo e sempre o fecha. Fechá-lo em quem
+	// chama deixava o descritor aberto no caminho de pânico, que rodarProtegido
+	// recupera lá em cima — e em modo imagem cada captura segura um os.Root.
+	e.Close()
+
+	fonte := e.Source
 	id, err := idDeCaptura()
 	if err != nil {
+		e.Close()
 		return nil, err
 	}
 	r := &Retrato{
 		ID: id, Rotulo: rotuloDe(d),
-		Dump: d, Env: e, Fatos: d.Facts, Fonte: e.Source,
-		Soma: SomaNaoSeAplica, Escopo: escopo,
+		Dump: d, Env: congelado, Fatos: d.Facts, Fonte: fonte,
+		Soma: SomaNaoSeAplica,
 	}
 
 	a.mu.Lock()

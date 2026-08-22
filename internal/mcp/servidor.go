@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/lex0c/aletheia/internal/env"
 )
@@ -41,6 +42,32 @@ type Servidor struct {
 	ativas  []Ferramenta
 	fora    []Indisponivel
 	porNome map[string]Ferramenta
+
+	// gastoDeColeta é quanto tempo de aquisição esta sessão já cobrou do host
+	// investigado. Ver Policy.OrcamentoDeColeta.
+	gastoDeColeta time.Duration
+	muGasto       sync.Mutex
+}
+
+// orcamentoDeColeta devolve o gasto e o que sobra. Sobra zero significa que
+// mais nenhuma captura acontece neste processo — nem depois de um release.
+func (s *Servidor) orcamentoDeColeta() (gasto, resta time.Duration) {
+	s.muGasto.Lock()
+	defer s.muGasto.Unlock()
+	resta = s.pol.OrcamentoDeColeta - s.gastoDeColeta
+	if resta < 0 {
+		resta = 0
+	}
+	return s.gastoDeColeta, resta
+}
+
+// cobrarColeta soma o tempo de uma aquisição, tenha ela dado certo ou não: o
+// host pagou pela varredura de qualquer jeito, e cobrar só o sucesso deixaria a
+// falha repetível de graça.
+func (s *Servidor) cobrarColeta(d time.Duration) {
+	s.muGasto.Lock()
+	s.gastoDeColeta += d
+	s.muGasto.Unlock()
 }
 
 // NovoServidor monta o servidor e CONGELA o registry.
@@ -364,11 +391,9 @@ func (s *Servidor) listarTools() (map[string]any, *ErroRPC) {
 			InputSchema: f.Entrada, OutSchema: f.Saida,
 			// As annotations são HINTS no protocolo — a spec é explícita quanto
 			// a isso, e um cliente pode ignorá-las. A proteção real é o
-			// registry: o que não está aqui não pode ser chamado, e nenhuma
-			// tool deste servidor tem caminho de escrita para ignorar.
-			Annotations: map[string]any{
-				"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false,
-			},
+			// registry. Elas vêm da PRÓPRIA tool: eram um literal igual para
+			// todas, e a aquisição trouxe duas que mudam estado.
+			Annotations: f.Anotacoes.JSON(),
 		})
 	}
 	return map[string]any{"tools": tools}, nil

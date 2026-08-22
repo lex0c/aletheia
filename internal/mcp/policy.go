@@ -103,6 +103,19 @@ type Policy struct {
 	// domínio, e fingir cancelamento fino seria mentira. O que ele faz é o que
 	// o mecanismo existente sustenta, e a descrição da tool diz isso.
 	Budget time.Duration
+
+	// OrcamentoDeColeta é o teto de trabalho ACUMULADO em aquisição, por
+	// processo.
+	//
+	// O teto de retratos vivos limita MEMÓRIA, e só. Capturar e liberar em laço
+	// mantém um retrato vivo o tempo todo e nunca esbarra nele — enquanto cada
+	// volta cobra uma varredura completa do host INVESTIGADO, que é a máquina
+	// em pior estado da sala. Um modelo em laço de correção ("o resultado veio
+	// estranho, deixa eu capturar de novo") transforma um servidor de
+	// observação num gerador de carga.
+	//
+	// Liberar NÃO devolve orçamento: memória volta, trabalho já feito não.
+	OrcamentoDeColeta time.Duration
 }
 
 // Padroes preenche o que o operador não disse.
@@ -115,6 +128,9 @@ func (p Policy) Padroes() Policy {
 	}
 	if p.Budget <= 0 {
 		p.Budget = BudgetPadrao
+	}
+	if p.OrcamentoDeColeta <= 0 {
+		p.OrcamentoDeColeta = OrcamentoDeColetaPadrao
 	}
 	return p
 }
@@ -134,6 +150,15 @@ const (
 	// estoura dois minutos é um filesystem grande — exatamente o caso em que a
 	// lacuna declarada vale mais que a espera.
 	BudgetPadrao = 2 * time.Minute
+
+	// OrcamentoDeColetaPadrao é quanto tempo de coleta uma sessão inteira pode
+	// gastar no host investigado.
+	//
+	// Dez minutos comportam algo como quatro dezenas de capturas completas num
+	// host normal (~1,5s cada) ou centenas de voláteis (~164ms) — muito acima
+	// de qualquer investigação real, e muito abaixo do que um laço produz em
+	// poucos minutos. É o teto que separa uso de acidente, não um racionamento.
+	OrcamentoDeColetaPadrao = 10 * time.Minute
 )
 
 // FonteDoModo é o que um servidor DE AQUISIÇÃO descreve. Em ModoSnapshot não

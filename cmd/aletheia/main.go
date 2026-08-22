@@ -216,12 +216,21 @@ MCP — a pergunta que a IA faz DE VOLTA
                 tools leem o host; todo o resto responde sobre um RETRATO, que é
                 o que impede trinta chamadas de misturar instantes diferentes
   --root PATH   o mesmo, sobre uma imagem montada
-  --allow-root  autoriza rodar como root. Sem ela, "sudo aletheia mcp" FALHA: o
-                servidor herda o privilégio do processo e nunca o adquire, e
-                rodar privilegiado é decisão dita, não acidente de sudo
+  --allow-root  autoriza observação PRIVILEGIADA. Sem ela, "sudo aletheia mcp"
+                FALHA — e falha também sem root, se o processo carregar
+                capability que alcance o mesmo: euid não basta, um uid=1000 com
+                CAP_DAC_READ_SEARCH lê /etc/shadow. O servidor herda o
+                privilégio do processo e nunca o adquire, e rodar privilegiado
+                é decisão dita, não acidente de sudo
   --audit-log F grava a trilha de invocações também em F. Ela sempre sai no
                 stderr; arquivo só quando pedido, porque preserve continua
                 sendo o único comando que escreve por padrão
+  --capture-budget D
+                tempo TOTAL de leitura do host que a sessão pode gastar em
+                snapshot.capture (padrão 10m). O teto de retratos vivos limita
+                memória; capturar e liberar em laço nunca esbarra nele e cobra
+                uma varredura por volta. Liberar não devolve orçamento: memória
+                volta, trabalho já feito não. 0 desliga, com aviso
 
   Na aquisição, scope=volatile lê /proc e sockets e é ~9x mais barato — e NÃO
   sustenta achado: o motor recusa rodar check sobre coleta parcial, e a resposta

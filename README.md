@@ -802,7 +802,12 @@ A captura atravessa a **mesma redação** do `collect`: o retrato ao vivo é
 literalmente o mesmo artefato, só que nunca escrito em disco — e a procedência
 dele diz `redaction: applied` como a de um dump.
 
-`scope=volatile` lê `/proc` e sockets e é ~9× mais barato; é o que pega processo
+`scope` é **obrigatório**, e não tem padrão: as duas opções respondem perguntas
+diferentes, e escolher por quem chama ou responderia a errada ou cobraria a
+varredura inteira de quem só esqueceu um argumento.
+
+`scope=volatile` lê `/proc`, os sockets e a base de usuários, e é ~9× mais
+barato; é o que pega processo
 efêmero. Ele **não sustenta achado**: o motor recusa rodar check sobre coleta
 parcial, porque um check de unit encontraria zero units e diria "nada
 encontrado" onde o certo é "não olhei". A resposta é zero achados **com o
@@ -813,6 +818,20 @@ o implante que está lá.
 roda, o servidor não responde outra chamada — nem um cancelamento, que só é
 notado depois. Os coletores não são interrompíveis, e a descrição da tool diz
 isso em vez de fingir.
+
+O **alcance viaja na resposta**: `provenance.scope` e o `scope` de
+`snapshot.list` fazem parte da identidade do retrato, e `snapshot.compare`
+**recusa** comparar alcances diferentes. Comparar um retrato completo com um
+volátil produzia 771 mudanças, 770 delas "sumiu" — nada sumiu; a segunda coleta
+é que não olhou.
+
+Há dois limites, e eles medem coisas diferentes. O **teto de retratos vivos**
+limita memória. O **orçamento de coleta** (`--capture-budget`, padrão 10m)
+limita trabalho: capturar e liberar em laço mantém sempre um só retrato vivo e
+nunca esbarra no teto, enquanto cobra uma varredura do host investigado por
+volta. Liberar não devolve orçamento — memória volta, trabalho já feito não —, e
+o que resta é publicado em `session.status` antes de ser batido, para o modelo
+não precisar gastar uma captura inteira para aprender que não podia.
 
 ### O que ainda não existe
 

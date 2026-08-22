@@ -107,10 +107,14 @@ var toolFindingsList = Ferramenta{
 		if er != nil {
 			return nil, er
 		}
-		for _, par := range [][2]string{{"group", a.Grupo}, {"id", a.ID}} {
-			if e := validarTexto(par[0], par[1]); e != nil {
-				return nil, e
-			}
+		// Conjunto FECHADO, e não só tamanho: um grupo ou id inventado
+		// devolveria zero achados com o veredito da execução inteira, e nada
+		// sinalizaria o engano. Ver validarGrupo.
+		if e := validarGrupo(a.Grupo); e != nil {
+			return nil, e
+		}
+		if e := validarIDDeCheck(a.ID); e != nil {
+			return nil, e
 		}
 
 		rel := r.Relatorio()
@@ -133,7 +137,9 @@ var toolFindingsList = Ferramenta{
 			itens = append(itens, achadoDe(i, f))
 		}
 
-		ini, fim, prox, er := fatiar(a.Pagina, r.ID, len(itens))
+		// O cursor amarra o FILTRO: o offset é posição na lista filtrada.
+		filtro := impressaoDoFiltro(a.MinSev, a.Grupo, a.ID)
+		ini, fim, prox, er := fatiar(a.Pagina, r.ID, filtro, len(itens))
 		if er != nil {
 			return nil, er
 		}
@@ -257,18 +263,18 @@ var toolFindingsCorrelate = Ferramenta{
 			return nil, er
 		}
 		rel := r.Relatorio()
-		// O índice do achado dentro do relatório completo, para o handle
-		// continuar valendo entre esta tool e findings.list.
-		posicao := map[string]int{}
-		for i, f := range rel.Findings {
-			posicao[chaveDoAchado(f)] = i
-		}
 		grupos, _ := rel.Correlate()
 		saida := []map[string]any{}
 		for _, g := range grupos {
 			itens := []itemAchado{}
-			for _, f := range g.Findings {
-				itens = append(itens, achadoDe(posicao[chaveDoAchado(f)], f))
+			// O índice vem de g.Indices, que o motor rastreia, e não de um mapa
+			// reconstruído por ID+Subject+Chave+Sev — essa chave COLIDE, e o
+			// próprio Finding.Chave documenta que colide. Dois
+			// proc.deleted_mapping no mesmo pid voltavam com o mesmo
+			// finding_ref, e um dos dois ficava inalcançável por finding.get,
+			// enquanto o schema anunciava o handle como estável.
+			for k, f := range g.Findings {
+				itens = append(itens, achadoDe(g.Indices[k], f))
 			}
 			saida = append(saida, map[string]any{
 				"subject": g.Subject, "sev": g.Sev().String(),
@@ -278,10 +284,6 @@ var toolFindingsCorrelate = Ferramenta{
 		return envelopar(r, ObservabilidadeDeRelatorio(rel),
 			map[string]any{"groups": saida}), nil
 	},
-}
-
-func chaveDoAchado(f check.Finding) string {
-	return f.ID + "\x00" + f.Subject + "\x00" + f.Chave + "\x00" + f.Sev.String()
 }
 
 // -------------------------------------------------------------- coverage.get

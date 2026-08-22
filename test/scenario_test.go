@@ -1246,6 +1246,40 @@ func assertChamada(t *testing.T, sc scenario.Scenario, c scenario.Chamada, resp 
 		}
 	}
 
+	// A FORMA GERAL da fronteira: o texto aparece, e toda região onde ele
+	// aparece está DECLARADA. É o que SoEmDados não alcança — um nome que entrou
+	// numa lacuna de coleta chega a observability legitimamente, e o defeito não
+	// seria ele estar lá, seria o caminho não estar dito.
+	if len(c.TextoDoAlvo) > 0 {
+		env, _ := resp.resultado["structuredContent"].(map[string]any)
+		conf, _ := env["trust"].(map[string]any)
+		declaradas := map[string]bool{}
+		for _, r := range conf["host_supplied_paths"].([]any) {
+			// A declaração é por PREFIXO: "observability" cobre
+			// "observability.coverage.collector_gaps".
+			declaradas[strings.Split(r.(string), ".")[0]] = true
+		}
+		for _, agulha := range c.TextoDoAlvo {
+			achouEmAlguma := false
+			for _, regiao := range []string{"data", "observability", "provenance", "trust"} {
+				b, _ := json.Marshal(env[regiao])
+				if !strings.Contains(string(b), agulha) {
+					continue
+				}
+				achouEmAlguma = true
+				if !declaradas[regiao] {
+					t.Errorf("%s: texto do alvo em %q, e o caminho NÃO está em "+
+						"trust.host_supplied_paths (%v) — a fronteira precisa ser "+
+						"declarada, não presumida", ctx, regiao, conf["host_supplied_paths"])
+				}
+			}
+			if !achouEmAlguma {
+				t.Errorf("%s: %q não apareceu na resposta — o cenário não exercitou "+
+					"o caminho que ele existe para provar", ctx, corta(agulha, 60))
+			}
+		}
+	}
+
 	// Os caminhos resolvem contra o ENVELOPE quando há um, e contra o result
 	// cru quando não há (tools/list, server/discover). É o que deixa o cenário
 	// escrever "observability.verdict" em vez de

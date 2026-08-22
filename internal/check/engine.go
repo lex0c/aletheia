@@ -601,6 +601,20 @@ func GroupByIDSev(fs []Finding) []Group {
 type SubjectGroup struct {
 	Subject  string
 	Findings []Finding
+
+	// Indices são as posições de Findings em Report.Findings, na mesma ordem.
+	//
+	// Existem porque quem publica os achados por um HANDLE posicional (o
+	// servidor MCP) precisa do índice verdadeiro, e recuperá-lo por um mapa
+	// ID+Subject+Chave+Sev é reconstruir uma identidade que o próprio
+	// Finding.Chave documenta como COLIDENTE: um check que dispara duas vezes
+	// no mesmo sujeito, com a mesma severidade e sem Chave — proc.deleted_mapping
+	// com duas bibliotecas apagadas no mesmo pid — produz duas entradas
+	// indistinguíveis, e o mapa fica com a última. Os dois achados voltavam com
+	// o mesmo handle, e um deles ficava inalcançável.
+	//
+	// Correlate já rastreia isto em posDoAlvo e descartava.
+	Indices []int
 }
 
 // Sev é a maior severidade do grupo: um implante com três avisos e um crítico
@@ -696,7 +710,9 @@ func (r *Report) Correlate() ([]SubjectGroup, []Finding) {
 		for _, i := range posDoAlvo[subj] {
 			agrupado[i] = true
 		}
-		grupos = append(grupos, SubjectGroup{Subject: subj, Findings: fs})
+		grupos = append(grupos, SubjectGroup{
+			Subject: subj, Findings: fs, Indices: posDoAlvo[subj],
+		})
 	}
 
 	// Mais severo primeiro; empatando, quem tem mais sinais.

@@ -35,6 +35,12 @@ type NoDaArvore struct {
 	Container string `json:"container,omitempty"`
 	Estado    string `json:"state,omitempty"`
 
+	// Ciclo marca o nó em que a descida PAROU porque o pid já estava no
+	// caminho. Sem ele, um ciclo A→B→A fabrica uma linhagem alternada que não
+	// existe, até o teto de profundidade — gerações inventadas, indistinguíveis
+	// de gerações reais.
+	Ciclo bool `json:"cycle,omitempty"`
+
 	Filhos []NoDaArvore `json:"children,omitempty"`
 	// FilhosOmitidos conta o que não coube na profundidade ou no teto. Corte
 	// silencioso se lê como "não havia mais nada", e o número é a diferença.
@@ -85,20 +91,53 @@ func Arvore(f *facts.Facts, pid, prof int) *ArvoreDeProcessos {
 		// Sem alvo: as RAÍZES do que este retrato enxerga. Raiz é quem não tem
 		// pai visível — o init, e também o processo cujo pai morreu ou está
 		// fora do namespace que a coleta alcançou.
+		var raizes []*facts.Process
 		for i := range f.Processes {
 			p := &f.Processes[i]
 			if p.PPID != 0 && f.ProcessByPID(p.PPID) != nil {
 				continue
 			}
-			a.Raizes = append(a.Raizes, montarNo(f, p, filhosDe, prof, &orcamento))
+			raizes = append(raizes, p)
+		}
+
+		// E DEPOIS o que nenhuma raiz alcança.
+		//
+		// Este bloco é o conserto de uma primitiva de OCULTAÇÃO. O teste acima
+		// exclui quem tem pai visível; num ciclo (10 é pai de 11, 11 é pai de
+		// 10) os dois têm pai visível e nenhum é raiz — então nenhum aparece,
+		// `truncated` fica false e nenhum sinal é emitido. Medido: com {1},
+		// {10,ppid 11}, {11,ppid 10} e {42,ppid 42}, a árvore devolvia SÓ o pid
+		// 1. Apontar o próprio PPid para um filho era um jeito grátis de sumir
+		// da única ferramenta feita para expor linhagem.
+		//
+		// Um componente órfão entra pela MENOR pid dele, e só uma vez.
+		alcancados := map[int]bool{}
+		for _, r := range raizes {
+			marcarAlcancados(r.PID, filhosDe, alcancados)
+		}
+		orfaos := 0
+		var extras []*facts.Process
+		for i := range f.Processes {
+			p := &f.Processes[i]
+			if alcancados[p.PID] {
+				continue
+			}
+			extras = append(extras, p)
+			orfaos += marcarAlcancados(p.PID, filhosDe, alcancados)
+		}
+		if len(extras) > 0 {
+			a.Sinais = append(a.Sinais, strconv.Itoa(orfaos)+" processo(s) que NENHUMA "+
+				"raiz alcança: a cadeia de pais deles tem ciclo, ou aponta para um pai "+
+				"que é descendente do próprio processo. Não é estado normal de /proc — "+
+				"e numa árvore ingênua eles seriam INVISÍVEIS")
+		}
+
+		for _, p := range append(raizes, extras...) {
+			a.Raizes = append(a.Raizes, montarNo(f, p, filhosDe, prof, &orcamento, map[int]bool{}))
 		}
 		sort.Slice(a.Raizes, func(i, j int) bool { return a.Raizes[i].PID < a.Raizes[j].PID })
 		a.Achou = len(a.Raizes) > 0
-		a.Truncado = orcamento <= 0
-		if a.Truncado {
-			a.Sinais = append(a.Sinais, "a árvore passou do teto de "+
-				strconv.Itoa(tetoDeNos)+" nós e foi cortada: children_omitted conta o resto")
-		}
+		a.marcarTruncagem(orcamento)
 		return a
 	}
 
@@ -133,14 +172,61 @@ func Arvore(f *facts.Facts, pid, prof int) *ArvoreDeProcessos {
 		ppid = pp.PPID
 	}
 
-	no := montarNo(f, p, filhosDe, prof, &orcamento)
+	no := montarNo(f, p, filhosDe, prof, &orcamento, map[int]bool{})
 	a.No = &no
-	a.Truncado = orcamento <= 0
-	if a.Truncado {
+	a.marcarTruncagem(orcamento)
+	return a
+}
+
+// marcarTruncagem declara TODO corte, e não só o do orçamento de nós.
+//
+// Truncado saía do orçamento apenas — e o corte comum é o outro, porque
+// profPadrao é 4: numa árvore de systemd com sete níveis a resposta vinha com
+// `truncated:false` e dezenas de nós carregando children_omitted>0. Um modelo
+// que conferisse a bandeira antes de concluir "o pid 1 não tem descendente que
+// case com X" era informado de que a visão estava completa depois de a maior
+// parte da árvore ter sido descartada. O doc de FilhosOmitidos já dizia que
+// corte silencioso se lê como "não havia mais nada".
+func (a *ArvoreDeProcessos) marcarTruncagem(orcamento int) {
+	if orcamento <= 0 {
+		a.Truncado = true
 		a.Sinais = append(a.Sinais, "a árvore passou do teto de "+
 			strconv.Itoa(tetoDeNos)+" nós e foi cortada: children_omitted conta o resto")
 	}
-	return a
+	omitidos := 0
+	var contar func(n *NoDaArvore)
+	contar = func(n *NoDaArvore) {
+		omitidos += n.FilhosOmitidos
+		for i := range n.Filhos {
+			contar(&n.Filhos[i])
+		}
+	}
+	if a.No != nil {
+		contar(a.No)
+	}
+	for i := range a.Raizes {
+		contar(&a.Raizes[i])
+	}
+	if omitidos > 0 && !a.Truncado {
+		a.Truncado = true
+		a.Sinais = append(a.Sinais, strconv.Itoa(omitidos)+" descendente(s) não "+
+			"couberam na profundidade pedida: aumente `depth` ou peça a subárvore "+
+			"pelo pid — children_omitted diz onde o corte caiu")
+	}
+}
+
+// marcarAlcancados percorre os descendentes e devolve quantos marcou. O mapa é
+// a guarda de ciclo: um componente cíclico é percorrido uma vez só.
+func marcarAlcancados(pid int, filhosDe map[int][]int, vistos map[int]bool) int {
+	if vistos[pid] {
+		return 0
+	}
+	vistos[pid] = true
+	n := 1
+	for _, c := range filhosDe[pid] {
+		n += marcarAlcancados(c, filhosDe, vistos)
+	}
+	return n
 }
 
 func indiceDeFilhos(f *facts.Facts) map[int][]int {
@@ -156,9 +242,26 @@ func indiceDeFilhos(f *facts.Facts) map[int][]int {
 }
 
 func montarNo(f *facts.Facts, p *facts.Process, filhosDe map[int][]int,
-	prof int, orcamento *int) NoDaArvore {
+	prof int, orcamento *int, naPilha map[int]bool) NoDaArvore {
 
 	n := noRaso(f, p)
+
+	// A guarda é do CAMINHO, e não da autorreferência.
+	//
+	// A versão anterior só recusava `fp.PID == p.PID`, que pega A→A e deixa
+	// passar A→B→A — e a caminhada da §16 é exatamente a que um ciclo estraga.
+	// Medido: com 10 e 11 apontando um para o outro, `depth:6` devolvia seis
+	// níveis alternando os mesmos dois processos, uma cadeia de gerações que
+	// não existe e que se lê como linhagem real. A caminhada de ANCESTRAIS,
+	// sessenta linhas acima, já se defendia disso; a de descendentes não.
+	if naPilha[p.PID] {
+		n.Ciclo = true
+		n.FilhosOmitidos = len(filhosDe[p.PID])
+		return n
+	}
+	naPilha[p.PID] = true
+	defer delete(naPilha, p.PID)
+
 	filhos := filhosDe[p.PID]
 	if prof <= 0 || len(filhos) == 0 {
 		n.FilhosOmitidos = len(filhos)
@@ -173,13 +276,8 @@ func montarNo(f *facts.Facts, p *facts.Process, filhosDe map[int][]int,
 		if fp == nil {
 			continue
 		}
-		// Autorreferência: um processo cujo PPID é ele mesmo faria a recursão
-		// não terminar. Não acontece num /proc são, e o retrato pode não ser.
-		if fp.PID == p.PID {
-			continue
-		}
 		*orcamento--
-		n.Filhos = append(n.Filhos, montarNo(f, fp, filhosDe, prof-1, orcamento))
+		n.Filhos = append(n.Filhos, montarNo(f, fp, filhosDe, prof-1, orcamento, naPilha))
 	}
 	return n
 }

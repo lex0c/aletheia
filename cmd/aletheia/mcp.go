@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/lex0c/aletheia/internal/mcp"
+	"github.com/lex0c/aletheia/internal/report"
 )
 
 // runMCP serve o Aletheia a um agente por MCP, sobre stdio.
@@ -75,7 +76,31 @@ func runMCP(args []string) int {
 		}
 		// Em stderr, para o operador saber o que o servidor está servindo. O
 		// modelo recebe o mesmo por snapshot.list, sem o caminho local.
-		fmt.Fprintf(os.Stderr, "mcp: %s = %s (%s)\n", r.ID, r.Rotulo, c)
+		//
+		// COM report.Safe: o rótulo é `hostname · data` lido verbatim do dump, e
+		// o hostname é escolhido por quem controla o alvo. Sem sanitizar, um
+		// `/etc/hostname` com ESC limpa a tela do analista no lançamento e pinta
+		// um banner forjado — e esta é a ÚNICA linha em que ele descobre qual
+		// arquivo virou qual snapshot_id. Todo outro print de hostname no
+		// repositório passa por aqui (report.Human, wtf, info, coleta).
+		fmt.Fprintf(os.Stderr, "mcp: %s = %s (%s)\n",
+			r.ID, report.Safe(r.Rotulo), report.Safe(c))
+
+		// A SOMA. `analyze` e `drift` conferem o sidecar antes de concluir
+		// qualquer coisa; o servidor MCP era o único caminho de carga que
+		// pulava — e é justamente ele que entrega o retrato a um modelo, com um
+		// bloco de procedência que afirma cadeia de custódia inteira.
+		switch r.Soma {
+		case mcp.SomaDivergente:
+			fmt.Fprintf(os.Stderr,
+				"\n⚠ O DUMP NÃO CONFERE COM A SOMA ESCRITA NA COLETA: %s\n"+
+					"  o arquivo mudou depois de coletado. Compare com o número que foi\n"+
+					"  para o war log. O servidor SEGUE — e o que sair dele descreve\n"+
+					"  outro arquivo. A procedência de toda resposta diz checksum_mismatch.\n\n", c)
+		case mcp.SomaAusente:
+			fmt.Fprintf(os.Stderr, "mcp: %s sem arquivo de soma ao lado: "+
+				"NÃO foi possível conferir se ele mudou desde a coleta\n", c)
+		}
 	}
 
 	aud, fecharAud, code := abrirAuditoria(*auditoria)

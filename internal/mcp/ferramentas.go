@@ -2,13 +2,16 @@ package mcp
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/env"
 )
 
@@ -154,6 +157,59 @@ func limparErro(s string) string {
 // vai para um modelo, resposta enorme é o próprio problema.
 const MaxTexto = 4096
 
+// validarGrupo e validarIDDeCheck fecham o conjunto.
+//
+// # Por que a validação existe
+//
+// `min_severity` é enum e o servidor recusa um valor errado em voz alta.
+// `group` e `id` eram só medidos em tamanho — e o efeito de errá-los é
+// SILENCIOSO e do pior tipo: `checks.catalog{"group":"network"}` (o grupo é
+// "net") devolve `{"checks":[],"total":0}`, e o modelo conclui que este binário
+// não tem check de rede. `findings.list{"id":"proc.memfd"}` (o id é
+// proc.memfd_exec) devolve zero achados com veredito e cobertura descrevendo a
+// execução INTEIRA, então nada sinaliza o engano — e o modelo relata que não há
+// execução fileless num host que tem.
+//
+// É o mesmo raciocínio do DisallowUnknownFields do decodificarArgs, um nível
+// abaixo: lá o NOME do campo é conjunto fechado, aqui o VALOR também é. E o
+// defeito já era conhecido do lado do teste — o cenário M1 filtra por
+// min_severity justamente porque "um id com erro de digitação devolveria zero
+// achados e o cenário passaria trivialmente". A defesa tinha ido para o
+// cenário, e não para o servidor.
+func validarGrupo(g string) *ErroRPC {
+	if g == "" {
+		return nil
+	}
+	if er := validarTexto("group", g); er != nil {
+		return er
+	}
+	for _, x := range check.Groups() {
+		if strings.EqualFold(x, g) {
+			return nil
+		}
+	}
+	return erroComDados(CodInvalidParams,
+		"grupo inexistente: "+g,
+		map[string]any{"groups": check.Groups()})
+}
+
+func validarIDDeCheck(id string) *ErroRPC {
+	if id == "" {
+		return nil
+	}
+	if er := validarTexto("id", id); er != nil {
+		return er
+	}
+	for _, c := range check.All() {
+		if c.ID == id {
+			return nil
+		}
+	}
+	return erroComDados(CodInvalidParams,
+		"id de check inexistente: "+id+" — use checks.catalog para o conjunto",
+		map[string]any{"hint": "checks.catalog"})
+}
+
 func validarTexto(campo, v string) *ErroRPC {
 	if len(v) > MaxTexto {
 		return erro(CodInvalidParams, fmt.Sprintf(
@@ -189,7 +245,7 @@ type Lista struct {
 // declara a sua, e o retrato é imutável, então duas chamadas com o mesmo cursor
 // devolvem os mesmos itens. Sem isso a paginação embaralha: o item 100 vira o
 // 101 entre duas páginas e some da leitura sem nunca aparecer.
-func fatiar(p Pagina, snapID string, total int) (ini, fim int, prox string, e *ErroRPC) {
+func fatiar(p Pagina, snapID, filtro string, total int) (ini, fim int, prox string, e *ErroRPC) {
 	lim := p.Limite
 	switch {
 	case lim <= 0:
@@ -197,7 +253,7 @@ func fatiar(p Pagina, snapID string, total int) (ini, fim int, prox string, e *E
 	case lim > LimiteMaximo:
 		lim = LimiteMaximo
 	}
-	ini, e = decodificarCursor(snapID, p.Cursor)
+	ini, e = decodificarCursor(snapID, filtro, p.Cursor)
 	if e != nil {
 		return 0, 0, "", e
 	}
@@ -206,22 +262,36 @@ func fatiar(p Pagina, snapID string, total int) (ini, fim int, prox string, e *E
 	}
 	fim = min(ini+lim, total)
 	if fim < total {
-		prox = codificarCursor(snapID, fim)
+		prox = codificarCursor(snapID, filtro, fim)
 	}
 	return ini, fim, prox, nil
 }
 
-// O cursor é opaco para quem usa e CARREGA O RETRATO por dentro.
+// O cursor é opaco para quem usa e carrega POR DENTRO o retrato E o filtro.
 //
-// Sem o retrato dentro dele, um cursor obtido sobre `snap-a` continuaria
+// O retrato, porque sem ele um cursor obtido sobre `snap-a` continuaria
 // "funcionando" sobre `snap-b`: a segunda página viria do outro host, e a
-// leitura juntaria dois retratos numa lista só sem nenhum sinal disso. Com ele,
-// o erro é imediato e diz o que houve.
-func codificarCursor(snapID string, off int) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(snapID + "|" + strconv.Itoa(off)))
+// leitura juntaria dois retratos numa lista só.
+//
+// O FILTRO, porque o offset é uma posição na lista JÁ FILTRADA. Um modelo que
+// pagina costuma ecoar o cursor de volta e esquecer o resto dos argumentos —
+// e aí `findings.list{"min_severity":"CRITICAL","limit":2}` seguido de
+// `findings.list{"cursor":…}` fatiava a lista COMPLETA a partir do índice 2:
+// linhas WARN e INFO chegavam como continuação da página de críticos, os
+// críticos restantes nunca eram enumerados, e `truncated` dizia false. O
+// caminho simétrico é pior — estreitar o filtro na página 2 devolve
+// `{"items":[],"truncated":false}`, que se lê como "acabou".
+func impressaoDoFiltro(partes ...string) string {
+	h := sha256.Sum256([]byte(strings.Join(partes, "\x00")))
+	return hex.EncodeToString(h[:4])
 }
 
-func decodificarCursor(snapID, cur string) (int, *ErroRPC) {
+func codificarCursor(snapID, filtro string, off int) string {
+	return base64.RawURLEncoding.EncodeToString(
+		[]byte(snapID + "|" + filtro + "|" + strconv.Itoa(off)))
+}
+
+func decodificarCursor(snapID, filtro, cur string) (int, *ErroRPC) {
 	if cur == "" {
 		return 0, nil
 	}
@@ -229,17 +299,24 @@ func decodificarCursor(snapID, cur string) (int, *ErroRPC) {
 	if err != nil {
 		return 0, erro(CodInvalidParams, "cursor malformado")
 	}
-	id, off, ok := strings.Cut(string(b), "|")
-	if !ok {
+	partes := strings.Split(string(b), "|")
+	if len(partes) != 3 {
 		return 0, erro(CodInvalidParams, "cursor malformado")
 	}
-	if id != snapID {
+	if partes[0] != snapID {
 		return 0, erroComDados(CodInvalidParams,
 			"STALE_CURSOR: este cursor é de outro retrato — paginar através de dois "+
 				"retratos juntaria hosts diferentes numa lista só",
-			map[string]any{"cursorSnapshot": id, "requestedSnapshot": snapID})
+			map[string]any{"cursorSnapshot": partes[0], "requestedSnapshot": snapID})
 	}
-	n, err := strconv.Atoi(off)
+	if partes[1] != filtro {
+		return 0, erro(CodInvalidParams,
+			"STALE_CURSOR: este cursor foi emitido sob OUTRO filtro. O offset é uma "+
+				"posição na lista filtrada; continuá-lo com outro filtro devolveria "+
+				"uma janela de uma lista diferente, sem nada indicando a troca. "+
+				"Repita os mesmos argumentos da primeira chamada, com o cursor.")
+	}
+	n, err := strconv.Atoi(partes[2])
 	if err != nil || n < 0 {
 		return 0, erro(CodInvalidParams, "cursor malformado")
 	}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/lex0c/aletheia/internal/check"
 	_ "github.com/lex0c/aletheia/internal/checks" // registra o catálogo
+	"github.com/lex0c/aletheia/internal/drift"
 	"github.com/lex0c/aletheia/internal/dump"
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
@@ -422,15 +423,65 @@ func TestVolatilNaoConclui(t *testing.T) {
 
 // CATRACA 10 — PAGINAÇÃO ESTÁVEL, E CURSOR DE OUTRO RETRATO É RECUSADO.
 func TestCursorDeOutroRetratoEhRecusado(t *testing.T) {
-	if _, er := decodificarCursor("snap-b", codificarCursor("snap-a", 10)); er == nil {
+	fa := impressaoDoFiltro("CRITICAL", "", "")
+	if _, er := decodificarCursor("snap-b", fa, codificarCursor("snap-a", fa, 10)); er == nil {
 		t.Fatal("cursor de outro retrato tem de ser recusado: paginar através de " +
 			"dois retratos juntaria hosts diferentes numa lista só")
 	} else if !strings.Contains(er.Message, "STALE_CURSOR") {
 		t.Fatalf("a recusa precisa ser reconhecível: %s", er.Message)
 	}
-	off, er := decodificarCursor("snap-a", codificarCursor("snap-a", 10))
+	off, er := decodificarCursor("snap-a", fa, codificarCursor("snap-a", fa, 10))
 	if er != nil || off != 10 {
 		t.Fatalf("ida e volta do cursor: off=%d er=%v", off, er)
+	}
+}
+
+// E o cursor amarra o FILTRO, não só o retrato.
+//
+// O offset é uma posição na lista JÁ FILTRADA. Um modelo que pagina ecoa o
+// cursor de volta e esquece o resto dos argumentos — e aí a página 2 de uma
+// consulta por CRITICAL vinha fatiada da lista completa: WARN e INFO chegavam
+// como continuação dos críticos, e os críticos restantes nunca eram
+// enumerados, com truncated:false.
+func TestCursorAmarraOFiltro(t *testing.T) {
+	comFiltro := impressaoDoFiltro("CRITICAL", "", "")
+	semFiltro := impressaoDoFiltro("", "", "")
+	cur := codificarCursor("snap-a", comFiltro, 2)
+
+	if _, er := decodificarCursor("snap-a", semFiltro, cur); er == nil {
+		t.Fatal("continuar a página sob OUTRO filtro devolve janela de outra lista")
+	} else if !strings.Contains(er.Message, "STALE_CURSOR") {
+		t.Fatalf("a recusa precisa ser reconhecível: %s", er.Message)
+	}
+}
+
+// Grupo e id são conjunto FECHADO, como min_severity já era.
+//
+// Um valor inventado devolvia zero achados com o veredito da execução inteira,
+// e nada sinalizava o engano: o modelo concluía que o host não tem execução
+// fileless quando o que ele errou foi o nome do check.
+func TestGrupoEIDInexistentesSaoRecusados(t *testing.T) {
+	s, _ := servidorDeTeste(t, fatosDeTeste())
+
+	casos := []struct{ tool, args, agulha string }{
+		{"findings.list", `{"group":"network"}`, "grupo inexistente"},
+		{"findings.list", `{"id":"proc.memfd"}`, "id de check inexistente"},
+		{"checks.catalog", `{"group":"network"}`, "grupo inexistente"},
+	}
+	for _, c := range casos {
+		f := s.porNome[c.tool]
+		_, er := f.Rodar(s, json.RawMessage(c.args))
+		if er == nil {
+			t.Errorf("%s %s: devia ter sido recusado", c.tool, c.args)
+			continue
+		}
+		if !strings.Contains(er.Message, c.agulha) {
+			t.Errorf("%s: mensagem %q não diz %q", c.tool, er.Message, c.agulha)
+		}
+	}
+	// E os valores REAIS continuam passando.
+	if _, er := s.porNome["findings.list"].Rodar(s, json.RawMessage(`{"group":"proc"}`)); er != nil {
+		t.Fatalf("grupo real recusado: %v", er)
 	}
 }
 
@@ -518,4 +569,401 @@ func clonar(m map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// ---------------------------------------------------------- revisão, onda 1
+//
+// Quatro defeitos que a revisão achou, e que passavam por todos os portões:
+// build, vet, gofmt e a suíte inteira ficavam verdes com eles presentes. Os
+// três primeiros são a mesma falha — texto do alvo alcançando o modelo FORA de
+// uma região marcada — vista em três lugares diferentes.
+
+// O erro de protocolo NÃO carrega texto do alvo.
+//
+// `ErroRPC.Data` levava o RÓTULO de cada retrato, que é `hostname · data` lido
+// verbatim do dump. O doc do próprio tipo promete que ali "NUNCA" entra texto
+// vindo do host.
+func TestErroDeProtocoloNaoCarregaTextoDoAlvo(t *testing.T) {
+	f := fatosDeTeste()
+	f.Host.Hostname = argvHostil // o hostname é escolhido por quem controla o host
+	s, _ := servidorDeTeste(t, f)
+
+	// Com um retrato só o handle é opcional; forçamos o erro pedindo um id que
+	// não existe, que é o outro caminho que devolvia rótulo.
+	_, er := s.retratoDe("snap-inexistente")
+	if er == nil {
+		t.Fatal("id desconhecido devia falhar")
+	}
+	b, _ := json.Marshal(er)
+	if bytes.Contains(b, []byte("IGNORE ALL PREVIOUS")) {
+		t.Fatalf("o erro carrega texto do alvo, fora de qualquer envelope:\n%s", b)
+	}
+	// E continua servindo para o cliente se recuperar: o id é hash de conteúdo.
+	if !bytes.Contains(b, []byte("snap-")) {
+		t.Fatal("o erro precisa dizer QUAIS retratos existem, pelo handle")
+	}
+}
+
+// As duas tools de ENTRADA carregam a marca de confiança.
+//
+// Elas devolviam mapa cru. É o pior lugar possível para essa falta: as duas
+// publicam hostname vindo do dump, e as Instrucoes mandam o modelo chamar
+// session.status PRIMEIRO — antes de qualquer envelope ter ensinado que texto
+// do alvo é adversário.
+func TestToolsDeEntradaVemMarcadas(t *testing.T) {
+	f := fatosDeTeste()
+	f.Host.Hostname = argvHostil
+	s, _ := servidorDeTeste(t, f)
+
+	for _, nome := range []string{"session.status", "snapshot.list"} {
+		t.Run(nome, func(t *testing.T) {
+			env := chamar(t, s, nome, `{}`)
+			conf, ok := env["trust"].(map[string]any)
+			if !ok {
+				t.Fatalf("%s respondeu SEM bloco de confiança: %v", nome, env)
+			}
+			if conf["untrusted"] != true {
+				t.Fatalf("%s: untrusted=%v", nome, conf["untrusted"])
+			}
+			b, _ := json.Marshal(env["data"])
+			if !bytes.Contains(b, []byte("IGNORE ALL PREVIOUS")) {
+				t.Fatal("o hostname do alvo precisa chegar — e chegar em `data`")
+			}
+		})
+	}
+}
+
+// A fronteira é DECLARADA, e as lacunas de coleta entram nela.
+//
+// As lacunas interpolam nomes que o alvo escolhe — facts/binfmt.go monta
+// "o registro "+nome+" não pôde ser lido" — e moram em `observability`, que é
+// onde a FERRAMENTA fala sobre a evidência. Apagar o nome destruiria a
+// evidência; o que vale é a lista de caminhos.
+func TestLacunaDeColetaEntraNasRegioesDeclaradas(t *testing.T) {
+	f := fatosDeTeste()
+	f.Partial = map[string][]string{
+		"binfmt": {"o registro " + argvHostil + " não pôde ser lido"},
+	}
+	s, _ := servidorDeTeste(t, f)
+
+	for _, nome := range []string{"findings.list", "process.get"} {
+		args := `{}`
+		if nome == "process.get" {
+			args = `{"pid":812}`
+		}
+		env := chamar(t, s, nome, args)
+		conf := env["trust"].(map[string]any)
+
+		var regioes []string
+		for _, r := range conf["host_supplied_paths"].([]any) {
+			regioes = append(regioes, r.(string))
+		}
+		if !contemStr(regioes, "data") {
+			t.Errorf("%s: `data` sempre é região do host", nome)
+		}
+
+		// Onde quer que a lacuna tenha caído, o caminho dela precisa estar
+		// declarado. É esta asserção que a versão anterior não tinha como
+		// fazer: ela afirmava "só em data", e "só em data" era falso.
+		obs, _ := json.Marshal(env["observability"])
+		if !bytes.Contains(obs, []byte("IGNORE ALL PREVIOUS")) {
+			t.Fatalf("%s: o fixture não exercitou a lacuna", nome)
+		}
+		achou := false
+		for _, r := range regioes {
+			if strings.HasPrefix(r, "observability") {
+				achou = true
+			}
+		}
+		if !achou {
+			t.Errorf("%s: a lacuna leva texto do alvo para observability e o "+
+				"caminho NÃO foi declarado em host_supplied_paths: %v", nome, regioes)
+		}
+	}
+}
+
+// Um pânico numa tool é DEFEITO DA FERRAMENTA, e não derruba o servidor.
+//
+// check.RunWith já embrulha o mesmo risco em runGuarded. Aqui a consequência
+// seria pior: o corpo de uma tool é dirigido por fatos de um dump validado só
+// pela versão de esquema, e o processo inteiro morreria no meio da
+// investigação — o cliente vê o cano fechar e o contexto se perde.
+func TestPanicoNaToolViraErroENaoDerrubaOServidor(t *testing.T) {
+	s, _ := servidorDeTeste(t, fatosDeTeste())
+	explosiva := Ferramenta{
+		Nome:  "x.explode",
+		Dados: DadosDoMotor,
+		Rodar: func(*Servidor, json.RawMessage) (any, *ErroRPC) {
+			var nulo []int
+			_ = nulo[7] // o índice fora de faixa que um dump torto produziria
+			return nil, nil
+		},
+	}
+	// Pelo DESPACHO, e não chamando rodarProtegido direto: o que precisa ser
+	// provado é que chamarTool passa por ele. Uma versão anterior deste teste
+	// exercitava a função isolada, e sobrevivia a reverter o despacho para
+	// `f.Rodar(...)` — provava que a proteção existe, não que ela é usada.
+	s.porNome[explosiva.Nome] = explosiva
+	corpo, er := s.chamarTool(&Requisicao{
+		Method: "tools/call",
+		Params: json.RawMessage(`{"name":"x.explode","arguments":{}}`),
+	})
+	if er == nil {
+		t.Fatal("o pânico devia ter virado erro")
+	}
+	if corpo != nil {
+		t.Fatal("nada pode sair de uma tool que explodiu")
+	}
+	if !strings.Contains(er.Message, "DEFEITO DA FERRAMENTA") {
+		t.Fatalf("a mensagem precisa separar defeito nosso de achado sobre o "+
+			"host: %q", er.Message)
+	}
+	// E o servidor continua servindo.
+	if _, e := s.listarTools(); e != nil {
+		t.Fatal("o servidor não sobreviveu ao pânico")
+	}
+}
+
+// E a memoização do relatório nunca devolve nil.
+//
+// O sync.Once ENVENENA em caso de pânico: marca a execução como feita mesmo sem
+// o corpo ter terminado. A resposta honesta é o catálogo inteiro NÃO
+// VERIFICADO, com o motivo — nunca nil, nunca "nada encontrado".
+func TestRelatorioQueFalhouEhIncompletoENaoVazio(t *testing.T) {
+	rel := relatorioQueFalhou("index out of range")
+	if rel == nil {
+		t.Fatal("nunca nil")
+	}
+	if rel.Verdict() != "INCOMPLETE" {
+		t.Fatalf("quero INCOMPLETE, tenho %s", rel.Verdict())
+	}
+	if len(rel.Coverage.NotChecked) != rel.Coverage.Total || rel.Coverage.Total == 0 {
+		t.Fatalf("o catálogo inteiro tinha de sair não verificado: %d/%d",
+			len(rel.Coverage.NotChecked), rel.Coverage.Total)
+	}
+	if rel.Coverage.Complete != 0 {
+		t.Fatal("nada foi completado")
+	}
+}
+
+// O dossiê NÃO fabrica uma cobertura zerada.
+//
+// Ele emitia `{"total":0,"complete":0,"collector_gaps":[…]}`, e um modelo que
+// leia `complete >= total` lê 0 >= 0 como cobertura COMPLETA — ao lado da linha
+// que diz que 250 processos não foram lidos. E sem lacuna nenhuma o bloco sumia
+// inteiro, então as únicas respostas que traziam cobertura eram as degradadas.
+func TestDossieNaoFabricaCoberturaZerada(t *testing.T) {
+	f := fatosDeTeste()
+	f.Partial = map[string][]string{"proc": {"250 processos com fd ilegível"}}
+	s, _ := servidorDeTeste(t, f)
+
+	env := chamar(t, s, "process.get", `{"pid":812}`)
+	obs := env["observability"].(map[string]any)
+
+	if _, tem := obs["coverage"]; tem {
+		t.Fatalf("um dossiê não roda check: `coverage` ali afirma uma aritmética "+
+			"que ninguém fez — %v", obs["coverage"])
+	}
+	lac, ok := obs["collector_gaps"].([]any)
+	if !ok || len(lac) != 1 {
+		t.Fatalf("a lacuna de coleta precisa aparecer no eixo próprio: %v", obs)
+	}
+	if _, tem := obs["verdict"]; tem {
+		t.Fatal("dossiê não conclui: veredito ali seria conclusão sem check")
+	}
+}
+
+// ---------------------------------------------------- revisão, ondas 2 e 3
+
+// acervoDeDois carrega dois retratos: um de host vivo, um de imagem montada.
+func acervoDeDois(t *testing.T) *Servidor {
+	t.Helper()
+	dir := t.TempDir()
+	a := NovoAcervo()
+
+	grava := func(nome string, fonte env.Source) {
+		e := ambienteDeTeste()
+		e.Source = fonte
+		f := fatosDeTeste()
+		f.Source = fonte.String()
+		f.Host.Hostname = "host-" + fonte.String()
+		var buf bytes.Buffer
+		if err := dump.De(e, f).Escrever(&buf); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, nome)
+		if err := os.WriteFile(p, buf.Bytes(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.Carregar(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	grava("vivo.json", env.SourceLive)
+	grava("imagem.json", env.SourceImage)
+	return NovoServidor(Policy{Modo: ModoSnapshot}, a, "teste", nil)
+}
+
+// A fonte é conferida no RETRATO endereçado, não na união do acervo.
+//
+// Ferramenta.Fontes é conferido uma vez, contra a união bitwise. Com um dump
+// live e um de imagem carregados juntos, process.get entrava no registry e
+// respondia sobre a IMAGEM com `found:false` e o sinal "ele pode ter terminado,
+// ou nunca ter existido" — uma frase falsa sobre uma fonte que nunca teve /proc.
+func TestFonteEhConferidaNoRetratoEnderecado(t *testing.T) {
+	s := acervoDeDois(t)
+	var vivo, imagem string
+	for _, r := range s.Acervo().Todos() {
+		if r.Fonte == env.SourceImage {
+			imagem = r.ID
+		} else {
+			vivo = r.ID
+		}
+	}
+	if vivo == "" || imagem == "" {
+		t.Fatal("o fixture precisa dos dois")
+	}
+
+	// Sobre a imagem: recusa que EXPLICA, e não "não encontrei".
+	_, er := s.porNome["process.get"].Rodar(s,
+		json.RawMessage(`{"snapshot_id":"`+imagem+`","pid":812}`))
+	if er == nil {
+		t.Fatal("process.get sobre uma imagem montada tinha de ser recusado")
+	}
+	if !strings.Contains(er.Message, "não se aplica a esta fonte") {
+		t.Fatalf("a recusa precisa separar 'não achei' de 'a pergunta não existe': %q",
+			er.Message)
+	}
+	// E sobre o retrato vivo continua respondendo.
+	if _, er := s.porNome["process.get"].Rodar(s,
+		json.RawMessage(`{"snapshot_id":"`+vivo+`","pid":812}`)); er != nil {
+		t.Fatalf("o retrato vivo devia responder: %v", er)
+	}
+	// file.inspect vale nas duas: ele é de arquivo, e imagem tem arquivo.
+	if _, er := s.porNome["file.inspect"].Rodar(s,
+		json.RawMessage(`{"snapshot_id":"`+imagem+`","path":"/etc/passwd"}`)); er != nil {
+		t.Fatalf("file.inspect vale sobre imagem: %v", er)
+	}
+}
+
+// snapshot.compare recusa a ordem invertida no mesmo host.
+//
+// Com os lados trocados, a chave de SSH que o atacante ACRESCENTOU volta como
+// "sumiu", e a que ele removeu volta como "surgiu". O CLI recusa isso com exit
+// 3; o servidor aceitava calado.
+func TestCompararComOrdemInvertidaEhRecusado(t *testing.T) {
+	novo := drift.Lado{Host: "web-01", Quando: "2026-08-18T10:00:00Z"}
+	velho := drift.Lado{Host: "web-01", Quando: "2026-08-17T10:00:00Z"}
+
+	if _, er := conferirOrdem(novo, velho); er == nil {
+		t.Fatal("mesmo host com o primeiro MAIS NOVO tem de ser recusado")
+	}
+	if _, er := conferirOrdem(velho, novo); er != nil {
+		t.Fatalf("a ordem certa não pode ser recusada: %v", er)
+	}
+	// Hosts diferentes não são recusa — pode ser deriva de relógio —, mas o
+	// modelo não tem stderr onde ler o aviso, então ele viaja no corpo.
+	outro := drift.Lado{Host: "web-02", Quando: "2026-08-17T10:00:00Z"}
+	ressalva, er := conferirOrdem(novo, outro)
+	if er != nil {
+		t.Fatal("hosts diferentes não são recusa")
+	}
+	if !strings.Contains(ressalva, "HOSTS DIFERENTES") {
+		t.Fatalf("a ambiguidade precisa ser DITA na resposta: %q", ressalva)
+	}
+}
+
+// A soma do sidecar é conferida, e o estado chega ao MODELO.
+//
+// `analyze` e `drift` conferem antes de concluir; o servidor MCP era o único
+// caminho de carga que pulava — e é ele que entrega o retrato a um modelo, com
+// um bloco de procedência que afirma cadeia de custódia inteira.
+func TestSomaDoSidecarChegaNaProcedencia(t *testing.T) {
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	if err := dump.De(ambienteDeTeste(), fatosDeTeste()).Escrever(&buf); err != nil {
+		t.Fatal(err)
+	}
+	caminho := filepath.Join(dir, "host.json")
+	if err := os.WriteFile(caminho, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	casos := []struct {
+		nome, sidecar, quer string
+	}{
+		{"sem sidecar", "", "checksum_absent"},
+		{"soma errada", "0000000000000000000000000000000000000000000000000000000000000000  host.json", "checksum_mismatch"},
+	}
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			_ = os.Remove(caminho + ".sha256")
+			if c.sidecar != "" {
+				if err := os.WriteFile(caminho+".sha256", []byte(c.sidecar), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r, err := NovoAcervo().Carregar(caminho)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := r.Procedencia().Soma; got != c.quer {
+				t.Fatalf("quero %s, tenho %s", c.quer, got)
+			}
+		})
+	}
+
+	// E a soma CERTA confere. "ausente" não pode se confundir com "conferida":
+	// ausência de verificação não é verificação.
+	soma, err := somaDoArquivo(caminho)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(caminho+".sha256", []byte(soma+"  host.json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NovoAcervo().Carregar(caminho)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Procedencia().Soma != "checksum_verified" {
+		t.Fatalf("a soma certa tinha de conferir, tenho %s", r.Procedencia().Soma)
+	}
+}
+
+// O handle de um achado correlacionado aponta para ELE, e não para um irmão.
+//
+// findings.correlate recuperava o índice por um mapa ID+Subject+Chave+Sev — uma
+// chave que o próprio Finding.Chave documenta como colidente. Dois achados do
+// mesmo check, no mesmo sujeito, com a mesma severidade e sem Chave voltavam
+// com o MESMO finding_ref, e um dos dois ficava inalcançável por finding.get.
+func TestHandleDeAchadoCorrelacionadoNaoColide(t *testing.T) {
+	rel := &check.Report{Findings: []check.Finding{
+		// Dois do mesmo check, mesmo sujeito, mesma severidade, sem Chave.
+		{ID: "proc.deleted_mapping", Subject: "pid=812", Sev: check.SevCritical, Title: "a"},
+		{ID: "proc.deleted_mapping", Subject: "pid=812", Sev: check.SevCritical, Title: "b"},
+		// E um terceiro, de outro check, para formar grupo (o corte é em DOIS
+		// checks distintos).
+		{ID: "proc.exe_deleted", Subject: "pid=812", Sev: check.SevCritical, Title: "c"},
+	}}
+	grupos, _ := rel.Correlate()
+	if len(grupos) != 1 {
+		t.Fatalf("quero 1 grupo, tenho %d", len(grupos))
+	}
+	g := grupos[0]
+	if len(g.Indices) != len(g.Findings) {
+		t.Fatalf("cada achado precisa do índice dele: %d vs %d",
+			len(g.Indices), len(g.Findings))
+	}
+	visto := map[int]bool{}
+	for k, i := range g.Indices {
+		if visto[i] {
+			t.Fatalf("índice %d repetido: dois achados com o mesmo handle", i)
+		}
+		visto[i] = true
+		if rel.Findings[i].Title != g.Findings[k].Title {
+			t.Fatalf("o índice %d aponta para %q e o achado é %q",
+				i, rel.Findings[i].Title, g.Findings[k].Title)
+		}
+	}
 }

@@ -76,7 +76,7 @@ type Contagem struct {
 
 // Padrao é uma repetição que tem NOME.
 type Padrao struct {
-	Tipo    string // "cron sobreposto" | "pool" | "respawn" | "leque de saída" `json:"kind"`
+	Tipo    string `json:"kind"` // "cron sobreposto" | "pool" | "respawn" | "leque de saída"
 	Alvo    string `json:"target"`
 	N       int    `json:"n"`
 	Detalhe string `json:"detail,omitempty"`

@@ -673,10 +673,12 @@ schema: toda resposta em forma de achado carrega `verdict` e `coverage`, e o
 
 ```json
 {
+  "provenance": { "snapshot_id": "snap-…", "checksum": "checksum_verified" },
   "observability": {
     "verdict": "INCOMPLETE",
     "coverage": { "total": 109, "complete": 18, "collector_gaps": [ "…" ] }
   },
+  "trust": { "untrusted": true, "host_supplied_paths": ["data", "observability"] },
   "data": { "items": [], "total": 0 }
 }
 ```
@@ -702,10 +704,20 @@ existe. Aqui a fronteira é a mesma, com outro leitor:
 * nome, título, descrição, `inputSchema` e `outputSchema` de cada tool são
   **constantes de compilação**: nenhuma string vinda do host chega a eles, em
   nenhum modo. O alvo não pode reescrever a superfície de ferramentas;
-* conteúdo do host aparece **só** dentro de `data`, num envelope marcado
-  `"trust": {"untrusted": true}` com a nota que diz o que a marca significa;
+* conteúdo do host chega marcado, e a fronteira é **declarada, não
+  presumida**: `trust.host_supplied_paths` lista os caminhos daquela resposta
+  onde texto escrito pelo alvo pode aparecer;
 * os bytes chegam **inteiros**. Escapar não é truncar — a forense precisa do
   que o atacante escolheu escrever.
+
+A lista existe porque `data` não era a única região adversária, e presumir que
+era foi um defeito real: as lacunas de coleta **interpolam nomes que o alvo
+escolhe** — `"o registro " + nome + " não pôde ser lido"` para um `binfmt_misc`,
+o caminho de um cgroup, o nome de um arquivo que não abriu — e elas moram em
+`observability`, que é onde a *ferramenta* fala sobre a evidência. Apagar o nome
+fecharia a fronteira e destruiria a evidência: é ele que diz **qual** objeto não
+foi lido. Então o caminho é dito, e `observability` entra na lista quando a
+execução tem lacuna.
 
 ### Privilégio é consentimento
 
@@ -737,6 +749,11 @@ lê `/etc/shadow` e não é "não privilegiado".
 | `net.census` / `net.ip` / `net.port` | o que o host expõe, e com quem fala |
 | `file.inspect` | de onde veio um arquivo e quem manda executá-lo |
 | `snapshot.compare` | o que mudou entre dois retratos |
+
+Toda resposta carrega a **procedência** do retrato, incluindo o que o sidecar
+`.sha256` escrito pela coleta respondeu — `checksum_verified`,
+`checksum_absent` ou `checksum_mismatch`. Ausência de verificação não é
+verificação, e um artefato que mudou depois de coletado descreve outro host.
 
 Nenhuma tool aceita **caminho de arquivo**: tudo que o processo pode abrir é
 fixado pelo operador no lançamento. Uma tool que recebesse pathname daria ao

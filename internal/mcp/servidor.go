@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/lex0c/aletheia/internal/env"
@@ -290,7 +291,7 @@ func (s *Servidor) chamarTool(r *Requisicao) (map[string]any, *ErroRPC) {
 			"tool desconhecida: "+p.Name,
 			map[string]any{"available": s.nomesAtivos()})
 	}
-	saida, er := f.Rodar(s, p.Arguments)
+	saida, er := rodarProtegido(s, f, p.Arguments)
 	if er != nil {
 		return nil, er
 	}
@@ -314,6 +315,35 @@ func (s *Servidor) chamarTool(r *Requisicao) (map[string]any, *ErroRPC) {
 		"structuredContent": saida,
 		"isError":           false,
 	}, nil
+}
+
+// rodarProtegido isola a falha de uma tool.
+//
+// O motor de checks já embrulha o mesmo risco em runGuarded, com o comentário
+// que explica por quê: "Sem isto, o panic aborta o processo com status 2 — que
+// o contrato desta ferramenta define como CRITICAL". Aqui a consequência é
+// outra e é pior. O corpo de uma tool chega em info.Censo, info.Arvore,
+// info.Arquivo e drift.Comparar, todos dirigidos por fatos de um dump que o
+// Acervo valida só pela VERSÃO DE ESQUEMA — um índice fora de faixa vindo de um
+// artefato malformado (ou escolhido) derrubaria o processo inteiro no meio da
+// investigação: o cliente vê o cano fechar, o contexto acumulado se perde, e
+// nenhuma linha de auditoria diz o que houve.
+//
+// A resposta é ERRO DE FERRAMENTA, e o texto precisa dizer isso: um defeito
+// nosso não pode ser lido como afirmação sobre o host.
+func rodarProtegido(s *Servidor, f Ferramenta, args json.RawMessage) (saida any, er *ErroRPC) {
+	defer func() {
+		if r := recover(); r != nil {
+			saida = nil
+			er = erroComDados(CodInternalError,
+				"a tool "+f.Nome+" falhou durante a execução: isto é DEFEITO DA "+
+					"FERRAMENTA, e não achado sobre o host — nada foi concluído sobre "+
+					"o alvo por esta chamada",
+				map[string]any{"tool": f.Nome})
+			s.aud.Falha(f.Nome, fmt.Errorf("panic: %v", r))
+		}
+	}()
+	return f.Rodar(s, args)
 }
 
 func (s *Servidor) nomesAtivos() []string {

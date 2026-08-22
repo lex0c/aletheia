@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/lex0c/aletheia/internal/check"
+	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
 )
 
@@ -31,7 +32,7 @@ func (s *Servidor) retratoDe(id string) (*Retrato, *ErroRPC) {
 		}
 		return nil, erroComDados(CodInvalidParams,
 			`ha mais de um retrato carregado: informe "snapshot_id"`,
-			map[string]any{"snapshots": s.rotulos()})
+			map[string]any{"snapshots": s.ids()})
 	}
 	if er := validarTexto("snapshot_id", id); er != nil {
 		return nil, er
@@ -39,7 +40,58 @@ func (s *Servidor) retratoDe(id string) (*Retrato, *ErroRPC) {
 	r, err := s.acervo.Retrato(id)
 	if err != nil {
 		return nil, erroComDados(CodInvalidParams, err.Error(),
-			map[string]any{"snapshots": s.rotulos()})
+			map[string]any{"snapshots": s.ids()})
+	}
+	return r, nil
+}
+
+// ids são os handles, e SÓ eles.
+//
+// O erro JSON-RPC levava o RÓTULO junto, que é `hostname · data` lido verbatim
+// do dump — texto do alvo, dentro de `ErroRPC.Data`, fora de qualquer envelope
+// e sem marca de confiança. O doc do ErroRPC diz, com todas as letras, que
+// `Data` "NUNCA" carrega texto vindo do host; a linha que o violava está a
+// quarenta arquivos de distância da que o promete.
+//
+// O id resolve o que o erro precisa resolver — ele é hash do CONTEÚDO, e é com
+// ele que a chamada seguinte acerta. Quem precisa do rótulo legível é o
+// operador, e ele o tem no stderr desde o lançamento.
+func (s *Servidor) ids() []string {
+	out := make([]string, 0, len(s.acervo.Todos()))
+	for _, r := range s.acervo.Todos() {
+		out = append(out, r.ID)
+	}
+	return out
+}
+
+// rotulos leva o hostname do alvo, e por isso só é servido DENTRO de envelope
+// marcado — nunca num erro de protocolo.
+// retratoComFonte resolve o handle E confere se a pergunta se aplica a ELE.
+//
+// # Por que o portão do registry não basta
+//
+// Ferramenta.Fontes é conferido uma vez, contra Acervo.Fontes(), que é a UNIÃO
+// bitwise de todos os retratos carregados. Com `--snapshot live.json --snapshot
+// imagem.json` a união é live|image, então process.get entra no registry — e
+// um process.get sobre o retrato de IMAGEM respondia `found:false` com o sinal
+// "ele pode ter terminado, ou nunca ter existido".
+//
+// Essa frase é FALSA sobre uma imagem montada: ali não existe /proc, e nunca
+// existiu processo nenhum para ter terminado. É a confusão que a ferramenta
+// inteira existe para não cometer — ausência lida como resposta, quando o certo
+// é "esta pergunta não se aplica a esta fonte".
+func (s *Servidor) retratoComFonte(id string, fontes env.Source) (*Retrato, *ErroRPC) {
+	r, er := s.retratoDe(id)
+	if er != nil {
+		return nil, er
+	}
+	if fontes != 0 && r.Fonte&fontes == 0 {
+		return nil, erroComDados(CodInvalidParams,
+			"este retrato foi coletado de uma imagem montada (source: "+
+				r.Fonte.String()+"): não há /proc, e portanto não há processo nem "+
+				"socket sobre o qual responder. Isto NÃO é 'não encontrei' — é uma "+
+				"pergunta que não se aplica a esta fonte.",
+			map[string]any{"snapshot_id": r.ID, "source": r.Fonte.String()})
 	}
 	return r, nil
 }
@@ -53,11 +105,15 @@ func (s *Servidor) rotulos() []map[string]string {
 }
 
 // envelopar monta a resposta padrão de uma tool sobre um retrato.
+//
+// As regiões adversárias são DERIVADAS da observabilidade, e não fixadas em
+// "data": uma lacuna de coleta cita nomes que o alvo escolheu, e o caminho dela
+// precisa entrar na lista. Ver Confianca.Regioes.
 func envelopar(r *Retrato, o Observabilidade, dados any) Envelope {
 	return Envelope{
 		Procedencia:     r.Procedencia(),
 		Observabilidade: o,
-		Confianca:       ConfiancaDoHost(),
+		Confianca:       ConfiancaDoHost(RegioesDoHost(o)...),
 		Dados:           dados,
 	}
 }
@@ -103,14 +159,17 @@ const notaDeRedacaoSnapshot = "este servidor responde sobre um DUMP, e o dump j�
 	"aqui, porque o segredo não está no artefato. Não conclua que não havia segredo."
 
 var toolStatus = Ferramenta{
-	Dados:  DadosDoMotor,
+	// NÃO é DadosDoMotor: a resposta lista os retratos carregados, e o rótulo
+	// de cada um é o hostname lido do dump. A classe declara o conteúdo mais
+	// forte que a tool emite, e "não há dado do alvo" aqui era falso.
+	Dados:  DadosRedigidosNaOrigem,
 	Nome:   "session.status",
 	Titulo: "O que esta execução pode e não pode ver",
 	Descricao: "Modo, perfil, privilégio efetivo deste processo e as tools que NÃO " +
 		"estão disponíveis, com o motivo. Comece por aqui: ele diz o alcance da " +
 		"investigação antes de você tirar conclusão de qualquer outra resposta.",
 	Entrada: json.RawMessage(entradaVazia),
-	Saida: json.RawMessage(`{"type":"object","required":["mode","profile","privilege",
+	Saida: esquemaSimples(`{"type":"object","required":["mode","profile","privilege",
 "network_egress","host_mutation","command_execution"],"properties":{
  "mode":{"type":"string","enum":["snapshot","live","image"]},
  "profile":{"type":"string","enum":["standard","full"]},
@@ -147,7 +206,7 @@ var toolStatus = Ferramenta{
 			d.RedigidoNaOrigem = true
 			d.NotaDeRedacao = notaDeRedacaoSnapshot
 		}
-		return d, nil
+		return EnvelopeSimples{Confianca: ConfiancaDoHost(), Dados: d}, nil
 	},
 }
 
@@ -171,7 +230,7 @@ var toolSnapshotList = Ferramenta{
 		"Nenhuma tool aceita caminho de arquivo: tudo que este processo pode abrir " +
 		"foi fixado pelo operador quando ele iniciou o servidor.",
 	Entrada: json.RawMessage(entradaVazia),
-	Saida: json.RawMessage(`{"type":"object","required":["snapshots"],"properties":{
+	Saida: esquemaSimples(`{"type":"object","required":["snapshots"],"properties":{
  "snapshots":{"type":"array","items":{"type":"object","required":["snapshot_id","source"],
   "properties":{"snapshot_id":{"type":"string"},"label":{"type":"string"},
    "host":{"type":"string"},"source":{"type":"string","enum":["live","image"]},
@@ -190,7 +249,10 @@ var toolSnapshotList = Ferramenta{
 				ColetadoEm: p.ColetadoEm, ColetadoPor: p.ColetadoPor, Caps: p.Caps,
 			})
 		}
-		return map[string]any{"snapshots": itens}, nil
+		return EnvelopeSimples{
+			Confianca: ConfiancaDoHost(),
+			Dados:     map[string]any{"snapshots": itens},
+		}, nil
 	},
 }
 
@@ -293,7 +355,7 @@ var toolChecksCatalog = Ferramenta{
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
-		if er := validarTexto("group", a.Grupo); er != nil {
+		if er := validarGrupo(a.Grupo); er != nil {
 			return nil, er
 		}
 		itens := []itemCheck{}

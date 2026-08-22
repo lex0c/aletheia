@@ -308,4 +308,56 @@ func init() {
 		}},
 		Exit: 0,
 	})
+	// ------------------------------------------------------------------- M8
+	//
+	// O cenário que a revisão de código pediu, e que teria pego o defeito.
+	//
+	// O M3 planta a injeção no argv e afirma que ela chega SÓ em `data`. Isso é
+	// verdade para o argv, e por isso ele passava — enquanto um segundo caminho,
+	// que ele não exercita, entregava texto do alvo em `observability` de TODA
+	// resposta: as lacunas de coleta interpolam nomes que o alvo escolhe.
+	//
+	//	facts/persist.go   c + " não pôde ser lido (…)"   ← c é o CAMINHO
+	//	facts/binfmt.go    "o registro " + nome + " …"
+	//	facts/bpf.go       "cgroup " + rel + ": …"
+	//
+	// O plantio usa um FIFO, e não uma permissão: o contêiner roda como root, e
+	// root ignora o bit de permissão. O que ele NÃO contorna é o tipo do objeto
+	// — env.abrirVerificado recusa não-arquivo pelo descritor, que é a defesa
+	// contra o `mkfifo /etc/ld.so.preload` que pendurava a varredura. A recusa
+	// vira lacuna, e a lacuna carrega o nome que escolhi.
+	//
+	// Apagar o nome da lacuna resolveria a fronteira e destruiria a evidência:
+	// é ele que diz QUAL arquivo não foi lido. Então a fronteira é DECLARADA —
+	// e é isso que este cenário cobra.
+	Register(Scenario{
+		ID:     "M8-mcp-lacuna-de-coleta-tambem-e-regiao-declarada",
+		Desc:   "nome hostil num arquivo que não abre: o texto do alvo alcança observability, e o caminho vem declarado",
+		Images: []string{"debian:12"},
+		Cmd:    "mcp",
+		Plant: `mkdir -p /etc/ld.so.conf.d
+			mkfifo "/etc/ld.so.conf.d/` + ordemAoModelo + `.conf"
+			` + coletaLocal,
+		Args: servirRetrato,
+		MCP: []Chamada{
+			{
+				Tool: "findings.list",
+				// Ele CHEGA — apagá-lo destruiria a evidência de qual arquivo
+				// não abriu — e toda região onde chega está declarada.
+				TextoDoAlvo: []string{ordemAoModelo},
+				Campos:      map[string]string{"trust.untrusted": "true"},
+				Espera: []string{
+					// A lista de caminhos precisa existir e citar observability.
+					`"host_supplied_paths"`,
+					`"observability"`,
+				},
+			},
+			{
+				// E a superfície de ferramentas continua intocada por ESTE
+				// caminho também.
+				Proibe: []string{ordemAoModelo},
+			},
+		},
+		Exit: 0,
+	})
 }

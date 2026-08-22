@@ -21,8 +21,10 @@ import (
 // retrato.
 
 // dossieDeAlvo é a cola comum: resolve o retrato, chama o info, envelopa.
-func dossieDeAlvo(s *Servidor, id string, fn func(r *Retrato) *info.Dossie) (any, *ErroRPC) {
-	r, er := s.retratoDe(id)
+func dossieDeAlvo(s *Servidor, id string, fontes env.Source,
+	fn func(r *Retrato) *info.Dossie) (any, *ErroRPC) {
+
+	r, er := s.retratoComFonte(id, fontes)
 	if er != nil {
 		return nil, er
 	}
@@ -47,7 +49,7 @@ var toolProcessCensus = Ferramenta{
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
-		r, er := s.retratoDe(a.SnapshotID)
+		r, er := s.retratoComFonte(a.SnapshotID, env.SourceLive)
 		if er != nil {
 			return nil, er
 		}
@@ -80,7 +82,7 @@ var toolProcessGet = Ferramenta{
 		if a.PID < 0 {
 			return nil, erro(CodInvalidParams, "pid inválido")
 		}
-		return dossieDeAlvo(s, a.SnapshotID, func(r *Retrato) *info.Dossie {
+		return dossieDeAlvo(s, a.SnapshotID, env.SourceLive, func(r *Retrato) *info.Dossie {
 			return info.Processo(r.Fatos, a.PID)
 		})
 	},
@@ -117,12 +119,21 @@ var toolProcessTree = Ferramenta{
 		if a.PID < 0 {
 			return nil, erro(CodInvalidParams, "pid inválido")
 		}
-		r, er := s.retratoDe(a.SnapshotID)
+		r, er := s.retratoComFonte(a.SnapshotID, env.SourceLive)
 		if er != nil {
 			return nil, er
 		}
-		return envelopar(r, ObservabilidadeDeFatos(r.Fatos),
-			info.Arvore(r.Fatos, a.PID, a.Prof)), nil
+		arv := info.Arvore(r.Fatos, a.PID, a.Prof)
+		obs := ObservabilidadeDeFatos(r.Fatos)
+		// A truncagem da ÁRVORE é truncagem da RESPOSTA, e observability é onde
+		// o modelo a procura. Sem esta linha os dois campos discordavam: o
+		// dossiê dizia truncated:true e o envelope, false.
+		obs.Truncado = arv.Truncado
+		if arv.Truncado {
+			obs.MotivoTruncagem = "a árvore foi cortada: veja data.signals e " +
+				"children_omitted para saber onde"
+		}
+		return envelopar(r, obs, arv), nil
 	},
 }
 
@@ -145,7 +156,7 @@ var toolNetCensus = Ferramenta{
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
-		r, er := s.retratoDe(a.SnapshotID)
+		r, er := s.retratoComFonte(a.SnapshotID, env.SourceLive)
 		if er != nil {
 			return nil, er
 		}
@@ -180,7 +191,7 @@ var toolNetIP = Ferramenta{
 		if a.Endereco == "" {
 			return nil, erro(CodInvalidParams, `net.ip exige "address"`)
 		}
-		return dossieDeAlvo(s, a.SnapshotID, func(r *Retrato) *info.Dossie {
+		return dossieDeAlvo(s, a.SnapshotID, env.SourceLive, func(r *Retrato) *info.Dossie {
 			return info.IP(r.Fatos, a.Endereco)
 		})
 	},
@@ -209,7 +220,7 @@ var toolNetPort = Ferramenta{
 		if a.Porta < 0 || a.Porta > 65535 {
 			return nil, erro(CodInvalidParams, "port fora do intervalo 0..65535")
 		}
-		return dossieDeAlvo(s, a.SnapshotID, func(r *Retrato) *info.Dossie {
+		return dossieDeAlvo(s, a.SnapshotID, env.SourceLive, func(r *Retrato) *info.Dossie {
 			return info.Porta(r.Fatos, a.Porta)
 		})
 	},
@@ -243,7 +254,7 @@ var toolFileInspect = Ferramenta{
 		if a.Caminho == "" {
 			return nil, erro(CodInvalidParams, `file.inspect exige "path"`)
 		}
-		return dossieDeAlvo(s, a.SnapshotID, func(r *Retrato) *info.Dossie {
+		return dossieDeAlvo(s, a.SnapshotID, 0, func(r *Retrato) *info.Dossie {
 			return info.Arquivo(r.Fatos, a.Caminho)
 		})
 	},

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/lex0c/aletheia/internal/drift"
 	"github.com/lex0c/aletheia/internal/env"
@@ -33,6 +34,7 @@ var toolSnapshotCompare = Ferramenta{
  "after_id":{"type":"string","description":"snapshot_id do retrato POSTERIOR"}}}`),
 	Saida: esquemaEnvelope(`{"type":"object","required":["changes","coverage_by_family"],
 "properties":{
+ "caveat":{"type":"string","description":"presente quando a ordem dos retratos é ambígua — leia antes de interpretar o sentido das mudancas"},
  "from_host":{"type":"string"},"to_host":{"type":"string"},
  "from_when":{"type":"string"},"to_when":{"type":"string"},
  "counted_only":{"type":"integer","description":"mudancas em campos que nao decidem nada (hash, mtime, tamanho): sai o numero, e nao a lista"},
@@ -73,8 +75,13 @@ var toolSnapshotCompare = Ferramenta{
 		if er != nil {
 			return nil, er
 		}
+		la, ld := ladoDe(antes), ladoDe(depois)
+		ressalva, er := conferirOrdem(la, ld)
+		if er != nil {
+			return nil, er
+		}
 
-		d := drift.Comparar(ladoDe(antes), ladoDe(depois))
+		d := drift.Comparar(la, ld)
 
 		mudancas := []map[string]any{}
 		for _, m := range d.Mudancas {
@@ -98,14 +105,50 @@ var toolSnapshotCompare = Ferramenta{
 		// resposta fala —, e os dois lados vão no corpo para que nenhum dos
 		// dois fique implícito.
 		obs := ObservabilidadeDeFatos(depois.Fatos)
-		return envelopar(depois, obs, map[string]any{
+		corpo := map[string]any{
 			"from_host": d.DeHost, "to_host": d.ParaHost,
 			"from_when": d.DeQuando, "to_when": d.AteQuando,
 			"counted_only":       d.Contadas,
 			"changes":            mudancas,
 			"coverage_by_family": cobertura,
-		}), nil
+		}
+		if ressalva != "" {
+			corpo["caveat"] = ressalva
+		}
+		return envelopar(depois, obs, corpo), nil
 	},
+}
+
+// conferirOrdem recusa a comparação invertida, e ressalva a ambígua.
+//
+// # Por que isso não é preciosismo
+//
+// Com os retratos trocados, drift.Comparar roda com os lados invertidos: a
+// chave de SSH que o atacante ACRESCENTOU volta como kind "sumiu", e a que ele
+// REMOVEU volta como "surgiu". O modelo lê a história ao contrário, e o
+// intervalo sai negativo sem que nada o diga. O CLI recusa isto com exit 3 e a
+// frase "pior que drift nenhum"; o servidor aceitava calado.
+//
+// Hosts DIFERENTES não são recusa: pode ser deriva de relógio entre duas
+// máquinas, e comparar dois hosts é legítimo. Mas o modelo não tem stderr onde
+// ler o aviso do CLI, então a ressalva viaja no corpo da resposta.
+func conferirOrdem(antes, depois drift.Lado) (string, *ErroRPC) {
+	ta, erra := time.Parse(time.RFC3339, antes.Quando)
+	td, errd := time.Parse(time.RFC3339, depois.Quando)
+	if erra != nil || errd != nil || !ta.After(td) {
+		return "", nil
+	}
+	if antes.Host != "" && antes.Host == depois.Host {
+		return "", erroComDados(CodInvalidParams,
+			"before_id é MAIS NOVO que after_id no mesmo host ("+antes.Quando+
+				" > "+depois.Quando+"): com a ordem trocada, o que foi REMOVIDO sai "+
+				"como \"surgiu\" e o intervalo sai negativo. Inverta os dois.",
+			map[string]any{"before_when": antes.Quando, "after_when": depois.Quando})
+	}
+	return "os retratos são de HOSTS DIFERENTES e o primeiro é mais novo que o " +
+		"segundo (" + antes.Quando + " > " + depois.Quando + "): pode ser deriva de " +
+		"relógio, pode ser ordem trocada. A comparação seguiu, e o intervalo sai " +
+		"como está — leia o sentido de cada mudança com isso em mente.", nil
 }
 
 // ladoDe monta o lado da comparação a partir de um retrato.

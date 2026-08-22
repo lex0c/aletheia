@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/lex0c/aletheia/internal/check"
@@ -37,6 +38,15 @@ type Retrato struct {
 	Fatos  *facts.Facts
 	Fonte  env.Source
 
+	// Soma é o que o sidecar .sha256 respondeu sobre este arquivo.
+	//
+	// O `collect` escreve `<dump>.sha256` ao lado do artefato, e `analyze` e
+	// `drift` o CONFEREM antes de concluir qualquer coisa. O servidor MCP era o
+	// único caminho de carga que pulava a verificação — e ele é justamente o
+	// que entrega o retrato a um modelo, com um bloco de procedência que
+	// afirma cadeia de custódia inteira.
+	Soma EstadoDaSoma
+
 	// O relatório é memoizado porque o retrato é IMUTÁVEL: rodar o catálogo
 	// inteiro sobre os mesmos fatos com o mesmo ambiente é determinístico, e
 	// quatro tools precisam dele (findings.list, finding.get, coverage.get,
@@ -54,13 +64,101 @@ type Retrato struct {
 // medir coisas diferentes e o teste que os compara vira decoração.
 func (r *Retrato) Relatorio() *check.Report {
 	r.umaVez.Do(func() {
+		// O sync.Once ENVENENA em caso de pânico: ele marca a execução como
+		// feita mesmo quando o corpo não terminou, e toda chamada seguinte
+		// devolveria `rel` nil — o defeito viraria um nil deref em
+		// ObservabilidadeDeRelatorio, longe da causa.
+		//
+		// check.Run protege cada CHECK com runGuarded, mas a cauda dele
+		// (Index, resolverAtores, marcarDrift, invalidarAusencias) roda solta,
+		// e ela lê fatos de um artefato que só foi validado por versão de
+		// esquema.
+		//
+		// A saída é a resposta honesta desta ferramenta: o catálogo inteiro
+		// NÃO VERIFICADO, com o motivo. Nunca nil, e nunca "nada encontrado".
+		defer func() {
+			if rec := recover(); rec != nil {
+				r.rel = relatorioQueFalhou(fmt.Sprint(rec))
+			}
+		}()
 		r.rel = check.Run(check.Select(check.Selection{}), r.Fatos, r.Env)
 	})
 	return r.rel
 }
 
+// relatorioQueFalhou é o rodapé de uma análise que não pôde acontecer.
+//
+// Ele existe para que a falha atravesse o protocolo com a MESMA forma de todo o
+// resto: veredito INCOMPLETE, catálogo em not_checked, motivo escrito. Um erro
+// de transporte diria "a chamada falhou"; isto diz "não foi possível olhar",
+// que é a distinção que a ferramenta inteira mantém.
+func relatorioQueFalhou(causa string) *check.Report {
+	todos := check.Select(check.Selection{})
+	rel := &check.Report{Coverage: check.Coverage{Total: len(todos)}}
+	for _, c := range todos {
+		rel.Coverage.NotChecked = append(rel.Coverage.NotChecked, check.NotChecked{
+			ID: c.ID, Ref: c.Ref, Title: c.Title,
+			Reason: "a análise deste retrato falhou durante a execução (" + causa +
+				"): DEFEITO DA FERRAMENTA, e não afirmação sobre o host",
+			Manual: []string{"analise o retrato pelo CLI: aletheia analyze <arquivo>"},
+		})
+	}
+	return rel
+}
+
 // Procedencia é a deste retrato, já montada.
-func (r *Retrato) Procedencia() Procedencia { return ProcedenciaDeDump(r.ID, r.Dump) }
+func (r *Retrato) Procedencia() Procedencia {
+	return ProcedenciaDeDump(r.ID, r.Dump, r.Soma.String())
+}
+
+// EstadoDaSoma é a resposta do sidecar .sha256.
+//
+// Três estados e não dois: "não havia sidecar" (dump de outra versão, ou vindo
+// de stdout) é diferente de "confere" e MUITO diferente de "não confere", e
+// achatá-los faria a ausência de verificação parecer verificação.
+type EstadoDaSoma uint8
+
+const (
+	SomaAusente EstadoDaSoma = iota
+	SomaConfere
+	SomaDivergente
+)
+
+func (e EstadoDaSoma) String() string {
+	switch e {
+	case SomaConfere:
+		return "checksum_verified"
+	case SomaDivergente:
+		return "checksum_mismatch"
+	}
+	return "checksum_absent"
+}
+
+// conferirSidecar compara o hash já calculado com o que a coleta escreveu.
+//
+// O teto de leitura é o mesmo raciocínio do dump.MaxDump aplicado ao sidecar:
+// ele veio do mesmo pendrive e do mesmo host, e "tamanho é entrada não
+// confiável" vale para ele também. 64 bytes de hex mais um nome é tudo que o
+// formato admite.
+func conferirSidecar(caminho, obtido string) EstadoDaSoma {
+	fh, err := os.Open(caminho + ".sha256")
+	if err != nil {
+		return SomaAusente
+	}
+	defer fh.Close()
+	b, err := io.ReadAll(io.LimitReader(fh, 8<<10))
+	if err != nil {
+		return SomaAusente
+	}
+	campos := strings.Fields(string(b))
+	if len(campos) == 0 {
+		return SomaAusente
+	}
+	if campos[0] == obtido {
+		return SomaConfere
+	}
+	return SomaDivergente
+}
 
 // Acervo guarda os retratos por ID, na ordem em que o operador os declarou.
 type Acervo struct {
@@ -118,6 +216,7 @@ func (a *Acervo) Carregar(caminho string) (*Retrato, error) {
 		ID:     "snap-" + soma[:12],
 		Rotulo: rotuloDe(d),
 		Dump:   d, Env: e, Fatos: d.Facts, Fonte: fonte,
+		Soma: conferirSidecar(caminho, soma),
 	}
 
 	a.mu.Lock()

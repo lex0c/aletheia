@@ -49,6 +49,16 @@ type Chamada struct {
 	// FERRAMENTA sobre a evidência, e não a evidência.
 	SoEmDados []string
 
+	// TextoDoAlvo é a forma GERAL da fronteira, e a que o M8 precisa.
+	//
+	// A substring precisa aparecer na resposta, e TODA região de primeiro nível
+	// onde ela aparece precisa estar declarada em trust.host_supplied_paths.
+	// SoEmDados afirma um caso particular — "aparece em data e em mais nada" —,
+	// que vale para o argv de um processo e NÃO vale para um nome que entrou
+	// numa lacuna de coleta: ali o texto do alvo alcança observability
+	// legitimamente, e o que importa é que o caminho esteja dito.
+	TextoDoAlvo []string
+
 	// Campos são asserções por caminho pontilhado sobre a resposta —
 	// "observability.verdict": "INCOMPLETE". O valor é comparado como texto,
 	// que é o que torna a escrita do cenário legível.

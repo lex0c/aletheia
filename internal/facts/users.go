@@ -102,6 +102,17 @@ func collectUsers(f *Facts, e *env.Env) {
 
 	shadow := lerShadow(f, e)
 
+	// O GROUP É LIDO ANTES, e não depois do passwd, porque ele não depende dele.
+	//
+	// Enquanto ficava embaixo, o `return` do passwd ilegível levava junto uma
+	// leitura que teria funcionado: um /etc/passwd 0600 (raro, mas é o que uma
+	// varredura sem root encontra em host endurecido) deixava GroupLido falso
+	// com o /etc/group perfeitamente aberto, e a família de grupo recusava a
+	// comparação por causa de OUTRO arquivo. É o mesmo defeito das chaves de
+	// lacuna largas, um nível abaixo — e foi a catraca de completude por fonte
+	// que o achou.
+	lerGrupos(f, e)
+
 	b, err := e.ReadFile("/etc/passwd")
 	if err != nil {
 		f.denyPersist("users", "/etc/passwd ilegível: nenhuma conta foi avaliada")
@@ -148,6 +159,11 @@ func collectUsers(f *Facts, e *env.Env) {
 		f.Accounts = append(f.Accounts, a)
 	}
 
+	metaDosArquivosDeConta(f, e)
+}
+
+// lerGrupos lê /etc/group. Fonte PRÓPRIA: nada aqui depende do passwd.
+func lerGrupos(f *Facts, e *env.Env) {
 	if b, err := e.ReadFile("/etc/group"); env.EhLacuna(err) {
 		f.denyPersist("users", "/etc/group não pôde ser lido: a resolução de GID→nome "+
 			"degrada, e um GID sem conta no group não pode ser afirmado")
@@ -166,7 +182,11 @@ func collectUsers(f *Facts, e *env.Env) {
 			f.Grupos = append(f.Grupos, Grupo{Name: fs[0], GID: gid, Members: membros})
 		}
 	}
+}
 
+// metaDosArquivosDeConta guarda o mtime dos quatro arquivos de conta. É meta, e
+// não conteúdo: nenhum fato de completude depende dela.
+func metaDosArquivosDeConta(f *Facts, e *env.Env) {
 	for _, p := range []string{"/etc/passwd", "/etc/shadow", "/etc/sudoers", "/etc/group"} {
 		if m := modUTC(e, p); m != "" {
 			f.MetaAcesso = append(f.MetaAcesso, ArquivoMeta{Path: p, ModUTC: m})

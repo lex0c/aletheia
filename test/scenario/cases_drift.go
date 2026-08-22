@@ -281,7 +281,8 @@ func init() {
 const driftDeDefesa = `
 mkdir -p /alvo/etc/ssh /alvo/etc/selinux /alvo/etc/audit/rules.d /alvo/root/.ssh \
          /alvo/sys/kernel/security /alvo/sys/module/module/parameters \
-         /alvo/proc/sys/kernel /alvo/etc/modprobe.d
+         /alvo/proc/sys/kernel /alvo/etc/modprobe.d /alvo/etc/ld.so.conf.d \
+         /alvo/usr/lib /alvo/opt/app/lib
 
 printf 'PermitRootLogin no\nPasswordAuthentication no\nPort 22\n' > /alvo/etc/ssh/sshd_config
 printf 'SELINUX=enforcing\n' > /alvo/etc/selinux/config
@@ -300,6 +301,10 @@ printf '127.0.0.1 localhost\n' > /alvo/etc/hosts
 printf 'export PATH=/usr/bin\n' > /alvo/etc/profile
 printf 'install nf_tables /bin/true\n' > /alvo/etc/modprobe.d/evil.conf
 printf '|/usr/lib/systemd/systemd-coredump\n' > /alvo/proc/sys/kernel/core_pattern
+# a cadeia de busca de biblioteca, com os diretórios do sistema NA FRENTE
+printf 'include /etc/ld.so.conf.d/*.conf\n' > /alvo/etc/ld.so.conf
+printf '/usr/lib\n/opt/app/lib\n' > /alvo/etc/ld.so.conf.d/00-app.conf
+printf 'PATH=/usr/local/bin:/usr/bin:/bin\n' > /alvo/etc/environment
 # o ~/.ssh/config só é procurado nos HOMES que o /etc/passwd declara: sem ele a
 # raiz artificial não tem de onde tirar a lista de contas
 printf 'root:x:0:0:root:/root:/bin/sh\n' > /alvo/etc/passwd
@@ -340,6 +345,18 @@ printf 'export PATH=/usr/bin\n. /tmp/.p\n' > /alvo/etc/profile
 printf 'install nf_tables /bin/sh -c "/tmp/.m; /sbin/modprobe --ignore-install nf_tables"\n' \
     > /alvo/etc/modprobe.d/evil.conf
 printf '|/tmp/.c\n' > /alvo/proc/sys/kernel/core_pattern
+
+# 10. AS DUAS PORTAS DO LOADER, e nenhuma delas acrescenta ou remove arquivo.
+#
+#     A primeira é só a ORDEM: os mesmos dois diretórios, trocados de lugar. O
+#     loader para no primeiro que casar, então /opt/app/lib passa a responder
+#     por toda biblioteca do host — sem diretório novo, sem arquivo novo, sem
+#     nada que uma varredura de forma possa apontar.
+printf '/opt/app/lib\n/usr/lib\n' > /alvo/etc/ld.so.conf.d/00-app.conf
+#     A segunda é o LD_PRELOAD que NÃO está no ld.so.preload: o PAM exporta o
+#     /etc/environment em toda sessão, inclusive por SSH, e o efeito é o mesmo
+#     da pré-carga global num arquivo que ninguém olha com a mesma desconfiança.
+printf 'PATH=/usr/local/bin:/usr/bin:/bin\nLD_PRELOAD=/tmp/.e.so\n' > /alvo/etc/environment
 sleep 0.2`
 
 func init() {
@@ -362,6 +379,12 @@ func init() {
 			{ID: "persist.trigger_drift", Evidence: "/tmp/.p"},
 			{ID: "kernel.load_drift", Evidence: "/tmp/.m"},
 			{ID: "kernel.load_drift", Evidence: "core_pattern"},
+			// As duas portas do loader, e as duas só existem como TRANSIÇÃO:
+			// a cadeia reordenada não acrescenta diretório nenhum, e o
+			// LD_PRELOAD do /etc/environment é uma linha num arquivo que todo
+			// host tem.
+			{ID: "kernel.load_drift", Evidence: "/opt/app/lib"},
+			{ID: "persist.preload_drift", Evidence: "/tmp/.e.so"},
 		},
 		// A DIREÇÃO precisa estar na evidência: `no -> yes` e `yes -> no` são a
 		// mesma família e conclusões opostas, e é o par antes/depois que separa

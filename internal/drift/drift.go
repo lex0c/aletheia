@@ -46,6 +46,36 @@
 //	                     processo com segredo na linha de comando. O preço, que
 //	                     fica dito, é que drift em campo redigido é invisível.
 //
+// # O PISO DE RUÍDO, medido
+//
+// Uma feature de drift vive ou morre pelo que ela diz num host que ninguém
+// atacou. A medição abaixo é o contrato, e ela é refeita quando o registro de
+// famílias muda — foi refeita depois de `loader.order` e `loader.env`
+// entrarem, que são as duas mais recentes.
+//
+//	contêiner debian:bookworm-20230612 atualizado para o corrente, com
+//	openssh-server, cron, sudo, ca-certificates, nginx-light e libpam-modules,
+//	e uma configuração plausível por cima (conta com chave autorizada, regra
+//	de sudo NOPASSWD, /etc/cron.d, LD_LIBRARY_PATH no /etc/environment e um
+//	ld.so.conf.d próprio):
+//
+//	28 pacotes atualizados  ->  ZERO achados
+//	                            14 mudanças CONTADAS e não impressas (hash,
+//	                            mtime, tamanho — campo que não decide)
+//	                            33 das 34 famílias comparadas SEM restrição
+//
+// A única restrita é `programa em execução`, e por ser efêmera: a limitação é
+// simétrica, então é escopo da pergunta e não defeito da comparação.
+//
+// A medição anterior, num conjunto menor de famílias, deu 38 pacotes -> UM
+// achado: o setgid que o `bsdutils` tirou do /usr/bin/wall (a correção da
+// CVE-2024-28085). Um achado verdadeiro sobre uma mudança real de privilégio é
+// o piso CERTO — o que não pode acontecer é a lista de pacotes virar drift.
+//
+// O limite da medição, dito: é um contêiner, não um servidor com systemd
+// rodando. A churn de unit de um host real é maior, e é ela que a família
+// `systemd.unit` paga.
+//
 // # Por que um registro explícito, e não reflexão sobre facts.Facts
 //
 // São 78 campos, e cada um tem identidade e volatilidade próprias. Reflexão não

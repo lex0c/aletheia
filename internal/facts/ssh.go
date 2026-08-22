@@ -577,7 +577,15 @@ func collectAuthorizedKeys(f *Facts, e *env.Env) {
 
 		b, err := e.ReadFile(a.path)
 		if err != nil {
-			if _, negado := lookup(e, a.path); negado {
+			// A NEGATIVA VEM DO ERRO DE LEITURA, e não de um Lstat à parte.
+			//
+			// O `lookup` responde por STAT, e stat de arquivo 0600 de outro
+			// usuário SUCEDE quando os diretórios do caminho são atravessáveis
+			// — que é o caso comum de /home/x/.ssh 0755. O read falhava com
+			// EACCES, o lookup dizia "existe e não é negado", e o arquivo saía
+			// da varredura em SILÊNCIO: SSHChavesCompleto continuava verdadeiro
+			// sobre um authorized_keys que ninguém leu.
+			if env.EhLacuna(err) {
 				negados = append(negados, a.path)
 			}
 			continue

@@ -118,7 +118,7 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `persist.modprobe_install` | 7.12 | diretiva de modprobe que executa comando em vez de carregar módulo | `97-modulo-no-boot` |
 | `persist.nss_module` | 7.8 | módulo NSS carregado em toda resolução de nome que nenhum pacote entregou | `101-nss-backdoor` |
 | `persist.pam_exec` | 7.12 | PAM executa programa ou carrega módulo de fora do lugar padrão | `64-gatilhos-de-execucao` |
-| `persist.preload_drift` | 7.6 | pré-carga de código mudou desde o retrato anterior | `DR4-drift-das-sete-superficies` |
+| `persist.preload_drift` | 7.6 | pré-carga de código mudou desde o retrato anterior | `DR4-drift-das-sete-superficies`, `DR5-drift-de-defesa-desligada` |
 | `persist.shell_env` | 7.6 | ENV definido: arquivo lido a cada shell POSIX interativo | `64-gatilhos-de-execucao` |
 | `persist.shell_startup` | 7.6 | arquivo de inicialização de shell executa algo suspeito | `64-gatilhos-de-execucao`, `TX1-texto-que-engana-quem-le` |
 | `persist.ssh_client_drift` | 7.3 | hook de execução do cliente SSH mudou desde o retrato anterior | `DR5-drift-de-defesa-desligada` |

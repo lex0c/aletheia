@@ -328,8 +328,15 @@ func TextoLivre(s string) string { return porLinha(s, semFlags) }
 // `curl -H 'Authorization: Bearer SEGREDO'` que passava intacto.
 func semFlags(tokens []string) []string {
 	out := make([]string, 0, len(tokens))
-	noCabecalho := false
+	noCabecalho, pularProximo := false, false
 	for _, a := range tokens {
+		if pularProximo {
+			pularProximo = false
+			if a != "" {
+				out = append(out, "<redacted>")
+				continue
+			}
+		}
 		if noCabecalho {
 			if !fechaCabecalhoAuth(a) {
 				out = append(out, "<redacted>")
@@ -346,9 +353,34 @@ func semFlags(tokens []string) []string {
 			out = append(out, r)
 			continue
 		}
+		// A flag ESCRITA POR EXTENSO vale em texto livre.
+		//
+		// A ambiguidade que fez a regra de flag sair daqui é das de UMA LETRA:
+		// `-w` e `-p` são "watch" e "permissions" numa regra de auditd, e
+		// senha numa linha de comando. `--password`, `--token` e `--secret` não
+		// são outra coisa em lugar nenhum, e isSecretFlag casa por igualdade
+		// exata — `--key-hint` não vira `--key`.
+		//
+		// Isso fecha a forma partida nos campos que NÃO são comando (log,
+		// configuração, trecho de código) sem custar evidência, e o corpus de
+		// evidência limpa é quem confere esse custo.
+		if flagPorExtenso(a) {
+			pularProximo = true
+			out = append(out, a)
+			continue
+		}
 		out = append(out, redactURLCreds(a))
 	}
 	return out
+}
+
+// flagPorExtenso: flag de segredo que não é abreviação de uma letra.
+func flagPorExtenso(a string) bool {
+	if !isSecretFlag(a) {
+		return false
+	}
+	corpo := strings.TrimLeft(a, "-")
+	return len(corpo) > 1
 }
 
 // porLinha aplica o redator linha a linha, preservando newline e espaçamento.

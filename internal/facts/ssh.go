@@ -90,7 +90,7 @@ type SSHClientExec struct {
 	User      string `json:"user,omitempty"` // dono do config; "" = de sistema
 	Line      int    `json:"line"`
 	Directive string `json:"directive"` // ProxyCommand | LocalCommand | Match exec | KnownHostsCommand
-	Command   string `json:"command"`
+	Command   string `json:"command" redact:"linha"`
 	// Ativacao só vale para LocalCommand, que exige PermitLocalCommand yes para
 	// rodar. "confirmada" = a permissão está no config; "não confirmada" = a
 	// permissão não apareceu (o padrão é `no`), mas o binário ainda pode ser

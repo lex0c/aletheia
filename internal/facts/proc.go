@@ -78,7 +78,7 @@ type Process struct {
 
 	// EnvKeys tem TODAS as chaves; Env só os valores da allowlist (SPEC 5.4).
 	EnvKeys []string          `json:"env_keys,omitempty"`
-	Env     map[string]string `json:"env,omitempty" redact:"valor"`
+	Env     map[string]string `json:"env,omitempty"`
 
 	CapEff    uint64 `json:"cap_eff"`
 	TracerPID int    `json:"tracer_pid,omitempty"`

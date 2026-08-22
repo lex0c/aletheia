@@ -27,6 +27,28 @@ func TestFormaPartidaNaoVaza(t *testing.T) {
 		nome  string
 		fatos func() *facts.Facts
 	}{
+		{".bashrc com -p separado", func() *facts.Facts {
+			// A superfície que motivou a reescrita inteira. Ela pegava a forma
+			// EMBUTIDA e deixava passar a partida, porque a etiquetagem inicial
+			// só cobriu os quatro campos que a redação curada já protegia — e o
+			// .bashrc nunca esteve entre eles.
+			return &facts.Facts{Triggers: []facts.Trigger{{Lines: []facts.TriggerLine{
+				{Text: "mysql -p " + sentinela}}}}}
+		}},
+		{"ProxyCommand com -p separado", func() *facts.Facts {
+			return &facts.Facts{SSHClientExec: []facts.SSHClientExec{
+				{Command: "ssh -p " + sentinela}}}
+		}},
+		{"core_pattern com flag separada", func() *facts.Facts {
+			return &facts.Facts{Helpers: []facts.HelperDoKernel{
+				{Valor: "|/bin/x --password " + sentinela}}}
+		}},
+		{"flag POR EXTENSO em texto livre", func() *facts.Facts {
+			// Aqui não há etiqueta de comando, e mesmo assim a forma partida é
+			// pega: `--password` não é outra coisa em lugar nenhum. É a de UMA
+			// LETRA que é ambígua, e essa fica para os campos que se declaram.
+			return &facts.Facts{ExecOculto: []string{"app --token " + sentinela}}
+		}},
 		{"argv com -p separado", func() *facts.Facts {
 			return &facts.Facts{Processes: []facts.Process{
 				{PID: 1, Argv: []string{"mysql", "-p", sentinela, "prod"}}}}
@@ -73,21 +95,28 @@ func TestFormaPartidaNaoVaza(t *testing.T) {
 // Isso é pior que ruído: o Facts cru não é guardado em lugar nenhum, então a
 // evidência perdida no artefato é irrecuperável.
 func TestEvidenciaSemSegredoAtravessaIntacta(t *testing.T) {
+	// O corpus vai num campo de TEXTO LIVRE, que é o padrão e a maioria.
+	//
+	// Um campo etiquetado como comando recebe semântica de comando de propósito,
+	// e ali `-w /etc/passwd -p wa` SERIA mascarado — o que está certo se o campo
+	// guarda comando, e é por isso que a etiqueta é por campo. A primeira versão
+	// deste teste enfiava o corpus inteiro em Trigger.Lines[].Text, que é linha
+	// de .bashrc: uma regra de auditd não mora ali, e o fixture é que estava
+	// irreal. Corrigir o fixture é diferente de mover a trave — a regra de
+	// auditd é afirmada logo abaixo, no campo em que ela de fato vive.
 	limpos := []string{
 		"/usr/bin/ssh",
 		"/etc/ssl/private/server.key",
-		"-w /etc/passwd -p wa -k identity",
 		"|/usr/share/apport/apport %p %s %c %d %P",
 		"Description=Um serviço  qualquer",
 		"#!/bin/sh\nset -e\nexec /usr/bin/app --port 8080\n",
 		"  if x:\n    y()\n",
-		"ExecStart=/usr/bin/env sleep 30",
 		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGx3 systemd-timesync@localhost",
 	}
 	for _, s := range limpos {
 		f := &facts.Facts{
 			SchemaVersion: facts.SchemaVersion,
-			Triggers:      []facts.Trigger{{File: "/root/.bashrc", Lines: []facts.TriggerLine{{Text: s}}}},
+			ExecOculto:    []string{s},
 		}
 		var buf bytes.Buffer
 		if err := De(ambienteDeTeste(), f).Escrever(&buf); err != nil {
@@ -98,6 +127,27 @@ func TestEvidenciaSemSegredoAtravessaIntacta(t *testing.T) {
 			t.Errorf("a redação CORROMPEU evidência sem segredo:\n  %q\n  saída: %s",
 				s, recorte(buf.String(), s))
 		}
+	}
+}
+
+// E a regra de auditd, no campo em que ela vive: intacta.
+//
+// Ela é o caso que mostrou por que a semântica de comando não pode ser o padrão
+// — `-w` e `-p` são flags de segredo numa linha de comando e são "watch" e
+// "permissions" numa regra de auditoria.
+func TestRegraDeAuditdAtravessaIntacta(t *testing.T) {
+	regra := "-w /etc/passwd -p wa -k identity"
+	f := &facts.Facts{
+		SchemaVersion: facts.SchemaVersion,
+		Audit:         facts.Auditoria{Regras: []facts.RegraAudit{{Texto: regra}}},
+	}
+	var buf bytes.Buffer
+	if err := De(ambienteDeTeste(), f).Escrever(&buf); err != nil {
+		t.Fatal(err)
+	}
+	esperado, _ := json.Marshal(regra)
+	if !bytes.Contains(buf.Bytes(), esperado) {
+		t.Fatalf("a regra de auditd foi corrompida: %s", buf.String())
 	}
 }
 

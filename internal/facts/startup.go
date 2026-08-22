@@ -59,7 +59,7 @@ type Trigger struct {
 // TriggerLine é uma linha executável, com o que decide se ela é suspeita.
 type TriggerLine struct {
 	N    int    `json:"n"`
-	Text string `json:"text"`
+	Text string `json:"text" redact:"linha"`
 
 	// Added marca a linha que NÃO existe no /etc/skel correspondente. É o
 	// baseline de graça da §7.6: o esqueleto é a versão que a distribuição

@@ -270,8 +270,13 @@ func redigirValor(v reflect.Value, classe string) reflect.Value {
 		}
 		for i := 0; i < v.NumField(); i++ {
 			campo := v.Type().Field(i)
-			if !campo.IsExported() {
-				continue // não serializa, e o reflect não o alcançaria
+			if !campo.IsExported() || campo.Tag.Get("json") == "-" {
+				// Não exportado o reflect nem alcançaria; `json:"-"` o alcança e
+				// não vai para lugar nenhum. Copiar profundamente o DriftDados —
+				// que pode ser a comparação inteira de dois retratos — para
+				// descartá-lo no encoder é trabalho no host que a ferramenta
+				// prometeu não gastar.
+				continue
 			}
 			c := campo.Tag.Get(TagRedacao)
 			if c == "-" {
@@ -313,6 +318,11 @@ func redigirValor(v reflect.Value, classe string) reflect.Value {
 				// um processo, as variáveis de uma crontab. O nome é o que
 				// denuncia o segredo (`AWS_SECRET_ACCESS_KEY`), e é a proteção
 				// que a lista curada tinha e a caminhada por string perdeu.
+				//
+				// A decisão é pelo TIPO e não pela etiqueta, de propósito: assim
+				// um mapa novo nasce protegido. Havia um `redact:"valor"` no
+				// Process.Env que não mudava nada — decorativo, e decoração que
+				// se parece com declaração é o que faz alguém confiar nela.
 				out.SetMapIndex(k, reflect.ValueOf(
 					redigirNomeValor(iter.Key().String(), iter.Value().String()),
 				).Convert(v.Type().Elem()))

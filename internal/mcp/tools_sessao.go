@@ -27,6 +27,13 @@ func (s *Servidor) retratoDe(id string) (*Retrato, *ErroRPC) {
 			return r, nil
 		}
 		if s.acervo.Vazio() {
+			if s.pol.Modo != ModoSnapshot {
+				return nil, erro(CodInvalidParams,
+					"nenhum retrato existe ainda: chame snapshot.capture primeiro. "+
+						"Este servidor responde sobre RETRATOS, e não sobre o estado do "+
+						"momento — é o que impede uma investigação de misturar instantes "+
+						"diferentes e de perguntar sobre um pid já reciclado")
+			}
 			return nil, erro(CodInvalidParams,
 				"nenhum retrato foi carregado neste servidor")
 		}
@@ -39,8 +46,16 @@ func (s *Servidor) retratoDe(id string) (*Retrato, *ErroRPC) {
 	}
 	r, err := s.acervo.Retrato(id)
 	if err != nil {
+		// A dica é do MODO: em snapshot o conjunto foi fixado no lançamento, e
+		// em live ele é cunhado por snapshot.capture. Mandar o operador conferir
+		// o lançamento num servidor live o manda para o lugar errado.
+		dica := "os retratos deste servidor foram declarados no lançamento"
+		if s.pol.Modo != ModoSnapshot {
+			dica = "retratos são cunhados por snapshot.capture, e somem com " +
+				"snapshot.release ou quando o servidor termina"
+		}
 		return nil, erroComDados(CodInvalidParams, err.Error(),
-			map[string]any{"snapshots": s.ids()})
+			map[string]any{"snapshots": s.ids(), "hint": dica})
 	}
 	return r, nil
 }

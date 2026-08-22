@@ -1,6 +1,10 @@
 package mcp
 
-import "github.com/lex0c/aletheia/internal/env"
+import (
+	"time"
+
+	"github.com/lex0c/aletheia/internal/env"
+)
 
 // Modo é COMO este servidor obtém fato, e é fixado no lançamento do processo.
 //
@@ -81,6 +85,24 @@ type Policy struct {
 
 	MaxLinha     int64
 	MaxResultado int64
+
+	// Budget é o teto de tempo de uma AQUISIÇÃO, e ele volta agora com o
+	// mecanismo que o faz valer.
+	//
+	// Ele já existiu, preenchido com um padrão e lido por ninguém — e foi
+	// removido por isso: orçamento declarado e não conferido é a armadilha do
+	// MaxWarn: 0, que parece proteção e não confere nada. Em modo snapshot não
+	// havia o que cronometrar.
+	//
+	// Agora há. Ele vira env.WalkDeadline, que é o mesmo teto cooperativo que o
+	// `wtf` usa: a varredura de filesystem PARA no prazo e DECLARA o que não
+	// examinou, em vez de estourar o tempo que o operador reservou. O que não
+	// couber vira lacuna, nunca "nada encontrado".
+	//
+	// Ele NÃO interrompe a coleta no meio: não existe context.Context no
+	// domínio, e fingir cancelamento fino seria mentira. O que ele faz é o que
+	// o mecanismo existente sustenta, e a descrição da tool diz isso.
+	Budget time.Duration
 }
 
 // Padroes preenche o que o operador não disse.
@@ -90,6 +112,9 @@ func (p Policy) Padroes() Policy {
 	}
 	if p.MaxResultado <= 0 {
 		p.MaxResultado = MaxResultadoPadrao
+	}
+	if p.Budget <= 0 {
+		p.Budget = BudgetPadrao
 	}
 	return p
 }
@@ -102,20 +127,14 @@ const (
 	// inválido, e um cliente que recebe metade de uma resposta não tem como
 	// saber que era metade.
 	MaxResultadoPadrao int64 = 4 << 20 // 4 MiB
-)
 
-// Aqui havia um `Budget time.Duration`, teto de tempo por tool. Ele foi
-// removido porque NADA o aplicava: era preenchido com um padrão e lido por
-// ninguém.
-//
-// É a armadilha do `MaxWarn: 0` da suíte de cenários, num lugar novo — um
-// orçamento declarado e não conferido parece proteção e não confere nada, e
-// pior, convida quem lê a policy a acreditar que existe um limite. Em modo
-// snapshot não há o que cronometrar: toda tool responde de memória sobre um
-// retrato imutável, e a mais cara é memoizada.
-//
-// Ele volta com a aquisição live, junto do mecanismo que o faz valer — os
-// deadlines cooperativos que env.WalkExpired e check.RunOptions já sustentam.
+	// BudgetPadrao é o teto da varredura de filesystem numa captura completa.
+	//
+	// Generoso: uma coleta completa num host normal fica em ~1,5s, e o que
+	// estoura dois minutos é um filesystem grande — exatamente o caso em que a
+	// lacuna declarada vale mais que a espera.
+	BudgetPadrao = 2 * time.Minute
+)
 
 // FonteDoModo é o que um servidor DE AQUISIÇÃO descreve. Em ModoSnapshot não
 // há resposta: quem decide é cada dump carregado.

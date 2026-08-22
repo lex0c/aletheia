@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/mcp"
 	"github.com/lex0c/aletheia/internal/report"
 )
@@ -69,6 +70,13 @@ func runMCP(args []string) int {
 	}
 
 	acervo := mcp.NovoAcervo()
+	// TETO DE RETRATOS VIVOS. Cada um segura os fatos INTEIROS na memória de um
+	// processo que roda no host investigado, e a ferramenta promete passar pouco
+	// recurso ali. Em modo snapshot não há teto: o operador declarou os arquivos
+	// no lançamento, e limitar o que ele mesmo pediu não protege ninguém.
+	if pol.Modo != mcp.ModoSnapshot {
+		acervo.Teto = tetoDeRetratosVivos
+	}
 	for _, c := range retratos {
 		r, err := acervo.Carregar(c)
 		if err != nil {
@@ -110,9 +118,27 @@ func runMCP(args []string) int {
 	}
 	defer fecharAud()
 
-	srv := mcp.NovoServidor(pol, acervo, version, aud)
+	// A AQUISIÇÃO. Ela vem daqui e não de internal/mcp porque é decisão de linha
+	// de comando: a versão do binário, o --root, e a recusa de autoload.
+	//
+	// PermitirAutoload fica FALSO e não é configurável: consultar o sock_diag
+	// pode fazer o kernel rodar `modprobe`, e um efeito colateral no host
+	// investigado não pode nascer de uma chamada de tool. Quem quer aquele
+	// alcance roda `aletheia scan --allow-kernel-autoload` e serve o retrato.
+	var adquirir mcp.Aquisicao
+	if pol.Modo != mcp.ModoSnapshot {
+		adquirir = func() (*env.Env, error) {
+			return env.Probe(env.Options{Root: *raiz, Version: version}), nil
+		}
+	}
+
+	srv := mcp.NovoServidor(pol, acervo, version, aud, adquirir)
 	fmt.Fprintf(os.Stderr, "mcp: modo %s · perfil %s · %d tool(s) · stdio\n",
 		pol.Modo, pol.Perfil, len(srv.Ativas()))
+	if pol.Modo != mcp.ModoSnapshot {
+		fmt.Fprintf(os.Stderr, "mcp: nenhum retrato ainda — o agente tira o dele com "+
+			"snapshot.capture (teto de %d vivos)\n", tetoDeRetratosVivos)
+	}
 
 	if err := srv.Servir(os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "mcp: %v\n", err)
@@ -120,6 +146,13 @@ func runMCP(args []string) int {
 	}
 	return 0
 }
+
+// tetoDeRetratosVivos é quantas capturas cabem ao mesmo tempo.
+//
+// Quatro é folgado para a investigação que este servidor existe para sustentar
+// — um retrato de referência, um atual, e espaço para comparar — e apertado o
+// bastante para que um agente em laço não coma a memória do host investigado.
+const tetoDeRetratosVivos = 4
 
 // caminhos é a flag repetível de --snapshot.
 type caminhos []string
@@ -181,16 +214,14 @@ func policyDeFlags(retratos caminhos, vivo bool, raiz, perfil string,
 	}
 
 	switch {
-	case vivo, raiz != "":
-		fmt.Fprintln(os.Stderr,
-			"mcp: --live e --root ainda não estão implementados.\n\n"+
-				"A aquisição ao vivo é a entrega 2, e ela vem depois de o modo snapshot\n"+
-				"estar sólido de propósito: começar pelo host vivo faria depurar protocolo\n"+
-				"e depurar segurança serem o mesmo problema.\n\n"+
-				"Tire um retrato e sirva ele:\n\n"+
-				"    aletheia collect --out /tmp/host.json\n"+
-				"    aletheia mcp --snapshot /tmp/host.json")
-		return pol, 3
+	case vivo:
+		pol.Modo = mcp.ModoLive
+	case raiz != "":
+		if fi, err := os.Stat(raiz); err != nil || !fi.IsDir() {
+			fmt.Fprintf(os.Stderr, "--root: %s não é um diretório acessível\n", raiz)
+			return pol, 3
+		}
+		pol.Modo = mcp.ModoImagem
 	default:
 		pol.Modo = mcp.ModoSnapshot
 	}
@@ -225,9 +256,25 @@ func policyDeFlags(retratos caminhos, vivo bool, raiz, perfil string,
 		return pol, 3
 	}
 
-	// A regra geral, para os modos de aquisição: desligar a redação sob o
-	// perfil padrão seria uma trava sem porta.
-	if permitirSeg && pol.Perfil != mcp.PerfilCompleto {
+	// --profile full AINDA NÃO TEM CONTEÚDO, e por isso é recusado também nos
+	// modos de aquisição.
+	//
+	// Ele destrava, por desenho, a classe DadosCrus — leitura de arquivo,
+	// environ sem redação. Nenhuma tool a declara ainda: é a entrega 3. Aceitar
+	// a flag hoje a tornaria uma promessa sem efeito, e `--allow-secrets` junto
+	// dela desligaria uma projeção que nada usa. É a mesma armadilha que a
+	// recusa do modo snapshot fecha, pela outra porta: flag de segurança que
+	// parece fazer algo e não faz.
+	if pol.Perfil == mcp.PerfilCompleto {
+		fmt.Fprintln(os.Stderr,
+			"mcp --profile full: ainda não há tool que ele destrave.\n\n"+
+				"O perfil completo existe para a leitura de conteúdo de arquivo e o\n"+
+				"environ sem redação, que são a entrega seguinte. Aceitá-lo agora seria\n"+
+				"uma flag de segurança sem efeito — e --allow-secrets junto dela\n"+
+				"desligaria uma projeção que nenhuma tool usa.")
+		return pol, 3
+	}
+	if permitirSeg {
 		fmt.Fprintln(os.Stderr, "mcp --allow-secrets exige --profile full")
 		return pol, 3
 	}

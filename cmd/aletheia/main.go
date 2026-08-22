@@ -212,6 +212,10 @@ MCP — a pergunta que a IA faz DE VOLTA
   --snapshot F  o retrato a servir (REPETÍVEL). Tudo que este processo poderá
                 abrir é fixado aqui: nenhuma tool aceita caminho de arquivo, ou
                 o modelo ganharia leitura arbitrária na estação de quem investiga
+  --live        o agente tira o retrato dele, com snapshot.capture. Duas únicas
+                tools leem o host; todo o resto responde sobre um RETRATO, que é
+                o que impede trinta chamadas de misturar instantes diferentes
+  --root PATH   o mesmo, sobre uma imagem montada
   --allow-root  autoriza rodar como root. Sem ela, "sudo aletheia mcp" FALHA: o
                 servidor herda o privilégio do processo e nunca o adquire, e
                 rodar privilegiado é decisão dita, não acidente de sudo
@@ -219,13 +223,20 @@ MCP — a pergunta que a IA faz DE VOLTA
                 stderr; arquivo só quando pedido, porque preserve continua
                 sendo o único comando que escreve por padrão
 
+  Na aquisição, scope=volatile lê /proc e sockets e é ~9x mais barato — e NÃO
+  sustenta achado: o motor recusa rodar check sobre coleta parcial, e a resposta
+  é zero achados COM o catálogo inteiro declarado não verificado. scope=complete
+  é a varredura inteira. Enquanto ela roda, o servidor não responde outra
+  chamada: os coletores não são interrompíveis, e isso é dito em vez de fingido.
+
   Toda resposta em forma de achado carrega o VEREDITO e a COBERTURA, e o schema
   os exige. É a promessa do exit code traduzida para um canal que não tem exit
   code: uma lista de achados vazia com INCOMPLETE significa "não consegui
   olhar", e sem esses dois campos ela chegaria ao modelo como "host limpo".
 
-  --live e --root ainda não existem: a aquisição ao vivo vem depois, para que
-  depurar protocolo e depurar segurança não sejam o mesmo problema.
+  --profile full ainda não destrava tool nenhuma (leitura de conteúdo de arquivo
+  e environ sem redação são a entrega seguinte), e por isso é RECUSADO: flag de
+  segurança sem efeito é pior que flag nenhuma.
 
 FLAGS DE collect E analyze
   collect --out F [--root PATH] [--ignore PATH] [--all-fs]   escreve o dump ("-" = stdout)

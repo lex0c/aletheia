@@ -427,4 +427,122 @@ func init() {
 		},
 		Exit: 0,
 	})
+	// --------------------------------------------------------- entrega 2: live
+	//
+	// Os cenários de M1 a M9 servem um ARTEFATO. Estes três exercitam a
+	// aquisição: o servidor lê o host, cunha o retrato, e responde sobre ele.
+	//
+	// O contêiner roda como root, então `--allow-root` é obrigatório nos dois
+	// primeiros — e o terceiro existe justamente para provar o portão.
+
+	// M10 — a captura COMPLETA conclui, contra um /proc de verdade.
+	Register(Scenario{
+		ID:     "M10-mcp-captura-completa-conclui",
+		Desc:   "execução fileless plantada e capturada AO VIVO: o retrato cunhado pelo agente sustenta o achado",
+		Images: []string{"debian:12"},
+		Cmd:    "mcp",
+		Plant: `/helper memfd /helper sleep 300 &
+			sleep 0.5`,
+		Args: []string{"--live", "--allow-root"},
+		MCP: []Chamada{
+			{
+				Tool: "snapshot.capture",
+				Args: `{"scope":"complete"}`,
+				Campos: map[string]string{
+					"data.supports_findings": "true",
+					// A captura ATRAVESSA a redação: o Facts vivo é cru, e as tools
+					// prometem "não contém segredo em claro".
+					"provenance.redaction": "applied",
+					// E não há sidecar a conferir — ela nunca virou bytes em disco.
+					"provenance.sidecar": "sidecar_not_applicable",
+				},
+				Espera: []string{
+					// O handle diz no próprio nome que não é hash de conteúdo.
+					`"snapshot_id":"snap-live-`,
+				},
+			},
+			{
+				// Com UM retrato, o handle é opcional — e é assim que o cenário
+				// consegue perguntar sobre um id que ele não tem como prever.
+				Tool:   "findings.list",
+				Args:   `{"min_severity":"CRITICAL"}`,
+				Campos: map[string]string{"observability.verdict": "CRITICAL"},
+				Espera: []string{"proc.memfd_exec"},
+			},
+		},
+		Exit: 0,
+	})
+
+	// M11 — a captura VOLÁTIL não conclui, e diz por quê.
+	//
+	// É o contrato que mais fácil se perde: uma coleta barata que devolvesse
+	// lista vazia se leria como "host limpo". O motor recusa rodar check sobre
+	// fatos voláteis — um check de unit encontraria zero units e reportaria
+	// "nada encontrado" onde o certo é "não olhei" — e a recusa precisa
+	// ATRAVESSAR o protocolo como o catálogo inteiro em not_checked.
+	Register(Scenario{
+		ID:     "M11-mcp-captura-volatil-nao-conclui",
+		Desc:   "captura barata com o MESMO implante do M10: zero achados, e o check que o pegaria declarado NÃO EXECUTADO",
+		Images: []string{"debian:12"},
+		Cmd:    "mcp",
+		Plant: `/helper memfd /helper sleep 300 &
+			sleep 0.5`,
+		Args: []string{"--live", "--allow-root"},
+		MCP: []Chamada{
+			{
+				Tool: "snapshot.capture",
+				Args: `{"scope":"volatile"}`,
+				// Ela DIZ que não sustenta achado, antes de alguém perguntar.
+				Campos: map[string]string{"data.supports_findings": "false"},
+			},
+			{
+				Tool: "findings.list",
+				Args: `{"min_severity":"CRITICAL"}`,
+				Campos: map[string]string{
+					"data.total":                      "0",
+					"observability.coverage.complete": "0",
+				},
+				CampoNao: map[string]string{
+					// Zero achados numa coleta que não olhou não é limpeza.
+					"observability.verdict": "OK",
+				},
+				Espera: []string{
+					`"not_checked"`,
+					"coleta volátil",
+					// A AFIRMAÇÃO MAIS FORTE que este cenário faz, e ela nasceu de
+					// uma asserção minha que estava errada.
+					//
+					// Escrevi `Proibe: ["proc.memfd_exec"]`, querendo dizer "o
+					// achado não aparece". O cenário falhou — porque o id APARECE,
+					// dentro de not_checked, que lista todo check do catálogo.
+					//
+					// E aparecer ali é melhor que sumir: o mesmo implante do M10
+					// está plantado, o check que o pegaria existe, e a resposta diz
+					// com todas as letras que ele NÃO RODOU. Um modelo lendo isto
+					// não tem como concluir ausência — que é a diferença entre uma
+					// lista vazia e uma lista vazia explicada.
+					"proc.memfd_exec",
+				},
+			},
+		},
+		Exit: 0,
+	})
+
+	// M12 — o portão de root vale para a aquisição, que é onde ele importa.
+	//
+	// O M5 prova o portão servindo um artefato, onde root quase não muda nada.
+	// Aqui ele muda tudo: como root a captura enxerga o host inteiro, e é esse
+	// alcance que vai para dentro de um modelo possivelmente remoto.
+	Register(Scenario{
+		ID:     "M12-mcp-live-recusa-root-sem-consentimento",
+		Desc:   "aquisição ao vivo como root e sem --allow-root: o servidor recusa subir",
+		Images: []string{"debian:12"},
+		Cmd:    "mcp",
+		Args:   []string{"--live"},
+		ExpectOutput: []string{
+			"recusei iniciar como root",
+			"--allow-root",
+		},
+		Exit: 3,
+	})
 }

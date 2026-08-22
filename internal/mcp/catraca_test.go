@@ -78,7 +78,7 @@ func servidorDeTeste(t *testing.T, f *facts.Facts) (*Servidor, *Retrato) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NovoServidor(Policy{Modo: ModoSnapshot}, a, "teste", nil), r
+	return NovoServidor(Policy{Modo: ModoSnapshot}, a, "teste", nil, nil), r
 }
 
 // chamar roda uma tool e devolve o envelope decodificado.
@@ -820,7 +820,7 @@ func acervoDeDois(t *testing.T) *Servidor {
 	}
 	grava("vivo.json", env.SourceLive)
 	grava("imagem.json", env.SourceImage)
-	return NovoServidor(Policy{Modo: ModoSnapshot}, a, "teste", nil)
+	return NovoServidor(Policy{Modo: ModoSnapshot}, a, "teste", nil, nil)
 }
 
 // A fonte é conferida no RETRATO endereçado, não na união do acervo.
@@ -1011,7 +1011,7 @@ func TestTetoDeResultadoMedeOFrameInteiro(t *testing.T) {
 
 	// Um teto que a resposta de findings.list passa por causa do content
 	// duplicado, e que ela NÃO passaria se só o structuredContent fosse medido.
-	s := NovoServidor(Policy{Modo: ModoSnapshot}, a, "teste", nil)
+	s := NovoServidor(Policy{Modo: ModoSnapshot}, a, "teste", nil, nil)
 	corpo, _, er := s.chamarTool(&Requisicao{
 		Params: json.RawMessage(`{"name":"findings.list","arguments":{}}`)})
 	if er != nil {
@@ -1025,7 +1025,7 @@ func TestTetoDeResultadoMedeOFrameInteiro(t *testing.T) {
 
 	// Com o teto ENTRE os dois, a versão anterior deixava passar.
 	entre := int64((len(sc) + len(frame)) / 2)
-	apertado := NovoServidor(Policy{Modo: ModoSnapshot, MaxResultado: entre}, a, "teste", nil)
+	apertado := NovoServidor(Policy{Modo: ModoSnapshot, MaxResultado: entre}, a, "teste", nil, nil)
 	var saida bytes.Buffer
 	req := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"findings.list",` +
 		`"arguments":{},"_meta":{"` + MetaVersao + `":"` + Versao2026 + `","` +

@@ -17,6 +17,10 @@ type Servidor struct {
 	sessao Sessao
 	aud    *Auditoria
 
+	// adquirir monta o ambiente de uma captura. nil em ModoSnapshot, onde
+	// nenhuma leitura do host acontece.
+	adquirir Aquisicao
+
 	// O registry é resolvido UMA VEZ, no lançamento. Ele não pode variar por
 	// conexão (a 2026-07-28 tornou as listas cacheáveis), e resolvê-lo por
 	// chamada abriria a porta para ele variar por acidente.
@@ -26,7 +30,8 @@ type Servidor struct {
 }
 
 // NovoServidor monta o servidor e CONGELA o registry.
-func NovoServidor(p Policy, a *Acervo, versao string, aud *Auditoria) *Servidor {
+func NovoServidor(p Policy, a *Acervo, versao string, aud *Auditoria,
+	adquirir Aquisicao) *Servidor {
 	p = p.Padroes()
 	fontes := a.Fontes()
 	if f, ok := p.FonteDoModo(); ok {
@@ -37,7 +42,7 @@ func NovoServidor(p Policy, a *Acervo, versao string, aud *Auditoria) *Servidor 
 	for _, f := range ativas {
 		porNome[f.Nome] = f
 	}
-	return &Servidor{pol: p, acervo: a, versao: versao, aud: aud,
+	return &Servidor{pol: p, acervo: a, versao: versao, aud: aud, adquirir: adquirir,
 		ativas: ativas, fora: fora, porNome: porNome}
 }
 

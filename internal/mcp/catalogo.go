@@ -12,6 +12,8 @@ func catalogo() []Ferramenta {
 		toolSnapshotList,
 		toolSnapshotInfo,
 		toolSnapshotCompare,
+		toolSnapshotCapture,
+		toolSnapshotRelease,
 		toolHostOverview,
 		toolChecksCatalog,
 		toolFindingsList,

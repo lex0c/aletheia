@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +40,10 @@ type Retrato struct {
 	// Digest é o sha256 COMPLETO dos bytes que foram interpretados. O ID é um
 	// prefixo dele, para caber num handle; a identidade guardada é a inteira.
 	Digest string
+
+	// Escopo é o quanto uma CAPTURA leu. Vazio num retrato carregado de arquivo:
+	// ali o escopo é o que a coleta original decidiu, e ele viaja no ambiente.
+	Escopo Escopo
 
 	// Soma é o que o sidecar .sha256 respondeu sobre este arquivo.
 	//
@@ -129,6 +135,11 @@ const (
 	SomaAusente EstadoDaSoma = iota
 	SomaConfere
 	SomaDivergente
+	// SomaNaoSeAplica é a captura ao vivo: ela nunca foi escrita em disco, então
+	// não há sidecar a conferir. É diferente de "ausente", que é um arquivo cuja
+	// integridade NÃO pôde ser verificada — aqui não há o que verificar, e
+	// achatar os dois faria a captura parecer degradada.
+	SomaNaoSeAplica
 )
 
 func (e EstadoDaSoma) String() string {
@@ -137,6 +148,8 @@ func (e EstadoDaSoma) String() string {
 		return "sidecar_matches"
 	case SomaDivergente:
 		return "sidecar_mismatch"
+	case SomaNaoSeAplica:
+		return "sidecar_not_applicable"
 	}
 	return "sidecar_absent"
 }
@@ -175,6 +188,11 @@ type Acervo struct {
 	mu    sync.RWMutex
 	ordem []string
 	por   map[string]*Retrato
+
+	// Teto limita quantos retratos vivem ao mesmo tempo. Zero = sem teto, que é
+	// o modo snapshot: ali o operador declarou os arquivos no lançamento, e
+	// limitar o que ele mesmo pediu não protege ninguém.
+	Teto int
 }
 
 func NovoAcervo() *Acervo { return &Acervo{por: map[string]*Retrato{}} }
@@ -186,11 +204,17 @@ func NovoAcervo() *Acervo { return &Acervo{por: map[string]*Retrato{}} }
 // identificador que o modelo copia automaticamente não custam nada.
 const LarguraDoID = 32
 
-// ErrRetratoDesconhecido é a resposta a um ID que não foi declarado no
-// lançamento. Ele é DIFERENTE de "arquivo não encontrado" de propósito: o
-// modelo não está pedindo um arquivo, está citando um handle, e a distinção
-// impede que a mensagem de erro vire um oráculo sobre o disco do analista.
-var ErrRetratoDesconhecido = errors.New("snapshot_id não declarado no lançamento deste servidor")
+// ErrRetratoDesconhecido é a resposta a um handle que este servidor não conhece.
+//
+// Ele é DIFERENTE de "arquivo não encontrado" de propósito: o modelo não está
+// pedindo um arquivo, está citando um handle, e a distinção impede que a
+// mensagem de erro vire um oráculo sobre o disco do analista.
+//
+// A frase é NEUTRA quanto ao modo. Ela dizia "não declarado no lançamento", que
+// é verdade em snapshot e falso em live — ali o retrato é cunhado em execução, e
+// mandar o operador conferir o lançamento o manda para o lugar errado. O que
+// muda por modo é a DICA, e ela vive em retratoDe.
+var ErrRetratoDesconhecido = errors.New("snapshot_id desconhecido neste servidor")
 
 // Carregar lê um dump do disco e o registra.
 //
@@ -263,6 +287,123 @@ func (a *Acervo) Carregar(caminho string) (*Retrato, error) {
 	a.por[r.ID] = r
 	a.ordem = append(a.ordem, r.ID)
 	return r, nil
+}
+
+// Escopo é o QUANTO uma captura ao vivo lê.
+type Escopo string
+
+const (
+	// EscopoVolatil lê /proc e sockets, e mais nada. Nove vezes mais barato
+	// que a completa (164ms contra ~1,5s, medido em watch.go) — e é o que pega
+	// processo efêmero e beacon curto.
+	//
+	// Ele NÃO sustenta check nenhum: o motor recusa rodar sobre fatos voláteis,
+	// porque um check de unit encontraria zero units e reportaria "nada
+	// encontrado" onde o certo é "não olhei". A recusa vira o catálogo inteiro
+	// em not_checked, com motivo — que é a resposta honesta, e não um defeito.
+	EscopoVolatil Escopo = "volatile"
+	// EscopoCompleto é a varredura inteira: a única que sustenta findings.
+	EscopoCompleto Escopo = "complete"
+)
+
+// Capturar tira um retrato AGORA e o registra.
+//
+// # Por que ela passa por dump.De
+//
+// A coleta ao vivo produz um Facts CRU — com argv inteiro, com o .bashrc do
+// usuário, com o histórico de shell. As tools deste servidor declaram
+// DadosRedigidosNaOrigem, que promete "não contém segredo em claro", e servir
+// aquele Facts direto tornaria a promessa falsa outra vez, pela porta nova.
+//
+// Em vez de abrir um segundo caminho de redação, a captura ATRAVESSA o mesmo:
+// dump.De aplica a redação profunda, carimba o artefato com a versão da
+// política, e monta a procedência. O retrato ao vivo passa a ser literalmente o
+// mesmo artefato de um `collect` — só que nunca escrito em disco.
+//
+// O custo é uma cópia profunda do Facts por captura, que é exatamente o que o
+// `collect` já paga na escrita.
+func (a *Acervo) Capturar(e *env.Env, escopo Escopo) (*Retrato, error) {
+	var f *facts.Facts
+	switch escopo {
+	case EscopoVolatil:
+		if e.Source != env.SourceLive {
+			return nil, errors.New("escopo volátil só existe sobre host vivo: ele lê " +
+				"/proc e sockets, e uma imagem montada não tem nenhum dos dois")
+		}
+		f = facts.CollectVolatile(e)
+		// O passwd é a única coisa de disco que a resposta barata precisa: sem
+		// ele o censo imprime "uid 1000" onde o operador espera "node". É o
+		// mesmo par que o `info` usa.
+		f.Accounts = facts.NomesDeUsuario(e)
+	case EscopoCompleto:
+		f = facts.Collect(e)
+	default:
+		return nil, fmt.Errorf("escopo desconhecido: %s", escopo)
+	}
+
+	d := dump.De(e, f)
+	d.Facts.Index()
+
+	id, err := idDeCaptura()
+	if err != nil {
+		return nil, err
+	}
+	r := &Retrato{
+		ID: id, Rotulo: rotuloDe(d),
+		Dump: d, Env: e, Fatos: d.Facts, Fonte: e.Source,
+		Soma: SomaNaoSeAplica, Escopo: escopo,
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.Teto > 0 && len(a.ordem) >= a.Teto {
+		return nil, fmt.Errorf("teto de %d retratos vivos alcançado: libere um com "+
+			"snapshot.release antes de capturar outro. O teto existe porque cada "+
+			"retrato segura os fatos INTEIROS na memória deste processo, e ele roda "+
+			"no host investigado", a.Teto)
+	}
+	a.por[r.ID] = r
+	a.ordem = append(a.ordem, r.ID)
+	return r, nil
+}
+
+// idDeCaptura mint um handle para retrato ao vivo.
+//
+// O prefixo `live-` está no PRÓPRIO id, e não num campo ao lado, porque a
+// diferença importa e um campo se perde: o id de um retrato carregado é o hash
+// do CONTEÚDO — reproduzível, verificável contra uma cópia salva —, e o de uma
+// captura não pode ser, porque ela nunca virou bytes em disco. Ver quem é quem
+// olhando o handle é melhor que ter de perguntar.
+func idDeCaptura() (string, error) {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("não foi possível cunhar o handle da captura: %w", err)
+	}
+	return "snap-live-" + hex.EncodeToString(b[:]), nil
+}
+
+// Liberar descarta um retrato e a memória dele.
+func (a *Acervo) Liberar(id string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	r, ok := a.por[id]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrRetratoDesconhecido, id)
+	}
+	// A raiz travada de uma captura de IMAGEM é um descritor aberto, e cada
+	// captura abre o seu. Sem isto, capturar em laço vaza descritor até o
+	// processo bater no RLIMIT_NOFILE — no host investigado.
+	if r.Env != nil {
+		r.Env.Close()
+	}
+	delete(a.por, id)
+	for i, x := range a.ordem {
+		if x == id {
+			a.ordem = append(a.ordem[:i], a.ordem[i+1:]...)
+			break
+		}
+	}
+	return nil
 }
 
 // Retrato busca por ID.

@@ -757,6 +757,7 @@ lê `/etc/shadow` e não é "não privilegiado".
 | `net.census` / `net.ip` / `net.port` | o que o host expõe, e com quem fala |
 | `file.inspect` | de onde veio um arquivo e quem manda executá-lo |
 | `snapshot.compare` | o que mudou entre dois retratos |
+| `snapshot.capture` / `snapshot.release` | só em `--live`/`--root`: as duas únicas tools que leem o host |
 
 Toda resposta carrega a **procedência** do retrato, e ela afirma só o que o
 artefato PROVA:
@@ -783,13 +784,41 @@ E não existe `finding.create`. Achado é conclusão do motor, com falso positiv
 declarado; o que o modelo produz é **hipótese**, e uma boa hipótese cita os
 achados que a sustentam.
 
+### Aquisição ao vivo
+
+Com `--live` (ou `--root`, sobre uma imagem montada) o agente tira o retrato
+dele:
+
+```sh
+sudo -n aletheia mcp --live --allow-root
+```
+
+Duas tools leem o host — `snapshot.capture` e `snapshot.release` — e todo o
+resto continua respondendo sobre um **retrato**. É o que impede uma
+investigação de trinta chamadas de misturar quatro instantes diferentes, e de
+perguntar sobre um pid que já morreu ou foi reciclado.
+
+A captura atravessa a **mesma redação** do `collect`: o retrato ao vivo é
+literalmente o mesmo artefato, só que nunca escrito em disco — e a procedência
+dele diz `redaction: applied` como a de um dump.
+
+`scope=volatile` lê `/proc` e sockets e é ~9× mais barato; é o que pega processo
+efêmero. Ele **não sustenta achado**: o motor recusa rodar check sobre coleta
+parcial, porque um check de unit encontraria zero units e diria "nada
+encontrado" onde o certo é "não olhei". A resposta é zero achados **com o
+catálogo inteiro declarado não verificado** — inclusive o check que teria pegado
+o implante que está lá.
+
+`scope=complete` é a varredura inteira, e a única que conclui. Enquanto ela
+roda, o servidor não responde outra chamada — nem um cancelamento, que só é
+notado depois. Os coletores não são interrompíveis, e a descrição da tool diz
+isso em vez de fingir.
+
 ### O que ainda não existe
 
-`--live` e `--root` (aquisição de host vivo e de imagem montada) e o
-`--profile full` (leitura de conteúdo de arquivo, environ sem redação) são as
-entregas seguintes. O modo snapshot vem primeiro de propósito: com ele sólido,
-a aquisição vira extensão — começando pelo host vivo com root, depurar
-protocolo e depurar segurança seriam o mesmo problema.
+`--profile full` — leitura de conteúdo de arquivo e environ sem redação — é a
+entrega seguinte, e por isso é **recusado**: ele não destrava tool nenhuma
+hoje, e uma flag de segurança sem efeito é pior que flag nenhuma.
 
 Em modo snapshot, `--allow-secrets` e `--profile full` são **recusados com o
 motivo**, e não ignorados: o dump já saiu do host redigido, então não há o que

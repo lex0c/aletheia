@@ -163,6 +163,38 @@ var envPreload = check.Check{
 			}
 			r.Findings = append(r.Findings, fd)
 		}
+		// A MESMA pergunta do lado das units. As duas listas foram separadas
+		// nos fatos porque falham de jeitos diferentes — um EnvironmentFile=
+		// ilegível de uma unit não põe em dúvida o /etc/environment —, e o
+		// check continua sendo um só: para quem responde ao incidente, é a
+		// mesma injeção.
+		for _, v := range f.Loader.EnvDeUnit {
+			sev := check.SevWarn
+			if v.Key == "LD_PRELOAD" || v.Key == "LD_AUDIT" {
+				sev = check.SevCritical
+			}
+			onde := v.DeclaradoEm
+			if onde == "" {
+				onde = v.Unit
+			}
+			ev := []string{
+				v.Key + "=" + v.Value,
+				"declarado em " + onde + ", que o systemd injeta no ambiente da unit " +
+					v.Unit + " a cada start",
+				"efeito equivalente ao /etc/ld.so.preload, no ambiente de um serviço",
+			}
+			if v.Incerto {
+				ev = append(ev, "esta unit tem EnvironmentFile= ILEGÍVEL: o valor "+
+					"acima é o que se conseguiu ver, e o arquivo que não abriu pode "+
+					"sobrescrevê-lo")
+			}
+			fd := self.F(sev, v.Unit, "", ev...)
+			fd.NextSteps = []string{
+				"trate a biblioteca apontada como amostra antes de remover a linha",
+				"`systemctl cat " + check.Arg(v.Unit) + "` mostra a unit e os drop-ins juntos",
+			}
+			r.Findings = append(r.Findings, fd)
+		}
 		r.Partial = append(r.Partial, f.PersistDenied["loader"]...)
 		return r
 	},

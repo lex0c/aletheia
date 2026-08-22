@@ -182,10 +182,23 @@ func init() {
 		Expect: []Expect{
 			{ID: "cross.thread_count", Sev: "WARN"},
 			{ID: "cross.thread_count", Evidence: "esconder uma thread exige mentir nos dois"},
+			// O MECANISMO, junto com o efeito. O pidhide filtra o readdir por um
+			// hook de ftrace, e o guest passou a montar tracefs — então o mesmo
+			// implante que produz a divergência de contagem deixa o gancho
+			// visível em enabled_functions. As duas linhas na mesma execução são
+			// o que um analista vê num host real, e afirmá-las juntas é o que
+			// prova que este tier ALCANÇA o kernel.ftrace_hook.
+			{ID: "kernel.ftrace_hook", Sev: "CRITICAL", Evidence: "esconde ARQUIVO"},
 		},
-		// Exit 1: o achado é WARN. Um WARN de ocultação de thread ainda tira o
-		// exit de zero — a automação de frota não pode arquivar isto como limpo.
-		Exit: 1,
+		// Exit 2 pelo ftrace, não pela contagem de threads.
+		//
+		// A afirmação sobre severidade que este cenário carrega é a do
+		// cross.thread_count — WARN, e por isso não invalida ausências —, e ela
+		// vive na linha de Expect acima, onde sempre viveu. O exit é do relatório
+		// inteiro: enquanto o guest não montava tracefs ele era 1 porque a
+		// ferramenta estava CEGA para metade do implante, não porque o implante
+		// fosse leve.
+		Exit: 2,
 	})
 }
 

@@ -139,6 +139,11 @@ type Finding struct {
 	// baseline foi informada — sem ela, tudo seria "novo" e a marca não
 	// informaria nada.
 	Novo bool `json:"new,omitempty"`
+	// Driftou marca o achado cujo OBJETO mudou desde o retrato anterior — não o
+	// achado, o objeto. A distinção é o que a baseline não consegue expressar:
+	// um achado que já estava na baseline (não é novo) sobre uma unit cujo
+	// ExecStart mudou ontem descreve outra coisa. Ver marcarDrift.
+	Driftou bool `json:"drifted,omitempty"`
 	// FalsePositives é copiado do check para o achado: o operador precisa
 	// saber o que descartar ANTES de investigar.
 	FalsePositives []string `json:"false_positives,omitempty"`
@@ -188,6 +193,16 @@ type Check struct {
 
 	// Wtf marca os checks que cabem no orçamento de ~1s do overview.
 	Wtf bool
+
+	// Drift marca o check que só tem o que responder quando DUAS pontas foram
+	// comparadas — ele lê f.DriftDados, e sem comparação não há pergunta.
+	//
+	// Sem esta marca ele cairia na mesma armadilha que a ferramenta evita em
+	// todo lugar: rodar sobre fato ausente e concluir "nada encontrado" quando
+	// o certo é "não houve o que olhar". Com ela, o motor o declara NÃO
+	// VERIFICADO na cobertura — que é a resposta honesta — e o `aletheia drift`
+	// o usa como seleção.
+	Drift bool
 
 	// Run recebe o próprio Check para poder montar Findings com o ID, o Ref
 	// e os FalsePositives dele — sem referenciar a var de pacote, o que
@@ -252,12 +267,18 @@ type Selection struct {
 	Mode   string   // "", "auto", "manual"
 	OnlyID []string // vazio = todos
 	Wtf    bool
+	// Drift seleciona SÓ os checks que comparam duas pontas. É o `aletheia
+	// drift`, que responde "o que mudou" e não "o que há de errado".
+	Drift bool
 }
 
 func Select(s Selection) []Check {
 	var out []Check
 	for _, c := range All() {
 		if s.Wtf && !c.Wtf {
+			continue
+		}
+		if s.Drift && !c.Drift {
 			continue
 		}
 		if len(s.Groups) > 0 && !contains(s.Groups, c.Group) {

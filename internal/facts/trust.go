@@ -1,7 +1,9 @@
 package facts
 
 import (
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"net"
 	"strconv"
@@ -29,11 +31,24 @@ type CACert struct {
 	// AutoAssinado marca a CA raiz: emissor igual ao titular. É a forma de uma
 	// CA plantada, e também a de toda CA raiz legítima — o que separa é quem
 	// ela diz ser.
-	AutoAssinado bool   `json:"self_signed,omitempty"`
-	NotBefore    string `json:"not_before,omitempty"`
-	NotAfter     string `json:"not_after,omitempty"`
-	ModUTC       string `json:"mod_utc,omitempty"`
-	Erro         string `json:"err,omitempty"`
+	AutoAssinado bool `json:"self_signed,omitempty"`
+
+	// O DN NÃO IDENTIFICA UMA ÂNCORA DE CONFIANÇA: ele é texto que quem emite
+	// escolhe, e dois certificados com o mesmo `CN=Company Root CA` podem
+	// carregar CHAVES DIFERENTES. Para o host, isso é trocar a autoridade
+	// inteira; para qualquer comparação que olhasse só Subject/Issuer, nada
+	// mudou.
+	//
+	//	Fingerprint  é ESTE certificado, byte a byte. Muda numa renovação.
+	//	SPKI         é a CHAVE que ele carrega. NÃO muda numa renovação, e é
+	//	             por isso que ele responde "a autoridade continua a mesma?".
+	Fingerprint string `json:"fingerprint,omitempty"`
+	SPKI        string `json:"spki,omitempty"`
+
+	NotBefore string `json:"not_before,omitempty"`
+	NotAfter  string `json:"not_after,omitempty"`
+	ModUTC    string `json:"mod_utc,omitempty"`
+	Erro      string `json:"err,omitempty"`
 }
 
 // HostEntry é uma linha de /etc/hosts já resolvida.
@@ -65,6 +80,14 @@ var caDirs = []string{
 }
 
 func collectTrust(f *Facts, e *env.Env) {
+	// Quatro fontes, quatro fatos — ver o comentário em facts.go. A chave
+	// `trust` continua declarando a lacuna para o operador; o que ela não pode
+	// fazer é servir de dependência para as quatro famílias ao mesmo tempo.
+	f.CACertsCompleto = true
+	f.HostsLido = true
+	f.ResolverLido = true
+	f.HostTrustCompleto = true
+
 	for _, dir := range caDirs {
 		// ReadDir e NÃO ReadDirNames: um diretório de âncoras que não LISTA
 		// (permissão) não é "nenhuma CA extra" — é evidência perdida. Vira
@@ -72,6 +95,7 @@ func collectTrust(f *Facts, e *env.Env) {
 		ents, err := e.ReadDir(dir)
 		if err != nil {
 			if env.EhLacuna(err) {
+				f.CACertsCompleto = false
 				f.denyPersist("trust", "o diretório de âncoras de confiança "+dir+
 					" não pôde ser LISTADO (permissão): uma CA plantada ali NÃO foi "+
 					"vista — e uma CA raiz sozinha já dá MITM de todo o TLS")
@@ -83,39 +107,82 @@ func collectTrust(f *Facts, e *env.Env) {
 			if e.IsDir(p) {
 				continue
 			}
-			f.CACerts = append(f.CACerts, lerCA(e, p))
+			c, ilegivel := lerCA(e, p)
+			if ilegivel {
+				// ARQUIVO LISTADO E NÃO LIDO é lacuna, e não estado.
+				//
+				// A entrada entra na lista assim mesmo — sumir com ela faria a
+				// âncora parecer REMOVIDA —, mas com Subject/Issuer vazios ela
+				// não pode alimentar a comparação: `emissor` e `auto_assinado`
+				// decidem, e o vazio deles viraria "a autoridade mudou".
+				// Certificado LIDO e inválido é outra coisa: aquilo é estado
+				// real do host, e continua sendo comparado.
+				f.CACertsCompleto = false
+				f.denyPersist("trust", "a âncora de confiança "+p+" foi listada e "+
+					"NÃO pôde ser lida ("+c.Erro+"): o que ela autoriza NÃO foi "+
+					"examinado")
+			}
+			f.CACerts = append(f.CACerts, c)
 		}
 	}
 	collectHosts(f, e)
 	collectResolver(f, e)
 }
 
-// lerCA decodifica o certificado. O parsing é NATIVO: chamar openssl seria
-// depender de binário do host, e o que se quer saber aqui é quem o host passou
-// a confiar.
-func lerCA(e *env.Env, p string) CACert {
+// lerCA decodifica o certificado e diz se ele ficou ILEGÍVEL. O parsing é
+// NATIVO: chamar openssl seria depender de binário do host, e o que se quer
+// saber aqui é quem o host passou a confiar.
+//
+// Ilegível é diferente de inválido, e a diferença é a regra central desta
+// ferramenta.
+//
+//	não pôde ser lido   LACUNA: ninguém sabe o que aquele arquivo autoriza
+//	lido e não é PEM    ESTADO: o host tem um arquivo estranho no diretório de
+//	                    âncoras, e isso é fato comparável
+//
+// Enquanto as duas saíam iguais — um CACert com Erro e nada mais —, um
+// certificado que virasse ilegível entre dois retratos aparecia como emissor
+// que sumiu e auto_assinado que virou falso: um drift de CONFIANÇA inventado,
+// no lugar exato onde um falso positivo custa mais caro.
+func lerCA(e *env.Env, p string) (CACert, bool) {
 	c := CACert{File: p, ModUTC: modUTC(e, p)}
 	b, err := e.ReadFile(p)
 	if err != nil {
-		c.Erro = err.Error()
-		return c
+		c.Erro = env.MotivoDoErro(err)
+		return c, env.EhLacuna(err)
 	}
 	bloco, _ := pem.Decode(b)
 	if bloco == nil {
 		c.Erro = "não é PEM"
-		return c
+		return c, false
 	}
 	cert, err := x509.ParseCertificate(bloco.Bytes)
 	if err != nil {
 		c.Erro = err.Error()
-		return c
+		return c, false
 	}
 	c.Subject = cert.Subject.String()
 	c.Issuer = cert.Issuer.String()
 	c.AutoAssinado = c.Subject == c.Issuer
 	c.NotBefore = cert.NotBefore.UTC().Format(time.RFC3339)
 	c.NotAfter = cert.NotAfter.UTC().Format(time.RFC3339)
-	return c
+	// O DN NÃO IDENTIFICA UMA ÂNCORA DE CONFIANÇA — ele é texto que quem emite
+	// escolhe. Dois certificados com `CN=Company Root CA` de um lado e do outro
+	// podem ter CHAVES DIFERENTES, e para o host isso é trocar a autoridade
+	// inteira. Sem estes dois campos, substituir o arquivo por um self-signed de
+	// mesmo Subject/Issuer não mudava nada que qualquer comparação olhasse.
+	//
+	//	Fingerprint  é ESTE certificado, byte a byte. Muda numa renovação.
+	//	SPKI         é a CHAVE que ele carrega. NÃO muda numa renovação, e é
+	//	             por isso que ele responde "a autoridade é a mesma?" —
+	//	             a pergunta que interessa.
+	soma := sha256.Sum256(cert.Raw)
+	c.Fingerprint = "SHA256:" + hex.EncodeToString(soma[:])
+	if der, err := x509.MarshalPKIXPublicKey(cert.PublicKey); err == nil {
+		k := sha256.Sum256(der)
+		c.SPKI = "SHA256:" + hex.EncodeToString(k[:])
+	}
+	return c, false
 }
 
 func collectHosts(f *Facts, e *env.Env) {
@@ -123,6 +190,7 @@ func collectHosts(f *Facts, e *env.Env) {
 	b, err := e.ReadFile("/etc/hosts")
 	if err != nil {
 		if env.EhLacuna(err) {
+			f.HostsLido = false
 			f.denyPersist("trust", "/etc/hosts não pôde ser lido ("+env.MotivoDoErro(err)+
 				"): um redirecionamento de domínio de atualização plantado ali NÃO "+
 				"foi avaliado")
@@ -150,6 +218,7 @@ func collectResolver(f *Facts, e *env.Env) {
 		b, err := e.ReadFile(p)
 		if err != nil {
 			if env.EhLacuna(err) {
+				f.ResolverLido = false
 				f.denyPersist("trust", p+" não pôde ser lido ("+env.MotivoDoErro(err)+
 					"): o servidor DNS configurado NÃO foi avaliado")
 			}
@@ -347,6 +416,7 @@ func collectConfiancaDeHost(f *Facts, e *env.Env) {
 	for _, p := range arquivosDeConfiancaDeSistema {
 		c, existe, ilegivel := lerConfiancaDeHost(e, p, "sistema", "")
 		if ilegivel {
+			f.HostTrustCompleto = false
 			f.denyPersist("trust", p+" existe e não pôde ser LIDO: uma confiança "+
 				"host-based (login sem senha, inclusive `+` irrestrito) plantada ali "+
 				"NÃO foi avaliada")
@@ -362,6 +432,7 @@ func collectConfiancaDeHost(f *Facts, e *env.Env) {
 			p := home + "/" + rel
 			c, existe, ilegivel := lerConfiancaDeHost(e, p, "usuario", conta)
 			if ilegivel {
+				f.HostTrustCompleto = false
 				f.denyPersist("trust", p+" existe e não pôde ser LIDO: a confiança "+
 					"host-based da conta "+conta+" (login sem senha) NÃO foi avaliada")
 				continue

@@ -629,12 +629,59 @@ quero analisar depois/offline?           -> analyze
 suspeito que o host esteja escondendo?   -> scan --root
 o comportamento aparece e some?          -> watch
 tenho um estado conhecido anterior?      -> baseline
+o que MUDOU desde um retrato que eu tinha? -> drift
 quero saber exatamente quais regras há?  -> checks
 ```
 
 Catorze fluxos concretos de investigação — do "entrei no servidor e alguma
 coisa parece errada" ao "tenho centenas de servidores para triar" — estão em
 **[docs/PLAYBOOKS.md](docs/PLAYBOOKS.md)**.
+
+---
+
+## Drift — o que mudou desde um estado conhecido
+
+Os checks são conhecimento: cada um sabe que uma forma é perigosa, e por isso
+alcançam o que alguém já viu antes. O `drift` é expectativa, e alcança a mudança
+para a qual **não há regra a escrever** — a de uma forma legítima para outra
+forma legítima:
+
+```text
+ExecStart=/usr/bin/env sleep 30  ->  ExecStart=/usr/bin/env tail -f /dev/null
+command="/usr/bin/rsync",restrict ssh-ed25519 AAAA…  ->  ssh-ed25519 AAAA…
+```
+
+A segunda é a mais silenciosa das duas: a chave continua a mesma, o fingerprint
+não mudou, o arquivo tem uma linha como antes — e uma chave de tarefa única
+virou acesso interativo irrestrito. Nenhuma das duas dispara check, em nenhuma
+das pontas.
+
+```sh
+sudo ./aletheia collect --out ontem.json     # o retrato
+sudo ./aletheia drift ontem.json             # o que mudou desde ele
+sudo ./aletheia scan --drift ontem.json      # a triagem inteira, com o drift junto
+```
+
+O estado anterior é um **dump** do `collect` — não há formato novo, e o dump para
+o qual você aponta *é* a pergunta que você está fazendo: contra o de ontem, "o
+que mudou desde ontem"; contra o da instalação, "quanto este host se afastou do
+que saiu de fábrica".
+
+Três coisas que ele não faz, e cada uma por um motivo:
+
+- **não guarda estado no host.** Uma referência guardada na máquina que ela
+  descreve vale o que aquela máquina vale;
+- **não compara retratos de alcance diferente.** Um dump com root contra um sem
+  root fabricaria "sumiu" para tudo que só root enxerga. A família afetada é
+  declarada, e o silêncio dela deixa de valer como resposta;
+- **não data a mudança num instante.** Ela é datada por INTERVALO ("entre t0 e
+  t1"), porque é só isso que se sabe: a ferramenta não estava presente na hora.
+
+`--drift` e `--baseline` são eixos diferentes. A baseline fala do **achado** ("já
+estava na lista?"); o drift fala do **objeto** ("a unit executa outra coisa
+agora?"). Um achado que já estava na baseline, sobre uma unit cujo `ExecStart`
+mudou ontem, sai marcado — e a severidade **não** sobe por isso: "mudou desde
+ontem" tem a forma de um deploy.
 
 ---
 
@@ -650,6 +697,7 @@ coisa parece errada" ao "tenho centenas de servidores para triar" — estão em
 | `info` | inspeciona processos, rede, arquivos, Git, IPs e portas |
 | `preserve` | preserva artefatos voláteis ou arquivos selecionados |
 | `baseline` | captura um estado de referência |
+| `drift` | compara com um retrato anterior: o que mudou desde ele |
 | `checks` | lista checks, requisitos e falsos positivos conhecidos |
 | `version` | mostra versão, caminho e hash do binário |
 

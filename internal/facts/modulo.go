@@ -61,6 +61,13 @@ func collectModulosCarregados(f *Facts, e *env.Env) {
 			"foram confrontados com o que existe em disco")
 		return
 	}
+	// O CONJUNTO foi lido. É um fato diferente de "a árvore em disco foi lida"
+	// (ArvoreDeModulos), e a diferença importa para quem compara dois retratos:
+	// a lista de módulos vem daqui e é exaustiva; o ARQUIVO de cada um vem da
+	// árvore. Sem separar os dois, a lacuna de um suprimia a comparação do
+	// outro — e como a lacuna da árvore só existe QUANDO HÁ MÓDULO CARREGADO,
+	// carregar um módulo apagava a própria comparação que o denunciaria.
+	f.ModulosLidos = true
 
 	// A árvore precisa ter sido LIDA para que a ausência signifique alguma
 	// coisa. Sem ela, todo módulo pareceria sem arquivo — e essa é exatamente a

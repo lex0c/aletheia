@@ -248,6 +248,35 @@ func resumoDaColeta(w io.Writer, e *env.Env, f *facts.Facts, arquivo, hash strin
 // ARQUIVO, nunca da máquina onde a análise roda. Sondar o ambiente local seria
 // declarar cobertura sobre um host que ninguém olhou — e como o efeito é
 // silencioso (números maiores, veredito melhor), ninguém revisaria.
+// parseComPosicionais aceita flag DEPOIS do argumento posicional.
+//
+// O `flag` da stdlib para no primeiro argumento que não é flag, e o que vem
+// depois vira posicional — inclusive as flags. O efeito é que a forma
+// DOCUMENTADA no próprio texto de uso desta ferramenta —
+//
+//	analyze DUMP [--ioc F] [--since S] [--only G,G] [--mode M] ...
+//
+// — não funcionava: `analyze dump.json --only proc` saía com "informe UM dump",
+// porque o parser via três posicionais. Falhava ruidosamente, o que é melhor do
+// que em silêncio, mas a documentação prometia o que o comando recusava.
+//
+// A volta é parsear em rodadas: cada posicional é retirado e o resto volta para
+// o parser. Assim as duas ordens valem, que é o que qualquer um espera de uma
+// CLI.
+func parseComPosicionais(fs *flag.FlagSet, args []string) ([]string, error) {
+	var pos []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		if fs.NArg() == 0 {
+			return pos, nil
+		}
+		pos = append(pos, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+}
+
 func runAnalyze(args []string) int {
 	fs := flag.NewFlagSet("analyze", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -259,14 +288,16 @@ func runAnalyze(args []string) int {
 		verbose2 = fs.Bool("vv", false, "+ INFO e detalhe de cobertura")
 		coverage = fs.Bool("coverage", false, "mostrar a seção de cobertura (causas e gaps)")
 		base     = fs.String("baseline", "", "comparar com a baseline em FILE")
+		driftDe  = fs.String("drift", "", "comparar com o RETRATO anterior em FILE")
 		iocFile  = fs.String("ioc", "", "casar os indicadores DESTE incidente, do arquivo FILE")
 		since    = fs.String("since", "", "janela de investigação, ancorada na COLETA")
 	)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
-	if err := fs.Parse(args); err != nil {
+	pos, err := parseComPosicionais(fs, args)
+	if err != nil {
 		return 3
 	}
-	if fs.NArg() != 1 {
+	if len(pos) != 1 {
 		fmt.Fprintln(os.Stderr, "analyze: informe UM dump (o arquivo de `collect --out`, "+
 			"ou '-' para a entrada padrão)")
 		return 3
@@ -287,12 +318,12 @@ func runAnalyze(args []string) int {
 		return 3
 	}
 
-	d, err := dump.Carregar(fs.Arg(0))
+	d, err := dump.Carregar(pos[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "analyze: %v\n", err)
 		return 3
 	}
-	conferirSoma(os.Stderr, fs.Arg(0))
+	conferirSoma(os.Stderr, pos[0])
 
 	// O ambiente LOCAL serve para duas coisas e nenhuma delas é cobertura:
 	// levar a lista de indicadores desta execução, e dizer quem está analisando.
@@ -336,6 +367,14 @@ func runAnalyze(args []string) int {
 	}
 
 	declararLacunaDeIOC(f, lista)
+	// A comparação usa os CAPS DA COLETA, e não os de quem analisa: a mesma
+	// regra que impede a análise de melhorar a cobertura vale aqui, e sem ela
+	// um dump feito sem root, analisado numa estação com root, pareceria
+	// comparável com um retrato completo.
+	capsDoDump, _ := env.CapsDeNomes(d.Ambiente.Caps)
+	if code := aplicarDrift(*driftDe, f, capsDoDump, d.Ambiente.CollectedAt); code != 0 {
+		return code
+	}
 
 	r := check.Run(selected, f, e)
 	return emitir(r, f, e, saida{
@@ -347,7 +386,7 @@ func runAnalyze(args []string) int {
 		verbose:  nivel(*verbose, *verbose2),
 		coverage: *coverage,
 		analise: &report.AnaliseInfo{
-			Arquivo:      fs.Arg(0),
+			Arquivo:      pos[0],
 			ColetadoEm:   d.Ambiente.CollectedAt,
 			ColetadoPor:  "aletheia/" + ouEntao(d.Ambiente.Tool, "dev"),
 			ColetaSHA:    d.Ambiente.ToolSHA,

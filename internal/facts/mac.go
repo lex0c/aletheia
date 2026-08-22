@@ -42,6 +42,19 @@ type MAC struct {
 	// FSPresente diz se o selinuxfs existe. Ausente num contêiner é o runtime
 	// mascarando, e não SELinux desligado.
 	FSPresente bool `json:"selinuxfs,omitempty"`
+
+	// ConfigLido e RuntimeLido separam as DUAS fontes desta struct.
+	//
+	// `Configurado` vem do /etc/selinux/config e vale no próximo boot;
+	// `Ativo` vem do securityfs e vale agora. São leituras independentes, com
+	// permissões diferentes, e enquanto a comparação de drift tinha um estado
+	// só para as duas o securityfs ilegível calava a mudança PERSISTENTE no
+	// arquivo — `enforcing -> permissive`, que é o achado.
+	//
+	// Falso não é "não há": é "não olhei". A diferença é a regra desta base, e
+	// aqui ela desceu ao nível do CAMPO.
+	ConfigLido  bool `json:"config_read,omitempty"`
+	RuntimeLido bool `json:"runtime_read,omitempty"`
 }
 
 func collectMAC(f *Facts, e *env.Env) {
@@ -49,8 +62,17 @@ func collectMAC(f *Facts, e *env.Env) {
 	// antiforense.mac_downgraded pergunta se alguém desligou o SELinux/AppArmor,
 	// e um /etc/selinux/config sem permissão de leitura fazia a resposta sair
 	// como "não há configuração" — indistinguível de host que nunca teve MAC.
+	// DOIS fatos, porque são DUAS leituras independentes na mesma entidade: o
+	// arquivo diz o que vale no próximo boot, o securityfs diz o que vale
+	// agora. Enquanto a comparação tinha um estado só para as duas, o
+	// securityfs ilegível suprimia a comparação do ARQUIVO — e é o arquivo que
+	// carrega a mudança PERSISTENTE, que é a que interessa.
+	f.MAC.ConfigLido = true
+	f.MAC.RuntimeLido = true
+
 	b, err := e.ReadFile("/etc/selinux/config")
 	if env.EhLacuna(err) {
+		f.MAC.ConfigLido = false
 		f.partial("mac", "/etc/selinux/config não pôde ser lido ("+
 			env.MotivoDoErro(err)+"): o modo configurado do SELinux NÃO foi lido, "+
 			"e ausência de configuração não pode ser afirmada")
@@ -67,6 +89,7 @@ func collectMAC(f *Facts, e *env.Env) {
 	f.MAC.FSPresente = e.IsDir("/sys/fs/selinux")
 	ativo, err := e.ReadFile("/sys/fs/selinux/enforce")
 	if env.EhLacuna(err) {
+		f.MAC.RuntimeLido = false
 		f.partial("mac", "/sys/fs/selinux/enforce não pôde ser lido ("+
 			env.MotivoDoErro(err)+"): o modo EM VIGOR não foi lido")
 	}

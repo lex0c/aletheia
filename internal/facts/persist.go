@@ -62,7 +62,41 @@ type Loader struct {
 	// EnvVars são definições de LD_PRELOAD/LD_LIBRARY_PATH em arquivo lido pelo
 	// PAM a cada sessão — mesmo efeito, num arquivo que ninguém associa a
 	// execução de código.
+	//
+	// O valor é o EFETIVO: quando o mesmo arquivo define a variável duas vezes,
+	// a última vence, e é ela que fica. Guardar as duas fazia a comparação
+	// tratar `a.so` seguido de `b.so` como igual a `b.so` seguido de `a.so` —
+	// mesmo conjunto, e o que o processo carrega trocado.
 	EnvVars []EnvSetting `json:"env_vars,omitempty"`
+
+	// EnvDeUnit é a MESMA superfície por outra porta: `Environment=` e
+	// `EnvironmentFile=` de unit injetam a variável no serviço com o mesmo
+	// efeito.
+	//
+	// Lista SEPARADA da de cima, e não é arrumação: as duas falham de jeitos
+	// diferentes. Um EnvironmentFile= ilegível de uma unit não pode pôr em
+	// dúvida o /etc/environment nem as outras units, e enquanto as duas
+	// dividiam a mesma lista era exatamente isso que acontecia — ou nada
+	// acontecia, que era pior: o arquivo ilegível não desmarcava fato nenhum, e
+	// uma variável que sumia do retrato saía como REMOVIDA.
+	EnvDeUnit []EnvDeUnit `json:"env_de_unit,omitempty"`
+}
+
+// EnvDeUnit é uma variável que carrega código, definida por uma unit.
+//
+// A identidade é (unit, chave) e não (arquivo, chave): o systemd resolve o
+// `Environment=` e o `EnvironmentFile=` da unit num ambiente SÓ, e qual arquivo
+// escreveu o valor vencedor é corroboração — muda quando alguém move a linha
+// para um drop-in sem mudar o que o serviço carrega.
+type EnvDeUnit struct {
+	Unit  string `json:"unit"`
+	Key   string `json:"key"`
+	Value string `json:"value"`
+	// DeclaradoEm é o arquivo da atribuição que VENCEU.
+	DeclaradoEm string `json:"declared_in,omitempty"`
+	// Incerto marca a unit que tem `EnvironmentFile=` ilegível: o valor abaixo
+	// é o que se conseguiu ver, e o arquivo que não abriu pode sobrescrevê-lo.
+	Incerto bool `json:"uncertain,omitempty"`
 }
 
 type LoaderDir struct {
@@ -344,14 +378,35 @@ func collectPersist(f *Facts, e *env.Env) {
 		if !f.Units[i].Efetiva() {
 			continue // unit sombreada ou mascarada não injeta env: não roda
 		}
-		for _, s := range f.Units[i].Environment {
+		u := &f.Units[i]
+		incerta := len(u.EnvFilesIlegiveis) > 0
+		// A ÚLTIMA ATRIBUIÇÃO VENCE, e é a única que descreve o processo.
+		//
+		// O systemd é explícito: variável definida mais de uma vez fica com a
+		// definição POSTERIOR, e isso vale entre `Environment=` e o que vem do
+		// `EnvironmentFile=`, na ordem em que as diretivas aparecem — que é a
+		// ordem em que o coletor as empilha. Guardar todas fazia a comparação
+		// virar um conjunto: trocar a ORDEM de duas linhas mudava o que o
+		// serviço carrega e não produzia drift nenhum.
+		efetivo := map[string]EnvDeUnit{}
+		var ordem []string
+		for _, s := range u.Environment {
 			switch s.Key {
 			case "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT":
-				f.Loader.EnvVars = append(f.Loader.EnvVars, s)
+				if _, ja := efetivo[s.Key]; !ja {
+					ordem = append(ordem, s.Key)
+				}
+				efetivo[s.Key] = EnvDeUnit{
+					Unit: u.Name, Key: s.Key, Value: s.Value,
+					DeclaradoEm: s.File, Incerto: incerta,
+				}
 			}
 		}
-		for _, arq := range f.Units[i].EnvFilesIlegiveis {
-			f.denyPersist("loader", "a unit "+f.Units[i].Name+" carrega env de "+arq+
+		for _, k := range ordem {
+			f.Loader.EnvDeUnit = append(f.Loader.EnvDeUnit, efetivo[k])
+		}
+		for _, arq := range u.EnvFilesIlegiveis {
+			f.denyPersist("loader", "a unit "+u.Name+" carrega env de "+arq+
 				", que não pôde ser lido: um LD_PRELOAD/LD_AUDIT definido ali NÃO "+
 				"foi avaliado")
 		}
@@ -464,6 +519,10 @@ func expandHome(pat string, homes []string) []string {
 // --- linker dinâmico (runbook §7.8) ---
 
 func collectLoader(f *Facts, e *env.Env) {
+	f.LoaderPreloadLido = true
+	f.LoaderPathCompleto = true
+	f.LoaderEnvCompleto = true
+
 	l := &f.Loader
 
 	switch b, err := e.ReadFile("/etc/ld.so.preload"); {
@@ -480,12 +539,14 @@ func collectLoader(f *Facts, e *env.Env) {
 		// Existe e não pudemos ler: isso NÃO é "não existe".
 		l.PreloadExists = true
 		l.PreloadErr = err.Error()
+		f.LoaderPreloadLido = false
 		f.denyPersist("loader", "/etc/ld.so.preload existe e não pôde ser lido: "+err.Error())
 	}
 
 	confs := []string{"/etc/ld.so.conf"}
 	ents, errCD := e.ReadDir("/etc/ld.so.conf.d")
 	if env.EhLacuna(errCD) {
+		f.LoaderPathCompleto = false
 		f.denyPersist("loader", "/etc/ld.so.conf.d não pôde ser listado ("+
 			env.MotivoDoErro(errCD)+"): um diretório de busca de biblioteca "+
 			"injetado ali NÃO foi avaliado")
@@ -506,6 +567,7 @@ func collectLoader(f *Facts, e *env.Env) {
 		b, err := e.ReadFile(c)
 		if err != nil {
 			if env.EhLacuna(err) {
+				f.LoaderPathCompleto = false
 				f.denyPersist("loader", c+" não pôde ser lido ("+env.MotivoDoErro(err)+
 					"): os diretórios de busca de biblioteca que ele declara NÃO "+
 					"foram avaliados")
@@ -541,6 +603,7 @@ func collectLoader(f *Facts, e *env.Env) {
 	// de olhar" em "não há". Se a cadeia passou do teto, um diretório de busca
 	// gravável declarado além dele NÃO foi avaliado, e isso precisa constar.
 	if len(confs) > maxConfsLoader {
+		f.LoaderPathCompleto = false
 		f.denyPersist("loader", "a cadeia de include do ld.so.conf passou de "+
 			strconv.Itoa(maxConfsLoader)+" arquivos e foi cortada no teto: os "+
 			"diretórios de busca de biblioteca declarados além dele NÃO foram "+
@@ -548,15 +611,27 @@ func collectLoader(f *Facts, e *env.Env) {
 	}
 
 	// Lidos pelo PAM a cada sessão.
+	//
+	// A flag é a do ENV, e não a do caminho de busca: estes dois arquivos
+	// alimentam EnvVars, não SearchDirs. Derrubar LoaderPathCompleto aqui fazia
+	// um pam_env.conf ilegível suprimir a comparação de um /opt/.lib recém-
+	// nascido no ld.so.conf.d — a mudança que a família existe para pegar.
 	for _, p := range []string{"/etc/environment", "/etc/security/pam_env.conf"} {
 		b, err := e.ReadFile(p)
 		if err != nil {
 			if env.EhLacuna(err) {
+				f.LoaderEnvCompleto = false
 				f.denyPersist("loader", p+" não pôde ser lido ("+env.MotivoDoErro(err)+
 					"): um LD_PRELOAD/LD_AUDIT global definido ali NÃO foi avaliado")
 			}
 			continue
 		}
+		// A ÚLTIMA vence aqui também: o pam_env aplica as linhas na ordem, e
+		// duas definições da mesma variável no mesmo arquivo deixam valendo a
+		// de baixo. Guardar as duas fazia trocar a ordem das linhas mudar o que
+		// toda sessão carrega sem produzir drift.
+		efetivo := map[string]string{}
+		var ordem []string
 		for _, ln := range strings.Split(string(b), "\n") {
 			ln = strings.TrimSpace(ln)
 			if ln == "" || strings.HasPrefix(ln, "#") {
@@ -564,9 +639,15 @@ func collectLoader(f *Facts, e *env.Env) {
 			}
 			for _, k := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"} {
 				if v, ok := envAssign(ln, k); ok {
-					l.EnvVars = append(l.EnvVars, EnvSetting{File: p, Key: k, Value: v})
+					if _, ja := efetivo[k]; !ja {
+						ordem = append(ordem, k)
+					}
+					efetivo[k] = v
 				}
 			}
+		}
+		for _, k := range ordem {
+			l.EnvVars = append(l.EnvVars, EnvSetting{File: p, Key: k, Value: efetivo[k]})
 		}
 	}
 }
@@ -595,6 +676,7 @@ func expandirIncludeLoader(f *Facts, e *env.Env, padrao string) []string {
 	var out []string
 	nomes, err := e.ReadDirNamesErr(dir)
 	if env.EhLacuna(err) {
+		f.LoaderPathCompleto = false
 		f.denyPersist("loader", dir+" (include de ld.so.conf) não pôde ser listado ("+
 			env.MotivoDoErro(err)+"): os arquivos incluídos dali NÃO foram lidos")
 	}
@@ -748,13 +830,25 @@ func collectUnits(f *Facts, e *env.Env) {
 	})
 	f.Units = units
 
+	// AS DUAS CHAVES, e a `unit` é a que a comparação lê.
+	//
+	// A `persist` é do OPERADOR — ela nomeia o subsistema no relatório — e é
+	// escrita por dezenove coletores, porque o denyPersist a alimenta sempre.
+	// A família de drift dependia dela, então um authorized_keys de outro
+	// usuário ilegível suprimia a comparação de um ExecStart alterado. É a
+	// mesma lição das oito chaves largas, e o remédio é o mesmo: quem decide
+	// por máquina é a chave estreita.
 	if truncated {
-		f.partial("persist", "mais de "+strconv.Itoa(maxUnits)+
-			" units encontradas; o excedente NÃO foi lido")
+		motivo := "mais de " + strconv.Itoa(maxUnits) +
+			" units encontradas; o excedente NÃO foi lido"
+		f.partial("persist", motivo)
+		f.partial("unit", motivo)
 	}
 	if len(units) == 0 && e.Has(env.CapSystemd) {
-		f.partial("persist", "systemd presente e nenhuma unit foi legível: "+
-			"os checks de unit não avaliaram nada")
+		motivo := "systemd presente e nenhuma unit foi legível: " +
+			"os checks de unit não avaliaram nada"
+		f.partial("persist", motivo)
+		f.partial("unit", motivo)
 	}
 }
 
@@ -1436,9 +1530,11 @@ func expandirDropins(f *Facts, units []Unit) []Unit {
 		}
 	}
 	if truncou {
-		f.partial("persist", "a expansão de drop-ins por padrão (service.d/, template@., "+
-			"prefixo-) passou do teto de "+strconv.Itoa(maxUnits)+" units efetivas: o "+
-			"excedente NÃO foi avaliado — um host com milhares de units e um drop-in amplo")
+		motivo := "a expansão de drop-ins por padrão (service.d/, template@., " +
+			"prefixo-) passou do teto de " + strconv.Itoa(maxUnits) + " units efetivas: o " +
+			"excedente NÃO foi avaliado — um host com milhares de units e um drop-in amplo"
+		f.partial("persist", motivo)
+		f.partial("unit", motivo)
 	}
 	return out
 }

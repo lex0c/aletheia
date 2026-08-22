@@ -56,6 +56,24 @@ docker rm -f "$cid" >/dev/null
 install -m 0755 "$root/dist/aletheia$sfx" "$rootfs/aletheia"
 install -m 0755 "$root/dist/helper$sfx"   "$rootfs/helper"
 
+# QUAIS binários entraram, por hash. O initramfs é artefato de build e NÃO é
+# reconstruído pelo `make scenarios`: ele fica com o que o último `make vm-image`
+# deixou ali. Sem este marcador, o tier de VM roda contra o binário que sobrou —
+# e passa, verde, testando outro programa.
+#
+# Foi medido: um initramfs de horas antes carregava um binário de SchemaVersion
+# 6 enquanto a árvore já estava no 9, e a suíte de VM vinha verde a sessão
+# inteira sobre código que não existia mais. Suíte que passa testando outra
+# coisa é o pior verde possível — é o mesmo defeito que esta ferramenta persegue
+# nos hosts alheios, dentro de casa.
+#
+# O runner compara este arquivo com o hash dos binários da árvore e PULA com o
+# motivo quando eles divergem. Pular alto é honesto; passar é que não era.
+{
+	echo "aletheia $(sha256sum "$root/dist/aletheia$sfx" | cut -d" " -f1)"
+	echo "helper $(sha256sum "$root/dist/helper$sfx" | cut -d" " -f1)"
+} > "$out/binarios$sfx.txt"
+
 # Um MÓDULO DE KERNEL de verdade para o guest, quando dá.
 #
 # O cenário de "módulo carregado sem arquivo em disco" não tem como ser montado
@@ -138,6 +156,24 @@ mount -t proc     proc     /proc  2>/dev/null
 mount -t sysfs    sysfs    /sys   2>/dev/null
 mount -t devtmpfs devtmpfs /dev   2>/dev/null
 mount -t tmpfs    tmpfs    /tmp   2>/dev/null
+
+# TRACEFS, e ela não é cosmética: sem ela o guest não parece um host.
+#
+# Num host real quem monta é o systemd, e o guest não tem systemd. O efeito era
+# que kernel.ftrace_hook e persist.ld_preload_global — dois dos checks que só
+# existem para serem exercitados contra um KERNEL DE VERDADE — declaravam
+# lacuna em toda microVM e nunca rodavam ali. O tier de VM existe justamente
+# para eles.
+#
+# As duas montagens, porque o caminho mudou de lugar na história do kernel:
+# tracefs é um filesystem próprio desde a 4.1; antes disso o `tracing` morava
+# dentro do debugfs. Os cenários de kernel 3.18 dependem da segunda.
+#
+# Falhar é aceitável e silencioso: um kernel sem CONFIG_FTRACE não tem o que
+# montar, e a ferramenta declara a lacuna — que é a resposta certa.
+mkdir -p /sys/kernel/debug 2>/dev/null
+mount -t debugfs debugfs /sys/kernel/debug   2>/dev/null
+mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null
 chmod 1777 /tmp
 
 # hostname próprio, para o relatório não parecer o do host

@@ -41,10 +41,13 @@ type findingLine struct {
 	Ator         string `json:"actor,omitempty"`
 	Irreversible bool   `json:"irreversible,omitempty"`
 
-	// Baseline e Novo só têm significado numa execução com referência. O
+	// Baseline e Novo só têm significado numa execução com referência: um
 	// agregador de frota usa Novo para separar deriva de mudança.
 	Baseline bool `json:"baseline,omitempty"`
 	Novo     bool `json:"new,omitempty"`
+	// Driftou é o OUTRO eixo de mudança: o achado pode ser velho e o objeto
+	// dele ter mudado. Ver check.Finding.Driftou.
+	Driftou bool `json:"drifted,omitempty"`
 }
 
 // coverageLine acompanha SEMPRE o JSONL. Sem ela, a agregação de frota mostra
@@ -115,7 +118,7 @@ func JSONL(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, bl *Baselin
 			Subject: fd.Subject, Title: fd.Title,
 			Evidence: fd.Evidence, NextSteps: fd.NextSteps,
 			FalsePositives: fd.FalsePositives, Downgraded: fd.Downgraded,
-			Baseline: fd.Baseline, Novo: fd.Novo,
+			Baseline: fd.Baseline, Novo: fd.Novo, Driftou: fd.Driftou,
 			Quando: fd.Quando, QuandoFonte: fd.QuandoFonte,
 			Ator: fd.Ator, Irreversible: fd.Irreversible,
 		}); err != nil {

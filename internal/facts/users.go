@@ -102,11 +102,31 @@ func collectUsers(f *Facts, e *env.Env) {
 
 	shadow := lerShadow(f, e)
 
+	// O GROUP É LIDO ANTES, e não depois do passwd, porque ele não depende dele.
+	//
+	// Enquanto ficava embaixo, o `return` do passwd ilegível levava junto uma
+	// leitura que teria funcionado: um /etc/passwd 0600 (raro, mas é o que uma
+	// varredura sem root encontra em host endurecido) deixava GroupLido falso
+	// com o /etc/group perfeitamente aberto, e a família de grupo recusava a
+	// comparação por causa de OUTRO arquivo. É o mesmo defeito das chaves de
+	// lacuna largas, um nível abaixo — e foi a catraca de completude por fonte
+	// que o achou.
+	lerGrupos(f, e)
+
 	b, err := e.ReadFile("/etc/passwd")
 	if err != nil {
 		f.denyPersist("users", "/etc/passwd ilegível: nenhuma conta foi avaliada")
 		return
 	}
+	// A LISTA DE CONTAS foi lida, e isso é um fato SEPARADO de ter lido o
+	// shadow, o group ou o sudoers — os quatro dividem a mesma chave de lacuna
+	// (`users`) e têm dependências diferentes.
+	//
+	// A diferença não é acadêmica: sem root o shadow é sempre ilegível, e uma
+	// família que consumisse a chave inteira deixava de reportar CONTA NOVA por
+	// causa disso. Uma conta uid 0 acrescentada entre dois retratos — o achado
+	// mais direto que existe — ficava calada porque outro arquivo não abriu.
+	f.PasswdLido = true
 	for _, ln := range strings.Split(string(b), "\n") {
 		fs := strings.Split(ln, ":")
 		// A linha COMENTADA não é conta. Comentar a linha do passwd é a forma
@@ -139,10 +159,16 @@ func collectUsers(f *Facts, e *env.Env) {
 		f.Accounts = append(f.Accounts, a)
 	}
 
+	metaDosArquivosDeConta(f, e)
+}
+
+// lerGrupos lê /etc/group. Fonte PRÓPRIA: nada aqui depende do passwd.
+func lerGrupos(f *Facts, e *env.Env) {
 	if b, err := e.ReadFile("/etc/group"); env.EhLacuna(err) {
 		f.denyPersist("users", "/etc/group não pôde ser lido: a resolução de GID→nome "+
 			"degrada, e um GID sem conta no group não pode ser afirmado")
 	} else if err == nil {
+		f.GroupLido = true
 		for _, ln := range strings.Split(string(b), "\n") {
 			fs := strings.Split(ln, ":")
 			if len(fs) < 4 || strings.HasPrefix(ln, "#") {
@@ -156,7 +182,11 @@ func collectUsers(f *Facts, e *env.Env) {
 			f.Grupos = append(f.Grupos, Grupo{Name: fs[0], GID: gid, Members: membros})
 		}
 	}
+}
 
+// metaDosArquivosDeConta guarda o mtime dos quatro arquivos de conta. É meta, e
+// não conteúdo: nenhum fato de completude depende dela.
+func metaDosArquivosDeConta(f *Facts, e *env.Env) {
 	for _, p := range []string{"/etc/passwd", "/etc/shadow", "/etc/sudoers", "/etc/group"} {
 		if m := modUTC(e, p); m != "" {
 			f.MetaAcesso = append(f.MetaAcesso, ArquivoMeta{Path: p, ModUTC: m})
@@ -174,6 +204,11 @@ func lerShadow(f *Facts, e *env.Env) map[string]string {
 			"conta sem senha não pôde ser avaliada")
 		return out
 	}
+	// A lacuna acima é declarada em granularidade de FAMÍLIA. Este campo a
+	// declara por CAMPO: sem ele, `SemSenha=false` em toda conta é
+	// indistinguível de "todas têm senha", e quem compara dois retratos leria
+	// "não sei -> não sei" como "não mudou".
+	f.ShadowLido = true
 	for _, ln := range strings.Split(string(b), "\n") {
 		fs := strings.Split(ln, ":")
 		if len(fs) < 2 || strings.HasPrefix(ln, "#") {
@@ -190,6 +225,11 @@ const (
 )
 
 func collectSudoers(f *Facts, e *env.Env) {
+	// Otimismo com desmentido: a árvore é dada por lida, e QUALQUER falha no
+	// caminho a desmarca. Uma regra de sudo que não pôde ser lida faz o
+	// conjunto deixar de ser exaustivo, e comparar dois retratos com conjuntos
+	// diferentes inventa "regra removida".
+	f.SudoersLido = true
 	// Árvore de configuração a partir de /etc/sudoers, seguindo os includes que
 	// o próprio sudo segue. Ler /etc/sudoers.d fixo tinha dois defeitos: um
 	// `@includedir /opt/.x` era invisível (bypass), e /etc/sudoers.d era varrido
@@ -204,6 +244,16 @@ func collectSudoers(f *Facts, e *env.Env) {
 // sintaxe antiga de include —, e por isso a checagem de include precede a de
 // comentário. visited-set contra ciclo; teto de arquivos e profundidade contra
 // árvore hostil; corte e diretório ilegível declaram lacuna.
+// negarSudoers declara a lacuna E desmarca o conjunto. Os dois andam juntos:
+// toda saída desta árvore que não leu algo torna a lista de regras NÃO
+// exaustiva, e é isso que a comparação de dois retratos precisa saber. Marcar
+// em cada ponto de saída à mão seria um a esquecer — e o esquecido vira
+// "regra removida" inventada.
+func (f *Facts) negarSudoers(motivo string) {
+	f.denyPersist("users", motivo)
+	f.SudoersLido = false
+}
+
 func arvoreSudoers(f *Facts, e *env.Env, p string, prof int, visto map[string]bool, contador *int) {
 	if visto[p] {
 		return
@@ -212,15 +262,15 @@ func arvoreSudoers(f *Facts, e *env.Env, p string, prof int, visto map[string]bo
 		// Teto de PROFUNDIDADE, distinto do de quantidade: um `@include` em ciclo
 		// (ou cadeia muito funda) para aqui, e o que ficou além NÃO foi avaliado.
 		// Cortar em silêncio transformaria "parei" em "não há".
-		f.denyPersist("users", "a árvore de include do sudoers passou de "+
-			strconv.Itoa(maxSudoersProf)+" níveis de profundidade em "+p+
+		f.negarSudoers("a árvore de include do sudoers passou de " +
+			strconv.Itoa(maxSudoersProf) + " níveis de profundidade em " + p +
 			" e foi cortada: regras incluídas além disso NÃO foram avaliadas")
 		return
 	}
 	visto[p] = true
 	if *contador >= maxSudoersArquivos {
-		f.denyPersist("users", "a árvore de include do sudoers passou de "+
-			strconv.Itoa(maxSudoersArquivos)+" arquivos e foi cortada: regras além "+
+		f.negarSudoers("a árvore de include do sudoers passou de " +
+			strconv.Itoa(maxSudoersArquivos) + " arquivos e foi cortada: regras além " +
 			"disso NÃO foram avaliadas")
 		return
 	}
@@ -231,7 +281,7 @@ func arvoreSudoers(f *Facts, e *env.Env, p string, prof int, visto map[string]bo
 		// isso faria a ferramenta dizer "nenhuma regra de sudo perigosa" quando
 		// o que houve foi não ter conseguido olhar.
 		if !os.IsNotExist(err) {
-			f.denyPersist("users", p+" ilegível: as regras de sudo declaradas ali NÃO foram avaliadas")
+			f.negarSudoers(p + " ilegível: as regras de sudo declaradas ali NÃO foram avaliadas")
 		}
 		return
 	}
@@ -251,8 +301,8 @@ func arvoreSudoers(f *Facts, e *env.Env, p string, prof int, visto map[string]bo
 			if ehDir {
 				nomes, derr := e.ReadDirNamesErr(resolvido)
 				if env.EhLacuna(derr) {
-					f.denyPersist("users", resolvido+" (includedir de sudoers) não pôde "+
-						"ser listado ("+env.MotivoDoErro(derr)+"): as regras dele NÃO foram avaliadas")
+					f.negarSudoers(resolvido + " (includedir de sudoers) não pôde " +
+						"ser listado (" + env.MotivoDoErro(derr) + "): as regras dele NÃO foram avaliadas")
 					continue
 				}
 				sort.Strings(nomes)
@@ -375,11 +425,22 @@ func resolverIncludeSudoers(dir, alvo string) string {
 //
 // options inclui `nopass` (sem senha), `keepenv`, `persist`, `setenv {...}`.
 // Uma linha de continuação termina em `\`; doas as junta antes de avaliar.
+// negarDoas declara a lacuna E desmarca o conjunto, pelo mesmo motivo do
+// negarSudoers: toda saída que não leu algo torna a lista NÃO exaustiva, e
+// marcar em cada ponto à mão é um a esquecer. Foi um a esquecer.
+func (f *Facts) negarDoas(motivo string) {
+	f.denyPersist("users", motivo)
+	f.DoasLido = false
+}
+
 func collectDoas(f *Facts, e *env.Env) {
+	// Otimismo com desmentido, como no sudoers: qualquer falha no caminho
+	// desmarca, e o conjunto deixa de ser exaustivo.
+	f.DoasLido = true
 	arquivos := []string{"/etc/doas.conf"}
 	nomes, errD := e.ReadDirNamesErr("/etc/doas.d")
 	if env.EhLacuna(errD) {
-		f.denyPersist("users", "/etc/doas.d não pôde ser listado: as regras de doas "+
+		f.negarDoas("/etc/doas.d não pôde ser listado: as regras de doas " +
 			"(escalada sem senha) NÃO foram avaliadas")
 	}
 	for _, n := range nomes {
@@ -391,7 +452,12 @@ func collectDoas(f *Facts, e *env.Env) {
 		b, err := e.ReadFile(p)
 		if err != nil {
 			if !os.IsNotExist(err) {
-				f.denyPersist("users", p+" ilegível: as regras de doas (escalada sem "+
+				// DESMARCA, e não só declara. Um arquivo de doas.d que existe e
+				// não abre torna o conjunto NÃO exaustivo: sem isto, a regra que
+				// ele continha aparecia como REMOVIDA na comparação — "não
+				// consegui mais observá-la" virando "sumiu", que é a
+				// equivalência que este pacote inteiro existe para recusar.
+				f.negarDoas(p + " ilegível: as regras de doas (escalada sem " +
 					"senha) NÃO foram avaliadas")
 			}
 			continue

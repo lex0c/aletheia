@@ -74,6 +74,8 @@ COMANDOS
   wtf           overview em ~1s: este host está pegando fogo?
   watch         varre em ciclo e reporta só o que MUDAR: o eixo do tempo
   baseline      captura o estado atual como referência para comparar depois
+  drift         o que MUDOU desde um retrato anterior — a mudança para a qual
+                não existe check a escrever
   collect       só coleta: tira o retrato do host e sai. Não conclui nada
   analyze       só analisa: roda os checks sobre um retrato, do lado limpo
   preserve      guarda a evidência antes que ela suma — inclusive tráfego
@@ -88,6 +90,12 @@ FLAGS DE scan E wtf
   --json FILE   JSONL; "-" = stdout. NUNCA afetado pela verbosidade
   --baseline F  compara com a baseline em F: o que já estava lá desce um nível
                 de severidade e CONTINUA no relatório, com a data
+  --drift F     compara com o RETRATO em F (um dump do collect): o que MUDOU
+                desde ele. Eixo diferente do --baseline — aquele fala do
+                ACHADO ("já estava na lista?"), este fala do OBJETO ("a unit
+                executa outra coisa agora?"). Um achado velho sobre um objeto
+                que mudou ontem sai marcado, e a severidade NÃO sobe: "mudou
+                desde ontem" tem a forma de um deploy
   --no-progress cala o batimento da coleta. Ele já só aparece em terminal —
                 pipe e 2>arquivo nunca o recebem —, esta flag desliga na mão
   --ignore PATH exclui um caminho da varredura de filesystem (repetível): não
@@ -130,6 +138,34 @@ FLAGS DE watch
 
   Amostragem por polling PERDE o que dura menos que o intervalo, e o resumo diz
   isso. Detecção contínua de verdade se instala ANTES do incidente, com eBPF.
+
+DRIFT — o que mudou desde um estado conhecido
+  aletheia drift ANTES.json [DEPOIS.json]
+
+  ANTES é um dump do collect. Sem DEPOIS, o estado atual é coletado agora.
+  Só os checks de drift rodam (--all-checks roda todos).
+
+  scan  há evidência de comprometimento AGORA?
+  watch quando isto aconteceu, enquanto eu olhava?
+  drift o que mudou desde um retrato que eu tinha?
+
+  Ele alcança o que nenhum check alcança: a mudança de uma forma legítima para
+  OUTRA forma legítima. ExecStart que passa a apontar para outro binário de
+  pacote, chave de SSH trocada por outra bem formada, command= retirado de uma
+  chave existente — não há regra a escrever, e o que denuncia é a transição.
+
+  Os DOIS retratos precisam ter sido feitos com o mesmo alcance: comparar um com
+  root contra um sem root fabricaria "sumiu" para tudo que só root enxerga. As
+  famílias afetadas são declaradas NÃO COMPARADAS, e o silêncio delas deixa de
+  valer como resposta.
+
+  A mudança é datada por INTERVALO ("entre t0 e t1"), nunca por instante: a
+  ferramenta não estava presente na hora, e fingir precisão no eixo do tempo
+  manda quem investiga para a hora errada.
+
+  --root PATH   comparar contra uma imagem montada
+  --only G,G    igual ao scan
+  --all-checks  roda o catálogo inteiro, e não só os de drift
 
 FLAGS DE baseline
   --root PATH   capturar de imagem montada em vez do host vivo
@@ -275,6 +311,8 @@ func main() {
 		os.Exit(runWtf(os.Args[2:]))
 	case "watch":
 		os.Exit(runWatch(os.Args[2:]))
+	case "drift":
+		os.Exit(runDrift(os.Args[2:]))
 	case "baseline":
 		os.Exit(runBaseline(os.Args[2:]))
 	case "preserve":
@@ -504,6 +542,7 @@ func runScan(args []string, wtf bool) int {
 		verbose2 = fs.Bool("vv", false, "+ INFO e detalhe de cobertura")
 		coverage = fs.Bool("coverage", false, "mostrar a seção de cobertura (causas e gaps)")
 		base     = fs.String("baseline", "", "comparar com a baseline em FILE")
+		driftDe  = fs.String("drift", "", "comparar com o RETRATO anterior em FILE: o que mudou desde ele")
 		iocFile  = fs.String("ioc", "", "casar os indicadores DESTE incidente, do arquivo FILE")
 		since    = fs.String("since", "", "janela de investigação: instante (2026-04-30T18:00Z) ou duração (72h, 7d)")
 		noProg   = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
@@ -573,6 +612,20 @@ func runScan(args []string, wtf bool) int {
 	coletaInicio := time.Now()
 	f := facts.Collect(e)
 	coletaFim := time.Now()
+
+	// DEPOIS do relógio de coleta parar, e isso não é detalhe: o número que o
+	// `relatarTempoDeColeta` imprime existe para dizer quanto tempo a
+	// ferramenta ficou TOCANDO a máquina comprometida, e é por ele que se
+	// julga o rastro deixado na timeline. Ler e comparar um retrato anterior —
+	// um arquivo de até 512 MB, que pode nem estar no host — não é tempo no
+	// host, e contá-lo ali fazia o número medir outra coisa.
+	//
+	// O drift entra ANTES DOS CHECKS porque ele é um FATO: os checks de drift o
+	// leem como leem qualquer outro, e a correlação liga o que mudou aos
+	// achados que falam da mesma coisa.
+	if code := aplicarDrift(*driftDe, f, e.Caps, e.Now.UTC().Format(time.RFC3339)); code != 0 {
+		return code
+	}
 
 	sel := check.Selection{Mode: *mode, Wtf: wtf}
 	if *only != "" {

@@ -53,7 +53,19 @@ func init() {
 		// conclusão inverte: um binário só chega àquele caminho dentro de uma
 		// imagem, e rodá-lo com o cgroup do host não tem caminho legítimo comum.
 		Mode: VM,
-		Setup: `d=/var/lib/docker/overlay2/9f3c1a2b4d5e6f708192a3b4c5d6e7f8/diff/usr/sbin
+		// O cgroup2 é montado aqui pelo MESMO motivo do M1, e a diferença entre
+		// os dois cenários é só onde o processo fica DENTRO da hierarquia: o M1
+		// o move para um escopo com nome de contêiner, o M2 o deixa na raiz.
+		//
+		// Sem montar nada, a microVM não tem hierarquia de cgroup nenhuma e o
+		// /proc/<pid>/cgroup sai VAZIO — que não é "o cgroup do host", é a
+		// ausência da premissa. A ferramenta acertava ao declarar lacuna ali
+		// ("cgroup ILEGÍVEL, e sem ele não se pode dizer se roda dentro ou fora")
+		// e o cenário é que afirmava, sem montar o que precisava, ter posto o
+		// binário no cgroup do host.
+		Setup: `mkdir -p /sys/fs/cgroup
+			mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true
+			d=/var/lib/docker/overlay2/9f3c1a2b4d5e6f708192a3b4c5d6e7f8/diff/usr/sbin
 			mkdir -p "$d"
 			cp /helper "$d/nginx"
 			"$d/nginx" sleep 90 &

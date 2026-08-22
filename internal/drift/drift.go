@@ -1,0 +1,666 @@
+// Package drift responde a pergunta que nem o check nem a baseline respondem:
+//
+//	o que MUDOU desde um estado conhecido?
+//
+// # Por que existe, e por que não é "mais um check"
+//
+// Os 109 checks desta ferramenta são conhecimento: cada um sabe que uma forma
+// específica é perigosa. Isso alcança o que alguém já viu antes, e só isso.
+//
+//	check   conhecimento   "eu sei que ISTO é ruim"
+//	drift   expectativa    "eu sei que isto NÃO ERA assim"
+//
+// A diferença não é de grau. Uma unit cujo `ExecStart` passa a apontar para
+// OUTRO binário de pacote, uma chave de `authorized_keys` trocada por outra bem
+// formada, uma regra de sudo reescrita para um alias diferente — nada disso
+// produz achado hoje, e nada disso vai produzir, porque não há regra a
+// escrever: as duas pontas são legítimas em forma. O que denuncia é a
+// TRANSIÇÃO, e transição é a única coisa que um retrato não tem.
+//
+// É também o limite: drift não pode virar check disfarçado. Ele não sabe se a
+// mudança é maligna — sabe que houve mudança, em que campo, e se aquele campo é
+// dos que decidem privilégio. Quem conclui é o check que lê estes fatos.
+//
+// # As três regras que o diff não pode quebrar
+//
+// Elas não são detalhe de implementação: são as mesmas invariantes do resto da
+// ferramenta, aplicadas à comparação. Sem qualquer uma delas, drift vira
+// fábrica de falso positivo em uma execução.
+//
+//	COMPARABILIDADE      dois estados com cobertura diferente NÃO são
+//	                     comparáveis. Um dump feito com root contra outro sem
+//	                     root fabrica "sumiu" para tudo que só root enxerga. A
+//	                     classe inteira é declarada não-comparável — vira
+//	                     lacuna, nunca achado.
+//
+//	SUMIR ≠ NÃO OLHAR    medido nesta base: entre duas coletas com segundos de
+//	                     intervalo, `/usr/bin/tail` "sumiu" de hash_verified —
+//	                     porque estava RODANDO na primeira e por isso entrou no
+//	                     conjunto hasheado. Só classe com enumeração exaustiva
+//	                     nos dois lados admite "sumiu"; as demais admitem
+//	                     apenas "surgiu" e "mudou".
+//
+//	MESMA NORMALIZAÇÃO   o dump é REDIGIDO ao ser escrito (redact.Cmdline), o
+//	                     host vivo não é. Comparar um contra o outro sem passar
+//	                     os dois pela mesma normalização inventa drift em todo
+//	                     processo com segredo na linha de comando. O preço, que
+//	                     fica dito, é que drift em campo redigido é invisível.
+//
+// # O PISO DE RUÍDO, medido
+//
+// Uma feature de drift vive ou morre pelo que ela diz num host que ninguém
+// atacou. A medição abaixo é o contrato, e ela é refeita quando o registro de
+// famílias muda — foi refeita depois de `loader.order` e `loader.env`
+// entrarem, que são as duas mais recentes.
+//
+//	contêiner debian:bookworm-20230612 atualizado para o corrente, com
+//	openssh-server, cron, sudo, ca-certificates, nginx-light e libpam-modules,
+//	e uma configuração plausível por cima (conta com chave autorizada, regra
+//	de sudo NOPASSWD, /etc/cron.d, LD_LIBRARY_PATH no /etc/environment e um
+//	ld.so.conf.d próprio):
+//
+//	28 pacotes atualizados  ->  ZERO achados
+//	                            14 mudanças CONTADAS e não impressas (hash,
+//	                            mtime, tamanho — campo que não decide)
+//	                            34 das 35 famílias comparadas SEM restrição
+//
+// A única restrita é `programa em execução`, e por ser efêmera: a limitação é
+// simétrica, então é escopo da pergunta e não defeito da comparação.
+//
+// Os mesmos números depois de a observabilidade descer ao CAMPO — a rodada que
+// separou config de runtime no MAC, libs de servicos no NSS e o env de unit do
+// env global: nada mudou no piso, que é o resultado que se queria. Granularidade
+// mais fina não pode custar ruído; ela existe para não CALAR o que foi lido.
+//
+// A medição anterior, num conjunto menor de famílias, deu 38 pacotes -> UM
+// achado: o setgid que o `bsdutils` tirou do /usr/bin/wall (a correção da
+// CVE-2024-28085). Um achado verdadeiro sobre uma mudança real de privilégio é
+// o piso CERTO — o que não pode acontecer é a lista de pacotes virar drift.
+//
+// O limite da medição, dito: é um contêiner, não um servidor com systemd
+// rodando. A churn de unit de um host real é maior, e é ela que a família
+// `systemd.unit` paga.
+//
+// # Por que um registro explícito, e não reflexão sobre facts.Facts
+//
+// São 78 campos, e cada um tem identidade e volatilidade próprias. Reflexão não
+// adivinha que o `where` do Ownership carrega `pid=` dentro (e por isso muda a
+// cada coleta sem nada ter mudado), nem que `kworker/0:3-events` não é uma
+// identidade — o nome codifica o índice do pool. As duas coisas foram MEDIDAS
+// aqui, e as duas produziriam ruído puro.
+//
+// Cada classe declara o que a identifica, o que nela é estado e de que
+// capacidade a enumeração dela depende. A tabela cresce por adição revisável;
+// a alternativa cresce por acidente.
+package drift
+
+import (
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/lex0c/aletheia/internal/env"
+	"github.com/lex0c/aletheia/internal/facts"
+)
+
+// Entidade é uma coisa com identidade ESTÁVEL entre execuções, e os campos
+// dela que significam alguma coisa para segurança.
+//
+// O que não entra aqui não é comparado — e isso é metade do desenho. Contador,
+// amostra ilustrativa, proveniência com pid dentro e tudo o mais que muda
+// sozinho fica de fora por NÃO SER EXTRAÍDO, e não por um filtro depois.
+type Entidade struct {
+	ID     string
+	Campos map[string]string
+
+	// Alvos são os SUJEITOS que esta entidade responde no relatório — o nome da
+	// unit, o caminho do arquivo, o usuário da regra. É por eles que o motor
+	// liga uma mudança aos achados que falam da mesma coisa.
+	//
+	// Sem isso, drift e checks viveriam em dois relatórios paralelos sobre o
+	// mesmo host: um dizendo "isto está errado", outro dizendo "isto mudou", e
+	// o operador juntando na cabeça — que é exatamente o que a resolução de
+	// ator já existe para não pedir.
+	Alvos []string
+
+	// NaoObservado marca o campo cujo valor NÃO foi observado DESTE lado.
+	// Campo fora do mapa é observado; o zero-value, portanto, é "observei
+	// tudo", que é o caso da maioria das famílias.
+	//
+	// # Por que o campo, e não a família
+	//
+	// A `Classe.Incompleta` é binária: um lado incompleto suprime `mudou` da
+	// família INTEIRA. Isso estava certo enquanto uma família tinha uma fonte,
+	// e passou a esconder mudança quando as fontes se multiplicaram dentro de
+	// uma entidade só. O MAC é o caso limpo:
+	//
+	//	configurado   /etc/selinux/config   (arquivo, vale no próximo boot)
+	//	ativo         /sys/fs/selinux/...   (runtime)
+	//
+	// São duas leituras independentes na mesma entidade. Com a granularidade
+	// de família, o securityfs ficar ilegível suprimia a comparação do ARQUIVO
+	// — que foi lido perfeitamente, e cuja transição `enforcing -> permissive`
+	// é persistente e é o achado. O mesmo vale para o `libs` do NSS, que
+	// depende do loader, contra o `servicos`, que só depende do nsswitch.
+	//
+	// # Diferença para Observacional
+	//
+	// `Observacional` é uma REGRA sobre o valor: "vazio aqui é ambíguo, então
+	// vazio de um lado só não vira mudança". É heurística, e serve onde o
+	// coletor não sabe dizer. `NaoObservado` é o coletor SABENDO: ele leu o
+	// fato de cobertura e respondeu. Onde os dois cabem, o segundo é melhor —
+	// ele distingue "está vazio" de "não olhei", que a heurística não faz.
+	NaoObservado map[string]bool
+
+	// Fonte é de onde esta entidade veio, quando a família tem mais de uma.
+	//
+	// Serve ao mesmo propósito do NaoObservado, um nível acima: ali o campo de
+	// uma entidade não foi observado, aqui o CONJUNTO de entidades daquela
+	// fonte não é exaustivo. Sem isso, uma árvore de repositório git ilegível
+	// fazia os hooks dela saírem como REMOVIDOS enquanto o /etc/profile, que
+	// vem de outra varredura e foi lido inteiro, seguia comparado — a mesma
+	// mudança que a Classe.FontesIncertas descreve, por entidade e não por
+	// família.
+	//
+	// Vazia quando a família tem fonte única, que continua sendo o normal.
+	Fonte string
+}
+
+// Classe é uma família de entidades e tudo que se precisa saber para
+// compará-las honestamente.
+type Classe struct {
+	// Tipo é o nome estável da família, e aparece no achado: "systemd.unit".
+	Tipo string
+	// Titulo é como o operador lê o Tipo.
+	Titulo string
+
+	// Requires são as capacidades sem as quais a enumeração desta classe é
+	// PARCIAL. Faltando em qualquer um dos dois lados, a classe não é
+	// comparada.
+	Requires env.Cap
+
+	// LacunaConferida é a resposta ESCRITA para a pergunta que oito defeitos
+	// custaram para virar hábito:
+	//
+	//	esta chave de lacuna cobre mais de uma FONTE?
+	//
+	// Toda família que usa `Lacunas` precisa respondê-la. As chaves são do
+	// OPERADOR — elas nomeiam um subsistema para quem lê o relatório —, e usar
+	// uma como DEPENDÊNCIA de máquina só é correto quando ela cobre exatamente
+	// a fonte de que esta família depende. Não foi o caso em `net`, `modulo`,
+	// `users` (duas vezes), `ssh`, `trust`, `loader` e `binfmt`: em todas, a
+	// falha de UMA fonte suprimia a comparação de OUTRA, perfeitamente lida.
+	//
+	// Escrever a conferência não a torna verdadeira — nenhum campo faz isso. O
+	// que ele faz é obrigar a pergunta a ser feita UMA vez, por quem tem o
+	// contexto, no commit que cria a família. Nas oito vezes, ninguém a fez.
+	LacunaConferida string
+
+	// Lacunas são as chaves de f.Partial/PersistDenied que degradam esta
+	// classe. Presente em qualquer lado, mesma consequência do Requires.
+	//
+	// A comparação é pela CHAVE e nunca pelo texto: o texto das lacunas carrega
+	// contador ("261 processos com fds ilegíveis" vira 262 na coleta seguinte),
+	// e compará-lo faria toda execução parecer degradada de forma diferente.
+	Lacunas []string
+
+	// Exaustiva diz que a enumeração vê TODAS as entidades da família nos dois
+	// lados. Só ela admite "sumiu" — ver a segunda regra no topo do arquivo.
+	Exaustiva bool
+
+	// Multiplicidade diz QUAIS CAMPOS contam repetição quando duas entidades
+	// compartilham o ID.
+	//
+	// O índice colapsa por ID, e para quase toda família isso é o certo: duas
+	// leituras da mesma unit são a mesma unit. Para o cron não é — duas linhas
+	// idênticas fazem o job rodar DUAS VEZES.
+	//
+	// A primeira versão resolvia isso com um campo de CARDINALIDADE do ID
+	// (`_repeticoes`), e ela colidia num caso só um pouco mais interessante:
+	//
+	//	antes:  A A B        depois:  B B A
+	//	  cmd = A,B  n=3       cmd = A,B  n=3     → nenhum drift
+	//
+	// A tinha duas execuções e passou a ter uma; B fez o contrário. O código
+	// existia para preservar multiplicidade e a perdia, porque contava
+	// ENTIDADES enquanto os valores viravam conjunto. Agora a multiplicidade
+	// mora no próprio valor: o campo vira MULTICONJUNTO ordenado, `A,A,B`
+	// contra `A,B,B`, e a cardinalidade sai de graça.
+	//
+	// E é POR CAMPO, não da entidade inteira. Aplicá-la a todos fabricava
+	// afirmação falsa: no cron, `user` e `schedule` FAZEM PARTE DO ID, então
+	// duas entradas do mesmo ID têm os dois iguais por construção — e o
+	// multiconjunto os transformava em
+	//
+	//	user      "root"       -> "root, root"
+	//	schedule  "17 3 * * *" -> "17 3 * * *, 17 3 * * *"
+	//
+	// Uma duplicação de linha virava TRÊS achados, dois deles dizendo que o
+	// usuário e o horário mudaram. Acertar que houve drift não autoriza a
+	// mentir sobre qual campo mudou.
+	Multiplicidade map[string]bool
+
+	// Incompleta é a pergunta que a família faz aos fatos de UM lado: "o
+	// conjunto que eu comparo está inteiro aqui?". Devolve o motivo quando não
+	// está, e "" quando está.
+	//
+	// Existe porque a chave de lacuna é grosseira demais em alguns casos. A
+	// família de portas depende de /proc/net/tcp{,6} ter sido lido INTEIRO, e
+	// isso é um subconjunto estreito do que a chave `net` cobre — consumir a
+	// chave suprimia a família em quase todo host; ignorá-la fazia tabela
+	// truncada virar "porta removida". A pergunta específica é a saída.
+	//
+	// Lida como lacuna: presente nos dois lados é ESCOPO, num só é ASSIMETRIA.
+	Incompleta func(*facts.Facts) string
+
+	// FontesIncertas devolve as FONTES cujo conjunto de entidades não é
+	// exaustivo deste lado — a versão por fonte da Incompleta.
+	//
+	// A Incompleta responde pela família toda, e por isso é grosseira demais
+	// para família de fonte múltipla: um repositório git ilegível não pode
+	// suprimir a comparação do /etc/profile, nem um EnvironmentFile= de uma
+	// unit pode suprimir a do /etc/environment. Aqui a supressão de `surgiu` e
+	// `sumiu` alcança só as entidades cuja Fonte está no conjunto.
+	//
+	// O motivo de cada fonte é o valor do mapa, e ele entra na cobertura.
+	FontesIncertas func(*facts.Facts) map[string]string
+
+	// Efemera é a família cuja PRESENÇA é volátil nos dois sentidos: o que não
+	// aparece num retrato não deixou de existir, e o que aparece no outro não
+	// nasceu ali. Só `mudou` vale.
+	//
+	// Programa em execução é o caso: um `sleep` de cron rodando na segunda
+	// coleta e não na primeira não é um programa novo no host — é o relógio.
+	// Reportá-lo encheria todo servidor movimentado de "surgiu", e a família
+	// perderia o único sinal que ela tem de verdade, que é o MESMO executável
+	// passando a rodar sob outra identidade.
+	//
+	// É a mesma regra do Exaustiva, pelo outro lado: ali "sumiu" não é
+	// confiável, aqui nenhuma das duas presenças é.
+	Efemera bool
+
+	// Decide são os campos cuja mudança É o evento de segurança, e não uma
+	// pista sobre ele. `ExecStart` de uma unit é isto; o mtime dela não é.
+	Decide map[string]bool
+
+	// Observacional são os campos em que VAZIO significa "não foi observado", e
+	// não "não existe".
+	//
+	// É a regra "sumir ≠ não olhar" descida ao nível do campo, e ela nasceu de
+	// um caso concreto: o dono de um socket em escuta (`comm`, `uid`) sai vazio
+	// quando o processo é de outro usuário e não se está como root. Entre dois
+	// retratos, a mesma porta atendida pelo mesmo programa aparecia mudando de
+	// `sshd` para vazio — porque numa das coletas o dono não pôde ser lido.
+	//
+	// A transição de/para vazio nestes campos é CONTADA e não vira achado. Em
+	// campo comum ela continua valendo, e tem de valer: `options` de uma chave
+	// de SSH indo para vazio é justamente o achado mais importante da família.
+	Observacional map[string]bool
+
+	// Extrair produz as entidades a partir dos fatos. É aqui que mora a
+	// normalização — ver Entidade.
+	Extrair func(*facts.Facts) []Entidade
+}
+
+// Kind é o que aconteceu com uma entidade.
+const (
+	Surgiu = "surgiu"
+	Sumiu  = "sumiu"
+	Mudou  = "mudou"
+)
+
+// Lado é um dos dois estados comparados, com as condições em que foi obtido.
+//
+// As condições viajam junto porque a comparação depende delas: sem os caps de
+// cada ponta, não há como saber se "sumiu" quer dizer que sumiu.
+type Lado struct {
+	F    *facts.Facts
+	Caps env.Cap
+	Host string
+	// Quando é o instante da coleta em RFC3339, e é o que dá ao achado o
+	// intervalo em que a mudança aconteceu. Um instante exato seria preciso e
+	// falso: o que se sabe é "entre as duas coletas".
+	Quando string
+}
+
+// Comparar produz o drift entre dois estados.
+func Comparar(antes, depois Lado) facts.Drift {
+	d := facts.Drift{
+		DeHost:    antes.Host,
+		DeQuando:  antes.Quando,
+		AteQuando: depois.Quando,
+		ParaHost:  depois.Host,
+	}
+	for _, c := range classes {
+		cob := comparabilidadeDe(c, antes, depois)
+		ma, semIDa := indexar(c, antes.F)
+		mb, semIDb := indexar(c, depois.F)
+		if n := semIDa + semIDb; n > 0 {
+			// Entidade sem identidade estável fica FORA da comparação, e isso
+			// precisa sair dito: descartá-la em silêncio esconderia justamente
+			// a linha malformada — que é onde uma inserção estranha se
+			// esconde. Ver a decisão simétrica em chaveAutorizada.
+			cob.Motivos = append(cob.Motivos, strconv.Itoa(n)+" entidade(s) sem "+
+				"identidade estável ficaram fora da comparação: sem identidade não "+
+				"há como dizer se são as mesmas dos dois lados")
+		}
+		d.Cobertura = append(d.Cobertura, cob)
+		var incertasA, incertasD map[string]string
+		if c.FontesIncertas != nil {
+			incertasA, incertasD = c.FontesIncertas(antes.F), c.FontesIncertas(depois.F)
+		}
+		compararClasse(c, cob, ma, mb, incertasA, incertasD, &d)
+	}
+	sort.Slice(d.Mudancas, func(i, j int) bool {
+		a, b := d.Mudancas[i], d.Mudancas[j]
+		if a.Tipo != b.Tipo {
+			return a.Tipo < b.Tipo
+		}
+		if a.ID != b.ID {
+			return a.ID < b.ID
+		}
+		return a.Campo < b.Campo
+	})
+	return d
+}
+
+// comparabilidadeDe aplica a PRIMEIRA regra, e ela é por DIREÇÃO.
+//
+// O que invalida uma comparação não é a limitação — é a assimetria dela. Ver
+// facts.CoberturaDrift, onde essa leitura está escrita por extenso e com o
+// defeito que a produziu.
+func comparabilidadeDe(c Classe, antes, depois Lado) facts.CoberturaDrift {
+	cob := facts.CoberturaDrift{Tipo: c.Tipo, Titulo: c.Titulo, Simetrico: true}
+
+	if c.Efemera {
+		cob.SemSurgiu, cob.SemSumiu = true, true
+		cob.Motivos = append(cob.Motivos, "a PRESENÇA desta família é volátil nos "+
+			"dois sentidos: o que não aparece num retrato não deixou de existir. Só "+
+			"a mudança de campo em entidade presente nas duas pontas é reportada")
+	}
+	faltaAntes := c.Requires &^ antes.Caps
+	faltaDepois := c.Requires &^ depois.Caps
+	if comum := faltaAntes & faltaDepois; comum != 0 {
+		// Faltou nos DOIS: é o escopo da pergunta, e a comparação vale sobre o
+		// que os dois enxergaram.
+		cob.SemSurgiu, cob.SemSumiu = true, true
+		cob.Motivos = append(cob.Motivos, "os DOIS retratos foram feitos sem "+
+			strings.Join(comum.Names(), "+")+": a enumeração é parcial nos dois lados, "+
+			"e só a mudança de campo em entidade presente nas duas pontas é confiável")
+	}
+	if so := faltaAntes &^ faltaDepois; so != 0 {
+		cob.Simetrico, cob.SemMudou = false, true
+		cob.SemSurgiu = true
+		cob.Motivos = append(cob.Motivos, "o retrato ANTES foi feito sem "+
+			strings.Join(so.Names(), "+")+" e o DEPOIS não: o que aparecer como NOVO "+
+			"pode ser coisa que sempre esteve lá e ninguém olhou")
+	}
+	if so := faltaDepois &^ faltaAntes; so != 0 {
+		cob.Simetrico, cob.SemMudou = false, true
+		cob.SemSumiu = true
+		cob.Motivos = append(cob.Motivos, "o retrato DEPOIS foi feito sem "+
+			strings.Join(so.Names(), "+")+" e o ANTES não: o que aparecer como REMOVIDO "+
+			"pode continuar lá, sem ter sido olhado")
+	}
+
+	// A pergunta ESPECÍFICA da família tem a mesma leitura das lacunas: nos
+	// dois lados é escopo, num só é assimetria.
+	if c.Incompleta != nil {
+		ia, id := c.Incompleta(antes.F), c.Incompleta(depois.F)
+		switch {
+		case ia != "" && id != "":
+			cob.SemSurgiu, cob.SemSumiu = true, true
+			cob.Motivos = append(cob.Motivos, "nos dois retratos, "+ia)
+		case ia != "":
+			cob.Simetrico, cob.SemSurgiu, cob.SemMudou = false, true, true
+			cob.Motivos = append(cob.Motivos, "só no retrato ANTES, "+ia)
+		case id != "":
+			cob.Simetrico, cob.SemSumiu, cob.SemMudou = false, true, true
+			cob.Motivos = append(cob.Motivos, "só no retrato DEPOIS, "+id)
+		}
+	}
+
+	// A pergunta POR FONTE não muda a cobertura da família: ela não suprime
+	// direção nenhuma no conjunto todo, só nas entidades daquela fonte. O
+	// motivo sai mesmo assim — o operador precisa saber que uma parte do
+	// conjunto ficou de fora, mesmo quando o resto foi comparado inteiro.
+	if c.FontesIncertas != nil {
+		for _, lado := range []struct {
+			f    *facts.Facts
+			nome string
+		}{{antes.F, "ANTES"}, {depois.F, "DEPOIS"}} {
+			for fonte, porque := range c.FontesIncertas(lado.f) {
+				cob.Motivos = append(cob.Motivos, "no retrato "+lado.nome+
+					", a fonte `"+fonte+"` não é exaustiva ("+porque+
+					"): as entidades dela não entram em surgiu/sumiu")
+			}
+		}
+		sort.Strings(cob.Motivos)
+	}
+
+	// Lacuna declarada tem a mesma leitura, e é comparada pela CHAVE — nunca
+	// pelo texto, que carrega contador ("261 processos" vira 262 na coleta
+	// seguinte) e faria toda execução parecer degradada de outro jeito.
+	for _, k := range c.Lacunas {
+		la, ld := temLacuna(antes.F, k), temLacuna(depois.F, k)
+		switch {
+		case la && ld:
+			cob.SemSurgiu, cob.SemSumiu = true, true
+			cob.Motivos = append(cob.Motivos, "os dois retratos declararam lacuna em `"+
+				k+"`: o alcance da coleta foi parcial nos dois")
+		case la:
+			cob.Simetrico, cob.SemSurgiu, cob.SemMudou = false, true, true
+			cob.Motivos = append(cob.Motivos, "só o retrato ANTES declarou lacuna em `"+
+				k+"`: o que aparecer como NOVO pode ser o que ele não conseguiu ler")
+		case ld:
+			cob.Simetrico, cob.SemSumiu, cob.SemMudou = false, true, true
+			cob.Motivos = append(cob.Motivos, "só o retrato DEPOIS declarou lacuna em `"+
+				k+"`: o que aparecer como REMOVIDO pode ser o que ele não conseguiu ler")
+		}
+	}
+	return cob
+}
+
+func temLacuna(f *facts.Facts, chave string) bool {
+	if f == nil {
+		return true
+	}
+	return len(f.Partial[chave]) > 0 || len(f.PersistDenied[chave]) > 0
+}
+
+func compararClasse(c Classe, cob facts.CoberturaDrift, ma, mb map[string]Entidade,
+	incertasAntes, incertasDepois map[string]string, d *facts.Drift) {
+	for id, eb := range mb {
+		ea, existia := ma[id]
+		if !existia {
+			if cob.SemSurgiu {
+				// Não é achado e não é silêncio: a família inteira já saiu
+				// declarada na cobertura da comparação, com a direção que foi
+				// suprimida e o motivo.
+				continue
+			}
+			if eb.Fonte != "" && incertasAntes[eb.Fonte] != "" {
+				// A FONTE desta entidade não foi varrida inteira do outro lado:
+				// "novo" aqui pode ser o que aquele retrato não conseguiu ler.
+				// A supressão é só destas entidades — o resto da família, que
+				// vem de fonte lida por inteiro, continua comparado.
+				d.Contadas++
+				continue
+			}
+			d.Mudancas = append(d.Mudancas, facts.MudancaDrift{
+				Tipo: c.Tipo, Titulo: c.Titulo, ID: id, Kind: Surgiu,
+				Decide: true, Campos: ordenar(eb.Campos), Alvos: eb.Alvos,
+			})
+			continue
+		}
+		if cob.SemMudou {
+			// ASSIMETRIA: um lado enxergou mais que o outro, e a diferença de
+			// FIDELIDADE aparece como mudança de campo. Ver CoberturaDrift.SemMudou.
+			continue
+		}
+		// A UNIÃO das chaves, e não só as do DEPOIS.
+		//
+		// As classes de hoje emitem conjunto fixo, então a diferença é zero.
+		// Uma classe futura com chaves variáveis — uma variável de ambiente por
+		// chave, por exemplo — perderia a REMOÇÃO em silêncio: a chave some do
+		// lado de depois e o laço nunca a visita. Três linhas contra um falso
+		// negativo que ninguém acharia depois.
+		for _, campo := range chavesDaUniao(ea.Campos, eb.Campos) {
+			va, vb := ea.Campos[campo], eb.Campos[campo]
+			if va == vb {
+				continue
+			}
+			if ea.NaoObservado[campo] || eb.NaoObservado[campo] {
+				// O COLETOR DISSE QUE NÃO OLHOU este campo deste lado. É a
+				// mesma conclusão do Observacional e por um caminho melhor: ali
+				// se infere do valor vazio, aqui se lê o fato de cobertura.
+				d.Contadas++
+				continue
+			}
+			if c.Observacional[campo] && (va == "" || vb == "") {
+				// Não se distingue "o dono mudou" de "o dono não foi lido desta
+				// vez". A contagem sai no número; a afirmação, não.
+				d.Contadas++
+				continue
+			}
+			if !c.Decide[campo] {
+				// TERCEIRA FAIXA: nem imprime individualmente, sai o número.
+				// Truncar em silêncio lê-se como "cobri tudo".
+				d.Contadas++
+				continue
+			}
+			// "mudou" sobrevive a restrição SIMÉTRICA — os dois lados
+			// enxergaram com a mesma fidelidade —, e não à assimétrica, que é
+			// filtrada acima.
+			d.Mudancas = append(d.Mudancas, facts.MudancaDrift{
+				Tipo: c.Tipo, Titulo: c.Titulo, ID: id, Kind: Mudou,
+				Campo: campo, Antes: va, Depois: vb, Decide: true,
+				Alvos: eb.Alvos,
+			})
+		}
+	}
+	if !c.Exaustiva || cob.SemSumiu {
+		return
+	}
+	for id, ea := range ma {
+		if _, continua := mb[id]; continua {
+			continue
+		}
+		if ea.Fonte != "" && incertasDepois[ea.Fonte] != "" {
+			// O outro lado não varreu esta fonte inteira: "removido" aqui pode
+			// continuar lá, sem ter sido olhado. É a regra da família aplicada
+			// ao pedaço dela que perdeu a testemunha.
+			d.Contadas++
+			continue
+		}
+		d.Mudancas = append(d.Mudancas, facts.MudancaDrift{
+			Tipo: c.Tipo, Titulo: c.Titulo, ID: id, Kind: Sumiu,
+			Decide: true, Campos: ordenar(ea.Campos), Alvos: ea.Alvos,
+		})
+	}
+}
+
+// indexar aplica a identidade. ID repetido é COLAPSADO com aviso implícito: a
+// segunda entidade de mesmo ID sobrescreveria a primeira em silêncio, e o
+// silêncio esconderia justamente a que foi acrescentada.
+func indexar(c Classe, f *facts.Facts) (map[string]Entidade, int) {
+	out := map[string]Entidade{}
+	if f == nil {
+		return out, 0
+	}
+	var semID int
+	for _, e := range c.Extrair(f) {
+		if e.ID == "" {
+			semID++
+			continue
+		}
+		if ja, dup := out[e.ID]; dup {
+			e = fundir(ja, e, c.Multiplicidade)
+		}
+		out[e.ID] = e
+	}
+	return out, semID
+}
+
+// chavesDaUniao devolve as chaves dos dois mapas, em ordem estável.
+func chavesDaUniao(a, b map[string]string) []string {
+	vistas := make(map[string]bool, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, m := range []map[string]string{a, b} {
+		for k := range m {
+			if !vistas[k] {
+				vistas[k] = true
+				out = append(out, k)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// fundir junta duas entidades de mesmo ID num valor ESTÁVEL: campo divergente
+// vira a lista ordenada dos valores. Sem isto, a ordem da coleta decidiria qual
+// das duas venceu, e a mesma máquina daria drift contra si mesma.
+func fundir(a, b Entidade, multiplo map[string]bool) Entidade {
+	out := Entidade{ID: a.ID, Campos: map[string]string{}, Alvos: unirAlvos(a.Alvos, b.Alvos)}
+	out.Fonte = a.Fonte
+	if out.Fonte == "" {
+		out.Fonte = b.Fonte
+	}
+	// NÃO OBSERVADO CONTAMINA A FUSÃO, e é o lado seguro: se uma das duas
+	// entidades de mesmo ID teve o campo às cegas, o valor fundido não pode ser
+	// afirmado — ele é a soma de uma leitura com um desconhecido.
+	for _, e := range []Entidade{a, b} {
+		for k := range e.NaoObservado {
+			if out.NaoObservado == nil {
+				out.NaoObservado = map[string]bool{}
+			}
+			out.NaoObservado[k] = true
+		}
+	}
+	for k, v := range a.Campos {
+		out.Campos[k] = v
+	}
+	for k, v := range b.Campos {
+		ja, existe := out.Campos[k]
+		// MULTICONJUNTO nos campos que a família declarou: valor repetido entra
+		// DE NOVO, e `A,A,B` deixa de ser igual a `A,B,B`. Nos demais, valor
+		// igual colapsa — que é o certo para campo que faz parte do ID e não
+		// pode variar dentro dele.
+		if !existe || (ja == v && !multiplo[k]) {
+			out.Campos[k] = v
+			continue
+		}
+		partes := append(strings.Split(ja, "\x1f"), v)
+		sort.Strings(partes)
+		out.Campos[k] = strings.Join(partes, "\x1f")
+	}
+	return out
+}
+
+func unirAlvos(a, b []string) []string {
+	vistos := map[string]bool{}
+	var out []string
+	for _, v := range append(append([]string{}, a...), b...) {
+		if v != "" && !vistos[v] {
+			vistos[v] = true
+			out = append(out, v)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ordenar serializa os campos de uma entidade para a evidência de "surgiu" e
+// "sumiu", em ordem estável.
+func ordenar(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k, v := range m {
+		if v == "" {
+			continue
+		}
+		out = append(out, k+"="+v)
+	}
+	sort.Strings(out)
+	return out
+}

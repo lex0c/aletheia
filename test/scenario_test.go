@@ -11,9 +11,12 @@ package test
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,6 +82,17 @@ type partialJSON struct {
 type notCheckedJSON struct {
 	ID     string `json:"id"`
 	Reason string `json:"reason"`
+	// Escopo separa as DUAS coisas que moram em not_checked, e a distinção é a
+	// mesma que o motor faz: lacuna é o que não rodou e devia; escopo é a
+	// pergunta que não existe neste host — ela sai do DENOMINADOR e não derruba
+	// a cobertura.
+	//
+	// O harness lia as duas como lacuna, e por muito tempo isso não custou nada
+	// porque quase nada era escopo. Deixou de ser verdade quando os checks de
+	// drift entraram: sem estado anterior informado eles são escopo puro, e todo
+	// cenário de host limpo passou a "ter cinco lacunas" que a cobertura, na
+	// mesma execução, contava como 109/109.
+	Escopo bool `json:"out_of_scope"`
 }
 
 // lacunas devolve TODO motivo de lacuna declarado na execução, venha ele de um
@@ -91,6 +105,10 @@ func (r result) lacunas() []string {
 		}
 	}
 	for _, n := range r.coverage.NotChecked {
+		if n.Escopo {
+			// Fora de escopo não é lacuna — ver notCheckedJSON.Escopo.
+			continue
+		}
 		out = append(out, n.ID+" NÃO RODOU: "+n.Reason)
 	}
 	return append(out, r.coverage.CollectorGaps...)
@@ -254,7 +272,7 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 	// esta ferramenta promete é dizer o que NÃO pôde olhar. Conferir isso pelo
 	// texto do relatório não servia — o motivo da lacuna só sai com --coverage
 	// ou -v, e um cenário sem essas flags cobrava um texto que nunca ia aparecer.
-	anotarUsoDeAmbiente(r.lacunas())
+	anotarUsoDeAmbiente(sc, r.lacunas())
 
 	if len(sc.ExpectGap) > 0 {
 		lac := strings.Join(r.lacunas(), "\n")
@@ -325,7 +343,7 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 		}
 	}
 	if sc.MustBeComplete {
-		if fora := scenario.FiltraAmbientais(r.lacunas()); len(fora) == 0 {
+		if fora := scenario.FiltraAmbientais(sc, r.lacunas()); len(fora) == 0 {
 			// Cobertura completa A MENOS das lacunas que este ambiente impõe. É
 			// o contrato que o cenário sempre quis: ele afirma coisas sobre o
 			// host que MONTA, não sobre a máquina de quem roda a suíte.
@@ -375,10 +393,16 @@ var gapsAmbientaisUsados sync.Map
 // de VM ausente (sem qemu), não suíte incompleta por defeito.
 var vmRodou atomic.Int64
 
-func anotarUsoDeAmbiente(lacunas []string) {
+// kernelsRodados guarda os kernels que a execução chegou a bootar, pelo mesmo
+// motivo do vmRodou: entrada recortada por kernel não pode ser cobrada por uma
+// execução que nunca subiu aquele kernel.
+var kernelsRodados sync.Map
+
+func anotarUsoDeAmbiente(sc scenario.Scenario, lacunas []string) {
+	kernelsRodados.Store(sc.Kernel, true)
 	for _, l := range lacunas {
 		for _, g := range scenario.GapsDoAmbiente {
-			if strings.Contains(l, g.Contem) {
+			if g.ValeNoKernel(sc.Kernel) && strings.Contains(l, g.Contem) {
 				gapsAmbientaisUsados.Store(g.Contem, true)
 			}
 		}
@@ -400,7 +424,7 @@ func exitSoPorAmbiente(sc scenario.Scenario, r result) bool {
 	if sc.Exit != 0 || r.exit != 1 || r.coverage.Verdict != "INCOMPLETE" {
 		return false
 	}
-	if len(scenario.FiltraAmbientais(r.lacunas())) > 0 {
+	if len(scenario.FiltraAmbientais(sc, r.lacunas())) > 0 {
 		return false
 	}
 	for _, f := range r.findings {
@@ -546,6 +570,7 @@ func runVM(t *testing.T, sc scenario.Scenario) result {
 	if _, err := os.Stat(initramfs); err != nil {
 		t.Skipf("initramfs%s ausente — rode `make vm-image`: %v", suffix, err)
 	}
+	conferirInitramfs(t, suffix)
 	kernel := kernelFor(t, sc)
 
 	logf := filepath.Join(t.TempDir(), "serial.log")
@@ -587,6 +612,83 @@ func runVM(t *testing.T, sc scenario.Scenario) result {
 
 // kernelFor resolve o kernel do guest. Pular por ausência é aceitável; pular em
 // SILÊNCIO não é — a mensagem diz exatamente o que rodar.
+// conferirInitramfs recusa rodar o tier de VM contra um initramfs que NÃO
+// contém o binário desta árvore.
+//
+// # O verde mais caro que existe é o que testa outra coisa
+//
+// O initramfs é artefato de build, e nem `make scenarios` nem
+// `make scenarios-container` o reconstroem: eles usam o que o último
+// `make vm-image` deixou em dist/vm. O binário sob teste, então, é o que sobrou
+// — e o resultado é uma suíte que sobe seis microVMs, passa, e não diz nada
+// sobre o código que está na árvore.
+//
+// Não é hipótese. Foi medido nesta base: um initramfs de horas antes carregava
+// um aletheia de SchemaVersion 6 enquanto a árvore já estava no 9, e o tier de
+// VM vinha verde a sessão inteira sobre código que não existia mais. O que
+// denunciou foi um acidente — uma comparação de drift recusou o dump por
+// esquema incompatível.
+//
+// A recusa é PULO e não falha, pelo mesmo motivo dos outros guardas deste
+// arquivo: initramfs desatualizado é condição de ambiente de quem roda, não
+// defeito do código. E o pulo é alto — com motivo e com o comando que conserta.
+// O anti-apodrecimento das lacunas ambientais já sabe distinguir "o tier de VM
+// não participou" (vmRodou), então pular aqui não cobra ninguém por ausência.
+func conferirInitramfs(t *testing.T, suffix string) {
+	t.Helper()
+	marcador, err := filepath.Abs("../dist/vm/binarios" + suffix + ".txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(marcador)
+	if err != nil {
+		t.Skipf("o initramfs%s não declara quais binários carrega (dist/vm/binarios%s.txt "+
+			"ausente): ele é anterior a esta verificação e pode conter qualquer "+
+			"versão. Rode `make vm-image`", suffix, suffix)
+	}
+	embutido := map[string]string{}
+	for _, ln := range strings.Split(string(b), "\n") {
+		if campos := strings.Fields(ln); len(campos) == 2 {
+			embutido[campos[0]] = campos[1]
+		}
+	}
+	for _, nome := range []string{"aletheia", "helper"} {
+		atual, err := somaDoArquivo("../dist/" + nome + suffix)
+		if err != nil {
+			t.Skipf("dist/%s%s ilegível: %v", nome, suffix, err)
+		}
+		if embutido[nome] != atual {
+			t.Skipf("o initramfs%s carrega um %s DIFERENTE do que está na árvore "+
+				"(%s… no guest, %s… aqui): o tier de VM testaria outro binário e "+
+				"passaria verde sobre código que não existe mais. Rode `make vm-image`",
+				suffix, nome, primeiros(embutido[nome]), primeiros(atual))
+		}
+	}
+}
+
+func somaDoArquivo(caminho string) (string, error) {
+	fh, err := os.Open(caminho)
+	if err != nil {
+		return "", err
+	}
+	defer fh.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, fh); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func primeiros(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	if s == "" {
+		return "(ausente)"
+	}
+	return s
+}
+
 func kernelFor(t *testing.T, sc scenario.Scenario) string {
 	t.Helper()
 	if sc.Kernel == "" {
@@ -931,6 +1033,11 @@ func TestGapsDoAmbienteSaoUsados(t *testing.T) {
 			// O tier de VM não rodou (sem qemu): esta entrada não teve chance de
 			// casar, e cobrá-la seria falhar por execução parcial.
 			continue
+		}
+		if g.SoNoKernel != "" {
+			if _, bootou := kernelsRodados.Load(g.SoNoKernel); !bootou {
+				continue
+			}
 		}
 		if _, ok := gapsAmbientaisUsados.Load(g.Contem); !ok {
 			t.Errorf("a lacuna ambiental %q não apareceu em execução nenhuma da suíte.\n"+

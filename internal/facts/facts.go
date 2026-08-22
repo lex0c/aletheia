@@ -136,7 +136,127 @@ import (
 //	     porque o truque mora numa linha de COMENTÁRIO, que Lines descarta. Num
 //	     dump v7 o campo vem 0, e 0 significa "este arquivo foi lido e não tem
 //	     escape nenhum" para `antiforense.hidden_text`.
-const SchemaVersion = 8
+//	9  A COMPARAÇÃO entre dois retratos (internal/drift) passou a existir, e ela
+//	   pergunta coisas que nenhum check perguntava. Num dump v8 as quatro
+//	   respostas vêm no zero-value, e zero-value aqui significa a coisa errada:
+//
+//	   SocketsIncompletos  quais tabelas de /proc/net NÃO saíram inteiras. Vazio
+//	     num dump v8 significa "todas saíram", e uma tabela truncada faz uma
+//	     porta que continua lá aparecer como REMOVIDA.
+//	   ShadowLido  se /etc/shadow foi lido. Falso num dump v8 é indistinguível
+//	     de "não foi lido", o que é o lado seguro — mas Account.SemSenha
+//	     continua vindo `false` para toda conta, e `false` ali significava as
+//	     duas coisas ao mesmo tempo.
+//	   CACert.SPKI/Fingerprint  a chave e o certificado. Vazios num dump v8, e
+//	     sem eles trocar uma CA por outra com o MESMO DN não muda nada que a
+//	     comparação olhe: a autoridade de confiança do host inteiro troca em
+//	     silêncio.
+//	     NSSServicos  a cadeia de resolução NA ORDEM. Vazia num dump v8, e sem
+//	     ela `passwd: files sss` e `passwd: sss files` são o mesmo fato — as
+//	     mesmas fontes, e a autoridade sobre quem é usuário trocada de lado.
+//	     (No 9 a cadeia era só a sequência de FONTES. Os blocos de ação
+//	     entraram no 11, como texto, e viraram tabela efetiva no 12.)
+//	10 ModulosLidos  separa "li /proc/modules" de "li a árvore /lib/modules",
+//	   que compartilhavam a chave de lacuna `modulo`. Falso num dump v9 faz a
+//	   família de módulos ser recusada por inteiro — o lado seguro, e ainda
+//	   assim uma perda: a lacuna da árvore só nasce QUANDO HÁ MÓDULO CARREGADO,
+//	   então carregar um módulo apagava a comparação que o denunciaria.
+//	11 PasswdLido, GroupLido e SudoersLido  o mesmo remédio para a chave `users`,
+//	   que cobria QUATRO arquivos com privilégios diferentes. Num dump v10 os
+//	   três vêm falsos, e as famílias de conta, grupo e regra de sudo recusam a
+//	   comparação inteira — de novo o lado seguro, e de novo uma perda: sem root
+//	   o shadow é sempre ilegível, então a chave estava sempre suja e uma conta
+//	   uid 0 NOVA ficava calada porque outro arquivo não abriu.
+//
+//	   NSSService.Cadeia mudou de SEMÂNTICA no mesmo número: ela passou a
+//	   incluir os blocos de ação (`[notfound=return]`), que decidem se a próxima
+//	   fonte é consultada. Num dump v10 a cadeia vem sem eles, e duas
+//	   configurações de comportamento diferente seriam o mesmo fato.
+//	12 NSSService.Cadeia de novo, e de novo só a semântica: os blocos de ação
+//	   passaram a ser resolvidos para a TABELA EFETIVA e colados na fonte a que
+//	   se aplicam, com o que É PADRÃO omitido.
+//
+//	   No 11 eles eram texto canonicalizado, e texto não sabe que
+//	   `[SUCCESS=return]` é exatamente o que a glibc faz sem bloco nenhum, nem
+//	   que a ordem dos termos de uma tabela não significa nada. As duas coisas
+//	   faziam reescrita de configuração virar drift. Num dump v11 a cadeia traz
+//	   os blocos crus, e compará-la com uma cadeia v12 acusaria mudança onde
+//	   houve reformatação.
+//	13 DoasLido  a quarta vez que a chave `users` cobria demais. A família de
+//	   regras de doas dependia dela, e sem root o shadow é sempre ilegível — o
+//	   que suprimia `surgiu` de regra de doas em Alpine e Arch, onde o doas É o
+//	   mecanismo de escalada. Falso num dump v12 recusa a comparação da família,
+//	   que é o lado seguro.
+//	15 A sétima e a oitava, e as duas introduzidas pelos DOIS COMMITS
+//	   ANTERIORES: famílias novas herdando chave de lacuna já em uso. `loader`
+//	   cobre ld.so.preload, a cadeia do ld.so.conf e o env de unit; `binfmt`
+//	   cobre o registro vivo e os arquivos de binfmt.d. Num dump v14 os quatro
+//	   fatos vêm falsos e as famílias recusam a comparação — o lado seguro.
+//
+//	   Foi a repetição que motivou a catraca: nenhuma família nova pode
+//	   compartilhar chave de lacuna com outra, e toda que ainda usa uma precisa
+//	   declarar por escrito que conferiu o alcance dela.
+//	14 A quinta e a sexta vez que uma chave de lacuna cobria fontes demais, e a
+//	   última: `ssh` juntava sshd_config, authorized_keys e config do cliente;
+//	   `trust` juntava âncoras de TLS, /etc/hosts, resolvedor e rhosts. Um
+//	   authorized_keys de outro usuário ilegível suprimia a comparação de um
+//	   ProxyCommand perfeitamente lido; um diretório de CA ilegível suprimia um
+//	   nome fixado no /etc/hosts.
+//
+//	   SSHServerColetado/Completo, SSHChavesCompleto, SSHClienteCompleto,
+//	   CACertsCompleto, HostsLido, ResolverLido, HostTrustCompleto  num dump v13
+//	   os oito vêm falsos, e as famílias correspondentes recusam a comparação
+//	   inteira — o lado seguro.
+//	   SSHClientExec.Escopo  o bloco `Host`/`Match` a que a diretiva pertence.
+//	     Vazio num dump v13, e sem ele dois ProxyCommand de destinos diferentes
+//	     colidem na mesma identidade: TROCAR os destinos entre si mantinha o
+//	     conjunto de comandos e invertia o comportamento, sem drift nenhum.
+//	16 A nona, a décima e a décima primeira — e as três são a MESMA lição um
+//	   nível abaixo da catraca do 15: ela impede duas famílias de dividirem uma
+//	   chave, e não impede uma chave (ou um fato) de ter escritores com
+//	   significados diferentes.
+//
+//	   ModuleConfigCompleto  a chave `modprobe` é escrita pelo coletor de
+//	     modprobe.d E pela caminhada de /lib/modules. Uma subárvore de módulos
+//	     ilegível suprimia a comparação de modprobe.d.
+//	   LoaderEnvCompleto  `LoaderPathCompleto` era derrubado por
+//	     /etc/environment e pam_env.conf, que alimentam EnvVars e não os
+//	     SearchDirs. Um pam_env.conf ilegível suprimia a comparação do caminho
+//	     de busca de biblioteca.
+//	   HelpersLidos  a fonte é /proc e /sys, e em modo image o coletor nem
+//	     roda. Sem o fato, comparar vivo com imagem lia a lista vazia como
+//	     helper REMOVIDO.
+//
+//	   Num dump v15 os três vêm falsos e as famílias correspondentes recusam a
+//	   comparação — o lado seguro, e o mesmo custo dos anteriores.
+//
+//	   Loader.EnvVars ganhou família própria (`loader.env`) no mesmo número: um
+//	   LD_PRELOAD global em /etc/environment é a mesma superfície do
+//	   ld.so.preload por outra porta, e ela não era comparada por ninguém. E a
+//	   ORDEM dos SearchDirs ganhou a `loader.order`: os mesmos diretórios
+//	   reordenados eram as mesmas entidades, e trocar a precedência de soname
+//	   não produzia drift nenhum. Nenhuma das duas mexe em campo serializado —
+//	   entram aqui porque um dump v15 comparado com um v16 responde diferente
+//	   sobre a MESMA fonte.
+//	17 A observabilidade desce ao CAMPO, e essa é a mudança de forma — não de
+//	   conteúdo — que motiva o número.
+//
+//	   MAC.ConfigLido e MAC.RuntimeLido  o /etc/selinux/config e o
+//	     /sys/fs/selinux/enforce são leituras independentes com permissões
+//	     diferentes, e a comparação tinha um estado só para as duas: o
+//	     securityfs ilegível calava a mudança PERSISTENTE no arquivo. Falsos
+//	     num dump v16, e a família recusa os dois campos — o lado seguro.
+//	   Loader.EnvDeUnit  o `Environment=`/`EnvironmentFile=` de unit saiu da
+//	     mesma lista do /etc/environment e virou fato próprio, com o valor
+//	     EFETIVO (a última atribuição vence, que é o que o systemd faz) e a
+//	     incerteza POR UNIT. Vazio num dump v16, e a família `unit.env` não
+//	     compara nada — o que era, até aqui, o comportamento de fato.
+//
+//	   Loader.EnvVars mudou de SEMÂNTICA no mesmo número: ela também passou a
+//	   guardar só o valor efetivo por arquivo. Num dump v16 ela traz todas as
+//	   atribuições, e comparar as duas versões acusaria remoção onde houve
+//	   apenas uma linha sombreada que deixou de ser guardada.
+const SchemaVersion = 17
 
 // Facts é o retrato do host.
 type Facts struct {
@@ -154,6 +274,17 @@ type Facts struct {
 	Host      Host      `json:"host"`
 	Processes []Process `json:"processes,omitempty"`
 	Sockets   []Socket  `json:"sockets,omitempty"`
+	// SocketsIncompletos são os protocolos cuja tabela de /proc/net NÃO foi
+	// lida inteira — ilegível ou cortada no teto de linhas.
+	//
+	// A lacuna já era declarada em texto sob a chave `net`, e isso não bastava:
+	// aquela chave carrega desde "o módulo de diagnóstico de UDP não está
+	// carregado" até "o dono do socket não pôde ser lido", e quem compara dois
+	// retratos precisa saber especificamente se o CONJUNTO que ele está
+	// comparando é exaustivo. Sem este campo, uma tabela truncada fazia uma
+	// porta que continua lá aparecer como REMOVIDA — "não vi" virando "não
+	// existe", que é a equivalência que esta ferramenta existe para recusar.
+	SocketsIncompletos []string `json:"sockets_incomplete,omitempty"`
 	// LimitesRede são os tetos contra os quais a contagem de conexões vale
 	// alguma coisa. Ver LimitesDeRede.
 	LimitesRede LimitesDeRede `json:"net_limits,omitempty"`
@@ -172,7 +303,16 @@ type Facts struct {
 	Units       []Unit       `json:"units,omitempty"`
 	// NSSModules são as fontes do /etc/nsswitch.conf e a lib que cada uma
 	// carrega — um libnss_ sem dono é backdoor carregado em toda resolução.
-	NSSModules    []NSSModule     `json:"nss_modules,omitempty"`
+	NSSModules []NSSModule `json:"nss_modules,omitempty"`
+	// NSSServicos é a configuração EFETIVA do nsswitch: um serviço, e a cadeia
+	// de fontes NA ORDEM em que ele as consulta.
+	//
+	// NSSModules responde "quais bibliotecas podem ser carregadas", e é
+	// inventário. Ele não responde precedência: agrupado por FONTE, ele perde
+	// que `passwd: files sss` e `passwd: sss files` são configurações
+	// diferentes — as mesmas fontes, as mesmas libs, e a autoridade sobre quem
+	// é usuário invertida.
+	NSSServicos   []NSSService    `json:"nss_services,omitempty"`
 	ToolArtifacts []ToolArtifact  `json:"tool_artifacts,omitempty"`
 	Cron          []CronEntry     `json:"cron,omitempty"`
 	SSH           SSHConfig       `json:"ssh"`
@@ -189,11 +329,108 @@ type Facts struct {
 	Pkg             PkgDB             `json:"pkg"`
 	Ownership       []Ownership       `json:"ownership,omitempty"`
 	Accounts        []Account         `json:"accounts,omitempty"`
-	Grupos          []Grupo           `json:"groups,omitempty"`
-	Sudoers         []SudoRule        `json:"sudoers,omitempty"`
-	Doas            []DoasRule        `json:"doas,omitempty"`
-	Suid            []SuidFile        `json:"suid,omitempty"`
-	Donos           []DonoDeArquivo   `json:"file_owners,omitempty"`
+	// PasswdLido, GroupLido, ShadowLido e SudoersLido são QUATRO fatos, e não
+	// um, porque as quatro leituras têm privilégio e destino diferentes — e as
+	// quatro compartilhavam a MESMA chave de lacuna (`users`).
+	//
+	// O efeito de compartilhar era um falso negativo grave: sem root o shadow é
+	// SEMPRE ilegível, então a chave `users` está sempre suja, e uma família que
+	// a consumisse parava de reportar CONTA NOVA por causa disso. Uma conta uid
+	// 0 acrescentada entre dois retratos — o achado mais direto que existe —
+	// ficava calada porque outro arquivo não abriu.
+	//
+	// A presença de uma conta vem do /etc/passwd; a de um grupo, do /etc/group;
+	// a senha vazia, do /etc/shadow; a regra, da árvore de sudoers. Cada família
+	// pergunta pela SUA fonte.
+	PasswdLido bool `json:"passwd_read,omitempty"`
+	GroupLido  bool `json:"group_read,omitempty"`
+	// A CHAVE `ssh` COBRE TRÊS FONTES COM PRIVILÉGIOS E DONOS DIFERENTES —
+	// sshd_config, authorized_keys de cada home, e config do cliente —, e a
+	// consequência é a mesma que a chave `users` tinha: um authorized_keys de
+	// outro usuário ilegível suprimia a comparação de um ProxyCommand
+	// perfeitamente observado. Três fatos, um por fonte.
+	//
+	// SSHServerColetado separa "este host não tem servidor SSH" de "não
+	// consegui ler a configuração dele" — sem ele, um host que GANHA sshd entre
+	// dois retratos tinha o `surgiu` suprimido, porque a ausência de arquivos
+	// era lida como desconhecimento.
+	SSHServerColetado  bool `json:"ssh_server_collected,omitempty"`
+	SSHServerCompleto  bool `json:"ssh_server_complete,omitempty"`
+	SSHChavesCompleto  bool `json:"ssh_keys_complete,omitempty"`
+	SSHClienteCompleto bool `json:"ssh_client_complete,omitempty"`
+
+	// E a chave `trust` cobre QUATRO: âncoras de TLS, /etc/hosts, o resolvedor
+	// e os arquivos de confiança entre hosts. Mesma história, quatro fatos.
+	CACertsCompleto   bool `json:"ca_complete,omitempty"`
+	HostsLido         bool `json:"hosts_read,omitempty"`
+	ResolverLido      bool `json:"resolver_read,omitempty"`
+	HostTrustCompleto bool `json:"host_trust_complete,omitempty"`
+
+	// A SÉTIMA E A OITAVA vez, e as duas fui EU quem introduziu: dar a uma
+	// família nova uma chave de lacuna que já estava em uso.
+	//
+	// `loader` cobre TRÊS superfícies — o /etc/ld.so.preload, a cadeia do
+	// ld.so.conf, e o arquivo de env de uma unit. `binfmt` cobre DUAS — o
+	// registro vivo em /proc/sys/fs/binfmt_misc e os arquivos de binfmt.d. Com
+	// uma chave só, um ld.so.conf.d ilegível suprimia a comparação do
+	// ld.so.preload, e um binfmt.d ilegível suprimia a do registro vivo.
+	// NSSLido serve às DUAS famílias de nsswitch — o inventário de módulos e a
+	// cadeia efetiva. Elas vêm do mesmo arquivo e do mesmo coletor, então o
+	// fato é um só; o que não pode é elas dependerem da CHAVE, que é do
+	// operador e pode ganhar outro escritor sem ninguém notar.
+	NSSLido bool `json:"nss_read,omitempty"`
+
+	// TRÊS fatos para o loader, e não dois. A separação anterior parou no meio:
+	// `LoaderPathCompleto` era derrubado tanto pela cadeia do ld.so.conf — que
+	// é a fonte dos SearchDirs — quanto por /etc/environment e pam_env.conf,
+	// que alimentam EnvVars e não têm nada a ver com o caminho de busca. Um
+	// pam_env.conf ilegível suprimia a comparação de um /opt/.lib recém-nascido
+	// no ld.so.conf.d, que era exatamente a mudança que interessava.
+	//
+	// É o mesmo defeito das oito chaves largas, um nível abaixo: ali a chave do
+	// operador cobria fontes demais, aqui o FATO de completude cobria.
+	LoaderPreloadLido    bool `json:"loader_preload_read,omitempty"`
+	LoaderPathCompleto   bool `json:"loader_path_complete,omitempty"`
+	LoaderEnvCompleto    bool `json:"loader_env_complete,omitempty"`
+	BinfmtVivoCompleto   bool `json:"binfmt_live_complete,omitempty"`
+	BinfmtConfigCompleto bool `json:"binfmt_config_complete,omitempty"`
+
+	// ModuleConfigCompleto é de /etc/modules, modules-load.d e modprobe.d, e de
+	// mais nada. A chave `modprobe` tem DOIS escritores com significados
+	// diferentes: este coletor e a caminhada de /lib/modules, que a emite
+	// quando uma subárvore não lista ou quando o teto de diretórios estoura.
+	// Uma subárvore de módulos ilegível suprimia a comparação de um
+	// modprobe.d perfeitamente lido.
+	ModuleConfigCompleto bool `json:"module_config_complete,omitempty"`
+
+	// HelpersLidos separa "este kernel não invoca nada" de "esta fonte não
+	// existe aqui". Os três valores (modprobe, core_pattern, uevent_helper)
+	// moram em /proc e /sys: em modo IMAGE o coletor nem roda, e a lista sai
+	// vazia. Sem este fato, comparar um retrato vivo com um de imagem lia a
+	// lista vazia como HELPER REMOVIDO — a forma exata do falso positivo que
+	// esta ferramenta existe para não cometer.
+	HelpersLidos bool `json:"kernel_helpers_read,omitempty"`
+
+	// DoasLido é o mesmo para /etc/doas.conf e /etc/doas.d — em Alpine e Arch o
+	// doas É o mecanismo de escalada, e a família dele não pode depender da
+	// chave `users` pela mesma razão que as outras três não podem.
+	DoasLido bool `json:"doas_read,omitempty"`
+	// SudoersLido é falso quando QUALQUER arquivo da árvore de include não pôde
+	// ser lido: aí a lista de regras deixa de ser exaustiva, e comparar dois
+	// retratos com conjuntos diferentes inventa "regra removida".
+	SudoersLido bool `json:"sudoers_read,omitempty"`
+
+	// ShadowLido diz se /etc/shadow pôde ser lido. Sem ele, Account.SemSenha e
+	// Account.Bloqueada vêm no zero-value `false` para TODA conta — e `false`
+	// ali significa "não sei", não "tem senha". A lacuna é declarada sob
+	// `users`, mas em granularidade de família: quem compara campo precisa
+	// saber por CAMPO.
+	ShadowLido bool            `json:"shadow_read,omitempty"`
+	Grupos     []Grupo         `json:"groups,omitempty"`
+	Sudoers    []SudoRule      `json:"sudoers,omitempty"`
+	Doas       []DoasRule      `json:"doas,omitempty"`
+	Suid       []SuidFile      `json:"suid,omitempty"`
+	Donos      []DonoDeArquivo `json:"file_owners,omitempty"`
 	// SuidDirs e SuidArquivos medem o CUSTO da varredura de filesystem, para o
 	// relatório de tempo dizer por que ela demorou.
 	SuidDirs     int `json:"suid_dirs,omitempty"`
@@ -249,6 +486,14 @@ type Facts struct {
 	// Carregados são os módulos que o kernel tem DENTRO dele agora, cada um
 	// confrontado com o arquivo que deveria explicá-lo.
 	Carregados []ModuloCarregado `json:"loaded_modules,omitempty"`
+	// ModulosLidos diz que /proc/modules foi lido — o CONJUNTO é conhecido.
+	//
+	// Separado do ArvoreDeModulos logo abaixo de propósito: aquele diz que a
+	// árvore em DISCO foi lida, e é dela que sai o arquivo de cada módulo. Os
+	// dois compartilhavam a mesma chave de lacuna, e o efeito era perverso —
+	// a lacuna da árvore só nasce QUANDO HÁ MÓDULO CARREGADO, então carregar um
+	// módulo suprimia a comparação que o denunciaria. Medido numa VM.
+	ModulosLidos bool `json:"modules_read,omitempty"`
 	// ArvoreDeModulos diz que /lib/modules foi encontrada e lida. Sem ela,
 	// "módulo sem arquivo" não significa nada — significa que ninguém olhou.
 	ArvoreDeModulos bool `json:"module_tree_read,omitempty"`
@@ -304,6 +549,10 @@ type Facts struct {
 	// Partial registra o que a própria coleta não conseguiu ler, por coletor.
 	// Não é o mesmo que "não havia nada": é "não deu para olhar".
 	Partial map[string][]string `json:"partial,omitempty"`
+
+	// DriftDados é a comparação com um estado anterior, quando alguém pediu
+	// uma. NÃO viaja no dump — ver o tipo Drift.
+	DriftDados *Drift `json:"-"`
 
 	idx *idx
 

@@ -3,7 +3,7 @@
 GERADO de `internal/checks` e `test/scenario`. Não edite à mão:
 `go test ./test/scenario -run TestDocumentoDeCenarios -update`.
 
-109 checks, 214 cenários.
+128 checks, 220 cenários.
 
 Um **check** é uma pergunta que a ferramenta faz ao host. Um **cenário** é um
 host montado de propósito — em contêiner, imagem ou microVM — que prova a
@@ -30,15 +30,19 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `manual.cloud_audit` *(manual)* | 10.4 | a evidência que o root do host não apaga está fora da caixa | — |
 | `persist.cloud_metadata` *(manual)* | 7.12 | startup-script no metadata da nuvem: fora do alcance desta varredura | — |
 
-### `integrity` (6)
+### `integrity` (10)
 
 | check | § | o que acusa | provado por |
 |---|---|---|---|
+| `integrity.defense_drift` | 34 | o estado de um controle de segurança mudou desde o retrato anterior | `DR5-drift-de-defesa-desligada` |
+| `integrity.drift_coverage` | 39.3 | o que a comparação com o retrato anterior NÃO alcançou | `DR1-drift-de-persistencia`, `DR2-drift-sem-mudanca-e-silencio` |
 | `integrity.immutable_flag` | 21 | arquivo travado por atributo de inode: a remoção falha até ele sair | `C2-implante-imutavel` |
 | `integrity.no_package_owner` | 24 | binário em execução ou agendado que nenhum pacote reivindica | `100-azazel-userland`, `101-nss-backdoor`, `18b-nome-de-runtime-sem-pacote-nao-compra-isencao` +16 |
 | `integrity.pkg_file_modified` | 24 | arquivo entregue por um pacote não confere com o que o pacote declara | `92-userland-trojanizado` |
 | `integrity.pkgdb_tampered` | 24 | a base de pacotes reivindica arquivo onde distribuição nenhuma instala | `A1-implante-empacotado` |
+| `integrity.suid_drift` | 7.10 | bit de privilégio mudou desde o retrato anterior | `DR4-drift-das-sete-superficies` |
 | `integrity.timestomp` | 9 | data de modificação muito anterior à de metadados: a evidência temporal foi mexida | `A4-data-forjada` |
+| `integrity.trust_drift` | 7.11 | em quem este host confia mudou desde o retrato anterior | `DR4-drift-das-sete-superficies`, `DR5-drift-de-defesa-desligada` |
 | `path.hidden_exec` | 8 | executável escondido em diretório com ponto, sob árvore temporária | `H2-executavel-escondido` |
 
 ### `ioc` (1)
@@ -47,7 +51,7 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 |---|---|---|---|
 | `ioc.match` | 23 | indicador deste incidente encontrado neste host | `P10-tag-de-ebpf-como-indicador`, `R1-indicador-encontrado` |
 
-### `kernel` (13)
+### `kernel` (16)
 
 | check | § | o que acusa | provado por |
 |---|---|---|---|
@@ -59,13 +63,16 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `kernel.binfmt_interpreter` | 7.12 | o kernel roteia execução para um interpretador registrado | `GB4-binfmt-registro-vivo`, `U3-binfmt-com-interpretador-plantado` |
 | `kernel.bpf_inventory` | 35 | o que está instrumentando este kernel por eBPF | `50-kernel-3.18-limpo`, `P1-bpf-sem-dono`, `P2-bpf-com-dono-nao-acusa` +3 |
 | `kernel.bpf_unowned` | 35 | programa eBPF carregado no kernel sem nenhum dono visível | `P1-bpf-sem-dono`, `P10-tag-de-ebpf-como-indicador`, `P8-bpfdoor-completo` |
-| `kernel.ftrace_hook` | 35.3 | função de enumeração do kernel interceptada: algo está sendo escondido | `G3-hook-de-ftrace-em-vm`, `RK-duplo-hide-ftrace`, `RK3-multivetor-cegueira-parcial` |
+| `kernel.ftrace_hook` | 35.3 | função de enumeração do kernel interceptada: algo está sendo escondido | `G3-hook-de-ftrace-em-vm`, `RK-duplo-hide-ftrace`, `RK-thread-count` +1 |
+| `kernel.load_drift` | 34 | o que o kernel carrega ou invoca mudou desde o retrato anterior | `DR5-drift-de-defesa-desligada` |
 | `kernel.module_no_file` | 35.3 | módulo carregado sem arquivo em disco que o explique | `Z1-modulo-carregado-sem-arquivo`, `Z2-modulo-sem-assinatura-e-sem-arquivo` |
 | `kernel.mount_over_system` | 35 | montagem por cima de diretório de sistema: esconde o que está embaixo | `G4-montagem-que-esconde-em-vm` |
 | `kernel.protection_context` | 35.7 | o que este kernel permite a si mesmo: assinatura, lockdown, IMA | `Z1-modulo-carregado-sem-arquivo`, `Z2-modulo-sem-assinatura-e-sem-arquivo`, `Z3-em-container-o-check-se-cala` |
+| `kernel.protection_drift` | 34 | o endurecimento do kernel mudou desde o retrato anterior | `DR6-drift-de-endurecimento-do-kernel` |
+| `kernel.surface_drift` | 34 | o que o kernel executa mudou desde o retrato anterior | `DR4-drift-das-sete-superficies` |
 | `kernel.taint_unexplained` | 35.3 | o kernel registra um módulo que nenhum módulo carregado admite | `P5-taint-sem-modulo-que-admita` |
 
-### `net` (9)
+### `net` (10)
 
 | check | § | o que acusa | provado por |
 |---|---|---|---|
@@ -74,12 +81,13 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `manual.exfil_volume` *(manual)* | 37.2 | quanto saiu: o host mediu sem querer, em lugares que esta varredura não lê | — |
 | `net.backend_exposed` | 15 | serviço usado só pelo proxy local, mas exposto para a rede inteira | `W2-backend-so-do-proxy-mas-aberto` |
 | `net.egress_unowned` | 2.1 | conexão para endereço público a partir de binário que nenhum pacote entregou | `71-adversario-competente`, `86-c2-por-origem`, `99-minerador-fala-com-pool` +2 |
+| `net.listen_drift` | 7.2 | porta em escuta mudou desde o retrato anterior | `DR4-drift-das-sete-superficies` |
 | `net.listener_unowned` | 14 | porta exposta para fora por binário que nenhum pacote entregou | `87-backdoor-de-escuta`, `88-servico-substituido` |
 | `net.packet_socket` | 2.6 | quem consegue ler o tráfego deste host | `102-symbiote`, `P8-bpfdoor-completo`, `P9-socket-de-captura-sem-implante` |
 | `net.pivot` | 12.2 | pivô: saída externa e saída interna no mesmo processo | `42-pivot`, `Q1-pool-php-fpm-nao-vira-parede` |
 | `net.vector_same_user` | 14 | por onde a entrada pode ter acontecido: serviços do mesmo usuário | `W3-vetor-estreitado-pelo-usuario` |
 
-### `persist` (41)
+### `persist` (48)
 
 | check | § | o que acusa | provado por |
 |---|---|---|---|
@@ -90,9 +98,11 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `antiforense.wtmp_cleared` | 12 | há sessão aberta e nenhum registro de login: o histórico foi zerado | `F2-sessao-sem-registro` |
 | `correlate.persistence_redundant` | 7 | o mesmo alvo persistido por vários mecanismos diferentes | `66-cadeia-completa`, `81-minerador-oportunista`, `94-xorddos` +2 |
 | `persist.at_job` | 7.4 | job do at agendado: dispara uma vez, no futuro | `62-cron-e-chaves`, `63-cron-e-chaves-em-imagem` |
+| `persist.authorized_key_drift` | 7.3 | chave autorizada de SSH mudou desde o retrato anterior | `DR1-drift-de-persistencia` |
 | `persist.bash_env` | 7.6 | BASH_ENV definido: executa em shell NÃO interativo | `64-gatilhos-de-execucao` |
 | `persist.binfmt_config` | 7.12 | configuração de binfmt que recria um interpretador no boot | `GB1-binfmt-interpretador-sem-dono` |
 | `persist.ca_planted` | 7.12 | âncora de confiança instalada fora do pacote de certificados | `65-confianca-e-deploy` |
+| `persist.cron_drift` | 7.5 | agendamento mudou desde o retrato anterior | `DR1-drift-de-persistencia` |
 | `persist.cron_frequent` | 7.1 | agendamento com intervalo curto: a cadência de um beacon | `62-cron-e-chaves`, `93-kinsing`, `95-outlaw` +2 |
 | `persist.cron_suspect` | 7.1 | agendamento executa de lugar suspeito, ou baixa o que executa | `62-cron-e-chaves`, `63-cron-e-chaves-em-imagem`, `81-minerador-oportunista` +3 |
 | `persist.env_preload` | 7.8 | LD_PRELOAD definido em arquivo lido a cada sessão | `60-persistencia-ao-vivo` |
@@ -108,24 +118,29 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `persist.modprobe_install` | 7.12 | diretiva de modprobe que executa comando em vez de carregar módulo | `97-modulo-no-boot` |
 | `persist.nss_module` | 7.8 | módulo NSS carregado em toda resolução de nome que nenhum pacote entregou | `101-nss-backdoor` |
 | `persist.pam_exec` | 7.12 | PAM executa programa ou carrega módulo de fora do lugar padrão | `64-gatilhos-de-execucao` |
+| `persist.preload_drift` | 7.6 | pré-carga de código mudou desde o retrato anterior | `DR4-drift-das-sete-superficies`, `DR5-drift-de-defesa-desligada` |
 | `persist.shell_env` | 7.6 | ENV definido: arquivo lido a cada shell POSIX interativo | `64-gatilhos-de-execucao` |
 | `persist.shell_startup` | 7.6 | arquivo de inicialização de shell executa algo suspeito | `64-gatilhos-de-execucao`, `TX1-texto-que-engana-quem-le` |
+| `persist.ssh_client_drift` | 7.3 | hook de execução do cliente SSH mudou desde o retrato anterior | `DR5-drift-de-defesa-desligada` |
 | `persist.ssh_client_exec` | 7.7 | config do cliente ssh executa comando ao conectar | `SC1-proxycommand-backdoor`, `SC2-proxycommand-legitimo`, `SC3-proxycommand-em-include` |
 | `persist.ssh_forced_command` | 7.5 | chave SSH que executa um comando a cada login | `62-cron-e-chaves`, `63-cron-e-chaves-em-imagem` |
 | `persist.ssh_keys` *(manual)* | 7.5 | inventário de chaves SSH autorizadas | `62-cron-e-chaves`, `66-cadeia-completa`, `82-exfiltracao` +2 |
+| `persist.ssh_server_drift` | 7.3 | configuração do servidor SSH mudou desde o retrato anterior | `DR5-drift-de-defesa-desligada` |
 | `persist.sshd_key_source` | 7.5 | sshd busca chave fora do lugar padrão | `62-cron-e-chaves`, `A9-allowlist-do-sshd-em-usr-local` |
 | `persist.suid_unowned` | 25 | binário que carrega privilégio e nenhum pacote entregou | `98-retencao-de-root`, `B1-baseline-cala-o-conhecido`, `B2-baseline-de-host-comprometido` +1 |
 | `persist.sysv_shm_channel` | 7.12 | memória compartilhada System V: canal aberto ou perfil do Ebury | `SV1-sysv-shm-mundo`, `SV3-ebury-0600-daemon-de-rede` |
 | `persist.timer_frequent` | 7.2 | timer com intervalo curto: a forma de um beacon | `60-persistencia-ao-vivo` |
+| `persist.trigger_drift` | 7.6 | arquivo que executa em gatilho mudou desde o retrato anterior | `DR5-drift-de-defesa-desligada` |
 | `persist.trigger_exec` | 7.7 | gatilho de boot, login ou pacote executa algo suspeito | `64-gatilhos-de-execucao`, `65-confianca-e-deploy`, `83-comprometimento-de-aplicacao` +3 |
 | `persist.udev_run` | 7.12 | regra de udev executa programa em evento de dispositivo | `64-gatilhos-de-execucao` |
 | `persist.unit_bind_shadow` | 7.2 | unit monta outro arquivo por cima de um caminho de sistema | `A12-bind-troca-o-arquivo-sob-caminho-limpo` |
+| `persist.unit_drift` | 7.4 | unit do systemd mudou desde o retrato anterior | `DR1-drift-de-persistencia` |
 | `persist.unit_dropin_exec` | 7.2 | drop-in acrescenta execução a uma unit existente | `60-persistencia-ao-vivo`, `61-persistencia-em-imagem`, `71-adversario-competente` +1 |
 | `persist.unit_exec_suspect` | 7.2 | unit de systemd executa de lugar suspeito, ou baixa o que executa | `60-persistencia-ao-vivo`, `61-persistencia-em-imagem`, `81-minerador-oportunista` +4 |
 | `persist.unit_socket_unowned` | 7.2 | unit de ativação expõe gatilho para binário que nenhum pacote entregou | `A5-ativacao-por-socket`, `J2-dropin-ao-lado-da-unit-de-verdade` |
 | `persist.unit_unowned` | 7.2 | serviço de systemd executa um binário de sistema que nenhum pacote entregou | `100-azazel-userland`, `J7-nome-nu-path-padrao`, `US1-nome-nu-atras-de-env` |
 
-### `priv` (16)
+### `priv` (19)
 
 | check | § | o que acusa | provado por |
 |---|---|---|---|
@@ -136,17 +151,20 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `cred.secret_file` | 12.3 | credencial em arquivo: até onde este host alcança | `E6-credencial-em-arquivo` |
 | `cred.ssh_private_key` | 12.3 | chave SSH privada em disco: para onde este host consegue ir | `E1-chave-privada-sem-senha`, `T6-agente-de-build-como-imagem` |
 | `manual.audit_query` *(manual)* | 11 | o auditd está ligado: a consulta que amarra o vetor | — |
+| `priv.account_drift` | 7.9 | conta ou grupo mudou desde o retrato anterior | `DR4-drift-das-sete-superficies` |
 | `priv.account_no_shadow` | 7.9 | conta existe no passwd e não no shadow: não passou pelo useradd | `H1-conta-sem-shadow` |
+| `priv.doas_drift` | 7.9 | regra de doas mudou desde o retrato anterior | `DR5-drift-de-defesa-desligada` |
 | `priv.doas_nopasswd` | 7.9 | regra de doas que escala sem pedir senha | `84-acesso-por-credencial`, `85-acesso-por-credencial-imagem` |
 | `priv.file_owner_no_account` | 7.9 | arquivo pertence a uid/gid que não existe em passwd/group | `J2-dono-sem-conta` |
 | `priv.no_password` | 7.9 | conta com campo de senha vazio: entra sem autenticação | `67-privilegio`, `84-acesso-por-credencial`, `85-acesso-por-credencial-imagem` |
 | `priv.root_equivalent_group` | 7.9 | grupo que equivale a root tem membro | `67-privilegio` |
 | `priv.root_runs_writable` | 36.4 | root executa um arquivo que outra pessoa pode reescrever | `W1-root-executa-o-que-outro-escreve` |
 | `priv.service_account_shell` | 7.9 | conta de serviço com shell de login | `67-privilegio` |
+| `priv.sudo_drift` | 7.9 | regra de sudo mudou desde o retrato anterior | `DR1-drift-de-persistencia` |
 | `priv.sudo_nopasswd` | 7.9 | regra de sudo que escala sem pedir senha | `84-acesso-por-credencial`, `85-acesso-por-credencial-imagem`, `T5-servidor-de-banco-como-imagem` |
-| `priv.uid_zero` | 7.9 | conta com uid 0 além do root | `67-privilegio`, `84-acesso-por-credencial`, `85-acesso-por-credencial-imagem` +2 |
+| `priv.uid_zero` | 7.9 | conta com uid 0 além do root | `67-privilegio`, `84-acesso-por-credencial`, `85-acesso-por-credencial-imagem` +3 |
 
-### `proc` (15)
+### `proc` (16)
 
 | check | § | o que acusa | provado por |
 |---|---|---|---|
@@ -161,6 +179,7 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `proc.maps_rwx_anon` | 3.10 | região de memória gravável, executável e sem arquivo por trás | `17-rwx-anonimo`, `18b-nome-de-runtime-sem-pacote-nao-compra-isencao`, `51-kernel-3.18-implante` +3 |
 | `proc.memfd_exec` | 3.16 | execução fileless: exe aponta para memória anônima | `13-memfd-fileless`, `29-userland-legado-implante`, `30-32-bits` +4 |
 | `proc.ns_divergent` | 3.15 | namespace próprio fora de container e fora de unit | `19-namespace-proprio` |
+| `proc.program_drift` | 2 | programa passou a rodar sob outra identidade | `DR4-drift-das-sete-superficies` |
 | `proc.service_account_pty` | 3.2 | conta de serviço com terminal interativo | `69-pty-de-conta-de-servico` |
 | `proc.shell_from_service` | 3.2 | daemon de rede gerou um shell | `68-linhagem`, `83-comprometimento-de-aplicacao` |
 | `proc.suspicious_path` | 8 | processo executando de diretório onde nada se instala | `14-caminho-suspeito`, `29-userland-legado-implante`, `31-sem-os-release` +6 |
@@ -274,6 +293,12 @@ contêiner não alcança — hidepid, sysctl, módulo, cgroup, eBPF.
 | `C1-capability-em-xattr` | vm | retenção de root por capability em atributo estendido, sem bit de setuid nenhum |
 | `C2-implante-imutavel` | vm | implante travado com atributo imutável: a limpeza falha, e falha em silêncio |
 | `D2-forca-bruta-que-entrou` | live | a mesma origem que falhou dezenas de vezes conseguiu entrar |
+| `DR1-drift-de-persistencia` | live | quatro mudanças legítimas em forma, invisíveis para o catálogo de checks |
+| `DR2-drift-sem-mudanca-e-silencio` | live | duas coletas do MESMO contêiner parado: o drift precisa ser VAZIO, senão a feature é ruído |
+| `DR3-drift-com-a-ordem-trocada` | live | os dois retratos na ordem errada: a ferramenta precisa RECUSAR, e não responder ao contrário |
+| `DR4-drift-das-sete-superficies` | live | sete superfícies mudadas, e a mudança encontrando o achado que fala dela |
+| `DR5-drift-de-defesa-desligada` | live | sete controles enfraquecidos entre dois retratos, nenhum suspeito parado |
+| `DR6-drift-de-endurecimento-do-kernel` | vm | sysctl de proteção afrouxado entre dois retratos, num kernel de verdade |
 | `E1-chave-privada-sem-senha` | live | chave SSH privada sem senha: credencial de movimento lateral largada aberta |
 | `E2-historico-desligado` | live | histórico de shell apontado para /dev/null e desligado no rc: rastro apagado de propósito |
 | `E3-alcance-do-host` | live | known_hosts: dezenas de evidências mandam procurar na frota, e esta diz em quais máquinas |

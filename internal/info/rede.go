@@ -25,49 +25,49 @@ import (
 
 // CensoDeRede é o retrato de com quem esta máquina fala.
 type CensoDeRede struct {
-	Total     int
-	PorEstado []Contagem
+	Total     int        `json:"total"`
+	PorEstado []Contagem `json:"by_state,omitempty"`
 
 	// Escutas é o que a máquina EXPÕE, que é a pergunta que vem primeiro.
-	Escutas []Escuta
+	Escutas []Escuta `json:"listeners,omitempty"`
 	// Saida agrupa quem fala para fora pelo executável real.
-	Saida []Falante
+	Saida []Falante `json:"outbound,omitempty"`
 	// Entrada é quem conectou aqui, agrupado por origem.
-	Entrada []Contagem
+	Entrada []Contagem `json:"inbound,omitempty"`
 
-	Tetos   []TetoDeRede
-	Padroes []Padrao
+	Tetos   []TetoDeRede `json:"limits,omitempty"`
+	Padroes []Padrao     `json:"patterns,omitempty"`
 
 	// SemDono conta os sockets cujo processo não pôde ser identificado. Sem
 	// root, o fd de processo alheio é ilegível — e o socket existe do mesmo
 	// jeito. Contar é o que impede a lista de parecer completa.
-	SemDono int
+	SemDono int `json:"without_owner,omitempty"`
 }
 
 // Escuta é uma porta aberta, com o que decide se ela é superfície de ataque: o
 // endereço em que está ligada.
 type Escuta struct {
-	Proto      string
-	Porta      int
-	Bind       string
-	Executavel string
-	PID        int
+	Proto      string `json:"proto"`
+	Porta      int    `json:"port"`
+	Bind       string `json:"bind"`
+	Executavel string `json:"exe,omitempty"`
+	PID        int    `json:"pid,omitempty"`
 	// Exposta diz que o bind NÃO é loopback: a porta está aberta para fora.
-	Exposta bool
+	Exposta bool `json:"exposed"`
 	// DonoDesconhecido separa "ninguém segura" de "não pude ver quem segura".
-	DonoDesconhecido bool
+	DonoDesconhecido bool `json:"owner_unknown,omitempty"`
 	// Sockets é quantos descritores seguram esta MESMA escuta. Com
 	// SO_REUSEPORT um serviço divide a porta entre vários processos ou threads,
 	// e o `ss` imprime uma linha por descritor — é o ruído que faz um nginx com
 	// doze workers parecer doze portas abertas. Aqui é uma escuta, com o número
 	// ao lado.
-	Sockets int
+	Sockets int `json:"sockets,omitempty"`
 }
 
 // Falante é um executável e o que ele abriu para fora.
 type Falante struct {
-	Executavel string
-	Conexoes   int
+	Executavel string `json:"exe,omitempty"`
+	Conexoes   int    `json:"connections"`
 	// Destinos é quantos ENDEREÇOS distintos, e Endpoints quantos pares
 	// endereço:porta distintos. Os dois números juntos é que separam as três
 	// formas, e usar só o primeiro rotulava varredura de porta como pool:
@@ -75,20 +75,20 @@ type Falante struct {
 	//	pool       muitas conexões, UM endpoint      (10.0.0.9:5432)
 	//	leque      muitos destinos, uma porta        (N hosts na 22)
 	//	varredura  UM destino, muitas portas         (10.0.0.9 em 16 portas)
-	Destinos  int
-	Endpoints int
-	Publicos  int
-	Portas    []Contagem
+	Destinos  int        `json:"destinations"`
+	Endpoints int        `json:"endpoints"`
+	Publicos  int        `json:"public"`
+	Portas    []Contagem `json:"ports,omitempty"`
 }
 
 // TetoDeRede é um limite com a ocupação medida contra ele.
 type TetoDeRede struct {
-	Nome  string
-	Uso   int
-	Teto  int
-	Nota  string
-	Lido  bool
-	Perto bool
+	Nome  string `json:"name"`
+	Uso   int    `json:"used"`
+	Teto  int    `json:"limit"`
+	Nota  string `json:"note,omitempty"`
+	Lido  bool   `json:"read"`
+	Perto bool   `json:"near_limit,omitempty"`
 }
 
 // portasDeWeb são as portas em que o leque também é a forma NORMAL. Elas NÃO

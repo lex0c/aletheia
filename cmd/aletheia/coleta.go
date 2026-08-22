@@ -449,7 +449,6 @@ type saida struct {
 }
 
 func emitir(r *check.Report, f *facts.Facts, e *env.Env, o saida) int {
-	collectorGaps(r, f)
 
 	bl, code := aplicarBaseline(r, f, e, o.baseline)
 	if code != 0 {

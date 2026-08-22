@@ -200,6 +200,22 @@ type Scenario struct {
 	// conhecimento, ele precisa poder afirmar também que não há lacuna ali.
 	ForbidGap []string
 
+	// MCP é a conversa com o servidor MCP, quando Cmd == "mcp".
+	//
+	// O contrato deste modo é OUTRO: não há achado nem linha de cobertura no
+	// stdout — há JSON-RPC. Ver mcp.go.
+	MCP []Chamada
+
+	// EsperaStderr e ProibeStderr são substrings no stderr do CONTÊINER.
+	//
+	// Existem para o modo MCP, e para uma coisa que nenhuma asserção sobre uma
+	// resposta alcança: comparar DUAS execuções do binário entre si. A paridade
+	// de cobertura entre `analyze` e `coverage.get` é exatamente isso — o
+	// plantio roda os dois sobre o mesmo retrato e diz o resultado, e o que a
+	// suíte cobra é a frase.
+	EsperaStderr []string
+	ProibeStderr []string
+
 	// Exit é o código esperado. -1 = não verificar.
 	Exit int
 
@@ -294,6 +310,15 @@ func Register(s Scenario) {
 	// coleta. Um `SemAvisos` ali seria verdadeiro por vacuidade, que é
 	// exatamente a armadilha do `MaxWarn: 0` descrita acima: parece proteção e
 	// não confere nada. O que um cenário de preserve afirma vai em ExpectOutput.
+	//
+	// O `mcp`: pela mesma vacuidade, por outro caminho. O orçamento é contado
+	// sobre o JSONL de achados, e o modo MCP não produz um — o que sai no
+	// stdout é JSON-RPC, e a contagem de avisos viaja DENTRO da resposta de uma
+	// tool. Declarar `SemAvisos` ali seria um número que o harness nunca lê.
+	//
+	// O que aquele modo afirma no lugar é mais forte, e está no M1: a lista de
+	// críticos vem VAZIA e o veredito NÃO diz OK. É a mesma pergunta — "o
+	// silêncio aqui significa o quê?" — feita nos termos do canal.
 	if s.Untestable == "" && orcamentoDeRuidoFazSentido(s.Cmd) {
 		if _, declarado := s.Orcamento(); !declarado && len(s.Expect) == 0 {
 			panic("cenário " + s.ID + ": não afirma achado nenhum, então ele existe " +
@@ -320,14 +345,23 @@ func Register(s Scenario) {
 // muda, e a contagem depende do ritmo da amostragem; o `preserve` não conta
 // nada, porque não produz achado.
 func orcamentoDeRuidoFazSentido(cmd string) bool {
-	return cmd != "watch" && cmd != "preserve" && cmd != "info"
+	return cmd != "watch" && cmd != "preserve" && cmd != "info" && cmd != "mcp"
 }
 
 // Varredura diz se o cenário ANALISA o host. Só quem analisa tem cobertura a
 // declarar: o `preserve` copia bytes e vai embora, e o `info` responde sobre UM
 // alvo sem concluir nada. Uma linha de cobertura em qualquer um dos dois
 // afirmaria uma conclusão que ninguém tirou.
-func (s Scenario) Varredura() bool { return s.Cmd != "preserve" && s.Cmd != "info" }
+// Varredura diz se este cenário produz um relatório com cobertura.
+//
+// `preserve` COPIA e `info` RESPONDE — nenhum dos dois roda check, e uma linha
+// de cobertura ali afirmaria uma conclusão que ninguém tirou. `mcp` entra na
+// mesma lista por um caminho diferente: ele roda checks, mas o que sai no
+// stdout é JSON-RPC, e a cobertura viaja DENTRO da resposta da tool, não como
+// linha própria.
+func (s Scenario) Varredura() bool {
+	return s.Cmd != "preserve" && s.Cmd != "info" && s.Cmd != "mcp"
+}
 
 // Orcamento devolve o teto de avisos e se ele foi DECLARADO. É a função que
 // separa "este cenário aceita até N avisos" de "ninguém disse nada sobre ruído

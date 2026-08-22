@@ -39,51 +39,51 @@ import (
 
 // CensoDeProcessos é o retrato de quem está rodando o quê, por usuário.
 type CensoDeProcessos struct {
-	Processos int
-	Tarefas   int
-	Usuarios  []UsuarioNoCenso
+	Processos int              `json:"processes"`
+	Tarefas   int              `json:"tasks"`
+	Usuarios  []UsuarioNoCenso `json:"users,omitempty"`
 	// Padroes são as repetições reconhecidas — cron sobreposto, pool, laço de
 	// respawn. É a parte que um `ps` não dá.
-	Padroes []Padrao
+	Padroes []Padrao `json:"patterns,omitempty"`
 }
 
 // UsuarioNoCenso é o que um uid está consumindo, e contra que teto.
 type UsuarioNoCenso struct {
-	UID       int
-	Nome      string
-	Processos int
-	Tarefas   int
+	UID       int    `json:"uid"`
+	Nome      string `json:"name,omitempty"`
+	Processos int    `json:"processes"`
+	Tarefas   int    `json:"tasks"`
 
 	// Teto é o menor RLIMIT_NPROC visto entre os processos deste uid. Menor, e
 	// não maior: é ele que decide onde o próximo fork falha.
-	Teto int
+	Teto int `json:"nproc_max,omitempty"`
 	// TetoLido diz se algum processo deste uid teve o limite lido. Sem isso, a
 	// ausência de teto significa "não olhei", e não "não há teto".
-	TetoLido bool
+	TetoLido bool `json:"nproc_max_read"`
 
-	PorExecutavel []Contagem
-	PorComando    []Contagem
-	PorPai        []Contagem
-	PorEstado     []Contagem
-	Zumbis        int
+	PorExecutavel []Contagem `json:"by_exe,omitempty"`
+	PorComando    []Contagem `json:"by_cmd,omitempty"`
+	PorPai        []Contagem `json:"by_parent,omitempty"`
+	PorEstado     []Contagem `json:"by_state,omitempty"`
+	Zumbis        int        `json:"zombies,omitempty"`
 }
 
 // Contagem é um agrupamento com o rótulo já pronto para impressão.
 type Contagem struct {
-	Rotulo string
-	N      int
+	Rotulo string `json:"label"`
+	N      int    `json:"n"`
 }
 
 // Padrao é uma repetição que tem NOME.
 type Padrao struct {
-	Tipo    string // "cron sobreposto" | "pool" | "respawn" | "leque de saída"
-	Alvo    string
-	N       int
-	Detalhe string
+	Tipo    string // "cron sobreposto" | "pool" | "respawn" | "leque de saída" `json:"kind"`
+	Alvo    string `json:"target"`
+	N       int    `json:"n"`
+	Detalhe string `json:"detail,omitempty"`
 	// Comum marca o padrão cuja forma também é a do uso legítimo frequente.
 	// Ele NÃO é suprimido — vai para o fim da lista, com a ressalva junto:
 	// suprimir seria filtrar pelo campo que o atacante escolhe.
-	Comum bool `json:",omitempty"`
+	Comum bool `json:"common,omitempty"`
 }
 
 // Perto diz se o usuário está a menos de 10% do teto — a faixa em que o próximo

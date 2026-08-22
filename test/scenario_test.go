@@ -217,6 +217,13 @@ func TestCenarios(t *testing.T) {
 			t.Run(sc.ID+"/"+sanitizeName(img), func(t *testing.T) {
 				t.Parallel()
 				exigeImagemLocal(t, img)
+				// O modo MCP tem outro contrato de saída: JSON-RPC no
+				// stdout, e a cobertura viajando DENTRO da resposta da tool em
+				// vez de como linha própria.
+				if sc.Cmd == "mcp" {
+					assertMCP(t, sc, runMCP(t, bin, img, sc))
+					return
+				}
 				var r result
 				if sc.Mode == scenario.Image {
 					r = runImage(t, bin, img, sc)
@@ -444,6 +451,16 @@ func runLive(t *testing.T, bin, img string, sc scenario.Scenario) result {
 		script += " " + strings.Join(sc.Args, " ")
 	}
 
+	return dockerRun(t, append(argsDeDocker(t, bin, img, sc), img, "sh", "-c", script))
+}
+
+// argsDeDocker monta o ambiente do contêiner — volumes, cota, rede, caps,
+// usuário. Extraído porque o modo MCP precisa do MESMO ambiente e de outro
+// comando: duplicá-lo faria os dois divergirem no dia em que um ganhasse um
+// flag novo, e a divergência apareceria como um cenário que passa por rodar num
+// contêiner diferente do que ele diz rodar.
+func argsDeDocker(t *testing.T, bin, img string, sc scenario.Scenario) []string {
+	t.Helper()
 	helper, err := filepath.Abs("../dist/helper")
 	if err != nil {
 		t.Fatal(err)
@@ -463,8 +480,7 @@ func runLive(t *testing.T, bin, img string, sc scenario.Scenario) result {
 	if sc.User != "" {
 		args = append(args, "-u", sc.User)
 	}
-	args = append(args, img, "sh", "-c", script)
-	return dockerRun(t, args)
+	return args
 }
 
 // runImage exporta o rootfs do contêiner e o varre DE FORA com --root — que é
@@ -1047,4 +1063,293 @@ func TestGapsDoAmbienteSaoUsados(t *testing.T) {
 				"motivo registrado: %s", g.Contem, g.Porque)
 		}
 	}
+}
+
+// ---------------------------------------------------------------- modo MCP
+//
+// O servidor MCP não cabe no caminho dos outros cenários por três razões, e as
+// três são de contrato e não de conveniência: ele não aceita `--json -`, lê a
+// requisição do STDIN, e o que sai é JSON-RPC — cujo `id` é numérico, então a
+// linha nem desserializa no tipo que o harness usa para achado.
+
+// respostaMCP é uma resposta JSON-RPC já decodificada.
+type respostaMCP struct {
+	linha     string
+	corpo     map[string]any
+	resultado map[string]any // result, quando houve
+	erro      map[string]any // error, quando houve
+}
+
+type resultadoMCP struct {
+	porID  map[int]respostaMCP
+	stdout string
+	stderr string
+	exit   int
+}
+
+// runMCP roda o servidor DENTRO do contêiner, com a transcrição na entrada
+// padrão.
+func runMCP(t *testing.T, bin, img string, sc scenario.Scenario) resultadoMCP {
+	t.Helper()
+
+	// O heredoc é NÃO citado de propósito: é o que permite ao cenário
+	// substituir um valor descoberto no plantio — o pid do implante, que só
+	// existe depois de ele subir. É o mesmo mecanismo que o campo `Args` já usa
+	// com `$(cat /tmp/pid)`. A consequência: `$` e crase dentro da transcrição
+	// são expandidos pelo shell, e nenhuma transcrição os usa por acaso.
+	script := sc.Plant + `
+cat > /tmp/mcp-entrada.jsonl <<FIM_DA_TRANSCRICAO
+` + scenario.Transcricao(sc.MCP) + `FIM_DA_TRANSCRICAO
+/aletheia mcp ` + strings.Join(sc.Args, " ") + ` < /tmp/mcp-entrada.jsonl`
+
+	r := capturaCrua(t, exec.Command("docker",
+		append(argsDeDocker(t, bin, img, sc), img, "sh", "-c", script)...))
+
+	res := resultadoMCP{porID: map[int]respostaMCP{}, stdout: r.stdout, stderr: r.stderr, exit: r.exit}
+	for _, ln := range strings.Split(strings.TrimSpace(r.stdout), "\n") {
+		if ln == "" {
+			continue
+		}
+		var corpo map[string]any
+		if err := json.Unmarshal([]byte(ln), &corpo); err != nil {
+			t.Fatalf("stdout do servidor MCP não é JSON-RPC válido: %v\nlinha: %q\n"+
+				"stderr:\n%s", err, ln, r.stderr)
+		}
+		// O stdout é EXCLUSIVAMENTE protocolo — a spec é literal quanto a isso,
+		// e é o que permite ao cliente parsear cada linha sem heurística. Uma
+		// linha de diagnóstico vazando para cá quebraria todo cliente, e é
+		// exatamente o tipo de regressão que ninguém percebe em desenvolvimento.
+		if corpo["jsonrpc"] != "2.0" {
+			t.Fatalf("linha no stdout que não é mensagem MCP: %q", ln)
+		}
+		resp := respostaMCP{linha: ln, corpo: corpo}
+		resp.resultado, _ = corpo["result"].(map[string]any)
+		resp.erro, _ = corpo["error"].(map[string]any)
+		if id, ok := corpo["id"].(float64); ok {
+			res.porID[int(id)] = resp
+		}
+	}
+	return res
+}
+
+// capturaCrua roda o comando sem interpretar o stdout. O `capture` original
+// exige JSONL de achados e aborta com t.Fatalf em qualquer outra coisa.
+func capturaCrua(t *testing.T, cmd *exec.Cmd) struct {
+	stdout, stderr string
+	exit           int
+} {
+	t.Helper()
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	err := cmd.Run()
+	r := struct {
+		stdout, stderr string
+		exit           int
+	}{stdout: out.String(), stderr: errb.String()}
+	if ee, ok := err.(*exec.ExitError); ok {
+		r.exit = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("execução falhou: %v\nstderr:\n%s", err, r.stderr)
+	}
+	return r
+}
+
+func assertMCP(t *testing.T, sc scenario.Scenario, r resultadoMCP) {
+	t.Helper()
+
+	if sc.Exit != -1 && r.exit != sc.Exit {
+		t.Errorf("cenário %q: exit %d, esperava %d\nstderr:\n%s",
+			sc.Desc, r.exit, sc.Exit, r.stderr)
+	}
+	for _, e := range sc.EsperaStderr {
+		if !strings.Contains(r.stderr, e) {
+			t.Errorf("cenário %q: stderr não trouxe %q\nstderr:\n%s", sc.Desc, e, r.stderr)
+		}
+	}
+	for _, p := range sc.ProibeStderr {
+		if strings.Contains(r.stderr, p) {
+			t.Errorf("cenário %q: stderr trouxe o que NÃO podia (%q)\nstderr:\n%s",
+				sc.Desc, p, r.stderr)
+		}
+	}
+
+	for i, c := range sc.MCP {
+		id := i + 1
+		resp, ok := r.porID[id]
+		if !ok {
+			t.Errorf("cenário %q: %s (id %d) não foi respondida\nstdout:\n%s\nstderr:\n%s",
+				sc.Desc, c.Rotulo(), id, r.stdout, r.stderr)
+			continue
+		}
+		assertChamada(t, sc, c, resp)
+	}
+}
+
+func assertChamada(t *testing.T, sc scenario.Scenario, c scenario.Chamada, resp respostaMCP) {
+	t.Helper()
+	ctx := fmt.Sprintf("cenário %q · %s", sc.Desc, c.Rotulo())
+
+	if c.ErroCodigo != 0 {
+		if resp.erro == nil {
+			t.Errorf("%s: esperava erro %d e veio resultado\n%s", ctx, c.ErroCodigo, resp.linha)
+			return
+		}
+		if cod, _ := resp.erro["code"].(float64); int(cod) != c.ErroCodigo {
+			t.Errorf("%s: erro %v, esperava %d\n%s", ctx, resp.erro["code"], c.ErroCodigo, resp.linha)
+		}
+		return
+	}
+	if resp.erro != nil {
+		t.Errorf("%s: erro inesperado: %v", ctx, resp.erro["message"])
+		return
+	}
+
+	for _, e := range c.Espera {
+		if !strings.Contains(resp.linha, e) {
+			t.Errorf("%s: a resposta não trouxe %q\n%s", ctx, e, corta(resp.linha, 900))
+		}
+	}
+	for _, p := range c.Proibe {
+		if strings.Contains(resp.linha, p) {
+			t.Errorf("%s: a resposta trouxe o que NÃO podia (%q)", ctx, p)
+		}
+	}
+
+	// A FRONTEIRA DE INJEÇÃO, escrita como asserção.
+	//
+	// O texto do alvo precisa CHEGAR — escapar não é truncar, e a forense
+	// precisa dos bytes que o atacante escolheu — e precisa chegar SÓ em `data`.
+	//
+	// A comparação é dentro de `structuredContent`, e não da linha inteira, e a
+	// razão é do protocolo: `content` é a serialização do MESMO envelope em
+	// texto, para o cliente que ainda não lê schema de saída. Cobrar ausência
+	// ali cobraria que a resposta se contradissesse.
+	if len(c.SoEmDados) > 0 {
+		sc := resp.resultado["structuredContent"]
+		dados, _ := json.Marshal(caminhoOuNil(sc, "data"))
+		var fora []byte
+		for _, campo := range []string{"provenance", "observability", "trust"} {
+			b, _ := json.Marshal(caminhoOuNil(sc, campo))
+			fora = append(fora, b...)
+		}
+		for _, agulha := range c.SoEmDados {
+			if !strings.Contains(string(dados), agulha) {
+				t.Errorf("%s: %q não chegou em `data` — escapar não é truncar",
+					ctx, corta(agulha, 60))
+			}
+			if strings.Contains(string(fora), agulha) {
+				t.Errorf("%s: %q VAZOU para fora de `data`: texto do alvo em "+
+					"procedência, cobertura ou marca de confiança são afirmações da "+
+					"FERRAMENTA, não evidência", ctx, corta(agulha, 60))
+			}
+		}
+	}
+
+	// Os caminhos resolvem contra o ENVELOPE quando há um, e contra o result
+	// cru quando não há (tools/list, server/discover). É o que deixa o cenário
+	// escrever "observability.verdict" em vez de
+	// "result.structuredContent.observability.verdict".
+	base := resp.resultado
+	if sc, ok := resp.resultado["structuredContent"].(map[string]any); ok {
+		base = sc
+	}
+	for caminho, quero := range c.Campos {
+		v, ok := valorNoCaminho(base, caminho)
+		if !ok {
+			t.Errorf("%s: caminho %q não existe na resposta\n%s", ctx, caminho, corta(resp.linha, 700))
+			continue
+		}
+		if got := textoDe(v); got != quero {
+			t.Errorf("%s: %s = %q, esperava %q", ctx, caminho, got, quero)
+		}
+	}
+	for caminho, naoQuero := range c.CampoNao {
+		v, ok := valorNoCaminho(base, caminho)
+		if !ok {
+			t.Errorf("%s: caminho %q não existe na resposta", ctx, caminho)
+			continue
+		}
+		if got := textoDe(v); got == naoQuero {
+			t.Errorf("%s: %s é %q, e não podia ser", ctx, caminho, got)
+		}
+	}
+
+	if len(c.ProibeTool) > 0 || c.ExigeReadOnly {
+		assertRegistry(t, ctx, c, resp)
+	}
+}
+
+// assertRegistry cobra o que o registry NÃO oferece.
+//
+// A ausência de superfície de execução é a propriedade central deste servidor,
+// e ela precisa ser afirmada pelo lado de fora: um teste que só verifica o que
+// existe nunca percebe o dia em que passa a existir um `shell`.
+func assertRegistry(t *testing.T, ctx string, c scenario.Chamada, resp respostaMCP) {
+	t.Helper()
+	tools, _ := resp.resultado["tools"].([]any)
+	if len(tools) == 0 {
+		t.Errorf("%s: tools/list veio vazio", ctx)
+		return
+	}
+	for _, x := range tools {
+		m, _ := x.(map[string]any)
+		nome, _ := m["name"].(string)
+		for _, proibido := range c.ProibeTool {
+			if nome == proibido {
+				t.Errorf("%s: a tool %q EXISTE. Este servidor concede observação, "+
+					"não execução — e o que está no registry pode ser induzido por "+
+					"texto plantado no alvo", ctx, nome)
+			}
+		}
+		if !c.ExigeReadOnly {
+			continue
+		}
+		an, _ := m["annotations"].(map[string]any)
+		if an["readOnlyHint"] != true {
+			t.Errorf("%s: a tool %q não se anota readOnlyHint", ctx, nome)
+		}
+		if an["destructiveHint"] != false {
+			t.Errorf("%s: a tool %q não se anota destructiveHint:false", ctx, nome)
+		}
+	}
+}
+
+func caminhoOuNil(v any, campo string) any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return m[campo]
+}
+
+func valorNoCaminho(v any, caminho string) (any, bool) {
+	for _, parte := range strings.Split(caminho, ".") {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		v, ok = m[parte]
+		if !ok {
+			return nil, false
+		}
+	}
+	return v, true
+}
+
+// textoDe normaliza o valor para comparação com o literal do cenário. O
+// encoding/json entrega todo número como float64, e "0" é mais legível num
+// cenário do que "0.000000".
+func textoDe(v any) string {
+	if f, ok := v.(float64); ok && f == float64(int64(f)) {
+		return strconv.FormatInt(int64(f), 10)
+	}
+	return fmt.Sprint(v)
+}
+
+func corta(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }

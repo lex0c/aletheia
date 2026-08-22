@@ -272,7 +272,6 @@ func (w *vigia) ciclo(primeiro bool) {
 	defer e.Close()
 	f := facts.Collect(e)
 	r := check.Run(w.selected, f, e)
-	collectorGaps(r, f)
 	w.ciclos++
 	w.ultimoCompleto = f
 

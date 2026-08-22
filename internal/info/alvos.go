@@ -22,29 +22,29 @@ import (
 // Linha é um par rótulo/valor do dossiê, com uma nota opcional que diz o que
 // aquele valor SIGNIFICA. A nota é o que separa isto de uma saída crua.
 type Linha struct {
-	Rotulo string
-	Valor  string
-	Nota   string
+	Rotulo string `json:"label"`
+	Valor  string `json:"value"`
+	Nota   string `json:"meaning,omitempty"`
 }
 
 // Dossie é a resposta sobre um alvo.
 type Dossie struct {
-	Alvo string
+	Alvo string `json:"target"`
 	// Achou é falso quando o alvo não existe nos fatos. Não é erro: é resposta.
-	Achou bool
+	Achou bool `json:"found"`
 	// Blocos são as seções, na ordem em que ajudam a decidir.
-	Blocos []Bloco
+	Blocos []Bloco `json:"blocks,omitempty"`
 	// Sinais são as coisas que pedem olhar humano — o que um scan chamaria de
 	// achado, aqui dito sem veredito.
-	Sinais []string
+	Sinais []string `json:"signals,omitempty"`
 	// Proximo são os comandos que fazem sentido em seguida, já preenchidos.
-	Proximo []string
+	Proximo []string `json:"next,omitempty"`
 }
 
 // Bloco é uma seção do dossiê.
 type Bloco struct {
-	Titulo string
-	Linhas []Linha
+	Titulo string  `json:"title"`
+	Linhas []Linha `json:"lines,omitempty"`
 }
 
 func (d *Dossie) bloco(titulo string, ls ...Linha) {

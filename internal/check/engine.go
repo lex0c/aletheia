@@ -209,6 +209,7 @@ func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 				Manual: []string{"rode `aletheia scan`, que faz a coleta completa"},
 			})
 		}
+		r.Coverage.CollectorGaps = LacunasDeColeta(f)
 		return r
 	}
 
@@ -315,8 +316,54 @@ func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 	// assim que "o executável deste processo mudou" alcança o achado que fala
 	// do processo.
 	marcarDrift(r, f)
+	// DEPOIS de tudo: a falha de COLETA é o eixo que não passa por check
+	// nenhum, e sem ela um relatório pode sair completo tendo lido metade do
+	// host.
+	r.Coverage.CollectorGaps = LacunasDeColeta(f)
 	r.sortFindings()
 	return r
+}
+
+// lacunasDeColeta move a falha de COLETA para o eixo próprio dela: não é um
+// check que deixou de rodar, é dado que não pôde ser lido. Sai da aritmética de
+// checks e continua impedindo um veredito de OK.
+//
+// # Por que ela mora AQUI, e não em quem chama
+//
+// Ela era uma função de `package main`, chamada à mão nos cinco pontos que
+// rodam checks — três deles indiretamente, por `emitir`. Funcionava, e tinha
+// duas consequências ruins. A primeira é que um sexto ponto de chamada nasceria
+// sem ela, e o sintoma seria uma cobertura silenciosamente melhor que a
+// verdade: nada quebra, o número sobe, o veredito melhora. A segunda apareceu
+// quando o servidor MCP precisou da mesma cobertura — de `internal/`, aquela
+// função não existe, e a saída óbvia seria reescrevê-la. Duas implementações da
+// mesma contabilidade divergem em silêncio, que foi exatamente o que aconteceu
+// com o agrupamento de achados antes de GroupByIDSev existir.
+//
+// Montar a cobertura É o que este motor produz. Aqui dentro, ninguém pode
+// esquecer.
+// Ela é PURA e devolve a lista: quem monta a cobertura é o motor, mas quem só
+// precisa saber o que a coleta não leu — o servidor MCP respondendo um dossiê,
+// sem rodar check nenhum — não deveria ter de fabricar um Report para descobrir.
+func LacunasDeColeta(f *facts.Facts) []string {
+	if f == nil || len(f.Partial) == 0 {
+		return nil
+	}
+	// Ordem FIXA: `f.Partial` é mapa, e a lista sai daqui para o JSONL e para a
+	// baseline. Sem ordenar, duas execuções idênticas produzem arquivos
+	// diferentes — e comparar dois JSONL por diff é como se audita frota.
+	coletores := make([]string, 0, len(f.Partial))
+	for c := range f.Partial {
+		coletores = append(coletores, c)
+	}
+	sort.Strings(coletores)
+	var out []string
+	for _, coletor := range coletores {
+		for _, razao := range f.Partial[coletor] {
+			out = append(out, coletor+": "+razao)
+		}
+	}
+	return out
 }
 
 // applyTrustDowngrade marca retroativamente os achados que dependeram de um

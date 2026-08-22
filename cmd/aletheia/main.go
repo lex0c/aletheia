@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -81,6 +80,8 @@ COMANDOS
   preserve      guarda a evidência antes que ela suma — inclusive tráfego
                 (--pcap). O ÚNICO que escreve
   info          responde sobre UM alvo: process, net, git, ip, port, file
+  mcp           serve um retrato a um agente por MCP, sobre stdio. Concede
+                OBSERVAÇÃO, não execução
   checks        catálogo: id, §ref, modo, grupo, requires, falsos positivos
   version       versão e hash deste binário
 
@@ -193,6 +194,38 @@ INFO — a pergunta que vem ANTES do veredito
   O censo compara as tarefas de cada uid com o RLIMIT_NPROC dele — é o número
   que explica Resource temporarily unavailable em su, fork e execve — e NOMEIA
   a repetição quando ela tem forma conhecida (cron que se sobrepõe, pool).
+
+MCP — a pergunta que a IA faz DE VOLTA
+  aletheia mcp --snapshot host.json
+  aletheia mcp --snapshot antes.json --snapshot depois.json
+
+  Serve os retratos a um agente pelo Model Context Protocol, em stdio. O ciclo
+  que ele fecha é hipótese → adquirir a evidência → correlacionar → pedir a
+  próxima aquisição, sem entregar um shell.
+
+  A regra: o servidor concede OBSERVAÇÃO, não EXECUÇÃO. Não existe tool que
+  escreva, execute comando, mate processo, resolva nome ou abra conexão. Dado do
+  host é entrada ADVERSÁRIA — o argv que o implante escolheu pode conter texto
+  endereçado ao modelo —, e por isso ele chega sempre marcado como não confiável,
+  nunca no nome nem na descrição de uma tool.
+
+  --snapshot F  o retrato a servir (REPETÍVEL). Tudo que este processo poderá
+                abrir é fixado aqui: nenhuma tool aceita caminho de arquivo, ou
+                o modelo ganharia leitura arbitrária na estação de quem investiga
+  --allow-root  autoriza rodar como root. Sem ela, "sudo aletheia mcp" FALHA: o
+                servidor herda o privilégio do processo e nunca o adquire, e
+                rodar privilegiado é decisão dita, não acidente de sudo
+  --audit-log F grava a trilha de invocações também em F. Ela sempre sai no
+                stderr; arquivo só quando pedido, porque preserve continua
+                sendo o único comando que escreve por padrão
+
+  Toda resposta em forma de achado carrega o VEREDITO e a COBERTURA, e o schema
+  os exige. É a promessa do exit code traduzida para um canal que não tem exit
+  code: uma lista de achados vazia com INCOMPLETE significa "não consegui
+  olhar", e sem esses dois campos ela chegaria ao modelo como "host limpo".
+
+  --live e --root ainda não existem: a aquisição ao vivo vem depois, para que
+  depurar protocolo e depurar segurança não sejam o mesmo problema.
 
 FLAGS DE collect E analyze
   collect --out F [--root PATH] [--ignore PATH] [--all-fs]   escreve o dump ("-" = stdout)
@@ -325,6 +358,8 @@ func main() {
 		os.Exit(runInfo(os.Args[2:]))
 	case "checks":
 		os.Exit(runChecks(os.Args[2:]))
+	case "mcp":
+		os.Exit(runMCP(os.Args[2:]))
 	case "version":
 		e := env.Probe(env.Options{Version: version})
 		fmt.Printf("aletheia %s\n%s\nsha256=%s\n", version, e.ToolPath, e.ToolSHA256)
@@ -508,7 +543,6 @@ func runWtf(args []string) int {
 		Deadline: start.Add(*budget),
 		Budget:   *budget,
 	})
-	collectorGaps(r, f)
 
 	bl, code := aplicarBaseline(r, f, e, *base)
 	if code != 0 {
@@ -804,7 +838,6 @@ func runBaseline(args []string) int {
 
 	selected := check.Select(check.Selection{})
 	r := check.Run(selected, f, e)
-	collectorGaps(r, f)
 	prog.Stop() // a linha some antes de escrever a baseline
 
 	bl := baseline.Capturar(r, f, f.Host.Hostname, version, e.Now)
@@ -842,25 +875,6 @@ func seNao(ok bool, texto string) string {
 		return ""
 	}
 	return texto
-}
-
-// collectorGaps move a falha de COLETA para o eixo próprio dela: não é um check
-// que deixou de rodar, é dado que não pôde ser lido. Sai da aritmética de
-// checks e continua impedindo um veredito de OK.
-func collectorGaps(r *check.Report, f *facts.Facts) {
-	// Ordem FIXA: `f.Partial` é mapa, e a lista sai daqui para o JSONL e para a
-	// baseline. Sem ordenar, duas execuções idênticas produzem arquivos
-	// diferentes — e comparar dois JSONL por diff é como se audita frota.
-	coletores := make([]string, 0, len(f.Partial))
-	for c := range f.Partial {
-		coletores = append(coletores, c)
-	}
-	sort.Strings(coletores)
-	for _, collector := range coletores {
-		for _, reason := range f.Partial[collector] {
-			r.Coverage.CollectorGaps = append(r.Coverage.CollectorGaps, collector+": "+reason)
-		}
-	}
 }
 
 // abrirSaidaJSON valida e ABRE o destino do --json ANTES da parte cara.

@@ -83,8 +83,15 @@ func collectHelpers(f *Facts, e *env.Env) {
 		// São todos /proc e /sys: não existem numa imagem montada. A
 		// persistência equivalente EM DISCO — um sysctl.d que reescreve o valor
 		// no boot — é outra pergunta, e ela não está feita.
+		//
+		// HelpersLidos fica FALSO aqui, e é isso que separa "este kernel não
+		// invoca nada" de "esta fonte não existe neste modo". Sem ele, comparar
+		// um retrato vivo com um de imagem lia a lista vazia como helper
+		// REMOVIDO — e um core_pattern que some é justamente o que um
+		// implante faria depois de usá-lo.
 		return
 	}
+	f.HelpersLidos = true
 
 	// ler declara a lacuna quando o arquivo EXISTE e não pôde ser lido.
 	//

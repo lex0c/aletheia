@@ -582,7 +582,11 @@ var driftDePrecarga = check.Check{
 			"configuração, não por ataque",
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
-		return achadosDeDrift(self, f, mudancasDeVarios(f, "precarga", "hook_interp"),
+		// As TRÊS portas da mesma injeção: o ld.so.preload, o hook de
+		// interpretador e a variável que o PAM exporta em toda sessão. Um
+		// `LD_PRELOAD=` em /etc/environment tem o alcance do primeiro num
+		// arquivo que ninguém olha com a mesma desconfiança.
+		return achadosDeDrift(self, f, mudancasDeVarios(f, "precarga", "hook_interp", "loader.env"),
 			"uma linha em /etc/ld.so.preload injeta código em TODO processo dinâmico "+
 				"do host — inclusive nos que a resposta a incidente vai rodar. É a "+
 				"superfície de maior alcance por byte escrito que existe em Linux",
@@ -1053,7 +1057,8 @@ var driftDeCarga = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		return achadosDeDrift(self, f,
-			mudancasDeVarios(f, "module.config", "kernel.helper", "binfmt.config", "loader.path"),
+			mudancasDeVarios(f, "module.config", "kernel.helper", "binfmt.config",
+				"loader.path", "loader.order"),
 			"o que estas famílias têm em comum é o kernel (ou o loader) EXECUTANDO "+
 				"por conta própria: `install` no modprobe.d, o programa do "+
 				"core_pattern, o interpretador do binfmt.d e o diretório onde toda "+

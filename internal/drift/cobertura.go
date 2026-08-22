@@ -84,6 +84,14 @@ var Cobertas = []Superficie{
 	{Nome: "programa que o kernel invoca", Campo: "kernel_helpers", Tipo: "kernel.helper"},
 	{Nome: "interpretador declarado em arquivo", Campo: "binfmt_config", Tipo: "binfmt.config"},
 	{Nome: "caminho de busca do loader", Campo: "loader", Tipo: "loader.path"},
+	// A TERCEIRA superfície dentro do MESMO campo, e ela ficou sem família até
+	// agora justamente por isso: a catraca de classificação pergunta por campo
+	// de topo de Facts, e `loader` já estava classificado duas vezes. Uma
+	// sub-superfície de struct composta passa por baixo dela — LD_PRELOAD em
+	// /etc/environment tem o alcance do ld.so.preload e não era comparado por
+	// ninguém.
+	{Nome: "variável de ambiente que carrega código", Campo: "loader", Tipo: "loader.env"},
+	{Nome: "ordem de busca de biblioteca", Campo: "loader", Tipo: "loader.order"},
 	{Nome: "configuração por diretório do servidor web", Campo: "web_config", Tipo: "web.config"},
 }
 
@@ -157,6 +165,9 @@ var NaoCobertas = []Superficie{
 	{Nome: "nsswitch lido", Campo: "nss_read", Porque: "sinal de cobertura"},
 	{Nome: "ld.so.preload lido", Campo: "loader_preload_read", Porque: "sinal de cobertura"},
 	{Nome: "caminho do loader completo", Campo: "loader_path_complete", Porque: "sinal de cobertura"},
+	{Nome: "env do loader completo", Campo: "loader_env_complete", Porque: "sinal de cobertura"},
+	{Nome: "config de módulo completa", Campo: "module_config_complete", Porque: "sinal de cobertura"},
+	{Nome: "helpers do kernel lidos", Campo: "kernel_helpers_read", Porque: "sinal de cobertura"},
 	{Nome: "binfmt vivo completo", Campo: "binfmt_live_complete", Porque: "sinal de cobertura"},
 	{Nome: "binfmt.d completo", Campo: "binfmt_config_complete", Porque: "sinal de cobertura"},
 	{Nome: "config de boot lida", Campo: "boot_config_read", Porque: "sinal de cobertura"},

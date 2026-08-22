@@ -107,32 +107,59 @@ func collectTrust(f *Facts, e *env.Env) {
 			if e.IsDir(p) {
 				continue
 			}
-			f.CACerts = append(f.CACerts, lerCA(e, p))
+			c, ilegivel := lerCA(e, p)
+			if ilegivel {
+				// ARQUIVO LISTADO E NÃO LIDO é lacuna, e não estado.
+				//
+				// A entrada entra na lista assim mesmo — sumir com ela faria a
+				// âncora parecer REMOVIDA —, mas com Subject/Issuer vazios ela
+				// não pode alimentar a comparação: `emissor` e `auto_assinado`
+				// decidem, e o vazio deles viraria "a autoridade mudou".
+				// Certificado LIDO e inválido é outra coisa: aquilo é estado
+				// real do host, e continua sendo comparado.
+				f.CACertsCompleto = false
+				f.denyPersist("trust", "a âncora de confiança "+p+" foi listada e "+
+					"NÃO pôde ser lida ("+c.Erro+"): o que ela autoriza NÃO foi "+
+					"examinado")
+			}
+			f.CACerts = append(f.CACerts, c)
 		}
 	}
 	collectHosts(f, e)
 	collectResolver(f, e)
 }
 
-// lerCA decodifica o certificado. O parsing é NATIVO: chamar openssl seria
-// depender de binário do host, e o que se quer saber aqui é quem o host passou
-// a confiar.
-func lerCA(e *env.Env, p string) CACert {
+// lerCA decodifica o certificado e diz se ele ficou ILEGÍVEL. O parsing é
+// NATIVO: chamar openssl seria depender de binário do host, e o que se quer
+// saber aqui é quem o host passou a confiar.
+//
+// Ilegível é diferente de inválido, e a diferença é a regra central desta
+// ferramenta.
+//
+//	não pôde ser lido   LACUNA: ninguém sabe o que aquele arquivo autoriza
+//	lido e não é PEM    ESTADO: o host tem um arquivo estranho no diretório de
+//	                    âncoras, e isso é fato comparável
+//
+// Enquanto as duas saíam iguais — um CACert com Erro e nada mais —, um
+// certificado que virasse ilegível entre dois retratos aparecia como emissor
+// que sumiu e auto_assinado que virou falso: um drift de CONFIANÇA inventado,
+// no lugar exato onde um falso positivo custa mais caro.
+func lerCA(e *env.Env, p string) (CACert, bool) {
 	c := CACert{File: p, ModUTC: modUTC(e, p)}
 	b, err := e.ReadFile(p)
 	if err != nil {
-		c.Erro = err.Error()
-		return c
+		c.Erro = env.MotivoDoErro(err)
+		return c, env.EhLacuna(err)
 	}
 	bloco, _ := pem.Decode(b)
 	if bloco == nil {
 		c.Erro = "não é PEM"
-		return c
+		return c, false
 	}
 	cert, err := x509.ParseCertificate(bloco.Bytes)
 	if err != nil {
 		c.Erro = err.Error()
-		return c
+		return c, false
 	}
 	c.Subject = cert.Subject.String()
 	c.Issuer = cert.Issuer.String()
@@ -155,7 +182,7 @@ func lerCA(e *env.Env, p string) CACert {
 		k := sha256.Sum256(der)
 		c.SPKI = "SHA256:" + hex.EncodeToString(k[:])
 	}
-	return c
+	return c, false
 }
 
 func collectHosts(f *Facts, e *env.Env) {

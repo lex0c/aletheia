@@ -225,7 +225,19 @@ func collectSSHClientConfig(f *Facts, e *env.Env) {
 // sistema, como o ssh faz); home expande o `~`. Config ilegível (não ausente)
 // vira LACUNA declarada — a diferença entre "não há config" e "não pude ler".
 func coletaDirsCliente(f *Facts, e *env.Env, arquivo, baseDir, home string, vistos map[string]bool, out *[]dirCliente, prof int) {
-	if prof > maxArquivosSSH || vistos[arquivo] {
+	if prof > maxArquivosSSH {
+		// Teto atingido: o resto da cadeia NÃO foi lido, e sair calado aqui
+		// transformava "parei de olhar" em "não há mais nada". Um ProxyCommand
+		// no arquivo 66 da cadeia simplesmente não existiria.
+		f.SSHClienteCompleto = false
+		f.denyPersist("ssh", "a cadeia de Include do cliente SSH passou de "+
+			strconv.Itoa(maxArquivosSSH)+" arquivos em "+arquivo+" e foi cortada "+
+			"no teto: a config de cliente além dele NÃO foi lida")
+		return
+	}
+	if vistos[arquivo] {
+		// Já lido: Include circular ou diamante. Não é lacuna — o conteúdo
+		// entrou na varredura na primeira visita.
 		return
 	}
 	vistos[arquivo] = true
@@ -305,7 +317,12 @@ func expandirIncludeCliente(f *Facts, e *env.Env, baseDir, home, padrao string) 
 		// profundidade de Include, e um único `*` pode abrir milhares de
 		// caminhos. Estourar vira lacuna declarada, nunca silêncio.
 		if len(prox) > maxExpansaoInclude {
-			f.SSHServerCompleto = false
+			// A flag é a do CLIENTE: esta função expande Include de ssh_config,
+			// não de sshd_config. Derrubar a do servidor fazia as duas pontas
+			// errarem de uma vez — o ssh.cliente_exec seguia acreditando que o
+			// conjunto era exaustivo DEPOIS de truncá-lo, e a comparação do
+			// sshd era degradada sem nada ter acontecido com ela.
+			f.SSHClienteCompleto = false
 			f.denyPersist("ssh", "o Include `"+padrao+"` expandiu para mais de "+
 				strconv.Itoa(maxExpansaoInclude)+" caminhos no componente "+
 				strconv.Itoa(i+1)+": a expansão foi cortada e os arquivos restantes "+
@@ -508,6 +525,20 @@ func collectSSHConfig(f *Facts, e *env.Env) {
 				c.Ports = append(c.Ports, v)
 			}
 		}
+	}
+	// O TETO DO LAÇO ACIMA, dito em voz alta.
+	//
+	// `arquivos` nasce com o sshd_config e o sshd_config.d, e CRESCE aqui
+	// dentro a cada Include seguido — então a conferência fica depois do laço,
+	// onde a lista final é conhecida. Parar no teto sem declarar nada era o
+	// mesmo defeito do lado do cliente: um `AuthorizedKeysCommand` no arquivo
+	// 65 saía como se não existisse, e a comparação do sshd continuava
+	// afirmando que o conjunto estava inteiro.
+	if len(arquivos) > maxArquivosSSH {
+		f.SSHServerCompleto = false
+		f.denyPersist("ssh", "a cadeia de Include do sshd passou de "+
+			strconv.Itoa(maxArquivosSSH)+" arquivos e foi cortada no teto: as "+
+			"diretivas declaradas além dele NÃO foram lidas")
 	}
 }
 

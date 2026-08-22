@@ -211,7 +211,34 @@ import (
 //	     Vazio num dump v13, e sem ele dois ProxyCommand de destinos diferentes
 //	     colidem na mesma identidade: TROCAR os destinos entre si mantinha o
 //	     conjunto de comandos e invertia o comportamento, sem drift nenhum.
-const SchemaVersion = 15
+//	16 A nona, a décima e a décima primeira — e as três são a MESMA lição um
+//	   nível abaixo da catraca do 15: ela impede duas famílias de dividirem uma
+//	   chave, e não impede uma chave (ou um fato) de ter escritores com
+//	   significados diferentes.
+//
+//	   ModuleConfigCompleto  a chave `modprobe` é escrita pelo coletor de
+//	     modprobe.d E pela caminhada de /lib/modules. Uma subárvore de módulos
+//	     ilegível suprimia a comparação de modprobe.d.
+//	   LoaderEnvCompleto  `LoaderPathCompleto` era derrubado por
+//	     /etc/environment e pam_env.conf, que alimentam EnvVars e não os
+//	     SearchDirs. Um pam_env.conf ilegível suprimia a comparação do caminho
+//	     de busca de biblioteca.
+//	   HelpersLidos  a fonte é /proc e /sys, e em modo image o coletor nem
+//	     roda. Sem o fato, comparar vivo com imagem lia a lista vazia como
+//	     helper REMOVIDO.
+//
+//	   Num dump v15 os três vêm falsos e as famílias correspondentes recusam a
+//	   comparação — o lado seguro, e o mesmo custo dos anteriores.
+//
+//	   Loader.EnvVars ganhou família própria (`loader.env`) no mesmo número: um
+//	   LD_PRELOAD global em /etc/environment é a mesma superfície do
+//	   ld.so.preload por outra porta, e ela não era comparada por ninguém. E a
+//	   ORDEM dos SearchDirs ganhou a `loader.order`: os mesmos diretórios
+//	   reordenados eram as mesmas entidades, e trocar a precedência de soname
+//	   não produzia drift nenhum. Nenhuma das duas mexe em campo serializado —
+//	   entram aqui porque um dump v15 comparado com um v16 responde diferente
+//	   sobre a MESMA fonte.
+const SchemaVersion = 16
 
 // Facts é o retrato do host.
 type Facts struct {
@@ -335,10 +362,36 @@ type Facts struct {
 	// operador e pode ganhar outro escritor sem ninguém notar.
 	NSSLido bool `json:"nss_read,omitempty"`
 
+	// TRÊS fatos para o loader, e não dois. A separação anterior parou no meio:
+	// `LoaderPathCompleto` era derrubado tanto pela cadeia do ld.so.conf — que
+	// é a fonte dos SearchDirs — quanto por /etc/environment e pam_env.conf,
+	// que alimentam EnvVars e não têm nada a ver com o caminho de busca. Um
+	// pam_env.conf ilegível suprimia a comparação de um /opt/.lib recém-nascido
+	// no ld.so.conf.d, que era exatamente a mudança que interessava.
+	//
+	// É o mesmo defeito das oito chaves largas, um nível abaixo: ali a chave do
+	// operador cobria fontes demais, aqui o FATO de completude cobria.
 	LoaderPreloadLido    bool `json:"loader_preload_read,omitempty"`
 	LoaderPathCompleto   bool `json:"loader_path_complete,omitempty"`
+	LoaderEnvCompleto    bool `json:"loader_env_complete,omitempty"`
 	BinfmtVivoCompleto   bool `json:"binfmt_live_complete,omitempty"`
 	BinfmtConfigCompleto bool `json:"binfmt_config_complete,omitempty"`
+
+	// ModuleConfigCompleto é de /etc/modules, modules-load.d e modprobe.d, e de
+	// mais nada. A chave `modprobe` tem DOIS escritores com significados
+	// diferentes: este coletor e a caminhada de /lib/modules, que a emite
+	// quando uma subárvore não lista ou quando o teto de diretórios estoura.
+	// Uma subárvore de módulos ilegível suprimia a comparação de um
+	// modprobe.d perfeitamente lido.
+	ModuleConfigCompleto bool `json:"module_config_complete,omitempty"`
+
+	// HelpersLidos separa "este kernel não invoca nada" de "esta fonte não
+	// existe aqui". Os três valores (modprobe, core_pattern, uevent_helper)
+	// moram em /proc e /sys: em modo IMAGE o coletor nem roda, e a lista sai
+	// vazia. Sem este fato, comparar um retrato vivo com um de imagem lia a
+	// lista vazia como HELPER REMOVIDO — a forma exata do falso positivo que
+	// esta ferramenta existe para não cometer.
+	HelpersLidos bool `json:"kernel_helpers_read,omitempty"`
 
 	// DoasLido é o mesmo para /etc/doas.conf e /etc/doas.d — em Alpine e Arch o
 	// doas É o mecanismo de escalada, e a família dele não pode depender da

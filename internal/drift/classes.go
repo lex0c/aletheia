@@ -73,6 +73,8 @@ var classes = []Classe{
 	helperDoKernel,
 	configDeBinfmt,
 	caminhoDoLoader,
+	ordemDoLoader,
+	envDoLoader,
 	configWeb,
 	programaEmExecucao,
 }
@@ -1375,6 +1377,20 @@ var gatilhoDeExecucao = Classe{
 	LacunaConferida: "todos os sites são da varredura de gatilhos, que é a fonte desta família",
 	Exaustiva:       true,
 	Decide:          map[string]bool{"linhas": true, "usuario": true, "modo": true},
+	// DÍVIDA DECLARADA: gatilho BINÁRIO trocado no lugar não produz drift.
+	//
+	// O coletor marca `Binario` e não extrai linha nenhuma — não há o que
+	// avaliar num ELF —, então um /etc/rc.local compilado substituído por outro
+	// com o mesmo caminho, dono e modo compara vazio com vazio e sai calado. O
+	// `mod_utc` muda e entra na CONTAGEM, mas mtime é forjável com um `touch` e
+	// por isso não decide em família nenhuma daqui.
+	//
+	// Fechar exige um resumo criptográfico do CONTEÚDO no coletor — que é
+	// decisão de custo, não de modelagem: hoje nenhum coletor de gatilho lê o
+	// arquivo inteiro. Gatilho TEXTUAL, que é a esmagadora maioria, está
+	// coberto pelas linhas. O limite fica escrito aqui em vez de descoberto no
+	// incidente.
+	//
 	// `ilegivel` é o próprio coletor dizendo que não leu o conteúdo: comparar as
 	// linhas de um arquivo ilegível é comparar o vazio com o vazio.
 	Observacional: map[string]bool{"linhas": true},
@@ -1409,13 +1425,31 @@ var gatilhoDeExecucao = Classe{
 // quando alguém tenta carregar aquele módulo — e o comando roda como root. É
 // persistência com gatilho, num arquivo que ninguém abre.
 var configDeModulo = Classe{
-	Tipo:            "module.config",
-	Titulo:          "configuração de módulo (modprobe.d/modules-load.d)",
-	Requires:        env.CapFilesystem,
-	Lacunas:         []string{"modprobe"},
-	LacunaConferida: "chave do coletor de modprobe.d/modules-load.d e só dele",
-	Exaustiva:       true,
-	Decide:          map[string]bool{"cmd": true},
+	Tipo:     "module.config",
+	Titulo:   "configuração de módulo (modprobe.d/modules-load.d)",
+	Requires: env.CapFilesystem,
+	// A chave `modprobe` NÃO é de escritor único, e a versão anterior desta
+	// classe afirmava por escrito que era.
+	//
+	// Quem mais a escreve é a caminhada de /lib/modules: subárvore que não
+	// lista, teto de diretórios estourado. São perguntas diferentes — "o que o
+	// boot manda carregar" e "quais .ko existem em disco" —, e enquanto a
+	// família dependia da chave, um /lib/modules/<versão> ilegível suprimia a
+	// comparação de um modprobe.d perfeitamente lido.
+	//
+	// É o limite da catraca que nasceu no commit anterior: ela impede DUAS
+	// FAMÍLIAS de dividirem uma chave, e não consegue impedir UMA CHAVE de ter
+	// dois escritores. O que fecha isso é o fato de completude, e a
+	// LacunaConferida — que era o lugar onde alguém tinha de conferir isto à
+	// mão — estava simplesmente errada.
+	Incompleta: func(f *facts.Facts) string {
+		if f.ModuleConfigCompleto {
+			return ""
+		}
+		return "a configuração de módulo (modprobe.d, modules-load.d, /etc/modules) não pôde ser lida inteira deste lado"
+	},
+	Exaustiva: true,
+	Decide:    map[string]bool{"cmd": true},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.Modules))
 		for i := range f.Modules {
@@ -1435,13 +1469,33 @@ var configDeModulo = Classe{
 // o caminho do modprobe, o do poweroff. Trocá-lo dá execução como root sem
 // nenhum processo do atacante estar rodando — o kernel chama por conta própria.
 var helperDoKernel = Classe{
-	Tipo:            "kernel.helper",
-	Titulo:          "programa que o kernel invoca",
-	Requires:        env.CapFilesystem,
+	Tipo:   "kernel.helper",
+	Titulo: "programa que o kernel invoca",
+	// PROCFS, e não filesystem: os três valores moram em /proc/sys/kernel e
+	// /sys/kernel, e esta família nunca leu um arquivo de disco. Declarar
+	// CapFilesystem era afirmar uma dependência que não existe E esconder a que
+	// existe — em modo image o procfs é negado por construção, e era isso que
+	// devia ter recusado a comparação.
+	Requires:        env.CapProcfs,
 	Lacunas:         []string{"helper"},
 	LacunaConferida: "chave de escritor único: o coletor de helpers do kernel",
-	Exaustiva:       true,
-	Decide:          map[string]bool{"valor": true, "alvo": true},
+	// E o fato, que é o que a família consome de verdade.
+	//
+	// Ele diz "esta fonte foi lida", e o cap diz "este retrato tinha /proc".
+	// Hoje um implica o outro — o coletor só roda em modo live, e modo live é
+	// o único que ganha procfs —, e mesmo assim os dois ficam: o cap é uma
+	// propriedade do AMBIENTE, o fato é da FONTE, e o dia em que alguém montar
+	// o /proc de uma imagem o cap deixa de responder pelo fato. Aqui a falha
+	// custa um helper de kernel inventado como REMOVIDO, e é o lugar de pagar
+	// uma linha a mais.
+	Incompleta: func(f *facts.Facts) string {
+		if f.HelpersLidos {
+			return ""
+		}
+		return "os programas que o kernel invoca não foram lidos deste lado (a fonte é /proc e /sys: não existe em retrato de imagem)"
+	},
+	Exaustiva: true,
+	Decide:    map[string]bool{"valor": true, "alvo": true},
 	Extrair: func(f *facts.Facts) []Entidade {
 		out := make([]Entidade, 0, len(f.Helpers))
 		for i := range f.Helpers {
@@ -1514,6 +1568,96 @@ var caminhoDoLoader = Classe{
 					"declarado_por": d.From,
 					"existe":        boolTxt(d.Exists),
 				},
+			})
+		}
+		return out
+	},
+}
+
+// A ORDEM da busca, que é um fato à parte de QUAIS diretórios são buscados.
+//
+// A família `loader.path` identifica cada entidade pelo próprio diretório, e por
+// construção isso perde a precedência: os MESMOS diretórios reordenados são as
+// mesmas entidades, com os mesmos campos, e produziam zero drift. Mas quem
+// resolve soname é o loader, e ele para no PRIMEIRO que casar — mover
+// /opt/.lib para a frente de /usr/lib sequestra toda biblioteca do host sem
+// acrescentar nem remover nada.
+//
+// É a mesma lição do nsswitch, e a solução é a mesma: a cadeia inteira vira UMA
+// entidade com a sequência como campo. Guardar a posição em cada diretório
+// resolveria a detecção e estragaria o relatório — inserir um item no começo
+// mudaria a posição de todos os outros, e uma mudança viraria N achados. Foi o
+// que o cron ensinou com a multiplicidade.
+var ordemDoLoader = Classe{
+	Tipo:     "loader.order",
+	Titulo:   "ordem de busca de biblioteca",
+	Requires: env.CapFilesystem,
+	// O MESMO fato do loader.path, e de propósito: as duas famílias leem a
+	// mesma fonte (a cadeia do ld.so.conf), então compartilham a resposta sobre
+	// a completude dela. O que a catraca proíbe é herdar a chave de OUTRA
+	// fonte; `nss` e `nss_servico` fazem igual pelo mesmo motivo.
+	Incompleta: func(f *facts.Facts) string {
+		if f.LoaderPathCompleto {
+			return ""
+		}
+		return "a cadeia do ld.so.conf não foi lida inteira: a ORDEM de busca deste lado está truncada"
+	},
+	Exaustiva: true,
+	Decide:    map[string]bool{"cadeia": true},
+	Extrair: func(f *facts.Facts) []Entidade {
+		if len(f.Loader.SearchDirs) == 0 {
+			return nil
+		}
+		dirs := make([]string, 0, len(f.Loader.SearchDirs))
+		alvos := make([]string, 0, len(f.Loader.SearchDirs))
+		for _, d := range f.Loader.SearchDirs {
+			dirs = append(dirs, d.Dir)
+			alvos = append(alvos, d.Dir)
+		}
+		return []Entidade{{
+			ID:     "ld.so.conf",
+			Alvos:  alvos,
+			Campos: map[string]string{"cadeia": juntarSequencia(dirs)},
+		}}
+	},
+}
+
+// O LD_PRELOAD que não está no ld.so.preload.
+//
+// /etc/environment e /etc/security/pam_env.conf são lidos pelo PAM a cada
+// sessão — inclusive por SSH —, e uma linha `LD_PRELOAD=/tmp/.so` ali tem o
+// mesmo efeito da pré-carga global, num arquivo que ninguém olha com a mesma
+// desconfiança. O check já acusava a linha; o que não existia era a comparação,
+// e ela é a que pega a troca de UMA lib por outra, ou o LD_LIBRARY_PATH que
+// ganha um diretório novo na frente.
+//
+// Família SEPARADA da precarga e do caminho do loader pela mesma razão que
+// separou aquelas duas: são três fontes, com três modos de falhar, e juntá-las
+// faz a falha de uma calar as outras.
+var envDoLoader = Classe{
+	Tipo:     "loader.env",
+	Titulo:   "variável de ambiente que carrega código",
+	Requires: env.CapFilesystem,
+	Incompleta: func(f *facts.Facts) string {
+		if f.LoaderEnvCompleto {
+			return ""
+		}
+		return "/etc/environment ou /etc/security/pam_env.conf não pôde ser lido deste lado"
+	},
+	Exaustiva: true,
+	Decide:    map[string]bool{"valor": true},
+	Extrair: func(f *facts.Facts) []Entidade {
+		out := make([]Entidade, 0, len(f.Loader.EnvVars))
+		for i := range f.Loader.EnvVars {
+			v := &f.Loader.EnvVars[i]
+			// Arquivo E chave identificam: a MESMA variável definida nos dois
+			// arquivos são duas definições, e qual vence depende da ordem em
+			// que o PAM os lê — tratá-las como uma só esconderia a que foi
+			// acrescentada.
+			out = append(out, Entidade{
+				ID:     v.File + "|" + v.Key,
+				Alvos:  []string{v.File, v.Value},
+				Campos: map[string]string{"valor": redact.Valor(v.Key, v.Value)},
 			})
 		}
 		return out

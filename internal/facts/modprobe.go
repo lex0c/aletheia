@@ -37,6 +37,16 @@ type ModuleConf struct {
 }
 
 func collectModprobe(f *Facts, e *env.Env) {
+	// A completude é declarada ANTES de qualquer leitura, e é da configuração
+	// de módulo — /etc/modules, modules-load.d e modprobe.d — e de mais nada.
+	//
+	// A chave `modprobe` continua servindo ao operador, mas ela tem DOIS
+	// escritores: este coletor e o collectModuleFiles logo abaixo, que a emite
+	// quando uma subárvore de /lib/modules não lista. São perguntas diferentes
+	// — o que o boot MANDA carregar, e quais .ko existem em disco —, e enquanto
+	// a família de drift dependia da chave, uma subárvore ilegível suprimia a
+	// comparação de um modprobe.d perfeitamente lido.
+	f.ModuleConfigCompleto = true
 	collectModuleFiles(f, e)
 
 	// Carga automática no boot: as duas formas dizem a mesma coisa.
@@ -51,6 +61,7 @@ func collectModprobe(f *Facts, e *env.Env) {
 	} {
 		nomes, err := e.ReadDirNamesErr(dir)
 		if env.EhLacuna(err) {
+			f.ModuleConfigCompleto = false
 			f.denyPersist("modprobe", dir+" não pôde ser listado ("+
 				env.MotivoDoErro(err)+"): os módulos carregados no boot NÃO foram lidos")
 			continue
@@ -76,6 +87,7 @@ func collectModprobe(f *Facts, e *env.Env) {
 	} {
 		nomes, err := e.ReadDirNamesErr(dir)
 		if env.EhLacuna(err) {
+			f.ModuleConfigCompleto = false
 			f.denyPersist("modprobe", dir+" não pôde ser listado ("+
 				env.MotivoDoErro(err)+"): a diretiva `install`, que EXECUTA como "+
 				"root na carga de um módulo, NÃO foi avaliada")
@@ -94,6 +106,7 @@ func lerCargaDeModulo(f *Facts, e *env.Env, p string) {
 	b, err := e.ReadFile(p)
 	if err != nil {
 		if env.EhLacuna(err) {
+			f.ModuleConfigCompleto = false
 			f.denyPersist("modprobe", p+" existe e não pôde ser lido ("+
 				env.MotivoDoErro(err)+"): os módulos que ele manda carregar no boot "+
 				"NÃO foram avaliados")
@@ -129,6 +142,7 @@ func lerModprobe(f *Facts, e *env.Env, p string) {
 	b, err := e.ReadFile(p)
 	if err != nil {
 		if env.EhLacuna(err) {
+			f.ModuleConfigCompleto = false
 			f.denyPersist("modprobe", p+" existe e não pôde ser lido ("+
 				env.MotivoDoErro(err)+"): a diretiva `install`, que EXECUTA como root "+
 				"na carga de um módulo, NÃO foi avaliada")

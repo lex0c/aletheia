@@ -466,6 +466,7 @@ func expandHome(pat string, homes []string) []string {
 func collectLoader(f *Facts, e *env.Env) {
 	f.LoaderPreloadLido = true
 	f.LoaderPathCompleto = true
+	f.LoaderEnvCompleto = true
 
 	l := &f.Loader
 
@@ -555,11 +556,16 @@ func collectLoader(f *Facts, e *env.Env) {
 	}
 
 	// Lidos pelo PAM a cada sessão.
+	//
+	// A flag é a do ENV, e não a do caminho de busca: estes dois arquivos
+	// alimentam EnvVars, não SearchDirs. Derrubar LoaderPathCompleto aqui fazia
+	// um pam_env.conf ilegível suprimir a comparação de um /opt/.lib recém-
+	// nascido no ld.so.conf.d — a mudança que a família existe para pegar.
 	for _, p := range []string{"/etc/environment", "/etc/security/pam_env.conf"} {
 		b, err := e.ReadFile(p)
 		if err != nil {
 			if env.EhLacuna(err) {
-				f.LoaderPathCompleto = false
+				f.LoaderEnvCompleto = false
 				f.denyPersist("loader", p+" não pôde ser lido ("+env.MotivoDoErro(err)+
 					"): um LD_PRELOAD/LD_AUDIT global definido ali NÃO foi avaliado")
 			}

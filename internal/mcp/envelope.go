@@ -61,32 +61,50 @@ type Procedencia struct {
 	ColetaSHA   string   `json:"collector_sha256,omitempty"`
 	Caps        []string `json:"caps,omitempty"`
 
-	// RedigidoNaOrigem diz que este artefato passou por dump.redigir: argv,
-	// linha de cron, variável de crontab e ExecStart saíram do host já
-	// mascarados, e o environ já sai do coletor só com os NOMES e uma
-	// allowlist de valores.
+	// Redacao é o que o ARTEFATO PROVA sobre a própria redação — nunca o que o
+	// servidor gostaria de afirmar sobre ele.
 	//
-	// O campo existe para que a ausência de segredo não seja lida como prova de
-	// que não havia nenhum. É a tese da ferramenta aplicada a ela mesma: o que
-	// não está aqui pode não estar por ter sido apagado na saída, e quem lê
-	// precisa saber qual dos dois é.
-	RedigidoNaOrigem bool `json:"redacted_at_source"`
+	// Ela era um `true` incondicional, derivado só do modo em que o servidor
+	// tinha sido lançado. Um arquivo montado à mão, estruturalmente válido e de
+	// procedência desconhecida, era anunciado como redigido: uma afirmação de
+	// segurança sem lastro nenhum. Agora o carimbo viaja DENTRO do dump, e este
+	// campo repete o que ele diz.
+	//
+	//	applied           carimbo presente, na versão que este binário conhece
+	//	absent            NENHUM carimbo: o artefato não prova ter sido redigido
+	//	unknown_version   carimbo de versão que este binário não conhece
+	//
+	// "absent" não é o mesmo que "tem segredo": é ausência de prova, e a
+	// diferença é a mesma que a ferramenta inteira mantém entre "não achei" e
+	// "não consegui olhar".
+	Redacao string `json:"redaction"`
 
-	// Soma é o que o sidecar .sha256 respondeu. Ela vive na PROCEDÊNCIA porque
-	// é exatamente isso: a cadeia de custódia deste artefato. Sem ela o bloco
-	// afirmava custódia inteira sobre um arquivo que ninguém conferiu.
-	Soma string `json:"checksum"`
+	// Sidecar é o que o arquivo .sha256 ao lado respondeu.
+	//
+	// O nome é `sidecar`, e não `checksum`, de propósito. O `collect` é
+	// explícito: a soma NÃO autentica o dump — quem altera um altera o outro,
+	// porque os dois saem do mesmo host e viajam no mesmo pendrive. Para um
+	// modelo, `checksum_verified` se lê como "integridade verificada", que é
+	// uma garantia que este campo não dá. A cadeia de custódia de verdade é o
+	// número que o operador registrou FORA do host.
+	Sidecar string `json:"sidecar"`
+
+	// Autenticado é sempre false, e está escrito para não deixar dúvida: nada
+	// neste artefato prova origem. Ele existe para o dia em que existir
+	// assinatura — e, até lá, para impedir a leitura otimista de `sidecar`.
+	Autenticado bool `json:"authenticated"`
 }
 
 // ProcedenciaDeDump monta a procedência a partir do artefato.
-func ProcedenciaDeDump(id string, d *dump.Dump, soma string) Procedencia {
+func ProcedenciaDeDump(id string, d *dump.Dump, sidecar string) Procedencia {
 	a := d.Ambiente
 	p := Procedencia{
 		SnapshotID: id, Fonte: a.Source,
 		ColetadoEm: a.CollectedAt, ColetadoPor: a.Tool,
 		ColetaSHA: a.ToolSHA, Caps: a.Caps,
-		RedigidoNaOrigem: true,
-		Soma:             soma,
+		// DO ARTEFATO, e não do modo do servidor.
+		Redacao: string(d.Redacao.Estado()),
+		Sidecar: sidecar,
 	}
 	if d.Facts != nil {
 		p.Host = d.Facts.Host.Hostname

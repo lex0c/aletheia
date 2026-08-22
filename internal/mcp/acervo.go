@@ -1,12 +1,9 @@
 package mcp
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
 
@@ -37,6 +34,10 @@ type Retrato struct {
 	Env    *env.Env
 	Fatos  *facts.Facts
 	Fonte  env.Source
+
+	// Digest é o sha256 COMPLETO dos bytes que foram interpretados. O ID é um
+	// prefixo dele, para caber num handle; a identidade guardada é a inteira.
+	Digest string
 
 	// Soma é o que o sidecar .sha256 respondeu sobre este arquivo.
 	//
@@ -116,6 +117,12 @@ func (r *Retrato) Procedencia() Procedencia {
 // Três estados e não dois: "não havia sidecar" (dump de outra versão, ou vindo
 // de stdout) é diferente de "confere" e MUITO diferente de "não confere", e
 // achatá-los faria a ausência de verificação parecer verificação.
+//
+// E os nomes dizem SIDECAR, não checksum: o `collect` é explícito quanto a
+// isso — a soma não AUTENTICA o dump, porque quem altera um altera o outro. Os
+// dois saem do mesmo host e viajam no mesmo pendrive. `sidecar_matches` afirma
+// só que o arquivo não mudou desde que a soma foi escrita; a cadeia de custódia
+// de verdade é o número que o operador registrou fora do host.
 type EstadoDaSoma uint8
 
 const (
@@ -127,11 +134,11 @@ const (
 func (e EstadoDaSoma) String() string {
 	switch e {
 	case SomaConfere:
-		return "checksum_verified"
+		return "sidecar_matches"
 	case SomaDivergente:
-		return "checksum_mismatch"
+		return "sidecar_mismatch"
 	}
-	return "checksum_absent"
+	return "sidecar_absent"
 }
 
 // conferirSidecar compara o hash já calculado com o que a coleta escreveu.
@@ -141,7 +148,10 @@ func (e EstadoDaSoma) String() string {
 // confiável" vale para ele também. 64 bytes de hex mais um nome é tudo que o
 // formato admite.
 func conferirSidecar(caminho, obtido string) EstadoDaSoma {
-	fh, err := os.Open(caminho + ".sha256")
+	// Pela MESMA porta do dump: o sidecar vem do mesmo host e do mesmo
+	// pendrive, e um `mkfifo dump.json.sha256` penduraria o lançamento do
+	// servidor exatamente como o do dump penduraria.
+	fh, err := dump.AbrirArtefato(caminho + ".sha256")
 	if err != nil {
 		return SomaAusente
 	}
@@ -169,6 +179,13 @@ type Acervo struct {
 
 func NovoAcervo() *Acervo { return &Acervo{por: map[string]*Retrato{}} }
 
+// LarguraDoID é quantos hex do digest entram no handle.
+//
+// 32 hex = 128 bits. Eram 12 hex — 48 bits —, e o acervo tratava colisão de ID
+// como "mesmo conteúdo" sem conferir o resto. Vinte caracteres a mais num
+// identificador que o modelo copia automaticamente não custam nada.
+const LarguraDoID = 32
+
 // ErrRetratoDesconhecido é a resposta a um ID que não foi declarado no
 // lançamento. Ele é DIFERENTE de "arquivo não encontrado" de propósito: o
 // modelo não está pedindo um arquivo, está citando um handle, e a distinção
@@ -192,11 +209,14 @@ func (a *Acervo) Carregar(caminho string) (*Retrato, error) {
 		// explicasse por quê.
 		return nil, errors.New("--snapshot - não é possível: a entrada padrão é o transporte MCP")
 	}
-	soma, err := somaDoArquivo(caminho)
-	if err != nil {
-		return nil, err
-	}
-	d, err := dump.Carregar(caminho)
+	// UMA leitura, limitada, com o digest dos MESMOS bytes.
+	//
+	// Antes eram duas aberturas independentes do mesmo caminho — uma para
+	// hashear, outra para interpretar — e entre elas cabia a troca do arquivo.
+	// O resultado é o pior possível num servidor que deixa uma IA CITAR
+	// evidência: o snapshot_id identifica o conteúdo A e os fatos servidos são
+	// o B, e a citação aponta para bytes que ninguém analisou.
+	d, digest, err := dump.CarregarComDigest(caminho)
 	if err != nil {
 		return nil, err
 	}
@@ -213,19 +233,32 @@ func (a *Acervo) Carregar(caminho string) (*Retrato, error) {
 
 	fonte, _ := env.SourceDeNome(d.Ambiente.Source)
 	r := &Retrato{
-		ID:     "snap-" + soma[:12],
+		ID:     "snap-" + digest[:LarguraDoID],
+		Digest: digest,
 		Rotulo: rotuloDe(d),
 		Dump:   d, Env: e, Fatos: d.Facts, Fonte: fonte,
-		Soma: conferirSidecar(caminho, soma),
+		Soma: conferirSidecar(caminho, digest),
 	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if ja, existe := a.por[r.ID]; existe {
-		// Mesmo conteúdo declarado duas vezes: não é erro do operador, e
-		// inventar um segundo ID para os mesmos bytes faria snapshot.compare
-		// comparar um retrato com ele mesmo achando que são dois.
-		return ja, nil
+		// Mesmo ID: confere o DIGEST INTEIRO antes de tratar como o mesmo
+		// retrato.
+		//
+		// Antes o prefixo bastava, e ele tinha 48 bits. Para colisão acidental
+		// entre dois ou dez snapshots isso é irrelevante; para conteúdo
+		// ESCOLHIDO, não — e o efeito era silencioso: o segundo arquivo era
+		// descartado e o servidor respondia sobre o primeiro, com o handle que
+		// o operador acha que aponta para o outro. Não há motivo para economizar
+		// caracteres num handle que o modelo copia sozinho.
+		if ja.Digest == r.Digest {
+			return ja, nil
+		}
+		return nil, fmt.Errorf(
+			"dois artefatos DIFERENTES com o mesmo prefixo de digest (%s): "+
+				"%s… e %s…. Isto não acontece por acaso — trate os dois arquivos "+
+				"como suspeitos", r.ID, ja.Digest[:24], r.Digest[:24])
 	}
 	a.por[r.ID] = r
 	a.ordem = append(a.ordem, r.ID)
@@ -298,23 +331,4 @@ func rotuloDe(d *dump.Dump) string {
 		quando = "sem data"
 	}
 	return host + " · " + quando
-}
-
-// somaDoArquivo calcula o sha256 em FLUXO.
-//
-// Em fluxo e não com ReadFile: um dump pode ter centenas de megabytes (o teto
-// do dump.MaxDump é 512 MiB), e carregá-lo inteiro só para hashear duplicaria o
-// pico de memória do carregamento que vem logo em seguida. É o mesmo motivo
-// pelo qual env.Open existe ao lado de env.ReadFile.
-func somaDoArquivo(caminho string) (string, error) {
-	fh, err := os.Open(caminho)
-	if err != nil {
-		return "", err
-	}
-	defer fh.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, fh); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }

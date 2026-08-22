@@ -34,7 +34,7 @@ func esquemaEnvelope(dados string, comVeredito bool) json.RawMessage {
 "properties":{
  "provenance":{"type":"object",
   "description":"De onde veio este fato e em que condições. Vem INTEIRA do artefato, nunca da máquina onde o servidor roda.",
-  "required":["snapshot_id","source","redacted_at_source","checksum"],
+  "required":["snapshot_id","source","redaction","sidecar","authenticated"],
   "properties":{
    "snapshot_id":{"type":"string"},
    "source":{"type":"string","enum":["live","image"],"description":"o que o RETRATO descreve; um dump coletado com --root responde image"},
@@ -43,9 +43,11 @@ func esquemaEnvelope(dados string, comVeredito bool) json.RawMessage {
    "collected_by":{"type":"string"},
    "collector_sha256":{"type":"string"},
    "caps":{"type":"array","items":{"type":"string"},"description":"o que a COLETA conseguiu; o que falta explica a cobertura"},
-   "redacted_at_source":{"type":"boolean","description":"true significa que argv, cron, ExecStart e environ saíram do host já mascarados: a AUSÊNCIA de segredo aqui não prova que não havia nenhum"},
-   "checksum":{"type":"string","enum":["checksum_verified","checksum_absent","checksum_mismatch"],
-    "description":"o que o sidecar .sha256 escrito pela coleta respondeu. checksum_mismatch significa que o arquivo MUDOU depois de coletado — o que sair daqui descreve outro artefato. checksum_absent é ausência de verificacao, e nao verificacao."}}},
+   "redaction":{"type":"string","enum":["applied","absent","unknown_version"],
+    "description":"o que o ARTEFATO prova sobre a propria redacao — nao o que o servidor afirma. applied: o carimbo esta no arquivo, e toda superficie textual passou pela redacao na origem, entao a AUSENCIA de segredo aqui nao prova que nao havia nenhum. absent: o arquivo NAO prova ter sido redigido — trate o conteudo como possivelmente em claro e desconfie da procedencia. unknown_version: carimbo de uma politica que este binario nao conhece."},
+   "sidecar":{"type":"string","enum":["sidecar_matches","sidecar_absent","sidecar_mismatch"],
+    "description":"o que o arquivo .sha256 ao lado respondeu. sidecar_mismatch: o dump MUDOU depois de coletado, e o que sair daqui descreve outro artefato. sidecar_absent e ausencia de verificacao, nao verificacao. NAO é autenticacao: quem altera o dump altera o sidecar, porque os dois saem do mesmo host."},
+   "authenticated":{"type":"boolean","description":"sempre false: nada neste artefato prova ORIGEM. A cadeia de custodia de verdade é o numero que o operador registrou fora do host."}}},
  "observability":{"type":"object",
   "description":"O que esta resposta NAO cobre, e por quê. Leia antes de concluir qualquer coisa a partir de data.",
   "required":` + obrig + `,

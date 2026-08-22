@@ -680,7 +680,8 @@ schema: toda resposta em forma de achado carrega `verdict` e `coverage`, e o
 
 ```json
 {
-  "provenance": { "snapshot_id": "snap-…", "checksum": "checksum_verified" },
+  "provenance": { "snapshot_id": "snap-…", "redaction": "applied",
+                  "sidecar": "sidecar_matches", "authenticated": false },
   "observability": {
     "verdict": "INCOMPLETE",
     "coverage": { "total": 109, "complete": 18, "collector_gaps": [ "…" ] }
@@ -757,10 +758,22 @@ lê `/etc/shadow` e não é "não privilegiado".
 | `file.inspect` | de onde veio um arquivo e quem manda executá-lo |
 | `snapshot.compare` | o que mudou entre dois retratos |
 
-Toda resposta carrega a **procedência** do retrato, incluindo o que o sidecar
-`.sha256` escrito pela coleta respondeu — `checksum_verified`,
-`checksum_absent` ou `checksum_mismatch`. Ausência de verificação não é
-verificação, e um artefato que mudou depois de coletado descreve outro host.
+Toda resposta carrega a **procedência** do retrato, e ela afirma só o que o
+artefato PROVA:
+
+* `redaction` — o dump traz um carimbo de que passou pela redação, e em que
+  versão da política. `absent` significa que ele **não prova** ter sido
+  redigido: trate o conteúdo como possivelmente em claro e desconfie da origem
+  do arquivo. Antes deste campo o servidor afirmava redação incondicionalmente,
+  o que era uma garantia sem lastro — um arquivo montado à mão era anunciado
+  como redigido;
+* `sidecar` — o que o `.sha256` escrito pela coleta respondeu. Ausência de
+  verificação não é verificação, e um artefato que mudou depois de coletado
+  descreve outro host;
+* `authenticated` — sempre `false`, e escrito para não deixar dúvida. O sidecar
+  **não autentica** nada: quem altera o dump altera a soma, porque os dois saem
+  do mesmo host e viajam juntos. A cadeia de custódia de verdade é o número que
+  o operador registrou fora do host.
 
 Nenhuma tool aceita **caminho de arquivo**: tudo que o processo pode abrir é
 fixado pelo operador no lançamento. Uma tool que recebesse pathname daria ao
@@ -779,8 +792,11 @@ a aquisição vira extensão — começando pelo host vivo com root, depurar
 protocolo e depurar segurança seriam o mesmo problema.
 
 Em modo snapshot, `--allow-secrets` e `--profile full` são **recusados com o
-motivo**, e não ignorados: o dump já saiu do host redigido — argv, cron,
-`ExecStart` e environ —, então não há o que destravar. Uma flag de segurança
+motivo**, e não ignorados: o dump já saiu do host redigido, então não há o que
+destravar. A redação é **profunda** — toda superfície textual do retrato passa
+por ela, e um coletor novo nasce protegido; a lista curada anterior deixava
+setenta chaves de topo levarem credencial embora, incluindo o `.bashrc` do
+usuário. Uma flag de segurança
 ignorada em silêncio faria o operador ler a ausência de segredo como prova de
 que não havia nenhum.
 

@@ -242,3 +242,69 @@ func Valor(nome, v string) string {
 	}
 	return v
 }
+
+// Texto redige preservando o ESPAÇAMENTO, e existe para a redação profunda do
+// dump.
+//
+// `Linha` tokeniza com strings.Fields e rejunta com um espaço — o que serve
+// para uma linha de comando, e destrói qualquer outra coisa. Quando a redação
+// deixou de ser uma lista curada de quatro campos e passou a valer para toda
+// superfície textual do Facts, isso virou problema: um trecho de código, uma
+// linha de log ou uma configuração alinhada sairiam do dump com o espaçamento
+// colapsado, e o artefato é o que alguém vai ler meses depois.
+//
+// Esta versão separa os TOKENS dos SEPARADORES, redige só os primeiros e
+// rejunta com os separadores originais. Newline inclusa: um valor multilinha
+// atravessa inteiro, com cada linha redigida por conta própria.
+func Texto(s string) string {
+	if s == "" {
+		return s
+	}
+	var tokens, seps []string
+	i := 0
+	for i < len(s) {
+		j := i
+		for j < len(s) && !ehBranco(s[j]) {
+			j++
+		}
+		if j > i {
+			tokens = append(tokens, s[i:j])
+			seps = append(seps, "")
+		}
+		k := j
+		for k < len(s) && ehBranco(s[k]) {
+			k++
+		}
+		if k > j {
+			if len(seps) == 0 {
+				// Branco no começo: entra como separador de um token vazio, para
+				// a reconstrução não perdê-lo.
+				tokens = append(tokens, "")
+				seps = append(seps, s[j:k])
+			} else {
+				seps[len(seps)-1] = s[j:k]
+			}
+		}
+		i = k
+		if k == j && j == i {
+			break
+		}
+	}
+	if len(tokens) == 0 {
+		return s
+	}
+	redigidos := Cmdline(tokens)
+	var b strings.Builder
+	b.Grow(len(s))
+	for n := range redigidos {
+		b.WriteString(redigidos[n])
+		if n < len(seps) {
+			b.WriteString(seps[n])
+		}
+	}
+	return b.String()
+}
+
+func ehBranco(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
+}

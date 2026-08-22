@@ -208,9 +208,36 @@ func decodificar(linha []byte) (*Requisicao, *ErroRPC) {
 	if r.Method == "" {
 		return nil, erro(CodInvalidRequest, `campo "method" ausente`)
 	}
-	if bytes.Equal(bytes.TrimSpace(r.ID), []byte("null")) {
-		return nil, erro(CodInvalidRequest,
-			"id nulo: a spec exige string ou número, e null se confunde com notificação")
+	if er := conferirTipoDoID(r.ID); er != nil {
+		return nil, er
 	}
 	return &r, nil
+}
+
+// conferirTipoDoID recusa o que a spec não admite.
+//
+// Ela diz: o id é string OU número, e NÃO pode ser null. A versão anterior deste
+// código dizia isso no comentário e conferia só o null — então `true`, `{}` e
+// `[]` entravam, e o servidor os ecoava de volta como se fossem ids legítimos.
+//
+// A conferência é sobre o PRIMEIRO TOKEN dos bytes crus, e não sobre um valor
+// decodificado, porque o id é devolvido byte a byte de propósito: passá-lo por
+// `any` transformaria o inteiro 9007199254740993 num float64 e o devolveria
+// arredondado, e cliente que casa resposta por igualdade estrita perderia a
+// correlação sem nenhum erro visível.
+func conferirTipoDoID(id json.RawMessage) *ErroRPC {
+	b := bytes.TrimSpace(id)
+	if len(b) == 0 {
+		return nil // notificação: a ausência é legítima
+	}
+	switch c := b[0]; {
+	case c == '"':
+		return nil // string
+	case c == '-' || (c >= '0' && c <= '9'):
+		return nil // número
+	}
+	return erro(CodInvalidRequest,
+		"id de tipo inválido: a spec admite string ou número, e mais nada — "+
+			"null se confunde com notificação, e objeto ou booleano não são "+
+			"correlacionáveis")
 }

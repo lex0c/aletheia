@@ -911,8 +911,8 @@ func TestSomaDoSidecarChegaNaProcedencia(t *testing.T) {
 	casos := []struct {
 		nome, sidecar, quer string
 	}{
-		{"sem sidecar", "", "checksum_absent"},
-		{"soma errada", "0000000000000000000000000000000000000000000000000000000000000000  host.json", "checksum_mismatch"},
+		{"sem sidecar", "", "sidecar_absent"},
+		{"soma errada", "0000000000000000000000000000000000000000000000000000000000000000  host.json", "sidecar_mismatch"},
 	}
 	for _, c := range casos {
 		t.Run(c.nome, func(t *testing.T) {
@@ -926,7 +926,7 @@ func TestSomaDoSidecarChegaNaProcedencia(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := r.Procedencia().Soma; got != c.quer {
+			if got := r.Procedencia().Sidecar; got != c.quer {
 				t.Fatalf("quero %s, tenho %s", c.quer, got)
 			}
 		})
@@ -934,19 +934,19 @@ func TestSomaDoSidecarChegaNaProcedencia(t *testing.T) {
 
 	// E a soma CERTA confere. "ausente" não pode se confundir com "conferida":
 	// ausência de verificação não é verificação.
-	soma, err := somaDoArquivo(caminho)
+	_, digest, err := dump.CarregarComDigest(caminho)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(caminho+".sha256", []byte(soma+"  host.json"), 0o600); err != nil {
+	if err := os.WriteFile(caminho+".sha256", []byte(digest+"  host.json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	r, err := NovoAcervo().Carregar(caminho)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Procedencia().Soma != "checksum_verified" {
-		t.Fatalf("a soma certa tinha de conferir, tenho %s", r.Procedencia().Soma)
+	if r.Procedencia().Sidecar != "sidecar_matches" {
+		t.Fatalf("a soma certa tinha de conferir, tenho %s", r.Procedencia().Sidecar)
 	}
 }
 
@@ -1040,5 +1040,67 @@ func TestTetoDeResultadoMedeOFrameInteiro(t *testing.T) {
 	if _, temErro := resp["error"]; !temErro {
 		t.Fatalf("teto de %d bytes deixou passar um frame de %d: o corpo da tool "+
 			"tem %d, e é ele que estava sendo medido", entre, len(frame), len(sc))
+	}
+}
+
+// O ID é string ou NÚMERO, e mais nada.
+//
+// O comentário do decodificar já dizia isso; a implementação conferia só o
+// null, então `true`, `{}` e `[]` entravam e voltavam ecoados como se fossem
+// correlacionáveis.
+func TestIDDeTipoInvalidoEhRecusado(t *testing.T) {
+	validos := []string{`1`, `-3`, `"abc"`, `9007199254740993`}
+	for _, id := range validos {
+		if _, e := decodificar([]byte(`{"jsonrpc":"2.0","id":` + id + `,"method":"x"}`)); e != nil {
+			t.Errorf("id %s é válido e foi recusado: %v", id, e)
+		}
+	}
+	invalidos := []string{`null`, `true`, `false`, `{}`, `[]`, `{"a":1}`}
+	for _, id := range invalidos {
+		_, e := decodificar([]byte(`{"jsonrpc":"2.0","id":` + id + `,"method":"x"}`))
+		if e == nil {
+			t.Errorf("id %s devia ter sido recusado", id)
+			continue
+		}
+		if e.Code != CodInvalidRequest {
+			t.Errorf("id %s: código %d, queria %d", id, e.Code, CodInvalidRequest)
+		}
+	}
+}
+
+// SCHEMA E RUNTIME SÃO O MESMO CONTRATO.
+//
+// Em MCP o inputSchema é COMO O MODELO APRENDE a chamar a ferramenta. Se o
+// runtime exige um campo que o schema declara opcional, o modelo aprende a
+// chamar errado e descobre pelo erro — e `finding.get {}` era exatamente isso.
+//
+// A catraca não duplica a lógica: ela CHAMA cada tool sem argumento nenhum e,
+// quando a chamada é recusada por parâmetro faltando, cobra que o schema diga
+// quais são os obrigatórios.
+func TestSchemaDeclaraOQueORuntimeExige(t *testing.T) {
+	s, _ := servidorDeTeste(t, fatosDeTeste())
+	for _, f := range catalogo() {
+		if _, ok := s.porNome[f.Nome]; !ok {
+			continue // não servida sob esta policy
+		}
+		// A regra é independente do TEXTO da mensagem. A primeira versão deste
+		// teste casava a palavra "exige" e não pegava finding.get, cuja recusa
+		// diz "malformado" — uma catraca que depende da prosa do erro falha
+		// justamente no caso que ela existia para pegar.
+		_, er := f.Rodar(s, json.RawMessage(`{}`))
+		if er == nil || er.Code != CodInvalidParams {
+			continue // aceita `{}`: não há obrigatório a declarar
+		}
+		var esq struct {
+			Required []string `json:"required"`
+		}
+		if err := json.Unmarshal(f.Entrada, &esq); err != nil {
+			t.Fatalf("%s: inputSchema ilegível: %v", f.Nome, err)
+		}
+		if len(esq.Required) == 0 {
+			t.Errorf("%s: o runtime recusa `{}` (%q) e o inputSchema não declara "+
+				"campo obrigatório nenhum — o modelo aprende a chamar errado",
+				f.Nome, er.Message)
+		}
 	}
 }

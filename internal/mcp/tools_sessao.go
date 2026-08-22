@@ -135,10 +135,10 @@ type dadosStatus struct {
 	RootAutorizado      bool `json:"root_authorized"`
 	SegredosAutorizados bool `json:"secrets_authorized"`
 
-	// RedigidoNaOrigem só é verdadeiro em modo snapshot, e é o que impede o
-	// modelo de ler a ausência de segredo como prova de que não havia nenhum.
-	RedigidoNaOrigem bool   `json:"redacted_at_source"`
-	NotaDeRedacao    string `json:"redaction_note,omitempty"`
+	// Redacao é o que os retratos carregados PROVAM sobre a própria redação —
+	// nunca o que este servidor gostaria de afirmar. Ver Procedencia.Redacao.
+	Redacao       []map[string]string `json:"redaction,omitempty"`
+	NotaDeRedacao string              `json:"redaction_note,omitempty"`
 
 	Retratos []map[string]string `json:"snapshots,omitempty"`
 
@@ -152,11 +152,12 @@ type dadosStatus struct {
 	FerramentasIndisponiveis []Indisponivel `json:"unavailable_tools,omitempty"`
 }
 
-const notaDeRedacaoSnapshot = "este servidor responde sobre um DUMP, e o dump já " +
-	"foi redigido na origem: argv, linha de cron, variável de crontab e ExecStart " +
-	"saíram do host mascarados, e o environ já sai do coletor só com os NOMES das " +
-	"variáveis mais uma allowlist de valores. Não existe flag que destrave isso " +
-	"aqui, porque o segredo não está no artefato. Não conclua que não havia segredo."
+const notaDeRedacaoSnapshot = "este servidor responde sobre um DUMP. Quando o " +
+	"artefato traz o carimbo (redaction: applied), toda superfície textual dele " +
+	"passou pela redação na ORIGEM, e não existe flag que destrave o que não está " +
+	"no arquivo — não conclua que não havia segredo. Quando ele diz absent, o " +
+	"artefato NÃO PROVA ter sido redigido: trate o conteúdo como possivelmente " +
+	"em claro, e desconfie da procedência do arquivo."
 
 var toolStatus = Ferramenta{
 	// NÃO é DadosDoMotor: a resposta lista os retratos carregados, e o rótulo
@@ -203,7 +204,11 @@ var toolStatus = Ferramenta{
 			FerramentasIndisponiveis: s.fora,
 		}
 		if s.pol.Modo == ModoSnapshot {
-			d.RedigidoNaOrigem = true
+			for _, r := range s.acervo.Todos() {
+				d.Redacao = append(d.Redacao, map[string]string{
+					"snapshot_id": r.ID, "redaction": r.Procedencia().Redacao,
+				})
+			}
 			d.NotaDeRedacao = notaDeRedacaoSnapshot
 		}
 		return EnvelopeSimples{Confianca: ConfiancaDoHost(), Dados: d}, nil

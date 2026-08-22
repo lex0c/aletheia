@@ -58,6 +58,15 @@
 > {"jsonrpc":"2.0","id":null,"method":"tools/list"}
 < erro -32600
 
+> {"jsonrpc":"2.0","id":true,"method":"tools/list"}
+< erro -32600   <<< ID DIVERGENTE: enviei true, voltou null
+
+> {"jsonrpc":"2.0","id":{},"method":"tools/list"}
+< erro -32600   <<< ID DIVERGENTE: enviei {}, voltou null
+
+> {"jsonrpc":"2.0","id":[],"method":"tools/list"}
+< erro -32600   <<< ID DIVERGENTE: enviei [], voltou null
+
 > {"jsonrpc":"2.0","id":14}
 < erro -32600   <<< ID DIVERGENTE: enviei 14, voltou null
 

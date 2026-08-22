@@ -33,8 +33,8 @@ import (
 // teste: daria uma sensação de cobertura que não existe.
 func TestImpressaoDoEsquema(t *testing.T) {
 	const (
-		esquemaEsperado  = 16
-		impressaoGravada = "d003e595cc6c3345"
+		esquemaEsperado  = 17
+		impressaoGravada = "c5efae975104c557"
 	)
 	if SchemaVersion != esquemaEsperado {
 		t.Fatalf("SchemaVersion=%d e este teste conhece o %d: atualize os dois "+

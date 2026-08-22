@@ -290,6 +290,38 @@ func expandirIncludeCliente(f *Facts, e *env.Env, baseDir, home, padrao string) 
 	case !strings.HasPrefix(p, "/"):
 		p = baseDir + "/" + p
 	}
+	// A flag é a do CLIENTE: esta função expande Include de ssh_config, não de
+	// sshd_config. Derrubar a do servidor fazia as duas pontas errarem de uma
+	// vez — o ssh.cliente_exec seguia acreditando que o conjunto era exaustivo
+	// DEPOIS de truncá-lo, e a comparação do sshd era degradada sem nada ter
+	// acontecido com ela.
+	return expandirGlobSSH(e, p, func(motivo string) {
+		f.SSHClienteCompleto = false
+		f.denyPersist("ssh", "o Include `"+padrao+"` do cliente: "+motivo)
+	})
+}
+
+// expandirGlobSSH é a expansão COMPONENTE A COMPONENTE, e é uma só para o
+// cliente e para o servidor.
+//
+// Duas coisas justificam a função compartilhada, e as duas foram defeito:
+//
+//	O GLOB VALE EM QUALQUER COMPONENTE. O sshd_config(5) diz que cada pathname
+//	de Include pode conter curinga de glob(7), sem restringi-lo ao último
+//	componente — e o lado do SERVIDOR recusava padrão com curinga no diretório,
+//	com um comentário afirmando o contrário. Um `Include
+//	/etc/ssh/profiles/*/sshd.conf` virava `nil` calado.
+//
+//	LISTAGEM QUE FALHA NÃO É DIRETÓRIO VAZIO. Os dois lados usavam
+//	ReadDirNames, que engole o erro por desenho — o comentário dele diz, com
+//	todas as letras, para não usá-lo onde a diferença decide cobertura. Um
+//	diretório de perfis sem permissão dava zero matches e o conjunto seguia
+//	"completo".
+//
+// `degradar` é como a fonte de quem chama paga por isso: ela desmarca o fato de
+// completude DELA e declara a lacuna. A função não sabe — nem precisa saber —
+// se está expandindo config de cliente ou de servidor.
+func expandirGlobSSH(e *env.Env, p string, degradar func(motivo string)) []string {
 	if !strings.ContainsAny(p, "*?[") {
 		return []string{p}
 	}
@@ -307,7 +339,14 @@ func expandirIncludeCliente(f *Facts, e *env.Env, baseDir, home, padrao string) 
 				prox = append(prox, base+"/"+comp)
 				continue
 			}
-			for _, n := range e.ReadDirNames(base + "/" + "") {
+			nomes, err := e.ReadDirNamesErr(base + "/")
+			if env.EhLacuna(err) {
+				degradar(base + "/ não pôde ser listado (" + env.MotivoDoErro(err) +
+					"): os arquivos de configuração que o curinga alcançaria ali " +
+					"NÃO foram lidos")
+				continue
+			}
+			for _, n := range nomes {
 				if ok, err := path.Match(comp, n); err == nil && ok {
 					prox = append(prox, base+"/"+n)
 				}
@@ -317,16 +356,9 @@ func expandirIncludeCliente(f *Facts, e *env.Env, baseDir, home, padrao string) 
 		// profundidade de Include, e um único `*` pode abrir milhares de
 		// caminhos. Estourar vira lacuna declarada, nunca silêncio.
 		if len(prox) > maxExpansaoInclude {
-			// A flag é a do CLIENTE: esta função expande Include de ssh_config,
-			// não de sshd_config. Derrubar a do servidor fazia as duas pontas
-			// errarem de uma vez — o ssh.cliente_exec seguia acreditando que o
-			// conjunto era exaustivo DEPOIS de truncá-lo, e a comparação do
-			// sshd era degradada sem nada ter acontecido com ela.
-			f.SSHClienteCompleto = false
-			f.denyPersist("ssh", "o Include `"+padrao+"` expandiu para mais de "+
-				strconv.Itoa(maxExpansaoInclude)+" caminhos no componente "+
-				strconv.Itoa(i+1)+": a expansão foi cortada e os arquivos restantes "+
-				"NÃO foram lidos")
+			degradar("expandiu para mais de " + strconv.Itoa(maxExpansaoInclude) +
+				" caminhos no componente " + strconv.Itoa(i+1) + ": a expansão foi " +
+				"cortada e os arquivos restantes NÃO foram lidos")
 			prox = prox[:maxExpansaoInclude]
 		}
 		atuais = prox
@@ -334,7 +366,7 @@ func expandirIncludeCliente(f *Facts, e *env.Env, baseDir, home, padrao string) 
 			return nil
 		}
 	}
-	sort.Strings(atuais)
+	sort.Strings(atuais) // o ssh e o sshd aplicam em ordem lexicográfica
 	return atuais
 }
 
@@ -421,29 +453,19 @@ func AnalisaConfigClienteParaTeste(arquivo, user string, b []byte) []SSHClientEx
 // `vistos`; o teto é contra a expansão explosiva de globs encadeados.
 const maxArquivosSSH = 64
 
-// expandirIncludeSSH resolve o alvo de um Include. Caminho relativo é relativo
-// a /etc/ssh, como o sshd faz, e o glob é expandido pelo diretório — sem
-// filepath.Glob, que resolveria fora da raiz travada em modo image.
-func expandirIncludeSSH(e *env.Env, padrao string) []string {
+// expandirIncludeSSH resolve o alvo de um Include do SERVIDOR. Caminho relativo
+// é relativo a /etc/ssh, como o sshd faz.
+//
+// A expansão é a mesma do cliente — ver expandirGlobSSH, e ver ali os dois
+// defeitos que motivaram unificá-las.
+func expandirIncludeSSH(f *Facts, e *env.Env, padrao string) []string {
 	if !strings.HasPrefix(padrao, "/") {
 		padrao = "/etc/ssh/" + padrao
 	}
-	if !strings.ContainsAny(padrao, "*?[") {
-		return []string{padrao}
-	}
-	dir, base := path.Split(padrao)
-	dir = strings.TrimSuffix(dir, "/")
-	if strings.ContainsAny(dir, "*?[") {
-		return nil // glob no DIRETÓRIO: fora do que o sshd aceita
-	}
-	var out []string
-	for _, n := range e.ReadDirNames(dir) {
-		if ok, err := path.Match(base, n); err == nil && ok {
-			out = append(out, dir+"/"+n)
-		}
-	}
-	sort.Strings(out) // o sshd aplica em ordem lexicográfica
-	return out
+	return expandirGlobSSH(e, padrao, func(motivo string) {
+		f.SSHServerCompleto = false
+		f.denyPersist("ssh", "o Include `"+padrao+"` do sshd: "+motivo)
+	})
 }
 
 func collectSSHConfig(f *Facts, e *env.Env) {
@@ -504,7 +526,7 @@ func collectSSHConfig(f *Facts, e *env.Env) {
 			// o arquivo de chaves real também não era lido, sem lacuna.
 			if strings.EqualFold(k, "include") {
 				for _, campo := range strings.Fields(v) {
-					arquivos = append(arquivos, expandirIncludeSSH(e, campo)...)
+					arquivos = append(arquivos, expandirIncludeSSH(f, e, campo)...)
 				}
 				continue
 			}

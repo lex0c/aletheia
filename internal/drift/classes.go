@@ -75,6 +75,7 @@ var classes = []Classe{
 	caminhoDoLoader,
 	ordemDoLoader,
 	envDoLoader,
+	envDeUnit,
 	configWeb,
 	programaEmExecucao,
 }
@@ -91,10 +92,17 @@ var unidadeSystemd = Classe{
 	Tipo:     "systemd.unit",
 	Titulo:   "unit do systemd",
 	Requires: env.CapFilesystem,
-	// Duas chaves porque o coletor de unit usa as duas: `unit` para o
-	// diretório que não pôde ser listado, `persist` para o arquivo ilegível.
-	Lacunas:         []string{"unit", "persist"},
-	LacunaConferida: "as duas chaves são do coletor de unit e só dele: `unit` para diretório não listado, `persist` para arquivo de unit ilegível e expansão de drop-in",
+	// UMA chave, e ela é a estreita.
+	//
+	// A `persist` estava aqui com a justificativa de cobrir "arquivo de unit
+	// ilegível e expansão de drop-in" — e a justificativa era falsa: o
+	// `denyPersist` alimenta `persist` a partir de DEZENOVE categorias, então
+	// um authorized_keys de outro usuário sem permissão bastava para tornar a
+	// família assimétrica e suprimir um `ExecStart=/tmp/.agent`. Os três sites
+	// que só escreviam `persist` no coletor de unit passaram a escrever `unit`
+	// também; nada se perdeu, e a dependência ficou do tamanho da fonte.
+	Lacunas:         []string{"unit"},
+	LacunaConferida: "chave do coletor de unit e só dele: diretório não listado, arquivo de unit ilegível, teto de units e teto de expansão de drop-in",
 	// A varredura das árvores de unit é exaustiva quando o filesystem está
 	// legível: as raízes são fixas e conhecidas. Por isso "sumiu" vale aqui —
 	// e unit que some é tão interessante quanto unit que nasce (é como se
@@ -127,6 +135,18 @@ var unidadeSystemd = Classe{
 			for _, ev := range u.Environment {
 				envs = append(envs, ev.Key+"="+redact.Valor(ev.Key, ev.Value))
 			}
+			// UM EnvironmentFile= ILEGÍVEL cega o campo `environment` DESTA
+			// unit, e só dele.
+			//
+			// O arquivo entra no ambiente efetivo do serviço, e o que ele
+			// define não foi lido — então a lista abaixo não é o ambiente, é a
+			// parte dele que estava visível. A cegueira é do campo: o
+			// `ExecStart` da mesma unit foi lido do arquivo da unit e continua
+			// comparável, e as outras units não têm nada com isso.
+			var naoObs map[string]bool
+			if len(u.EnvFilesIlegiveis) > 0 {
+				naoObs = map[string]bool{"environment": true}
+			}
 			// BIND MONTA CAMINHO DO HOST DENTRO DO NAMESPACE DA UNIT, e por
 			// isso decide. Ele estava declarado em Decide e NÃO era extraído: a
 			// mudança não produzia drift nem lacuna — silêncio limpo, que é o
@@ -141,28 +161,29 @@ var unidadeSystemd = Classe{
 				}
 				binds = append(binds, b.Origem+":"+b.Destino+":"+modo)
 			}
-			out = append(out, Entidade{ID: id, Alvos: []string{u.Name, u.Path}, Campos: map[string]string{
-				"exec":           juntarSequencia(execs),
-				"user":           u.User,
-				"enabled_by":     juntarConjunto(u.EnabledBy),
-				"dropin_for":     u.DropInFor,
-				"root_directory": u.RootDirectory,
-				"root_image":     u.RootImage,
-				"listen":         juntarConjunto(u.Listen),
-				"watch_paths":    juntarConjunto(u.WatchPaths),
-				"on_calendar":    juntarConjunto(u.OnCalendar),
-				"environment":    juntarSequencia(envs),
-				"binds":          juntarSequencia(binds),
-				// BindReset (`BindPaths=` vazio) APAGA os binds herdados, e
-				// some da lista acima sem deixar rastro: sem este campo, zerar
-				// a lista e não ter lista nenhuma são o mesmo valor.
-				"bind_reset": boolTxt(u.BindReset),
-				"masked":     boolTxt(u.Masked),
-				// CORROBORA, não decide: mtime muda em toda atualização de
-				// pacote. Entra para a contagem e para a evidência de quem já
-				// tem outro motivo para olhar.
-				"mod_utc": u.ModUTC,
-			}})
+			out = append(out, Entidade{ID: id, Alvos: []string{u.Name, u.Path},
+				NaoObservado: naoObs, Campos: map[string]string{
+					"exec":           juntarSequencia(execs),
+					"user":           u.User,
+					"enabled_by":     juntarConjunto(u.EnabledBy),
+					"dropin_for":     u.DropInFor,
+					"root_directory": u.RootDirectory,
+					"root_image":     u.RootImage,
+					"listen":         juntarConjunto(u.Listen),
+					"watch_paths":    juntarConjunto(u.WatchPaths),
+					"on_calendar":    juntarConjunto(u.OnCalendar),
+					"environment":    juntarSequencia(envs),
+					"binds":          juntarSequencia(binds),
+					// BindReset (`BindPaths=` vazio) APAGA os binds herdados, e
+					// some da lista acima sem deixar rastro: sem este campo, zerar
+					// a lista e não ter lista nenhuma são o mesmo valor.
+					"bind_reset": boolTxt(u.BindReset),
+					"masked":     boolTxt(u.Masked),
+					// CORROBORA, não decide: mtime muda em toda atualização de
+					// pacote. Entra para a contagem e para a evidência de quem já
+					// tem outro motivo para olhar.
+					"mod_utc": u.ModUTC,
+				}})
 		}
 		return out
 	},
@@ -820,11 +841,24 @@ var moduloNSS = Classe{
 	Exaustiva: true,
 	Decide:    map[string]bool{"libs": true, "servicos": true},
 	Extrair: func(f *facts.Facts) []Entidade {
+		var naoObsNSS map[string]bool
+		if !f.LoaderPathCompleto {
+			naoObsNSS = map[string]bool{"libs": true}
+		}
 		out := make([]Entidade, 0, len(f.NSSModules))
 		for i := range f.NSSModules {
 			n := &f.NSSModules[i]
 			out = append(out, Entidade{
 				ID: n.Fonte, Alvos: []string{n.Fonte},
+				// `libs` DEPENDE DO LOADER, e `servicos` não.
+				//
+				// Localizar libnss_<fonte>.so.* usa os diretórios de busca que
+				// o ld.so.conf declara: se aquela cadeia não foi lida inteira,
+				// uma lib pode simplesmente não ter sido PROCURADA onde estava,
+				// e a lista encolhe sem nada ter saído do host. `servicos` vem
+				// só do nsswitch.conf e continua comparável — que é o motivo de
+				// isto ser por campo e não por família.
+				NaoObservado: naoObsNSS,
 				Campos: map[string]string{
 					"libs": juntarConjunto(n.Paths),
 					// EM QUAIS DATABASES esta fonte manda. Estava nos fatos e era
@@ -1129,19 +1163,32 @@ var regraDeDoas = Classe{
 // Os dois decidem, e por motivos diferentes: mudar o arquivo é persistência
 // (vale no próximo boot), mudar o runtime é agora.
 var controleMAC = Classe{
-	Tipo:            "mac",
-	Titulo:          "controle de acesso obrigatório (MAC)",
-	Requires:        env.CapFilesystem,
-	Lacunas:         []string{"mac"},
-	LacunaConferida: "os dois sites são do coletor de MAC: /etc/selinux/config e /sys/fs/selinux/enforce",
-	Exaustiva:       true,
-	Decide:          map[string]bool{"configurado": true, "ativo": true},
-	// `Ativo` sai vazio quando o filesystem do MAC não está montado — e vazio
-	// ali é "não observado", não "desligado".
-	Observacional: map[string]bool{"ativo": true},
+	Tipo:     "mac",
+	Titulo:   "controle de acesso obrigatório (MAC)",
+	Requires: env.CapFilesystem,
+	// SEM `Lacunas`, e a razão é a que motivou o NaoObservado existir.
+	//
+	// A chave `mac` agrega DUAS fontes com permissões diferentes:
+	// /etc/selinux/config, que diz o que vale no próximo boot, e
+	// /sys/fs/selinux/enforce, que diz o que vale agora. Como dependência de
+	// família, ela fazia o securityfs ilegível suprimir a comparação do
+	// ARQUIVO — que tinha sido lido perfeitamente, e cuja transição
+	// `enforcing -> permissive` é justamente a que sobrevive ao reboot.
+	//
+	// Cada campo passa a responder pela SUA leitura, abaixo. A chave continua
+	// no relatório, para o operador, que é para quem ela foi escrita.
+	Exaustiva: true,
+	Decide:    map[string]bool{"configurado": true, "ativo": true},
 	Extrair: func(f *facts.Facts) []Entidade {
 		if f.MAC.Configurado == "" && f.MAC.Ativo == "" {
 			return nil
+		}
+		naoObs := map[string]bool{}
+		if !f.MAC.ConfigLido {
+			naoObs["configurado"] = true
+		}
+		if !f.MAC.RuntimeLido {
+			naoObs["ativo"] = true
 		}
 		return []Entidade{{
 			ID: "mac", Alvos: []string{"mac", "selinux", "apparmor"},
@@ -1149,6 +1196,7 @@ var controleMAC = Classe{
 				"configurado": f.MAC.Configurado,
 				"ativo":       f.MAC.Ativo,
 			},
+			NaoObservado: naoObs,
 		}}
 	},
 }
@@ -1196,11 +1244,19 @@ var controleAudit = Classe{
 // alguém desligando a trava, e nenhuma delas exige tocar num arquivo que a
 // varredura de persistência olhe.
 var protecaoDoKernel = Classe{
-	Tipo:            "kernel.protecao",
-	Titulo:          "endurecimento do kernel",
-	Requires:        env.CapProcfs,
-	Lacunas:         []string{"taint"},
-	LacunaConferida: "os sites são do endurecimento e do taint, e a família já pergunta por Protecao.Lido()",
+	Tipo:     "kernel.protecao",
+	Titulo:   "endurecimento do kernel",
+	Requires: env.CapProcfs,
+	// SEM `taint`, e a chave estava aqui por engano de leitura.
+	//
+	// Ela é escrita pelo coletor de taint — /proc/sys/kernel/tainted e
+	// /proc/modules —, e nenhum dos dez campos desta família vem de lá. O
+	// efeito era um `ptrace_scope: 1 -> 0` desaparecer porque o `tainted`
+	// ficou ilegível de um lado: a trava que impede um processo de ler a
+	// memória de outro sendo desligada, calada por um arquivo sem relação.
+	//
+	// O que responde por esta família é o Protecao.Lido() abaixo, mais os
+	// campos observacionais — os dois olham exatamente a fonte dela.
 	// O coletor desta superfície é VIVO: em modo imagem ele não roda, e os dez
 	// campos vêm vazios dos dois lados. Sem esta pergunta, a cobertura diria
 	// "comparada sem restrição" sobre uma família que ninguém coletou — que é a
@@ -1370,13 +1426,36 @@ func nz(s, padrao string) string {
 // supervisor, ~/.bashrc, ~/.ssh/rc. Todas são arquivos que EXECUTAM em algum
 // gatilho, e o coletor já as normalizou numa forma só.
 var gatilhoDeExecucao = Classe{
-	Tipo:            "startup.trigger",
-	Titulo:          "arquivo que executa em gatilho",
-	Requires:        env.CapFilesystem,
-	Lacunas:         []string{"startup"},
-	LacunaConferida: "todos os sites são da varredura de gatilhos, que é a fonte desta família",
-	Exaustiva:       true,
-	Decide:          map[string]bool{"linhas": true, "usuario": true, "modo": true},
+	Tipo:     "startup.trigger",
+	Titulo:   "arquivo que executa em gatilho",
+	Requires: env.CapFilesystem,
+	// DUAS FONTES, e a segunda não era conhecida por esta família.
+	//
+	// `f.Triggers` não sai só da varredura de gatilhos: o coletor de hooks de
+	// git também escreve nela, e as falhas DELE vão para a chave `githook`.
+	// Enquanto a família dependia só de `startup`, uma árvore de repositório
+	// que ficasse ilegível fazia os hooks dela saírem como REMOVIDOS — a
+	// família continuava se achando exaustiva sobre um conjunto que perdeu
+	// metade da testemunha.
+	//
+	// A saída não é juntar as duas chaves num `Lacunas` maior: isso faria um
+	// repositório ilegível suprimir a comparação do /etc/profile, que vem da
+	// outra varredura e foi lido inteiro. A supressão é POR FONTE.
+	FontesIncertas: func(f *facts.Facts) map[string]string {
+		out := map[string]string{}
+		if temLacuna(f, "startup") {
+			out["startup"] = "a varredura de gatilhos declarou lacuna"
+		}
+		if temLacuna(f, "githook") {
+			out["githook"] = "a varredura de hooks de git declarou lacuna"
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	},
+	Exaustiva: true,
+	Decide:    map[string]bool{"linhas": true, "usuario": true, "modo": true},
 	// DÍVIDA DECLARADA: gatilho BINÁRIO trocado no lugar não produz drift.
 	//
 	// O coletor marca `Binario` e não extrai linha nenhuma — não há o que
@@ -1406,8 +1485,15 @@ var gatilhoDeExecucao = Classe{
 			if t.Ilegvel {
 				conteudo = ""
 			}
+			// A FONTE separa o que a varredura de gatilhos achou do que o
+			// coletor de git achou: as duas enchem f.Triggers, e cada uma falha
+			// do seu jeito.
+			fonte := "startup"
+			if t.Kind == "git_hook" {
+				fonte = "githook"
+			}
 			out = append(out, Entidade{
-				ID: t.File, Alvos: []string{t.File},
+				ID: t.File, Alvos: []string{t.File}, Fonte: fonte,
 				Campos: map[string]string{
 					"linhas":  conteudo,
 					"usuario": t.User,
@@ -1658,6 +1744,72 @@ var envDoLoader = Classe{
 				ID:     v.File + "|" + v.Key,
 				Alvos:  []string{v.File, v.Value},
 				Campos: map[string]string{"valor": redact.Valor(v.Key, v.Value)},
+			})
+		}
+		return out
+	},
+}
+
+// A MESMA injeção pela porta do systemd: `Environment=` e `EnvironmentFile=`
+// põem a variável no ambiente do serviço com o efeito do ld.so.preload.
+//
+// Família SEPARADA da `loader.env` porque as fontes falham diferente. Um
+// EnvironmentFile= ilegível de UMA unit não pode pôr em dúvida o
+// /etc/environment, nem as outras units — e é por isso que a incerteza aqui é
+// declarada POR UNIT, e não por família: a `Fonte` da entidade é o nome da
+// unit, e só as entidades dela saem de surgiu/sumiu.
+//
+// O valor comparado é o EFETIVO. O systemd deixa valendo a ÚLTIMA atribuição de
+// uma variável, então trocar a ordem de duas linhas `Environment=LD_PRELOAD=`
+// muda o que o serviço carrega — e comparar o conjunto de declarações daria
+// zero drift para essa troca.
+var envDeUnit = Classe{
+	Tipo:     "unit.env",
+	Titulo:   "variável de unit que carrega código",
+	Requires: env.CapFilesystem,
+	Incompleta: func(f *facts.Facts) string {
+		if temLacuna(f, "unit") {
+			return "a varredura de units não foi exaustiva deste lado"
+		}
+		return ""
+	},
+	FontesIncertas: func(f *facts.Facts) map[string]string {
+		out := map[string]string{}
+		for i := range f.Units {
+			if u := &f.Units[i]; u.Efetiva() && len(u.EnvFilesIlegiveis) > 0 {
+				out[u.Name] = "EnvironmentFile= ilegível"
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	},
+	Exaustiva: true,
+	Decide:    map[string]bool{"valor": true},
+	Extrair: func(f *facts.Facts) []Entidade {
+		out := make([]Entidade, 0, len(f.Loader.EnvDeUnit))
+		for i := range f.Loader.EnvDeUnit {
+			v := &f.Loader.EnvDeUnit[i]
+			var naoObs map[string]bool
+			if v.Incerto {
+				// A unit tem EnvironmentFile= que não abriu: o valor abaixo é o
+				// visível, e o arquivo que faltou pode sobrescrevê-lo. Comparar
+				// dois "visíveis" como se fossem dois efetivos afirmaria o que
+				// ninguém leu.
+				naoObs = map[string]bool{"valor": true}
+			}
+			out = append(out, Entidade{
+				ID:           v.Unit + "|" + v.Key,
+				Fonte:        v.Unit,
+				Alvos:        []string{v.Unit, v.Value, v.DeclaradoEm},
+				NaoObservado: naoObs,
+				Campos: map[string]string{
+					"valor": redact.Valor(v.Key, v.Value),
+					// CORROBORA: mover a linha da unit para um drop-in muda o
+					// arquivo e não muda o que o serviço carrega.
+					"declarado_em": v.DeclaradoEm,
+				},
 			})
 		}
 		return out

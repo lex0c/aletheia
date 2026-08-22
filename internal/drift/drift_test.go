@@ -246,10 +246,11 @@ func TestTodaClasseDeclaraDoQueDepende(t *testing.T) {
 // mudança em `BindPaths=` não produzia drift NEM lacuna. Silêncio limpo, que é
 // o pior modo de falha desta base, e invisível para qualquer teste que só
 // olhasse o que a ferramenta acha.
-func TestTodoCampoQueDecideEhExtraido(t *testing.T) {
-	// Fatos com uma entidade de cada família, para que os extratores emitam
-	// algo. O conteúdo não importa: o que se mede é o CONJUNTO DE CHAVES.
-	f := &facts.Facts{
+// fixtureDeTodasAsFamilias monta fatos com UMA entidade de cada família, para
+// que todo extrator emita algo. O conteúdo não importa: o que as catracas medem
+// é o CONJUNTO DE CHAVES, a cegueira declarada e a fonte.
+func fixtureDeTodasAsFamilias() *facts.Facts {
+	return &facts.Facts{
 		Units: []facts.Unit{{Name: "u.service", Path: "/etc/systemd/system/u.service"}},
 		Cron:  []facts.CronEntry{{File: "/etc/cron.d/x", Kind: "dropin", Cmd: "/bin/true"}},
 		Sudoers: []facts.SudoRule{{File: "/etc/sudoers", Line: 1,
@@ -262,6 +263,8 @@ func TestTodoCampoQueDecideEhExtraido(t *testing.T) {
 		Loader: facts.Loader{
 			SearchDirs: []facts.LoaderDir{{Dir: "/usr/lib", From: "/etc/ld.so.conf", Exists: true}},
 			EnvVars:    []facts.EnvSetting{{File: "/etc/environment", Key: "LD_PRELOAD", Value: "/tmp/.so"}},
+			EnvDeUnit: []facts.EnvDeUnit{{Unit: "u.service", Key: "LD_PRELOAD",
+				Value: "/tmp/.u.so", DeclaradoEm: "/etc/systemd/system/u.service"}},
 		},
 		Suid:               []facts.SuidFile{{Path: "/usr/bin/sudo", Setuid: true}},
 		Sockets:            []facts.Socket{{Proto: "tcp", State: "LISTEN", LocalIP: "0.0.0.0", LocalPort: 22, Comm: "sshd"}},
@@ -297,6 +300,10 @@ func TestTodoCampoQueDecideEhExtraido(t *testing.T) {
 		Resolver:        facts.Resolver{File: "/etc/resolv.conf", Nameservers: []string{"1.1.1.1"}},
 		ConfiancaDeHost: []facts.ConfiancaDeHost{{Path: "/root/.rhosts", Conta: "root", Linhas: []string{"+"}, Curinga: true}},
 	}
+}
+
+func TestTodoCampoQueDecideEhExtraido(t *testing.T) {
+	f := fixtureDeTodasAsFamilias()
 	for _, c := range classes {
 		// Pelo INDEXAR e não pelo Extrair: a invariante é sobre a entidade que
 		// de fato é comparada, e o índice acrescenta campo próprio (a
@@ -341,7 +348,7 @@ func TestChaveRemovidaEhComparada(t *testing.T) {
 	eb := Entidade{ID: "x", Campos: map[string]string{}}
 	var d facts.Drift
 	compararClasse(c, facts.CoberturaDrift{Simetrico: true},
-		map[string]Entidade{"x": ea}, map[string]Entidade{"x": eb}, &d)
+		map[string]Entidade{"x": ea}, map[string]Entidade{"x": eb}, nil, nil, &d)
 	if len(d.Mudancas) != 1 || d.Mudancas[0].Depois != "" || d.Mudancas[0].Antes != "valia" {
 		t.Fatalf("a chave que sumiu do lado de depois precisa ser comparada: %+v", d.Mudancas)
 	}
@@ -386,7 +393,7 @@ func TestCampoObservacionalNaoInventaMudanca(t *testing.T) {
 		var d facts.Drift
 		compararClasse(c, facts.CoberturaDrift{Simetrico: true},
 			map[string]Entidade{"x": {ID: "x", Campos: a}},
-			map[string]Entidade{"x": {ID: "x", Campos: b}}, &d)
+			map[string]Entidade{"x": {ID: "x", Campos: b}}, nil, nil, &d)
 		return d.Mudancas
 	}
 	// Observado num lado e não no outro: não é mudança.

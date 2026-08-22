@@ -586,7 +586,7 @@ var driftDePrecarga = check.Check{
 		// interpretador e a variável que o PAM exporta em toda sessão. Um
 		// `LD_PRELOAD=` em /etc/environment tem o alcance do primeiro num
 		// arquivo que ninguém olha com a mesma desconfiança.
-		return achadosDeDrift(self, f, mudancasDeVarios(f, "precarga", "hook_interp", "loader.env"),
+		return achadosDeDrift(self, f, mudancasDeVarios(f, "precarga", "hook_interp", "loader.env", "unit.env"),
 			"uma linha em /etc/ld.so.preload injeta código em TODO processo dinâmico "+
 				"do host — inclusive nos que a resposta a incidente vai rodar. É a "+
 				"superfície de maior alcance por byte escrito que existe em Linux",

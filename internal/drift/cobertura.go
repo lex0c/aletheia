@@ -92,6 +92,7 @@ var Cobertas = []Superficie{
 	// ninguém.
 	{Nome: "variável de ambiente que carrega código", Campo: "loader", Tipo: "loader.env"},
 	{Nome: "ordem de busca de biblioteca", Campo: "loader", Tipo: "loader.order"},
+	{Nome: "variável de unit que carrega código", Campo: "loader", Tipo: "unit.env"},
 	{Nome: "configuração por diretório do servidor web", Campo: "web_config", Tipo: "web.config"},
 }
 

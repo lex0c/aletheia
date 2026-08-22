@@ -139,3 +139,73 @@ func TestTetoDeArquivosDoServidorDeclaraLacuna(t *testing.T) {
 		t.Error("um corte do lado do SERVIDOR não pode degradar a flag do cliente")
 	}
 }
+
+// O GLOB DO INCLUDE VALE EM QUALQUER COMPONENTE, e o lado do SERVIDOR afirmava
+// o contrário por escrito.
+//
+// O sshd_config(5) diz que cada pathname pode conter curinga de glob(7), e não
+// restringe o curinga ao último componente. A versão anterior devolvia `nil` —
+// calada, sem lacuna — para padrão com curinga no diretório, então um
+// PermitRootLogin plantado um nível abaixo não existia para esta ferramenta.
+func TestIncludeDoServidorExpandeGlobEmDiretorio(t *testing.T) {
+	raiz := t.TempDir()
+	for _, d := range []string{"etc/ssh/perfis/a", "etc/ssh/perfis/b"} {
+		if err := os.MkdirAll(filepath.Join(raiz, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.WriteFile(filepath.Join(raiz, "etc/ssh/sshd_config"),
+		[]byte("Include /etc/ssh/perfis/*/sshd.conf\n"), 0o600)
+	os.WriteFile(filepath.Join(raiz, "etc/ssh/perfis/a/sshd.conf"),
+		[]byte("PermitRootLogin yes\n"), 0o600)
+	os.WriteFile(filepath.Join(raiz, "etc/ssh/perfis/b/sshd.conf"),
+		[]byte("AuthorizedKeysCommand /tmp/.k\n"), 0o600)
+
+	f := &Facts{SSHServerCompleto: true, SSHClienteCompleto: true}
+	collectSSHConfig(f, envDeRaiz(t, raiz))
+
+	if f.SSH.PermitRootLogin != "yes" {
+		t.Errorf("o Include com curinga no DIRETÓRIO não foi expandido: "+
+			"PermitRootLogin=%q, arquivos=%v", f.SSH.PermitRootLogin, f.SSH.Files)
+	}
+	if f.SSH.AuthorizedKeysCommand != "/tmp/.k" {
+		t.Errorf("o segundo perfil também não entrou: %q", f.SSH.AuthorizedKeysCommand)
+	}
+}
+
+// LISTAGEM QUE FALHA NÃO É DIRETÓRIO VAZIO.
+//
+// Os dois lados usavam ReadDirNames, que engole o erro por desenho — o
+// comentário dele manda não usá-lo onde a diferença decide cobertura. Um
+// diretório de perfis sem permissão dava zero matches e o conjunto continuava
+// "completo": um ProxyCommand plantado ali saía como inexistente.
+func TestGlobDeIncludeComDiretorioIlegivelDeclaraLacuna(t *testing.T) {
+	raiz := t.TempDir()
+	perfis := filepath.Join(raiz, "home/u/.ssh/perfis")
+	if err := os.MkdirAll(perfis, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Join(raiz, "etc/ssh"), 0o755)
+	os.WriteFile(filepath.Join(raiz, "etc/passwd"),
+		[]byte("u:x:1000:1000::/home/u:/bin/sh\n"), 0o644)
+	os.WriteFile(filepath.Join(raiz, "home/u/.ssh/config"),
+		[]byte("Include ~/.ssh/perfis/*.conf\n"), 0o600)
+	if err := os.Chmod(perfis, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(perfis, 0o755) })
+
+	f := &Facts{SSHServerCompleto: true, SSHClienteCompleto: true}
+	collectSSHClientConfig(f, envDeRaiz(t, raiz))
+
+	if f.SSHClienteCompleto {
+		t.Error("o diretório do curinga não pôde ser LISTADO e SSHClienteCompleto " +
+			"continuou verdadeiro: zero matches saiu como 'não há nada ali'")
+	}
+	if !lacunaSSH(f, "não pôde ser listado") {
+		t.Errorf("sem lacuna declarada: %v", f.PersistDenied["ssh"])
+	}
+	if !f.SSHServerCompleto {
+		t.Error("um diretório de config de CLIENTE não pode degradar o servidor")
+	}
+}

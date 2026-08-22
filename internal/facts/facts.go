@@ -238,7 +238,25 @@ import (
 //	   não produzia drift nenhum. Nenhuma das duas mexe em campo serializado —
 //	   entram aqui porque um dump v15 comparado com um v16 responde diferente
 //	   sobre a MESMA fonte.
-const SchemaVersion = 16
+//	17 A observabilidade desce ao CAMPO, e essa é a mudança de forma — não de
+//	   conteúdo — que motiva o número.
+//
+//	   MAC.ConfigLido e MAC.RuntimeLido  o /etc/selinux/config e o
+//	     /sys/fs/selinux/enforce são leituras independentes com permissões
+//	     diferentes, e a comparação tinha um estado só para as duas: o
+//	     securityfs ilegível calava a mudança PERSISTENTE no arquivo. Falsos
+//	     num dump v16, e a família recusa os dois campos — o lado seguro.
+//	   Loader.EnvDeUnit  o `Environment=`/`EnvironmentFile=` de unit saiu da
+//	     mesma lista do /etc/environment e virou fato próprio, com o valor
+//	     EFETIVO (a última atribuição vence, que é o que o systemd faz) e a
+//	     incerteza POR UNIT. Vazio num dump v16, e a família `unit.env` não
+//	     compara nada — o que era, até aqui, o comportamento de fato.
+//
+//	   Loader.EnvVars mudou de SEMÂNTICA no mesmo número: ela também passou a
+//	   guardar só o valor efetivo por arquivo. Num dump v16 ela traz todas as
+//	   atribuições, e comparar as duas versões acusaria remoção onde houve
+//	   apenas uma linha sombreada que deixou de ser guardada.
+const SchemaVersion = 17
 
 // Facts é o retrato do host.
 type Facts struct {

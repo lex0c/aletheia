@@ -62,10 +62,15 @@
 //	28 pacotes atualizados  ->  ZERO achados
 //	                            14 mudanças CONTADAS e não impressas (hash,
 //	                            mtime, tamanho — campo que não decide)
-//	                            33 das 34 famílias comparadas SEM restrição
+//	                            34 das 35 famílias comparadas SEM restrição
 //
 // A única restrita é `programa em execução`, e por ser efêmera: a limitação é
 // simétrica, então é escopo da pergunta e não defeito da comparação.
+//
+// Os mesmos números depois de a observabilidade descer ao CAMPO — a rodada que
+// separou config de runtime no MAC, libs de servicos no NSS e o env de unit do
+// env global: nada mudou no piso, que é o resultado que se queria. Granularidade
+// mais fina não pode custar ruído; ela existe para não CALAR o que foi lido.
 //
 // A medição anterior, num conjunto menor de famílias, deu 38 pacotes -> UM
 // achado: o setgid que o `bsdutils` tirou do /usr/bin/wall (a correção da
@@ -117,6 +122,48 @@ type Entidade struct {
 	// o operador juntando na cabeça — que é exatamente o que a resolução de
 	// ator já existe para não pedir.
 	Alvos []string
+
+	// NaoObservado marca o campo cujo valor NÃO foi observado DESTE lado.
+	// Campo fora do mapa é observado; o zero-value, portanto, é "observei
+	// tudo", que é o caso da maioria das famílias.
+	//
+	// # Por que o campo, e não a família
+	//
+	// A `Classe.Incompleta` é binária: um lado incompleto suprime `mudou` da
+	// família INTEIRA. Isso estava certo enquanto uma família tinha uma fonte,
+	// e passou a esconder mudança quando as fontes se multiplicaram dentro de
+	// uma entidade só. O MAC é o caso limpo:
+	//
+	//	configurado   /etc/selinux/config   (arquivo, vale no próximo boot)
+	//	ativo         /sys/fs/selinux/...   (runtime)
+	//
+	// São duas leituras independentes na mesma entidade. Com a granularidade
+	// de família, o securityfs ficar ilegível suprimia a comparação do ARQUIVO
+	// — que foi lido perfeitamente, e cuja transição `enforcing -> permissive`
+	// é persistente e é o achado. O mesmo vale para o `libs` do NSS, que
+	// depende do loader, contra o `servicos`, que só depende do nsswitch.
+	//
+	// # Diferença para Observacional
+	//
+	// `Observacional` é uma REGRA sobre o valor: "vazio aqui é ambíguo, então
+	// vazio de um lado só não vira mudança". É heurística, e serve onde o
+	// coletor não sabe dizer. `NaoObservado` é o coletor SABENDO: ele leu o
+	// fato de cobertura e respondeu. Onde os dois cabem, o segundo é melhor —
+	// ele distingue "está vazio" de "não olhei", que a heurística não faz.
+	NaoObservado map[string]bool
+
+	// Fonte é de onde esta entidade veio, quando a família tem mais de uma.
+	//
+	// Serve ao mesmo propósito do NaoObservado, um nível acima: ali o campo de
+	// uma entidade não foi observado, aqui o CONJUNTO de entidades daquela
+	// fonte não é exaustivo. Sem isso, uma árvore de repositório git ilegível
+	// fazia os hooks dela saírem como REMOVIDOS enquanto o /etc/profile, que
+	// vem de outra varredura e foi lido inteiro, seguia comparado — a mesma
+	// mudança que a Classe.FontesIncertas descreve, por entidade e não por
+	// família.
+	//
+	// Vazia quando a família tem fonte única, que continua sendo o normal.
+	Fonte string
 }
 
 // Classe é uma família de entidades e tudo que se precisa saber para
@@ -206,6 +253,18 @@ type Classe struct {
 	// Lida como lacuna: presente nos dois lados é ESCOPO, num só é ASSIMETRIA.
 	Incompleta func(*facts.Facts) string
 
+	// FontesIncertas devolve as FONTES cujo conjunto de entidades não é
+	// exaustivo deste lado — a versão por fonte da Incompleta.
+	//
+	// A Incompleta responde pela família toda, e por isso é grosseira demais
+	// para família de fonte múltipla: um repositório git ilegível não pode
+	// suprimir a comparação do /etc/profile, nem um EnvironmentFile= de uma
+	// unit pode suprimir a do /etc/environment. Aqui a supressão de `surgiu` e
+	// `sumiu` alcança só as entidades cuja Fonte está no conjunto.
+	//
+	// O motivo de cada fonte é o valor do mapa, e ele entra na cobertura.
+	FontesIncertas func(*facts.Facts) map[string]string
+
 	// Efemera é a família cuja PRESENÇA é volátil nos dois sentidos: o que não
 	// aparece num retrato não deixou de existir, e o que aparece no outro não
 	// nasceu ali. Só `mudou` vale.
@@ -286,7 +345,11 @@ func Comparar(antes, depois Lado) facts.Drift {
 				"há como dizer se são as mesmas dos dois lados")
 		}
 		d.Cobertura = append(d.Cobertura, cob)
-		compararClasse(c, cob, ma, mb, &d)
+		var incertasA, incertasD map[string]string
+		if c.FontesIncertas != nil {
+			incertasA, incertasD = c.FontesIncertas(antes.F), c.FontesIncertas(depois.F)
+		}
+		compararClasse(c, cob, ma, mb, incertasA, incertasD, &d)
 	}
 	sort.Slice(d.Mudancas, func(i, j int) bool {
 		a, b := d.Mudancas[i], d.Mudancas[j]
@@ -357,6 +420,24 @@ func comparabilidadeDe(c Classe, antes, depois Lado) facts.CoberturaDrift {
 		}
 	}
 
+	// A pergunta POR FONTE não muda a cobertura da família: ela não suprime
+	// direção nenhuma no conjunto todo, só nas entidades daquela fonte. O
+	// motivo sai mesmo assim — o operador precisa saber que uma parte do
+	// conjunto ficou de fora, mesmo quando o resto foi comparado inteiro.
+	if c.FontesIncertas != nil {
+		for _, lado := range []struct {
+			f    *facts.Facts
+			nome string
+		}{{antes.F, "ANTES"}, {depois.F, "DEPOIS"}} {
+			for fonte, porque := range c.FontesIncertas(lado.f) {
+				cob.Motivos = append(cob.Motivos, "no retrato "+lado.nome+
+					", a fonte `"+fonte+"` não é exaustiva ("+porque+
+					"): as entidades dela não entram em surgiu/sumiu")
+			}
+		}
+		sort.Strings(cob.Motivos)
+	}
+
 	// Lacuna declarada tem a mesma leitura, e é comparada pela CHAVE — nunca
 	// pelo texto, que carrega contador ("261 processos" vira 262 na coleta
 	// seguinte) e faria toda execução parecer degradada de outro jeito.
@@ -387,7 +468,8 @@ func temLacuna(f *facts.Facts, chave string) bool {
 	return len(f.Partial[chave]) > 0 || len(f.PersistDenied[chave]) > 0
 }
 
-func compararClasse(c Classe, cob facts.CoberturaDrift, ma, mb map[string]Entidade, d *facts.Drift) {
+func compararClasse(c Classe, cob facts.CoberturaDrift, ma, mb map[string]Entidade,
+	incertasAntes, incertasDepois map[string]string, d *facts.Drift) {
 	for id, eb := range mb {
 		ea, existia := ma[id]
 		if !existia {
@@ -395,6 +477,14 @@ func compararClasse(c Classe, cob facts.CoberturaDrift, ma, mb map[string]Entida
 				// Não é achado e não é silêncio: a família inteira já saiu
 				// declarada na cobertura da comparação, com a direção que foi
 				// suprimida e o motivo.
+				continue
+			}
+			if eb.Fonte != "" && incertasAntes[eb.Fonte] != "" {
+				// A FONTE desta entidade não foi varrida inteira do outro lado:
+				// "novo" aqui pode ser o que aquele retrato não conseguiu ler.
+				// A supressão é só destas entidades — o resto da família, que
+				// vem de fonte lida por inteiro, continua comparado.
+				d.Contadas++
 				continue
 			}
 			d.Mudancas = append(d.Mudancas, facts.MudancaDrift{
@@ -418,6 +508,13 @@ func compararClasse(c Classe, cob facts.CoberturaDrift, ma, mb map[string]Entida
 		for _, campo := range chavesDaUniao(ea.Campos, eb.Campos) {
 			va, vb := ea.Campos[campo], eb.Campos[campo]
 			if va == vb {
+				continue
+			}
+			if ea.NaoObservado[campo] || eb.NaoObservado[campo] {
+				// O COLETOR DISSE QUE NÃO OLHOU este campo deste lado. É a
+				// mesma conclusão do Observacional e por um caminho melhor: ali
+				// se infere do valor vazio, aqui se lê o fato de cobertura.
+				d.Contadas++
 				continue
 			}
 			if c.Observacional[campo] && (va == "" || vb == "") {
@@ -447,6 +544,13 @@ func compararClasse(c Classe, cob facts.CoberturaDrift, ma, mb map[string]Entida
 	}
 	for id, ea := range ma {
 		if _, continua := mb[id]; continua {
+			continue
+		}
+		if ea.Fonte != "" && incertasDepois[ea.Fonte] != "" {
+			// O outro lado não varreu esta fonte inteira: "removido" aqui pode
+			// continuar lá, sem ter sido olhado. É a regra da família aplicada
+			// ao pedaço dela que perdeu a testemunha.
+			d.Contadas++
 			continue
 		}
 		d.Mudancas = append(d.Mudancas, facts.MudancaDrift{
@@ -499,6 +603,21 @@ func chavesDaUniao(a, b map[string]string) []string {
 // das duas venceu, e a mesma máquina daria drift contra si mesma.
 func fundir(a, b Entidade, multiplo map[string]bool) Entidade {
 	out := Entidade{ID: a.ID, Campos: map[string]string{}, Alvos: unirAlvos(a.Alvos, b.Alvos)}
+	out.Fonte = a.Fonte
+	if out.Fonte == "" {
+		out.Fonte = b.Fonte
+	}
+	// NÃO OBSERVADO CONTAMINA A FUSÃO, e é o lado seguro: se uma das duas
+	// entidades de mesmo ID teve o campo às cegas, o valor fundido não pode ser
+	// afirmado — ele é a soma de uma leitura com um desconhecido.
+	for _, e := range []Entidade{a, b} {
+		for k := range e.NaoObservado {
+			if out.NaoObservado == nil {
+				out.NaoObservado = map[string]bool{}
+			}
+			out.NaoObservado[k] = true
+		}
+	}
 	for k, v := range a.Campos {
 		out.Campos[k] = v
 	}

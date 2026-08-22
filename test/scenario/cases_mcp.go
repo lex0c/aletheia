@@ -360,4 +360,71 @@ func init() {
 		},
 		Exit: 0,
 	})
+	// ------------------------------------------------------------------- M9
+	//
+	// A catraca "snapshot não toca o host", que o plano pedia e faltava.
+	//
+	// O M7 prova o eixo do ESTADO: o processo morre antes de o servidor subir e
+	// o dossiê continua respondendo sobre ele. Este prova o eixo da IDENTIDADE,
+	// que é mais forte — o retrato descreve um host que NÃO é a máquina onde o
+	// servidor roda, e toda resposta tem de ser sobre o retrato.
+	//
+	// O plantio monta uma rootfs falsa com um hostname escolhido e coleta dela
+	// com --root. Se o servidor lesse a máquina em algum ponto, host.overview
+	// devolveria o hostname do contêiner — um id hexadecimal do Docker, nunca
+	// "host-do-artefato".
+	//
+	// E de brinde ele exercita a gating por FONTE: um retrato de imagem não tem
+	// /proc, então as tools de processo e de rede não entram no registry. Que
+	// elas SUMAM é a metade MCP da regra; que a ausência seja DECLARADA em
+	// session.status é a metade Aletheia.
+	Register(Scenario{
+		ID:     "M9-mcp-responde-sobre-o-artefato-e-nao-sobre-a-maquina",
+		Desc:   "retrato de uma imagem montada servido de outra máquina: as respostas são do artefato, e as tools de processo nem existem",
+		Images: []string{"debian:12"},
+		Cmd:    "mcp",
+		Plant: `mkdir -p /tmp/falso/etc /tmp/falso/usr/bin
+			printf 'host-do-artefato\n' > /tmp/falso/etc/hostname
+			printf 'PRETTY_NAME="SO do artefato"\nID=artefato\n' > /tmp/falso/etc/os-release
+			/aletheia collect --root /tmp/falso --out /tmp/retrato.json
+			hostname > /tmp/hostname-real
+			echo "CONTEINER=$(cat /tmp/hostname-real)" >&2`,
+		Args: servirRetrato,
+		MCP: []Chamada{
+			{
+				Tool: "host.overview",
+				Campos: map[string]string{
+					// O ARTEFATO, e não a máquina. Um servidor que lesse o host
+					// devolveria o id hexadecimal do contêiner.
+					"data.hostname": "host-do-artefato",
+					// E a procedência declara de onde o retrato veio.
+					"provenance.source": "image",
+				},
+			},
+			{
+				// As tools de processo e rede NÃO existem sobre uma imagem: ali
+				// não há /proc, e a pergunta não se aplica à fonte.
+				ProibeTool: []string{
+					"process.get", "process.tree", "process.census",
+					"net.census", "net.ip", "net.port",
+				},
+				// As que valem sobre arquivo continuam.
+				Espera: []string{`"file.inspect"`, `"findings.list"`},
+			},
+			{
+				// E chamá-la é método inexistente, não permissão negada: o que o
+				// operador não autorizou não deve nem parecer alcançável.
+				Tool:       "process.get",
+				Args:       `{"pid":1}`,
+				ErroCodigo: -32601,
+			},
+			{
+				// A ausência fica DECLARADA, com o motivo — esconder em silêncio
+				// contradiz a regra da ferramenta.
+				Tool:   "session.status",
+				Espera: []string{`"unavailable_tools"`, "nenhum retrato carregado tem esta fonte"},
+			},
+		},
+		Exit: 0,
+	})
 }

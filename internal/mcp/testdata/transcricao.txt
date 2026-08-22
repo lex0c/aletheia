@@ -1,0 +1,96 @@
+# TRANSCRIÇÃO DOURADA — o contrato de protocolo do servidor MCP.
+#
+# GERADO. Não edite à mão:
+#     go test ./internal/mcp -run TestTranscricaoDourada -update
+#
+# "> " é a requisição, uma por linha, como ela entra no stdin — com um único
+# desvio: __TEXTO_ACIMA_DO_TETO__ é expandido para 4097 caracteres na leitura,
+# porque colar o valor inteiro aqui tornaria o documento ilegível.
+# "< " é a FORMA da resposta: as chaves de topo do result, ou o código do erro.
+#
+# A forma, e não o conteúdo: as respostas mudam a cada check novo e a cada tool,
+# e um dourado que quebra a cada commit de produto vira um -update reflexo. O
+# que este arquivo trava é quem respondeu, com que id, com que chaves e com que
+# código — que é o que "deriva de protocolo" quer dizer.
+
+> {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"session.status","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+< ok _meta,content,isError,resultType,structuredContent
+
+> {"jsonrpc":"2.0","id":2,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+< ok _meta,cacheScope,capabilities,instructions,resultType,supportedVersions,ttlMs
+
+> {"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+< ok _meta,cacheScope,resultType,tools,ttlMs
+
+> {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"checks.catalog","arguments":{"group":"proc"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+< ok _meta,content,isError,resultType,structuredContent
+
+> {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"shell","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+< erro -32601
+
+> {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"findings.list","arguments":{"severity":"CRITICAL"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+< erro -32602
+
+> {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"process.get","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+< erro -32602
+
+> {"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"file.inspect","arguments":{"path":"__TEXTO_ACIMA_DO_TETO__"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+< erro -32602
+
+> {"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"checks.catalog","arguments":{"group":"network"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+< erro -32602
+
+> {"jsonrpc":"2.0","id":10,"method":"tools/list","params":{}}
+< erro -32602
+
+> {"jsonrpc":"2.0","id":11,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2099-01-01","io.modelcontextprotocol/clientCapabilities":{}}}}
+< erro -32022
+
+> {"jsonrpc":"2.0","id":12,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}
+< erro -32602
+
+> [{"jsonrpc":"2.0","id":13,"method":"tools/list"}]
+< erro -32600
+
+> {"jsonrpc":
+< erro -32700
+
+> {"jsonrpc":"2.0","id":null,"method":"tools/list"}
+< erro -32600
+
+> {"jsonrpc":"2.0","id":14}
+< erro -32600   <<< ID DIVERGENTE: enviei 14, voltou null
+
+> {"jsonrpc":"2.0","id":15,"method":"metodo/inexistente","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+< erro -32601
+
+> {"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"host.overview","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+< ok _meta,content,isError,resultType,structuredContent
+
+> {"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"host.overview","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+< ok _meta,content,isError,resultType,structuredContent
+
+> {"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9999}}
+< (sem resposta — notificação)
+
+> {"jsonrpc":"2.0","method":"notifications/inventada","params":{}}
+< (sem resposta — notificação)
+
+> {"jsonrpc":"2.0","id":17,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"velho","version":"0.1"}}}
+< ok capabilities,instructions,protocolVersion,serverInfo
+
+> {"jsonrpc":"2.0","method":"notifications/initialized"}
+< (sem resposta — notificação)
+
+> {"jsonrpc":"2.0","id":18,"method":"tools/list","params":{}}
+< ok tools
+
+> {"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"host.overview","arguments":{}}}
+< ok content,isError,structuredContent
+
+> {"jsonrpc":"2.0","id":20,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}
+< ok capabilities,instructions,protocolVersion,serverInfo
+
+> {"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"host.overview","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+< ok _meta,content,isError,resultType,structuredContent
+

@@ -3,7 +3,7 @@
 GERADO de `internal/checks` e `test/scenario`. Não edite à mão:
 `go test ./test/scenario -run TestDocumentoDeCenarios -update`.
 
-128 checks, 228 cenários.
+128 checks, 229 cenários.
 
 Um **check** é uma pergunta que a ferramenta faz ao host. Um **cenário** é um
 host montado de propósito — em contêiner, imagem ou microVM — que prova a
@@ -355,6 +355,7 @@ contêiner não alcança — hidepid, sysctl, módulo, cgroup, eBPF.
 | `M6-mcp-paridade-de-cobertura-com-analyze` | live | a cobertura que o MCP publica é a MESMA que o analyze imprime sobre o mesmo retrato |
 | `M7-mcp-responde-sobre-o-retrato` | live | o processo é morto ANTES do servidor subir: o dossiê continua respondendo sobre ele |
 | `M8-mcp-lacuna-de-coleta-tambem-e-regiao-declarada` | live | nome hostil num arquivo que não abre: o texto do alvo alcança observability, e o caminho vem declarado |
+| `M9-mcp-responde-sobre-o-artefato-e-nao-sobre-a-maquina` | live | retrato de uma imagem montada servido de outra máquina: as respostas são do artefato, e as tools de processo nem existem |
 | `N1-alternatives-legitimo` | live | cadeia do update-alternatives apontando para binário COM dono |
 | `N2-alternatives-sequestrado` | live | a MESMA cadeia, apontando para lugar sem dono: continua achado |
 | `NF1-netfilter-backdoor-oculto` | vm | backdoor de netfilter que se esconde de /proc/modules é pego pelo cross.module_view via a função do hook no ftrace |

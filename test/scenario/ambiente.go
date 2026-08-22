@@ -49,6 +49,17 @@ var GapsDoAmbiente = []GapAmbiental{
 			"kernel mínimo não traz inet_diag",
 	},
 	{
+		SoEmVM:     true,
+		SoNoKernel: "3.18",
+		Contem:     "não há tracefs montado",
+		Porque: "o /init do guest monta tracefs e debugfs desde que o kernel os " +
+			"ofereça, e nos kernels modernos da suíte ele monta. O 3.18 desta " +
+			"matriz foi compilado SEM ftrace: tem debugfs, e dentro dele não há " +
+			"`tracing` para montar. Não há o que a suíte possa fazer no guest, e " +
+			"declarar a lacuna é a resposta certa. O recorte por kernel é o que " +
+			"importa aqui: em qualquer outro kernel esta lacuna volta a ser falha",
+	},
+	{
 		SoEmVM: true,
 		Contem: "cgroup v2 não encontrado em /sys/fs/cgroup",
 		Porque: "as microVMs sobem sem cgroup2 montado, a menos que o cenário o " +
@@ -73,12 +84,28 @@ type GapAmbiental struct {
 	// podre onde há apenas execução parcial. Falha por motivo errado é a mesma
 	// doença que este arquivo inteiro combate.
 	SoEmVM bool
+
+	// SoNoKernel restringe a entrada aos cenários que bootam AQUELE kernel.
+	//
+	// Sem o recorte, uma entrada nascida de uma limitação de kernel antigo
+	// passaria a perdoar a mesma lacuna em toda a matriz — inclusive onde ela
+	// significaria regressão (o /init parou de montar tracefs, e ninguém viu).
+	// A tolerância tem de ser tão estreita quanto a causa.
+	SoNoKernel string
 }
 
-// EhDoAmbiente diz se uma lacuna declarada é uma das esperadas.
-func EhDoAmbiente(lacuna string) bool {
+// ValeNoKernel diz se esta entrada se aplica ao kernel de um cenário.
+func (g GapAmbiental) ValeNoKernel(kernel string) bool {
+	return g.SoNoKernel == "" || g.SoNoKernel == kernel
+}
+
+// EhDoAmbiente diz se uma lacuna declarada é uma das esperadas NAQUELE cenário.
+//
+// O cenário entra porque parte das entradas é recortada por kernel: a mesma
+// frase é ambiente num guest 3.18 e defeito num guest moderno.
+func EhDoAmbiente(sc Scenario, lacuna string) bool {
 	for _, g := range GapsDoAmbiente {
-		if strings.Contains(lacuna, g.Contem) {
+		if g.ValeNoKernel(sc.Kernel) && strings.Contains(lacuna, g.Contem) {
 			return true
 		}
 	}
@@ -87,10 +114,10 @@ func EhDoAmbiente(lacuna string) bool {
 
 // FiltraAmbientais devolve só as lacunas que NÃO são do ambiente — as que um
 // cenário tem o direito de cobrar.
-func FiltraAmbientais(lacunas []string) []string {
+func FiltraAmbientais(sc Scenario, lacunas []string) []string {
 	var out []string
 	for _, l := range lacunas {
-		if !EhDoAmbiente(l) {
+		if !EhDoAmbiente(sc, l) {
 			out = append(out, l)
 		}
 	}

@@ -272,7 +272,7 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 	// esta ferramenta promete é dizer o que NÃO pôde olhar. Conferir isso pelo
 	// texto do relatório não servia — o motivo da lacuna só sai com --coverage
 	// ou -v, e um cenário sem essas flags cobrava um texto que nunca ia aparecer.
-	anotarUsoDeAmbiente(r.lacunas())
+	anotarUsoDeAmbiente(sc, r.lacunas())
 
 	if len(sc.ExpectGap) > 0 {
 		lac := strings.Join(r.lacunas(), "\n")
@@ -343,7 +343,7 @@ func assertScenario(t *testing.T, sc scenario.Scenario, r result) {
 		}
 	}
 	if sc.MustBeComplete {
-		if fora := scenario.FiltraAmbientais(r.lacunas()); len(fora) == 0 {
+		if fora := scenario.FiltraAmbientais(sc, r.lacunas()); len(fora) == 0 {
 			// Cobertura completa A MENOS das lacunas que este ambiente impõe. É
 			// o contrato que o cenário sempre quis: ele afirma coisas sobre o
 			// host que MONTA, não sobre a máquina de quem roda a suíte.
@@ -393,10 +393,16 @@ var gapsAmbientaisUsados sync.Map
 // de VM ausente (sem qemu), não suíte incompleta por defeito.
 var vmRodou atomic.Int64
 
-func anotarUsoDeAmbiente(lacunas []string) {
+// kernelsRodados guarda os kernels que a execução chegou a bootar, pelo mesmo
+// motivo do vmRodou: entrada recortada por kernel não pode ser cobrada por uma
+// execução que nunca subiu aquele kernel.
+var kernelsRodados sync.Map
+
+func anotarUsoDeAmbiente(sc scenario.Scenario, lacunas []string) {
+	kernelsRodados.Store(sc.Kernel, true)
 	for _, l := range lacunas {
 		for _, g := range scenario.GapsDoAmbiente {
-			if strings.Contains(l, g.Contem) {
+			if g.ValeNoKernel(sc.Kernel) && strings.Contains(l, g.Contem) {
 				gapsAmbientaisUsados.Store(g.Contem, true)
 			}
 		}
@@ -418,7 +424,7 @@ func exitSoPorAmbiente(sc scenario.Scenario, r result) bool {
 	if sc.Exit != 0 || r.exit != 1 || r.coverage.Verdict != "INCOMPLETE" {
 		return false
 	}
-	if len(scenario.FiltraAmbientais(r.lacunas())) > 0 {
+	if len(scenario.FiltraAmbientais(sc, r.lacunas())) > 0 {
 		return false
 	}
 	for _, f := range r.findings {
@@ -1027,6 +1033,11 @@ func TestGapsDoAmbienteSaoUsados(t *testing.T) {
 			// O tier de VM não rodou (sem qemu): esta entrada não teve chance de
 			// casar, e cobrá-la seria falhar por execução parcial.
 			continue
+		}
+		if g.SoNoKernel != "" {
+			if _, bootou := kernelsRodados.Load(g.SoNoKernel); !bootou {
+				continue
+			}
 		}
 		if _, ok := gapsAmbientaisUsados.Load(g.Contem); !ok {
 			t.Errorf("a lacuna ambiental %q não apareceu em execução nenhuma da suíte.\n"+

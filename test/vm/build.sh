@@ -156,6 +156,24 @@ mount -t proc     proc     /proc  2>/dev/null
 mount -t sysfs    sysfs    /sys   2>/dev/null
 mount -t devtmpfs devtmpfs /dev   2>/dev/null
 mount -t tmpfs    tmpfs    /tmp   2>/dev/null
+
+# TRACEFS, e ela não é cosmética: sem ela o guest não parece um host.
+#
+# Num host real quem monta é o systemd, e o guest não tem systemd. O efeito era
+# que kernel.ftrace_hook e persist.ld_preload_global — dois dos checks que só
+# existem para serem exercitados contra um KERNEL DE VERDADE — declaravam
+# lacuna em toda microVM e nunca rodavam ali. O tier de VM existe justamente
+# para eles.
+#
+# As duas montagens, porque o caminho mudou de lugar na história do kernel:
+# tracefs é um filesystem próprio desde a 4.1; antes disso o `tracing` morava
+# dentro do debugfs. Os cenários de kernel 3.18 dependem da segunda.
+#
+# Falhar é aceitável e silencioso: um kernel sem CONFIG_FTRACE não tem o que
+# montar, e a ferramenta declara a lacuna — que é a resposta certa.
+mkdir -p /sys/kernel/debug 2>/dev/null
+mount -t debugfs debugfs /sys/kernel/debug   2>/dev/null
+mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null
 chmod 1777 /tmp
 
 # hostname próprio, para o relatório não parecer o do host

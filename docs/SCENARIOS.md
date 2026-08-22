@@ -63,7 +63,7 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `kernel.binfmt_interpreter` | 7.12 | o kernel roteia execução para um interpretador registrado | `GB4-binfmt-registro-vivo`, `U3-binfmt-com-interpretador-plantado` |
 | `kernel.bpf_inventory` | 35 | o que está instrumentando este kernel por eBPF | `50-kernel-3.18-limpo`, `P1-bpf-sem-dono`, `P2-bpf-com-dono-nao-acusa` +3 |
 | `kernel.bpf_unowned` | 35 | programa eBPF carregado no kernel sem nenhum dono visível | `P1-bpf-sem-dono`, `P10-tag-de-ebpf-como-indicador`, `P8-bpfdoor-completo` |
-| `kernel.ftrace_hook` | 35.3 | função de enumeração do kernel interceptada: algo está sendo escondido | `G3-hook-de-ftrace-em-vm`, `RK-duplo-hide-ftrace`, `RK3-multivetor-cegueira-parcial` |
+| `kernel.ftrace_hook` | 35.3 | função de enumeração do kernel interceptada: algo está sendo escondido | `G3-hook-de-ftrace-em-vm`, `RK-duplo-hide-ftrace`, `RK-thread-count` +1 |
 | `kernel.load_drift` | 34 | o que o kernel carrega ou invoca mudou desde o retrato anterior | `DR5-drift-de-defesa-desligada` |
 | `kernel.module_no_file` | 35.3 | módulo carregado sem arquivo em disco que o explique | `Z1-modulo-carregado-sem-arquivo`, `Z2-modulo-sem-assinatura-e-sem-arquivo` |
 | `kernel.mount_over_system` | 35 | montagem por cima de diretório de sistema: esconde o que está embaixo | `G4-montagem-que-esconde-em-vm` |

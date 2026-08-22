@@ -226,8 +226,15 @@ func policyDeFlags(retratos caminhos, vivo bool, raiz, perfil string,
 		pol.Modo = mcp.ModoSnapshot
 	}
 
-	// AS DUAS RECUSAS DO MODO SNAPSHOT, e elas vêm ANTES da regra geral de
-	// --allow-secrets exigir --profile full.
+	// AS DUAS RECUSAS DO MODO SNAPSHOT — e elas são presas AO MODO.
+	//
+	// Não eram: as duas condições não olhavam pol.Modo, então disparavam também
+	// em --live e --root, imprimindo um parágrafo sobre um dump que o operador
+	// nunca carregou. Pior, elas tornavam MORTOS os dois blocos escritos logo
+	// abaixo para os modos de aquisição — as condições são idênticas, e `go vet`
+	// não vê braço inalcançável por predicado, só por constante.
+	//
+	// Elas vêm ANTES da regra geral de --allow-secrets exigir --profile full.
 	//
 	// A ordem é o conserto de um caminho que mandava o operador ao lugar
 	// errado: `--snapshot --allow-secrets` batia na regra geral, respondia
@@ -236,7 +243,7 @@ func policyDeFlags(retratos caminhos, vivo bool, raiz, perfil string,
 	// para aprender o que a primeira mensagem já podia dizer: em snapshot
 	// NENHUMA das duas significa coisa alguma, porque o artefato não carrega
 	// nem segredo nem conteúdo de arquivo.
-	if permitirSeg {
+	if pol.Modo == mcp.ModoSnapshot && permitirSeg {
 		fmt.Fprintln(os.Stderr,
 			"mcp --snapshot --allow-secrets: recusado, e o motivo importa.\n\n"+
 				"O dump JÁ foi redigido na origem: argv, linha de cron, variável de crontab\n"+
@@ -247,7 +254,7 @@ func policyDeFlags(retratos caminhos, vivo bool, raiz, perfil string,
 				"resultado como prova de que não havia nenhum.")
 		return pol, 3
 	}
-	if pol.Perfil == mcp.PerfilCompleto {
+	if pol.Modo == mcp.ModoSnapshot && pol.Perfil == mcp.PerfilCompleto {
 		fmt.Fprintln(os.Stderr,
 			"mcp --snapshot --profile full: recusado.\n\n"+
 				"O perfil completo destrava leitura de arquivo e environ sem redação, e o\n"+

@@ -323,6 +323,20 @@ const (
 // O custo é uma cópia profunda do Facts por captura, que é exatamente o que o
 // `collect` já paga na escrita.
 func (a *Acervo) Capturar(e *env.Env, escopo Escopo) (*Retrato, error) {
+	// O TETO VEM ANTES DA COLETA.
+	//
+	// Ele era conferido no fim, na hora de registrar — depois de facts.Collect
+	// ter varrido o filesystem inteiro, de dump.De ter feito a cópia profunda e
+	// do índice ter sido montado. Uma captura que ia ser recusada já tinha
+	// pagado tudo isso, no host investigado, e um agente em laço fazia o alvo
+	// varrer o disco repetidas vezes para receber erro.
+	//
+	// O teto existe justamente para não gastar aquilo ali. Conferi-lo depois o
+	// tornava uma trava sobre a memória e nenhuma sobre o custo.
+	if err := a.vagaLivre(); err != nil {
+		return nil, err
+	}
+
 	var f *facts.Facts
 	switch escopo {
 	case EscopoVolatil:
@@ -356,15 +370,33 @@ func (a *Acervo) Capturar(e *env.Env, escopo Escopo) (*Retrato, error) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// Conferido DE NOVO sob o lock: entre a primeira conferência e aqui houve
+	// uma coleta inteira, e o Acervo é público — nada garante que ninguém
+	// registrou no meio. A primeira verificação é sobre o CUSTO, esta é sobre a
+	// invariante.
 	if a.Teto > 0 && len(a.ordem) >= a.Teto {
-		return nil, fmt.Errorf("teto de %d retratos vivos alcançado: libere um com "+
-			"snapshot.release antes de capturar outro. O teto existe porque cada "+
-			"retrato segura os fatos INTEIROS na memória deste processo, e ele roda "+
-			"no host investigado", a.Teto)
+		return nil, erroDeTeto(a.Teto)
 	}
 	a.por[r.ID] = r
 	a.ordem = append(a.ordem, r.ID)
 	return r, nil
+}
+
+// vagaLivre recusa antes de qualquer trabalho.
+func (a *Acervo) vagaLivre() error {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.Teto > 0 && len(a.ordem) >= a.Teto {
+		return erroDeTeto(a.Teto)
+	}
+	return nil
+}
+
+func erroDeTeto(teto int) error {
+	return fmt.Errorf("teto de %d retratos vivos alcançado: libere um com "+
+		"snapshot.release antes de capturar outro. O teto existe porque cada "+
+		"retrato segura os fatos INTEIROS na memória deste processo, e ele roda "+
+		"no host investigado", teto)
 }
 
 // idDeCaptura mint um handle para retrato ao vivo.

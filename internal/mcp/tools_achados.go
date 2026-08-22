@@ -317,7 +317,13 @@ var toolFindingsCorrelate = Ferramenta{
 // -------------------------------------------------------------- coverage.get
 
 var toolCoverageGet = Ferramenta{
-	Dados:  DadosDoMotor,
+	// NÃO é DadosDoMotor, pelo mesmo motivo que session.status não era: a
+	// resposta passa por `envelopar`, que carimba provenance.host — o hostname
+	// lido do dump —, e o corpo vem de check.Coverage, cujos collector_gaps e
+	// partial[].reasons interpolam nome de cgroup, de binfmt e caminho de
+	// arquivo que o alvo escolheu. "Não há dado do alvo" aqui era falso, e a
+	// classe é a declaração em que o portão de projecao.go confia.
+	Dados:  DadosRedigidosNaOrigem,
 	Nome:   "coverage.get",
 	Titulo: "O que esta execução NÃO verificou, e por quê",
 	Descricao: "A cobertura inteira: quantos checks rodaram completos, quais rodaram " +

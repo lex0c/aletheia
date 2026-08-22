@@ -727,15 +727,19 @@ func TestPanicoNaToolViraErroENaoDerrubaOServidor(t *testing.T) {
 		Method: "tools/call",
 		Params: json.RawMessage(`{"name":"x.explode","arguments":{}}`),
 	})
-	if er == nil {
-		t.Fatal("o pânico devia ter virado erro")
+	// isError, e NÃO erro de protocolo. A distinção decide quem lê a mensagem:
+	// muitos clientes tratam erro JSON-RPC como falha de transporte e não a
+	// devolvem ao modelo — e esta frase foi escrita para o modelo.
+	if er != nil {
+		t.Fatalf("falha de tool é RESULTADO, não erro de protocolo: %v", er)
 	}
-	if corpo != nil {
-		t.Fatal("nada pode sair de uma tool que explodiu")
+	if corpo["isError"] != true {
+		t.Fatalf("a resposta precisa se marcar isError: %v", corpo)
 	}
-	if !strings.Contains(er.Message, "DEFEITO DA FERRAMENTA") {
+	b, _ := json.Marshal(corpo)
+	if !strings.Contains(string(b), "DEFEITO DA FERRAMENTA") {
 		t.Fatalf("a mensagem precisa separar defeito nosso de achado sobre o "+
-			"host: %q", er.Message)
+			"host, e CHEGAR ao modelo: %s", b)
 	}
 	// E o servidor continua servindo.
 	if _, e := s.listarTools(); e != nil {
@@ -1101,6 +1105,52 @@ func TestSchemaDeclaraOQueORuntimeExige(t *testing.T) {
 			t.Errorf("%s: o runtime recusa `{}` (%q) e o inputSchema não declara "+
 				"campo obrigatório nenhum — o modelo aprende a chamar errado",
 				f.Nome, er.Message)
+		}
+	}
+}
+
+// QUEM CARREGA PROCEDÊNCIA NÃO É DadosDoMotor.
+//
+// A classe é a declaração em que o portão de projecao.go confia, e
+// DadosDoMotor significa "gerado por este binário, não pelo host". Toda tool que
+// passa por `envelopar` carimba provenance.host — o hostname lido do dump — e a
+// observabilidade dela pode levar nome de cgroup e de binfmt que o alvo
+// escolheu. Declarar aquela classe ali é falso.
+//
+// O defeito já apareceu duas vezes: em session.status e, depois de consertado
+// lá, em coverage.get. Duas ocorrências da mesma confusão são uma catraca
+// faltando, e não duas distrações.
+func TestToolComProcedenciaNaoSeDeclaraDoMotor(t *testing.T) {
+	s, _ := servidorDeTeste(t, fatosDeTeste())
+	argsPorTool := map[string]string{
+		"process.get": `{"pid":812}`, "net.ip": `{"address":"127.0.0.1"}`,
+		"net.port": `{"port":22}`, "file.inspect": `{"path":"/etc/passwd"}`,
+		"finding.get": `{"finding_ref":"f-0"}`,
+	}
+	for _, f := range catalogo() {
+		if _, servida := s.porNome[f.Nome]; !servida {
+			continue
+		}
+		args := argsPorTool[f.Nome]
+		if args == "" {
+			args = `{}`
+		}
+		saida, er := f.Rodar(s, json.RawMessage(args))
+		if er != nil {
+			continue // recusada por outro motivo; não é o que se mede aqui
+		}
+		b, _ := json.Marshal(saida)
+		var m map[string]any
+		if json.Unmarshal(b, &m) != nil {
+			continue
+		}
+		if _, temProc := m["provenance"]; !temProc {
+			continue
+		}
+		if f.Dados == DadosDoMotor {
+			t.Errorf("%s carrega provenance (e portanto o hostname do alvo) e se "+
+				"declara DadosDoMotor — a classe diz 'não há dado do alvo', e há",
+				f.Nome)
 		}
 	}
 }

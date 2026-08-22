@@ -142,15 +142,38 @@ func montarDourada(t *testing.T, pedidos []string, saida []byte) string {
 	return b.String()
 }
 
-// idIlegivel diz que a requisição é malformada a ponto de o id não ter podido
-// ser lido — o único caso em que a spec permite responder com id nulo.
+// idIlegivel diz que o id não pôde ser USADO — o único caso em que a spec
+// permite responder com id nulo.
+//
+// # Por que ele precisou ficar mais preciso
+//
+// A versão anterior só reconhecia "documento não abriu" e "id null", então
+// marcava ID DIVERGENTE para id `true`, `{}` e `[]` — que são recusados de
+// propósito, porque não servem para correlacionar, e para os quais `null` é a
+// resposta CERTA. Três acusações falsas.
+//
+// E elas custaram caro. Havia uma QUARTA linha de ID DIVERGENTE no arquivo, e
+// essa era real: o servidor descartava o id de toda requisição recusada por
+// validação, e a de id 14 voltava como null. Eu li as quatro, vi três que sabia
+// serem esperadas, e li a quarta como mais uma. Um detector que produz ruído
+// aceito treina quem o lê a ignorar o sinal — e o sinal aqui era um defeito de
+// protocolo que uma revisão externa acabou tendo de apontar.
 func idIlegivel(p string) bool {
 	var m map[string]json.RawMessage
 	if json.Unmarshal([]byte(p), &m) != nil {
-		return true
+		return true // o documento não abriu
 	}
 	b, ok := m["id"]
-	return !ok || strings.TrimSpace(string(b)) == "null"
+	if !ok {
+		return true
+	}
+	t := strings.TrimSpace(string(b))
+	if t == "null" || t == "" {
+		return true
+	}
+	// String ou número servem para correlacionar; o resto foi lido e recusado,
+	// e para ele `null` é a resposta certa.
+	return !(t[0] == '"' || t[0] == '-' || (t[0] >= '0' && t[0] <= '9'))
 }
 
 // formaDaResposta reduz a resposta ao que é contrato de protocolo.

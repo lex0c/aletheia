@@ -1,10 +1,12 @@
 package mcp
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/lex0c/aletheia/internal/env"
 )
@@ -20,6 +22,18 @@ type Servidor struct {
 	// adquirir monta o ambiente de uma captura. nil em ModoSnapshot, onde
 	// nenhuma leitura do host acontece.
 	adquirir Aquisicao
+
+	// cancelados são os ids que o cliente pediu para abortar.
+	//
+	// O laço é sequencial, então um cancelamento da requisição EM VOO não chega
+	// a ser lido — esse limite é real e está dito na descrição da captura. O que
+	// chega é o cancelamento de uma requisição PIPELINADA: o cliente mandou
+	// três de uma vez e desistiu da terceira. Para essas, a spec é clara — o
+	// receptor NÃO deve responder —, e responder mesmo assim entrega ao cliente
+	// uma resposta de id que ele já liberou, que muitos tratam como violação de
+	// protocolo e derrubam a conexão.
+	cancelados map[string]bool
+	muCanc     sync.Mutex
 
 	// O registry é resolvido UMA VEZ, no lançamento. Ele não pode variar por
 	// conexão (a 2026-07-28 tornou as listas cacheáveis), e resolvê-lo por
@@ -43,7 +57,8 @@ func NovoServidor(p Policy, a *Acervo, versao string, aud *Auditoria,
 		porNome[f.Nome] = f
 	}
 	return &Servidor{pol: p, acervo: a, versao: versao, aud: aud, adquirir: adquirir,
-		ativas: ativas, fora: fora, porNome: porNome}
+		cancelados: map[string]bool{},
+		ativas:     ativas, fora: fora, porNome: porNome}
 }
 
 func (s *Servidor) identidade() Implementacao {
@@ -110,7 +125,13 @@ func (s *Servidor) Servir(entrada io.Reader, saida io.Writer) error {
 
 		req, erpc := decodificar(linha)
 		if erpc != nil {
-			s.responderErro(w, json.RawMessage("null"), erpc)
+			// O id da requisição, quando ele PÔDE ser lido. `null` só onde ele
+			// de fato não pôde — documento que não abriu, lote, id inválido.
+			var id json.RawMessage
+			if req != nil {
+				id = req.ID
+			}
+			s.responderErro(w, id, erpc)
 			continue
 		}
 		if req.EhNotificacao() {
@@ -123,9 +144,40 @@ func (s *Servidor) Servir(entrada io.Reader, saida io.Writer) error {
 
 // tratarNotificacao: o receptor NÃO responde, nem para método desconhecido.
 func (s *Servidor) tratarNotificacao(r *Requisicao) {
+	if r.Method == "notifications/cancelled" {
+		s.marcarCancelada(r.Params)
+	}
 	if s.aud != nil {
 		s.aud.Notificacao(r.Method)
 	}
+}
+
+func (s *Servidor) marcarCancelada(params json.RawMessage) {
+	var p struct {
+		RequestID json.RawMessage `json:"requestId"`
+	}
+	if json.Unmarshal(params, &p) != nil || len(p.RequestID) == 0 {
+		return
+	}
+	s.muCanc.Lock()
+	defer s.muCanc.Unlock()
+	s.cancelados[string(bytes.TrimSpace(p.RequestID))] = true
+}
+
+// foiCancelada consome a marca: um id cancelado é atendido uma vez pelo
+// silêncio, e não fica envenenado para sempre.
+func (s *Servidor) foiCancelada(id json.RawMessage) bool {
+	if len(id) == 0 {
+		return false
+	}
+	k := string(bytes.TrimSpace(id))
+	s.muCanc.Lock()
+	defer s.muCanc.Unlock()
+	if !s.cancelados[k] {
+		return false
+	}
+	delete(s.cancelados, k)
+	return true
 }
 
 func (s *Servidor) tratar(w *Escritor, r *Requisicao) {
@@ -134,6 +186,28 @@ func (s *Servidor) tratar(w *Escritor, r *Requisicao) {
 	// `initialize` é da era legada por definição: ele é o handshake, e não
 	// carrega `_meta` com versão porque em 2025 isso não existia. Perguntar a
 	// era antes dele recusaria todo cliente legado na primeira mensagem.
+	// PING é da era 2025, e SÓ dela.
+	//
+	// A 2026-07-28 o REMOVEU do protocolo, junto de logging/setLevel. Mas este
+	// servidor fala as duas eras, e na legada ele é utilidade obrigatória: o
+	// cliente o usa para saber se a conexão está viva, e uma recusa faz ele
+	// concluir que o servidor morreu e reiniciar no meio da investigação.
+	//
+	// Ele vem ANTES do portão de era pelo mesmo motivo do initialize: a spec de
+	// 2025 permite ping antes mesmo da resposta do handshake, então exigir
+	// `_meta` ali recusaria o uso legítimo.
+	if r.Method == "ping" {
+		if s.sessao.versaoLegada() == "" && lerMeta(r.Params) != nil {
+			// Cliente moderno pedindo ping: ele não existe mais na 2026-07-28.
+			s.responder(w, r, EraModerna, "", nil,
+				erro(CodMethodNotFound, "ping foi REMOVIDO na 2026-07-28: a saúde da "+
+					"conexão stdio é o próprio processo estar vivo"), fim)
+			return
+		}
+		s.responder(w, r, EraLegado, "", json.RawMessage(`{}`), nil, fim)
+		return
+	}
+
 	if r.Method == "initialize" {
 		res, erpc := s.sessao.tratarInitialize(s, r)
 		s.responder(w, r, EraLegado, "", res, erpc, fim)
@@ -228,6 +302,13 @@ func (s *Servidor) selar(era Era, cacheavel bool, corpo map[string]any) json.Raw
 func (s *Servidor) responder(w *Escritor, r *Requisicao, era Era, alvo string,
 	res json.RawMessage, er *ErroRPC, fim func(string, string, int)) {
 
+	// A spec: o receptor NÃO deve responder a uma requisição cancelada. Isto
+	// alcança a pipelinada; a que está EM VOO não é alcançável, porque o laço
+	// não lê enquanto processa — e esse limite está dito, não fingido.
+	if s.foiCancelada(r.ID) {
+		fim(alvo, "cancelled", 0)
+		return
+	}
 	if er != nil {
 		fim(alvo, "error", 0)
 		s.responderErro(w, r.ID, er)
@@ -339,7 +420,21 @@ func (s *Servidor) chamarTool(r *Requisicao) (map[string]any, string, *ErroRPC) 
 	}
 	saida, er := rodarProtegido(s, f, p.Arguments)
 	if er != nil {
-		return nil, alvo, er
+		// FALHA DE TOOL É RESULTADO, e não erro de protocolo.
+		//
+		// A distinção decide QUEM LÊ a mensagem. Um erro JSON-RPC é do
+		// transporte, e muitos clientes o tratam como falha de conexão sem
+		// devolver o texto ao modelo. E as mensagens deste servidor foram
+		// escritas para o modelo: "STALE_CURSOR: este cursor foi emitido sob
+		// outro filtro", "a pergunta não se aplica a esta fonte", "isto é
+		// DEFEITO DA FERRAMENTA, e não achado sobre o host". Escondê-las atrás
+		// de um erro de transporte é escrevê-las para ninguém — e tira do
+		// modelo a chance de se corrigir sozinho na chamada seguinte.
+		//
+		// O que continua sendo erro de protocolo é o que acontece ANTES do
+		// despacho: método desconhecido, tool inexistente, era ambígua, frame
+		// malformado. Aquilo o modelo não pode consertar.
+		return resultadoDeFalha(f.Nome, er), alvo, nil
 	}
 	b, err := json.Marshal(saida)
 	if err != nil {
@@ -383,6 +478,20 @@ func rodarProtegido(s *Servidor, f Ferramenta, args json.RawMessage) (saida any,
 		}
 	}()
 	return f.Rodar(s, args)
+}
+
+// resultadoDeFalha embrulha a recusa de uma tool na forma que o modelo lê.
+func resultadoDeFalha(tool string, er *ErroRPC) map[string]any {
+	corpo := map[string]any{"tool": tool, "error": er.Message}
+	if er.Data != nil {
+		corpo["details"] = er.Data
+	}
+	b, _ := json.Marshal(corpo)
+	return map[string]any{
+		"content":           []map[string]any{{"type": "text", "text": string(b)}},
+		"structuredContent": corpo,
+		"isError":           true,
+	}
 }
 
 func (s *Servidor) nomesAtivos() []string {

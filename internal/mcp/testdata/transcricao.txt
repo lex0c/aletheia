@@ -29,16 +29,16 @@
 < erro -32601
 
 > {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"findings.list","arguments":{"severity":"CRITICAL"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
-< erro -32602
+< ok _meta,content,isError,resultType,structuredContent
 
 > {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"process.get","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
-< erro -32602
+< ok _meta,content,isError,resultType,structuredContent
 
 > {"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"file.inspect","arguments":{"path":"__TEXTO_ACIMA_DO_TETO__"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
-< erro -32602
+< ok _meta,content,isError,resultType,structuredContent
 
 > {"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"checks.catalog","arguments":{"group":"network"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
-< erro -32602
+< ok _meta,content,isError,resultType,structuredContent
 
 > {"jsonrpc":"2.0","id":10,"method":"tools/list","params":{}}
 < erro -32602
@@ -59,16 +59,16 @@
 < erro -32600
 
 > {"jsonrpc":"2.0","id":true,"method":"tools/list"}
-< erro -32600   <<< ID DIVERGENTE: enviei true, voltou null
+< erro -32600
 
 > {"jsonrpc":"2.0","id":{},"method":"tools/list"}
-< erro -32600   <<< ID DIVERGENTE: enviei {}, voltou null
+< erro -32600
 
 > {"jsonrpc":"2.0","id":[],"method":"tools/list"}
-< erro -32600   <<< ID DIVERGENTE: enviei [], voltou null
+< erro -32600
 
 > {"jsonrpc":"2.0","id":14}
-< erro -32600   <<< ID DIVERGENTE: enviei 14, voltou null
+< erro -32600
 
 > {"jsonrpc":"2.0","id":15,"method":"metodo/inexistente","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
 < erro -32601
@@ -90,6 +90,9 @@
 
 > {"jsonrpc":"2.0","method":"notifications/initialized"}
 < (sem resposta — notificação)
+
+> {"jsonrpc":"2.0","id":22,"method":"ping","params":{}}
+< ok 
 
 > {"jsonrpc":"2.0","id":18,"method":"tools/list","params":{}}
 < ok tools

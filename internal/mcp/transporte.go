@@ -162,7 +162,7 @@ func NovoEscritor(w io.Writer) *Escritor {
 // nenhum teste alcança é pior que guarda nenhuma: ela promete uma defesa que
 // ninguém verifica.
 func (e *Escritor) Enviar(v any) error {
-	b, err := json.Marshal(v)
+	b, err := semEscapeHTML(v)
 	if err != nil {
 		return err
 	}
@@ -177,6 +177,28 @@ func (e *Escritor) Enviar(v any) error {
 	return e.w.Flush()
 }
 
+// semEscapeHTML serializa sem transformar <, > e & em \u003c, \u003e e \u0026.
+//
+// O padrão do encoding/json escapa os três — herança de quem embute JSON em
+// HTML —, e isso quebrava a única promessa que o envelope faz sobre o id: que
+// ele volta BYTE A BYTE. Um id `"req<7>"` voltava `"req\u003c7\u003e"`. O
+// valor JSON é igual, então quem desserializa não vê nada; quem correlaciona
+// por bytes — que é exatamente o cliente que o comentário do Requisicao.ID diz
+// estar protegendo — perde a correlação sem erro nenhum.
+//
+// Verificado contra o runtime: inteiro grande e não-ASCII já atravessavam
+// intactos; só os três caracteres de HTML quebravam.
+func semEscapeHTML(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	// O Encode acrescenta uma newline; o frame põe a dele.
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
 // decodificar transforma um frame em requisição, ou no erro que o cliente
 // precisa ver.
 //
@@ -188,28 +210,50 @@ func (e *Escritor) Enviar(v any) error {
 //	id nulo    a spec diz textualmente que o id NÃO pode ser null — e null é
 //	           indistinguível de ausente depois do Unmarshal, então uma
 //	           requisição viraria notificação e ficaria sem resposta
+//
+// A requisição volta MESMO NA RECUSA, quando o id pôde ser lido.
+//
+// A spec JSON-RPC é literal: a resposta de erro leva o MESMO id da requisição,
+// e só usa `null` quando o id NÃO PÔDE SER DETECTADO. A versão anterior
+// devolvia nil junto do erro em toda validação — e o `jsonrpc` errado, o
+// `method` ausente e o lote têm o id perfeitamente legível, já desserializado
+// pela linha acima.
+//
+// O efeito é do lado do cliente, e é mudo: ele correlaciona por id, tem a
+// requisição 14 pendente, e a recusa dela chega num envelope `null` que ele não
+// casa com nada. A 14 fica esperando até o timeout dele.
+//
+// A DENÚNCIA ESTAVA ESCRITA. O montador da transcrição dourada compara o id
+// enviado com o que voltou e imprime "ID DIVERGENTE" — e o arquivo tem quatro
+// dessas, gravadas por mim, lidas por mim, e aceitas como se fossem o esperado.
+// Escrever o detector não adianta se a saída dele não é lida como acusação.
 func decodificar(linha []byte) (*Requisicao, *ErroRPC) {
 	corte := bytes.TrimLeft(linha, " \t\r\n")
 	if len(corte) == 0 {
 		return nil, erro(CodInvalidRequest, "frame vazio")
 	}
 	if corte[0] == '[' {
+		// Lote: a spec proíbe, e o id de dentro dele não é o id DESTA mensagem —
+		// não há um só id a devolver. `null` é a resposta certa aqui.
 		return nil, erro(CodInvalidRequest,
 			"lote (batch) JSON-RPC não é suportado: foi removido do MCP na 2025-06-18 — "+
 				"envie uma mensagem por linha")
 	}
 	var r Requisicao
 	if err := json.Unmarshal(corte, &r); err != nil {
+		// Aqui o id realmente não pôde ser detectado: o documento não abriu.
 		return nil, erro(CodParseError, "JSON inválido")
 	}
+	if er := conferirTipoDoID(r.ID); er != nil {
+		// Id de tipo inválido: ele foi LIDO e não serve para correlacionar.
+		// Devolvê-lo seria ecoar um `true` como se fosse handle.
+		return nil, er
+	}
 	if r.JSONRPC != "2.0" {
-		return nil, erro(CodInvalidRequest, `campo "jsonrpc" ausente ou diferente de "2.0"`)
+		return &r, erro(CodInvalidRequest, `campo "jsonrpc" ausente ou diferente de "2.0"`)
 	}
 	if r.Method == "" {
-		return nil, erro(CodInvalidRequest, `campo "method" ausente`)
-	}
-	if er := conferirTipoDoID(r.ID); er != nil {
-		return nil, er
+		return &r, erro(CodInvalidRequest, `campo "method" ausente`)
 	}
 	return &r, nil
 }

@@ -220,36 +220,65 @@ func redigir(f *facts.Facts) *facts.Facts {
 	if f == nil {
 		return nil
 	}
-	c := redigirValor(reflect.ValueOf(f).Elem()).Interface().(facts.Facts)
+	c := redigirValor(reflect.ValueOf(f).Elem(), "").Interface().(facts.Facts)
 	return &c
 }
 
-// TagRedacao é o opt-out. `redact:"-"` deixa o campo (e tudo abaixo dele)
-// intacto, para o caso em que os bytes exatos importam.
+// TagRedacao classifica o campo. O valor decide QUAL redator se aplica.
+//
+//	(ausente)  texto livre — redact.TextoLivre, sem estado entre tokens
+//	cmdline    uma sequência argv: redact.Cmdline sobre a FATIA inteira
+//	linha      uma linha de comando como string: redact.Texto
+//	valor      um par nome/valor: redact.Valor, que mascara pelo NOME
+//	-          intocado; os bytes exatos importam
 const TagRedacao = "redact"
 
 // redigirValor devolve uma cópia redigida do valor.
 //
+// # Por que a classe do campo importa
+//
+// A primeira versão desta caminhada aplicava o redator de LINHA DE COMANDO a
+// toda string, e ele tem estado entre tokens — `-p` manda mascarar o token
+// seguinte, `Authorization:` manda mascarar até fechar o cabeçalho. Aplicado
+// string a string, esse estado se perde; aplicado a texto que não é comando,
+// ele estraga o que não é segredo. Medido, os dois sentidos:
+//
+//	["mysql","-p","S3cr3t"]           o segredo saía EM CLARO
+//	"-w /etc/passwd -p wa -k identity"  virava "-w <redacted> -p <redacted> …"
+//
+// A classe restaura o contexto onde ele existe. O padrão continua sendo
+// redigir — um coletor novo nasce protegido —, e o que ele perde em relação ao
+// redator de comando é só a forma PARTIDA (`-p` e o valor em tokens
+// separados), que só existe em linha de comando e portanto só nos campos que
+// se declaram.
+//
 // Ela constrói em vez de mutar porque o Facts vivo continua servindo à execução
 // em curso: os checks precisam do argv inteiro para casar indicador e para
 // julgar linhagem, e redigir no lugar os cegaria.
-func redigirValor(v reflect.Value) reflect.Value {
+func redigirValor(v reflect.Value, classe string) reflect.Value {
 	switch v.Kind() {
 	case reflect.String:
-		return reflect.ValueOf(redact.Texto(v.String())).Convert(v.Type())
+		if classe == "linha" {
+			return reflect.ValueOf(redact.Texto(v.String())).Convert(v.Type())
+		}
+		return reflect.ValueOf(redact.TextoLivre(v.String())).Convert(v.Type())
 
 	case reflect.Struct:
 		out := reflect.New(v.Type()).Elem()
+		if classe == "valor" {
+			return redigirPar(v)
+		}
 		for i := 0; i < v.NumField(); i++ {
 			campo := v.Type().Field(i)
 			if !campo.IsExported() {
 				continue // não serializa, e o reflect não o alcançaria
 			}
-			if campo.Tag.Get(TagRedacao) == "-" {
+			c := campo.Tag.Get(TagRedacao)
+			if c == "-" {
 				out.Field(i).Set(v.Field(i))
 				continue
 			}
-			out.Field(i).Set(redigirValor(v.Field(i)))
+			out.Field(i).Set(redigirValor(v.Field(i), c))
 		}
 		return out
 
@@ -257,9 +286,13 @@ func redigirValor(v reflect.Value) reflect.Value {
 		if v.IsNil() {
 			return v
 		}
+		// ARGV é uma SEQUÊNCIA, e só ela liga uma flag ao token seguinte.
+		if classe == "cmdline" && v.Type().Elem().Kind() == reflect.String {
+			return reflect.ValueOf(redact.Cmdline(paraStrings(v))).Convert(v.Type())
+		}
 		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
 		for i := 0; i < v.Len(); i++ {
-			out.Index(i).Set(redigirValor(v.Index(i)))
+			out.Index(i).Set(redigirValor(v.Index(i), classe))
 		}
 		return out
 
@@ -269,10 +302,23 @@ func redigirValor(v reflect.Value) reflect.Value {
 		}
 		out := reflect.MakeMapWithSize(v.Type(), v.Len())
 		iter := v.MapRange()
+		mapaNomeValor := v.Type().Key().Kind() == reflect.String &&
+			v.Type().Elem().Kind() == reflect.String
 		for iter.Next() {
 			// A CHAVE também: um mapa de lacunas por caminho tem o caminho na
 			// chave, e um caminho pode carregar segredo tanto quanto um valor.
-			out.SetMapIndex(redigirValor(iter.Key()), redigirValor(iter.Value()))
+			k := redigirValor(iter.Key(), classe)
+			if mapaNomeValor {
+				// map[string]string é, quase sempre, NOME -> VALOR: o environ de
+				// um processo, as variáveis de uma crontab. O nome é o que
+				// denuncia o segredo (`AWS_SECRET_ACCESS_KEY`), e é a proteção
+				// que a lista curada tinha e a caminhada por string perdeu.
+				out.SetMapIndex(k, reflect.ValueOf(
+					redigirNomeValor(iter.Key().String(), iter.Value().String()),
+				).Convert(v.Type().Elem()))
+				continue
+			}
+			out.SetMapIndex(k, redigirValor(iter.Value(), classe))
 		}
 		return out
 
@@ -281,7 +327,7 @@ func redigirValor(v reflect.Value) reflect.Value {
 			return v
 		}
 		out := reflect.New(v.Type().Elem())
-		out.Elem().Set(redigirValor(v.Elem()))
+		out.Elem().Set(redigirValor(v.Elem(), classe))
 		return out
 
 	case reflect.Interface:
@@ -289,10 +335,61 @@ func redigirValor(v reflect.Value) reflect.Value {
 			return v
 		}
 		out := reflect.New(v.Type()).Elem()
-		out.Set(redigirValor(v.Elem()))
+		out.Set(redigirValor(v.Elem(), classe))
 		return out
 	}
 	return v
+}
+
+// redigirPar trata a struct que é um par nome/valor — o EnvSetting de uma
+// crontab. O NOME é o que denuncia o segredo.
+//
+// Ela redige TODOS os campos, e não só o Value. A primeira versão fazia
+// `out.Set(v)` — cópia da struct inteira — e reescrevia apenas o Value; o
+// EnvSetting tem também um `File`, e ele saía CRU. A catraca global pegou, que
+// é exatamente para isso que ela existe: perguntar "o segredo saiu?" em vez de
+// "os campos que eu lembrei foram redigidos?".
+func redigirPar(v reflect.Value) reflect.Value {
+	out := reflect.New(v.Type()).Elem()
+	var nome string
+	for i := 0; i < v.NumField(); i++ {
+		if v.Type().Field(i).Name == "Key" && v.Field(i).Kind() == reflect.String {
+			nome = v.Field(i).String()
+		}
+	}
+	for i := 0; i < v.NumField(); i++ {
+		campo := v.Type().Field(i)
+		if !campo.IsExported() {
+			continue
+		}
+		if campo.Tag.Get(TagRedacao) == "-" {
+			out.Field(i).Set(v.Field(i))
+			continue
+		}
+		if campo.Name == "Value" && campo.Type.Kind() == reflect.String {
+			out.Field(i).SetString(redigirNomeValor(nome, v.Field(i).String()))
+			continue
+		}
+		out.Field(i).Set(redigirValor(v.Field(i), campo.Tag.Get(TagRedacao)))
+	}
+	return out
+}
+
+// redigirNomeValor aplica a redação por NOME e, se ela não disse nada, a de
+// texto livre — que ainda pega a forma embutida.
+func redigirNomeValor(nome, valor string) string {
+	if r := redact.Valor(nome, valor); r != valor {
+		return r
+	}
+	return redact.TextoLivre(valor)
+}
+
+func paraStrings(v reflect.Value) []string {
+	out := make([]string, v.Len())
+	for i := range out {
+		out[i] = v.Index(i).String()
+	}
+	return out
 }
 
 // Escrever emite o dump, em fluxo e SEM indentação.

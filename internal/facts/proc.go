@@ -73,12 +73,12 @@ type Process struct {
 	// Argv vem de /proc/<pid>/cmdline: MESMA fonte que o ps lê, e o processo
 	// pode reescrevê-la. Serve para ver o disfarce, não para confirmar
 	// identidade — isso é o Exe (runbook §3.5).
-	Argv         []string `json:"argv,omitempty"`
+	Argv         []string `json:"argv,omitempty" redact:"cmdline"`
 	CmdlineEmpty bool     `json:"cmdline_empty,omitempty"`
 
 	// EnvKeys tem TODAS as chaves; Env só os valores da allowlist (SPEC 5.4).
 	EnvKeys []string          `json:"env_keys,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
+	Env     map[string]string `json:"env,omitempty" redact:"valor"`
 
 	CapEff    uint64 `json:"cap_eff"`
 	TracerPID int    `json:"tracer_pid,omitempty"`

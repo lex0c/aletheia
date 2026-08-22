@@ -116,6 +116,20 @@ func entradaSnapshot(extra string) json.RawMessage {
 	return json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{` + props + `}}`)
 }
 
+// entradaSnapshotExigindo é a entrada com campos OBRIGATÓRIOS declarados.
+//
+// Um argumento que o servidor exige e o schema não declara é um contrato torto:
+// o cliente valida, passa, e a chamada falha. Pior no caso do `pid`, onde a
+// versão anterior nem falhava — decodificava a ausência para zero e respondia
+// sobre o pid 0.
+func entradaSnapshotExigindo(obrigatorios []string, extra string) json.RawMessage {
+	req, _ := json.Marshal(obrigatorios)
+	base := entradaSnapshot(extra)
+	return json.RawMessage(`{"type":"object","additionalProperties":false,` +
+		`"required":` + string(req) + `,"properties":` +
+		string(base[len(`{"type":"object","additionalProperties":false,"properties":`):len(base)-1]) + `}`)
+}
+
 func entradaSnapshotPaginada(extra string) json.RawMessage {
 	p := propPagina
 	if extra != "" {

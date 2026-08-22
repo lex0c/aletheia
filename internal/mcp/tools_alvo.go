@@ -68,22 +68,30 @@ var toolProcessGet = Ferramenta{
 		"escolhe, o executável é o kernel que diz. O PID é válido DENTRO deste " +
 		"retrato — nada é relido, então não há reuso de PID a temer. " +
 		"found:false não é erro: é resposta.",
-	Entrada: entradaSnapshot(`"pid":{"type":"integer","minimum":0}`),
-	Fontes:  env.SourceLive,
-	Saida:   esquemaEnvelope(esquemaDossie, false),
+	Entrada: entradaSnapshotExigindo([]string{"pid"},
+		`"pid":{"type":"integer","minimum":1}`),
+	Fontes: env.SourceLive,
+	Saida:  esquemaEnvelope(esquemaDossie, false),
 	Rodar: func(s *Servidor, args json.RawMessage) (any, *ErroRPC) {
 		var a struct {
 			argsSnapshot
-			PID int `json:"pid"`
+			// PONTEIRO, para separar "não veio" de "veio zero". Com `int`, um
+			// process.get{} decodificava para 0 e o servidor respondia,
+			// confiante, sobre o pid 0 — found:false, com o sinal "ele pode ter
+			// terminado, ou nunca ter existido". Ausência da PERGUNTA virando
+			// resposta sobre um alvo que ninguém pediu, no servidor que existe
+			// para não confundir as duas coisas.
+			PID *int `json:"pid"`
 		}
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
-		if a.PID < 0 {
-			return nil, erro(CodInvalidParams, "pid inválido")
+		if a.PID == nil || *a.PID < 1 {
+			return nil, erro(CodInvalidParams,
+				`process.get exige "pid" — um inteiro positivo`)
 		}
 		return dossieDeAlvo(s, a.SnapshotID, env.SourceLive, func(r *Retrato) *info.Dossie {
-			return info.Processo(r.Fatos, a.PID)
+			return info.Processo(r.Fatos, *a.PID)
 		})
 	},
 }
@@ -102,10 +110,14 @@ var toolProcessTree = Ferramenta{
 		`"pid":{"type":"integer","minimum":0},
 "depth":{"type":"integer","minimum":1,"maximum":16,"default":4,"description":"profundidade de descendentes"}`),
 	Fontes: env.SourceLive,
-	Saida: esquemaEnvelope(`{"type":"object","properties":{
- "ancestors":{"type":"array","items":{"type":"object"}},
- "node":{"type":"object"},
- "children":{"type":"array","items":{"type":"object"}},
+	Saida: esquemaEnvelope(`{"type":"object","required":["found","truncated"],
+"properties":{
+ "target":{"type":"integer"},
+ "found":{"type":"boolean"},
+ "ancestors":{"type":"array","items":{"type":"object"},"description":"do PAI ate a raiz, nessa ordem"},
+ "node":{"type":"object","description":"o alvo, com children aninhado"},
+ "roots":{"type":"array","items":{"type":"object"},"description":"a resposta quando nenhum pid foi pedido"},
+ "signals":{"type":"array","items":{"type":"string"},"description":"orfao de ciclo, corte por profundidade — leia antes de concluir que a arvore esta inteira"},
  "truncated":{"type":"boolean"}}}`, false),
 	Rodar: func(s *Servidor, args json.RawMessage) (any, *ErroRPC) {
 		var a struct {
@@ -174,9 +186,10 @@ var toolNetIP = Ferramenta{
 		"apontado para lá não passa por DNS), resolv.conf e known_hosts (o host JÁ " +
 		"se conectou lá — é alcance lateral). Ausência aqui não fecha a questão: " +
 		"conexão de vida curta não aparece num retrato único.",
-	Entrada: entradaSnapshot(`"address":{"type":"string","maxLength":4096}`),
-	Fontes:  env.SourceLive,
-	Saida:   esquemaEnvelope(esquemaDossie, false),
+	Entrada: entradaSnapshotExigindo([]string{"address"},
+		`"address":{"type":"string","maxLength":4096}`),
+	Fontes: env.SourceLive,
+	Saida:  esquemaEnvelope(esquemaDossie, false),
 	Rodar: func(s *Servidor, args json.RawMessage) (any, *ErroRPC) {
 		var a struct {
 			argsSnapshot
@@ -206,22 +219,28 @@ var toolNetPort = Ferramenta{
 	Descricao: "Quem escuta, com que exposição e sob que pacote, e as conexões " +
 		"estabelecidas. Ninguém escutando NESTE retrato não é o mesmo que a porta " +
 		"estar fechada no firewall.",
-	Entrada: entradaSnapshot(`"port":{"type":"integer","minimum":0,"maximum":65535}`),
-	Fontes:  env.SourceLive,
-	Saida:   esquemaEnvelope(esquemaDossie, false),
+	Entrada: entradaSnapshotExigindo([]string{"port"},
+		`"port":{"type":"integer","minimum":0,"maximum":65535}`),
+	Fontes: env.SourceLive,
+	Saida:  esquemaEnvelope(esquemaDossie, false),
 	Rodar: func(s *Servidor, args json.RawMessage) (any, *ErroRPC) {
 		var a struct {
 			argsSnapshot
-			Porta int `json:"port"`
+			// Ponteiro pela mesma razão do pid: a porta 0 é um valor legítimo de
+			// se perguntar, e indistinguível da pergunta que não veio.
+			Porta *int `json:"port"`
 		}
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
-		if a.Porta < 0 || a.Porta > 65535 {
+		if a.Porta == nil {
+			return nil, erro(CodInvalidParams, `net.port exige "port"`)
+		}
+		if *a.Porta < 0 || *a.Porta > 65535 {
 			return nil, erro(CodInvalidParams, "port fora do intervalo 0..65535")
 		}
 		return dossieDeAlvo(s, a.SnapshotID, env.SourceLive, func(r *Retrato) *info.Dossie {
-			return info.Porta(r.Fatos, a.Porta)
+			return info.Porta(r.Fatos, *a.Porta)
 		})
 	},
 }
@@ -238,8 +257,9 @@ var toolFileInspect = Ferramenta{
 		"arquivo a partir do que a coleta já examinou. Um caminho que não aparece " +
 		"em nada NÃO significa que ele não existe — significa que nada nesta " +
 		"varredura o referencia.",
-	Entrada: entradaSnapshot(`"path":{"type":"string","maxLength":4096}`),
-	Saida:   esquemaEnvelope(esquemaDossie, false),
+	Entrada: entradaSnapshotExigindo([]string{"path"},
+		`"path":{"type":"string","maxLength":4096}`),
+	Saida: esquemaEnvelope(esquemaDossie, false),
 	Rodar: func(s *Servidor, args json.RawMessage) (any, *ErroRPC) {
 		var a struct {
 			argsSnapshot

@@ -612,6 +612,13 @@ Também funciona sobre um dump:
 ./aletheia info --from host.json process 812
 ```
 
+> **Mudança de saída em `info --json`.** As chaves passaram a ser snake_case em
+> inglês, como o resto do JSON produzido pela ferramenta: `Rotulo` virou
+> `label`, `Valor` virou `value`, `Nota` virou `meaning`, e o mesmo vale para os
+> censos de processo, de rede e de git. Até a v1.7.0 elas saíam com o nome do
+> campo em Go. O JSONL de `scan`/`analyze` — que é o consumido pela agregação de
+> frota — **não** mudou.
+
 Use `info` quando a pergunta for "o que está acontecendo?" e `scan` quando a
 pergunta for "quais sinais de comprometimento existem?".
 
@@ -1091,7 +1098,13 @@ artefatos solicitados, por exemplo:
 - `collect --out`;
 - `baseline -o`;
 - `scan --json`;
-- `preserve --out`.
+- `preserve --out`;
+- `mcp --audit-log`.
+
+`mcp` sem `--audit-log` não escreve nada: a trilha de invocações sai no `stderr`,
+que o cliente MCP pode capturar, encaminhar ou ignorar. O destino do
+`--audit-log` precisa ser um arquivo comum — a saída padrão é o canal do
+protocolo, e a ferramenta recusa apontar a trilha para lá.
 
 As leituras de arquivos tentam usar `O_NOATIME` para reduzir alteração da
 timeline. Quando o kernel ou as permissões não permitem esse modo, a ferramenta

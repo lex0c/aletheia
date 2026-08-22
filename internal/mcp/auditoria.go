@@ -23,8 +23,9 @@ import (
 // diretório que o investigador não escolheu.
 //
 // O que ela registra é a atividade do AGENTE, que numa resposta a incidente é
-// evidência por si: quem perguntou o quê, quando, sobre qual retrato. Ela NÃO
-// registra argumento nem resultado — argumento pode conter caminho e resultado
+// evidência por si: quem perguntou o quê, quando, sobre qual retrato — o método,
+// a TOOL e o snapshot_id que a chamada citou. Ela NÃO registra argumento nem
+// resultado — argumento pode conter caminho e resultado
 // contém dado do host, e a trilha viraria uma segunda cópia não redigida do
 // que o servidor acabou de proteger.
 type Auditoria struct {
@@ -42,9 +43,13 @@ func NovaAuditoria(w io.Writer) *Auditoria {
 }
 
 type linhaAuditoria struct {
-	Seq       int    `json:"seq"`
-	Em        string `json:"at"`
-	Metodo    string `json:"method"`
+	Seq    int    `json:"seq"`
+	Em     string `json:"at"`
+	Metodo string `json:"method"`
+	// Alvo é o QUE foi perguntado: o nome da tool e o retrato que a chamada
+	// citou. Sem ele toda invocação saía como a constante "tools/call", e a
+	// trilha respondia uma das três perguntas que promete — a menos útil.
+	Alvo      string `json:"target,omitempty"`
 	Status    string `json:"status,omitempty"`
 	DuracaoMs int64  `json:"duration_ms,omitempty"`
 	Bytes     int    `json:"result_bytes,omitempty"`
@@ -76,14 +81,14 @@ func (a *Auditoria) escrever(l linhaAuditoria) {
 
 // Comeco marca o início e devolve o fecho. Nil-safe: um servidor sem auditoria
 // devolve um fecho que não faz nada, e quem chama não precisa saber.
-func (a *Auditoria) Comeco(metodo string) func(status string, bytes int) {
+func (a *Auditoria) Comeco(metodo string) func(alvo, status string, bytes int) {
 	if a == nil {
-		return func(string, int) {}
+		return func(string, string, int) {}
 	}
 	t0 := a.agora()
-	return func(status string, bytes int) {
+	return func(alvo, status string, bytes int) {
 		a.escrever(linhaAuditoria{
-			Metodo: metodo, Status: status, Bytes: bytes,
+			Metodo: metodo, Alvo: alvo, Status: status, Bytes: bytes,
 			DuracaoMs: a.agora().Sub(t0).Milliseconds(),
 		})
 	}

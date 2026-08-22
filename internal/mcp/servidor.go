@@ -131,35 +131,57 @@ func (s *Servidor) tratar(w *Escritor, r *Requisicao) {
 	// era antes dele recusaria todo cliente legado na primeira mensagem.
 	if r.Method == "initialize" {
 		res, erpc := s.sessao.tratarInitialize(s, r)
-		s.responder(w, r, EraLegado, res, erpc, fim)
+		s.responder(w, r, EraLegado, "", res, erpc, fim)
 		return
 	}
 
 	era, erpc := s.sessao.EraDe(r)
 	if erpc != nil {
-		s.responder(w, r, EraLegado, nil, erpc, fim)
+		s.responder(w, r, EraLegado, "", nil, erpc, fim)
 		return
 	}
 
 	var (
-		corpo map[string]any
-		er    *ErroRPC
+		corpo     map[string]any
+		cacheavel bool
+		alvo      string
+		er        *ErroRPC
 	)
 	switch r.Method {
 	case "server/discover":
 		corpo, er = s.discover()
+		cacheavel = true
 	case "tools/list":
 		corpo, er = s.listarTools()
+		cacheavel = true
 	case "tools/call":
-		corpo, er = s.chamarTool(r)
+		corpo, alvo, er = s.chamarTool(r)
 	default:
 		er = erro(CodMethodNotFound, "método desconhecido: "+r.Method)
 	}
 	if er != nil {
-		s.responder(w, r, era, nil, er, fim)
+		s.responder(w, r, era, alvo, nil, er, fim)
 		return
 	}
-	s.responder(w, r, era, s.selar(era, corpo), nil, fim)
+
+	res := s.selar(era, cacheavel, corpo)
+
+	// O TETO É DO FRAME, e não do corpo da tool.
+	//
+	// Ele era medido sobre o valor que a tool devolvia — antes de o resultado
+	// ganhar `content`, que é a MESMA carga serializada em texto para o cliente
+	// que ainda não lê schema de saída. Medido: 179 KB conferidos contra um
+	// frame de 323 KB, 1,80x. Um teto de 4 MiB admitia quase 7, e quem quebra
+	// não é este servidor — é o limite de frame do CLIENTE, do outro lado, onde
+	// o operador não tem como diagnosticar.
+	if int64(len(res)) > s.pol.MaxResultado {
+		s.responder(w, r, era, alvo, nil, erroComDados(CodInvalidParams,
+			"resultado acima do teto deste servidor: peça uma página menor com "+
+				`"limit", ou filtre a consulta`,
+			map[string]any{"bytes": len(res), "limit": s.pol.MaxResultado}), fim)
+		return
+	}
+	s.responder(w, r, era, alvo, res, nil, fim)
 }
 
 // selar acrescenta ao resultado o que é da ERA, e só o que é dela.
@@ -169,13 +191,27 @@ func (s *Servidor) tratar(w *Escritor, r *Requisicao) {
 // — mas OMITI-LOS para um cliente de 2026 quebra um campo que a spec declara
 // obrigatório. O contrário do vazamento é igualmente ruim, e é por isso que a
 // era é decidida por requisição e nunca por padrão do servidor.
-func (s *Servidor) selar(era Era, corpo map[string]any) json.RawMessage {
+func (s *Servidor) selar(era Era, cacheavel bool, corpo map[string]any) json.RawMessage {
 	if corpo == nil {
 		corpo = map[string]any{}
 	}
 	if era == EraModerna {
 		corpo["resultType"] = "complete"
 		corpo["_meta"] = map[string]any{MetaInfoServidor: s.identidade()}
+		if cacheavel {
+			// CacheableResult nasceu na 2026-07-28, junto com resultType. Estes
+			// dois campos eram postos no CORPO pelos handlers, então saíam nas
+			// DUAS eras — e o doc logo acima afirmava o contrário. Um cliente de
+			// 2025 os ignora, e o dano é pequeno; a promessa quebrada não é.
+			//
+			// A lista deste servidor é fixa enquanto ele viver: o que ela contém
+			// foi decidido pelo operador no lançamento. Uma hora é folgada.
+			corpo["ttlMs"] = 3600000
+			// PRIVATE, e não public: a lista revela o modo, o perfil e as fontes
+			// desta execução. Não é segredo, e também não é coisa que um
+			// intermediário compartilhado deva guardar e servir a outra pessoa.
+			corpo["cacheScope"] = "private"
+		}
 	}
 	b, err := json.Marshal(corpo)
 	if err != nil {
@@ -184,15 +220,15 @@ func (s *Servidor) selar(era Era, corpo map[string]any) json.RawMessage {
 	return b
 }
 
-func (s *Servidor) responder(w *Escritor, r *Requisicao, era Era,
-	res json.RawMessage, er *ErroRPC, fim func(string, int)) {
+func (s *Servidor) responder(w *Escritor, r *Requisicao, era Era, alvo string,
+	res json.RawMessage, er *ErroRPC, fim func(string, string, int)) {
 
 	if er != nil {
-		fim("error", 0)
+		fim(alvo, "error", 0)
 		s.responderErro(w, r.ID, er)
 		return
 	}
-	fim("ok", len(res))
+	fim(alvo, "ok", len(res))
 	if err := w.Enviar(Resposta{JSONRPC: "2.0", ID: r.ID, Result: res}); err != nil {
 		s.aud.Falha(r.Method, err)
 	}
@@ -222,15 +258,6 @@ func (s *Servidor) discover() (map[string]any, *ErroRPC) {
 		"supportedVersions": VersoesSuportadas,
 		"capabilities":      Capacidades{Tools: &CapTools{}},
 		"instructions":      Instrucoes,
-		// A lista de tools deste servidor é fixa enquanto ele viver, e o que
-		// ela contém foi decidido pelo operador no lançamento. Uma hora de
-		// cache é folgada e não arrisca nada.
-		"ttlMs": 3600000,
-		// PRIVATE, e não public: a lista revela o modo, o perfil e as fontes
-		// desta execução — quantos retratos, de host vivo ou de imagem. Não é
-		// segredo, mas também não é coisa que um intermediário compartilhado
-		// deva guardar e servir a outra pessoa.
-		"cacheScope": "private",
 	}, nil
 }
 
@@ -258,9 +285,7 @@ func (s *Servidor) listarTools() (map[string]any, *ErroRPC) {
 			},
 		})
 	}
-	return map[string]any{
-		"tools": tools, "ttlMs": 3600000, "cacheScope": "private",
-	}, nil
+	return map[string]any{"tools": tools}, nil
 }
 
 type paramsCall struct {
@@ -268,15 +293,31 @@ type paramsCall struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 
-func (s *Servidor) chamarTool(r *Requisicao) (map[string]any, *ErroRPC) {
+// chamarTool devolve, além do corpo, o ALVO para a trilha de auditoria: o nome
+// da tool e o retrato que a chamada citou.
+//
+// A trilha registrava só `r.Method`, então toda invocação saía como a constante
+// "tools/call" — e o doc dela promete responder "quem perguntou o quê, quando,
+// sobre qual retrato". Respondia uma das três, e a menos útil. O nome estava na
+// mão duas linhas abaixo.
+//
+// O retrato é o que a chamada PEDIU, e não o que o servidor resolveu: numa
+// trilha de auditoria o que interessa é o que foi perguntado.
+func (s *Servidor) chamarTool(r *Requisicao) (map[string]any, string, *ErroRPC) {
 	var p paramsCall
 	if len(r.Params) > 0 {
 		if err := json.Unmarshal(r.Params, &p); err != nil {
-			return nil, erro(CodInvalidParams, "params de tools/call ilegíveis")
+			return nil, "", erro(CodInvalidParams, "params de tools/call ilegíveis")
 		}
 	}
 	if p.Name == "" {
-		return nil, erro(CodInvalidParams, `tools/call sem "name"`)
+		return nil, "", erro(CodInvalidParams, `tools/call sem "name"`)
+	}
+	alvo := p.Name
+	var quais argsSnapshot
+	if len(p.Arguments) > 0 && json.Unmarshal(p.Arguments, &quais) == nil &&
+		quais.SnapshotID != "" {
+		alvo += " " + quais.SnapshotID
 	}
 	f, ok := s.porNome[p.Name]
 	if !ok {
@@ -287,26 +328,19 @@ func (s *Servidor) chamarTool(r *Requisicao) (map[string]any, *ErroRPC) {
 		// pedir ao operador que reinicie com outra flag. "não existe" fecha o
 		// assunto. O que o operador não autorizou não deve nem parecer
 		// alcançável.
-		return nil, erroComDados(CodMethodNotFound,
+		return nil, alvo, erroComDados(CodMethodNotFound,
 			"tool desconhecida: "+p.Name,
 			map[string]any{"available": s.nomesAtivos()})
 	}
 	saida, er := rodarProtegido(s, f, p.Arguments)
 	if er != nil {
-		return nil, er
+		return nil, alvo, er
 	}
 	b, err := json.Marshal(saida)
 	if err != nil {
-		return nil, erro(CodInternalError, "falha ao serializar o resultado")
+		return nil, alvo, erro(CodInternalError, "falha ao serializar o resultado")
 	}
-	if int64(len(b)) > s.pol.MaxResultado {
-		// Não corta: recusa e diz como pedir menos. Cortar JSON serializado
-		// produz documento inválido, e um cliente que recebe metade não tem
-		// como saber que era metade.
-		return nil, erro(CodInvalidParams,
-			"resultado acima do teto deste servidor: peça uma página menor com "+
-				`"limit", ou filtre a consulta`)
-	}
+	// O teto é conferido no FRAME, em tratar. Aqui só se monta.
 	return map[string]any{
 		// `content` é o caminho que todo cliente entende; `structuredContent` é
 		// o que casa com o outputSchema. Mandar os dois é o que mantém a
@@ -314,7 +348,7 @@ func (s *Servidor) chamarTool(r *Requisicao) (map[string]any, *ErroRPC) {
 		"content":           []map[string]any{{"type": "text", "text": string(b)}},
 		"structuredContent": saida,
 		"isError":           false,
-	}, nil
+	}, alvo, nil
 }
 
 // rodarProtegido isola a falha de uma tool.

@@ -1,10 +1,6 @@
 package mcp
 
-import (
-	"time"
-
-	"github.com/lex0c/aletheia/internal/env"
-)
+import "github.com/lex0c/aletheia/internal/env"
 
 // Modo é COMO este servidor obtém fato, e é fixado no lançamento do processo.
 //
@@ -85,7 +81,6 @@ type Policy struct {
 
 	MaxLinha     int64
 	MaxResultado int64
-	Budget       time.Duration
 }
 
 // Padroes preenche o que o operador não disse.
@@ -95,9 +90,6 @@ func (p Policy) Padroes() Policy {
 	}
 	if p.MaxResultado <= 0 {
 		p.MaxResultado = MaxResultadoPadrao
-	}
-	if p.Budget <= 0 {
-		p.Budget = BudgetPadrao
 	}
 	return p
 }
@@ -110,10 +102,20 @@ const (
 	// inválido, e um cliente que recebe metade de uma resposta não tem como
 	// saber que era metade.
 	MaxResultadoPadrao int64 = 4 << 20 // 4 MiB
-	// BudgetPadrao é o teto de tempo de UMA tool. Em ModoSnapshot quase nada
-	// chega perto; ele existe para o dia em que a aquisição live entrar.
-	BudgetPadrao = 30 * time.Second
 )
+
+// Aqui havia um `Budget time.Duration`, teto de tempo por tool. Ele foi
+// removido porque NADA o aplicava: era preenchido com um padrão e lido por
+// ninguém.
+//
+// É a armadilha do `MaxWarn: 0` da suíte de cenários, num lugar novo — um
+// orçamento declarado e não conferido parece proteção e não confere nada, e
+// pior, convida quem lê a policy a acreditar que existe um limite. Em modo
+// snapshot não há o que cronometrar: toda tool responde de memória sobre um
+// retrato imutável, e a mais cara é memoizada.
+//
+// Ele volta com a aquisição live, junto do mecanismo que o faz valer — os
+// deadlines cooperativos que env.WalkExpired e check.RunOptions já sustentam.
 
 // FonteDoModo é o que um servidor DE AQUISIÇÃO descreve. Em ModoSnapshot não
 // há resposta: quem decide é cada dump carregado.

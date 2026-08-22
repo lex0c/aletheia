@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -246,21 +247,36 @@ func abrirAuditoria(caminho string) (*mcp.Auditoria, func(), int) {
 	if caminho == "" {
 		return mcp.NovaAuditoria(os.Stderr), func() {}, 0
 	}
+	// STDOUT É O CANAL DO PROTOCOLO, e a trilha não pode entrar nele.
+	//
+	// `openJSONOut` aceita "-" como stdout e abre /dev/stdout como um arquivo
+	// qualquer — nos dois casos as linhas de auditoria sairiam INTERLEAVADAS
+	// entre as mensagens MCP, e todo cliente quebraria numa linha que não é
+	// mensagem. É a mesma recusa que --snapshot - já faz, do outro lado do
+	// mesmo descritor. ("-" ainda criaria um arquivo chamado "-" no diretório
+	// corrente, que é a segunda forma de errar sem perceber.)
+	for _, proibido := range []string{"-", "/dev/stdout", "/dev/fd/1", "/proc/self/fd/1"} {
+		if caminho == proibido {
+			fmt.Fprintf(os.Stderr,
+				"mcp --audit-log %s: a saída padrão é o canal do protocolo MCP.\n"+
+					"A trilha já sai no stderr; use --audit-log com um ARQUIVO.\n", caminho)
+			return nil, nil, 3
+		}
+	}
 	fh, err := openJSONOut(caminho)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mcp --audit-log: %v\n", err)
 		return nil, nil, 3
 	}
-	return mcp.NovaAuditoria(multi{os.Stderr, fh}), func() { fh.Close() }, 0
-}
-
-// multi escreve nos dois destinos. Falha em um não impede o outro: perder a
-// trilha é ruim, perder a investigação por causa dela é pior.
-type multi []interface{ Write([]byte) (int, error) }
-
-func (m multi) Write(b []byte) (int, error) {
-	for _, w := range m {
-		_, _ = w.Write(b)
+	// E a conferência no DESCRITOR, que é a que vale: o caminho pode chegar
+	// aqui por um symlink ou por um /dev/fd/N que a lista acima não nomeia.
+	if fi, err := fh.Stat(); err == nil && !fi.Mode().IsRegular() {
+		fh.Close()
+		fmt.Fprintf(os.Stderr,
+			"mcp --audit-log %s: não é arquivo comum. A trilha vai para arquivo ou "+
+				"para o stderr — nunca para um descritor que possa ser o do protocolo.\n",
+			caminho)
+		return nil, nil, 3
 	}
-	return len(b), nil
+	return mcp.NovaAuditoria(io.MultiWriter(os.Stderr, fh)), func() { fh.Close() }, 0
 }

@@ -1162,14 +1162,19 @@ func assertMCP(t *testing.T, sc scenario.Scenario, r resultadoMCP) {
 		t.Errorf("cenário %q: exit %d, esperava %d\nstderr:\n%s",
 			sc.Desc, r.exit, sc.Exit, r.stderr)
 	}
-	for _, e := range sc.EsperaStderr {
+	// ExpectOutput/ForbidOutput, e não um par próprio: o caminho normal já
+	// inspeciona exatamente o stderr do contêiner (ver assertScenario). Os
+	// campos EsperaStderr/ProibeStderr que este modo tinha eram duplicata pura
+	// — dois nomes para a mesma asserção, cada par sem efeito na outra metade
+	// da suíte.
+	for _, e := range sc.ExpectOutput {
 		if !strings.Contains(r.stderr, e) {
-			t.Errorf("cenário %q: stderr não trouxe %q\nstderr:\n%s", sc.Desc, e, r.stderr)
+			t.Errorf("cenário %q: a saída não trouxe %q\nstderr:\n%s", sc.Desc, e, r.stderr)
 		}
 	}
-	for _, p := range sc.ProibeStderr {
+	for _, p := range sc.ForbidOutput {
 		if strings.Contains(r.stderr, p) {
-			t.Errorf("cenário %q: stderr trouxe o que NÃO podia (%q)\nstderr:\n%s",
+			t.Errorf("cenário %q: a saída trouxe o que NÃO podia (%q)\nstderr:\n%s",
 				sc.Desc, p, r.stderr)
 		}
 	}

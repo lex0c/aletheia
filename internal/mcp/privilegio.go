@@ -28,12 +28,21 @@ import (
 // onde ele roda. Passar pelo Env leria o /proc de outro host.
 const statusDoProprioProcesso = "/proc/self/status"
 
+// Toda entrada tem `efeito` preenchido, e isso não é estilo: é o critério de
+// pertencer à lista. Havia um CAP_CHOWN aqui, com efeito vazio — e ele não é
+// capability de OBSERVAÇÃO, é de mutação: trocar o dono de um arquivo não
+// mostra nada que já não se veja. A tabela se chama capsDeObservacao, e ele não
+// era uma.
+//
+// A presença dele acoplava a resposta à prosa: Elevado saía de `efeito != ""`,
+// então um processo só com CAP_CHOWN reportava elevated:false porque eu não
+// tinha escrito descrição para aquela linha. A resposta estava certa por
+// acidente, e acidente não é decisão.
 var capsDeObservacao = []struct {
 	bit    uint
 	nome   string
 	efeito string
 }{
-	{0, "CAP_CHOWN", ""},
 	{1, "CAP_DAC_OVERRIDE", "ignora permissão de arquivo: lê qualquer coisa"},
 	{2, "CAP_DAC_READ_SEARCH", "ignora permissão de LEITURA e de travessia de diretório"},
 	{3, "CAP_FOWNER", "age como dono de qualquer arquivo (inclusive O_NOATIME alheio)"},
@@ -100,13 +109,13 @@ func LerPrivilegio() Privilegio {
 				continue
 			}
 			p.CapsEfetivas = append(p.CapsEfetivas, c.nome)
-			if c.efeito != "" {
-				p.Explicacao = append(p.Explicacao, c.nome+": "+c.efeito)
-			}
+			p.Explicacao = append(p.Explicacao, c.nome+": "+c.efeito)
 		}
 		break
 	}
-	p.Elevado = p.Root || len(p.Explicacao) > 0
+	// Da LISTA, e não do texto: estar na tabela é o critério, e toda entrada
+	// dela muda o que este servidor consegue observar.
+	p.Elevado = p.Root || len(p.CapsEfetivas) > 0
 	if p.Root {
 		p.Explicacao = append([]string{"euid 0: root"}, p.Explicacao...)
 	}

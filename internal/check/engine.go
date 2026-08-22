@@ -324,11 +324,11 @@ func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 	return r
 }
 
-// lacunasDeColeta move a falha de COLETA para o eixo próprio dela: não é um
-// check que deixou de rodar, é dado que não pôde ser lido. Sai da aritmética de
-// checks e continua impedindo um veredito de OK.
+// LacunasDeColeta é a falha de COLETA no eixo próprio dela: não é um check que
+// deixou de rodar, é dado que não pôde ser lido. Sai da aritmética de checks e
+// continua impedindo um veredito de OK.
 //
-// # Por que ela mora AQUI, e não em quem chama
+// # Por que ela vive aqui, e é PURA
 //
 // Ela era uma função de `package main`, chamada à mão nos cinco pontos que
 // rodam checks — três deles indiretamente, por `emitir`. Funcionava, e tinha
@@ -340,11 +340,10 @@ func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 // mesma contabilidade divergem em silêncio, que foi exatamente o que aconteceu
 // com o agrupamento de achados antes de GroupByIDSev existir.
 //
-// Montar a cobertura É o que este motor produz. Aqui dentro, ninguém pode
-// esquecer.
-// Ela é PURA e devolve a lista: quem monta a cobertura é o motor, mas quem só
-// precisa saber o que a coleta não leu — o servidor MCP respondendo um dossiê,
-// sem rodar check nenhum — não deveria ter de fabricar um Report para descobrir.
+// RunWith a aplica sozinho, para que ninguém possa esquecer. E ela devolve a
+// LISTA em vez de mexer num Report, porque quem só precisa saber o que a coleta
+// não leu — o servidor MCP respondendo um dossiê, sem rodar check nenhum — não
+// deveria ter de fabricar um relatório para descobrir.
 func LacunasDeColeta(f *facts.Facts) []string {
 	if f == nil || len(f.Partial) == 0 {
 		return nil

@@ -213,7 +213,7 @@ func init() {
 		Plant:  coletaLocal,
 		// Sem --allow-root, de propósito.
 		Args: []string{"--snapshot", "/tmp/retrato.json"},
-		EsperaStderr: []string{
+		ExpectOutput: []string{
 			"recusei iniciar como root",
 			// A recusa precisa ENSINAR o caminho, senão ela só atrapalha.
 			"--allow-root",
@@ -255,10 +255,10 @@ func init() {
 				echo "PARIDADE QUEBRADA cli=[$CLI] mcp=[$MCP]" >&2
 			fi`,
 		Args:         servirRetrato,
-		EsperaStderr: []string{"PARIDADE OK"},
+		ExpectOutput: []string{"PARIDADE OK"},
 		// A negativa vale tanto quanto: sem ela, um grep que não casasse nada
 		// dos dois lados produziria duas strings vazias, iguais entre si.
-		ProibeStderr: []string{"PARIDADE QUEBRADA"},
+		ForbidOutput: []string{"PARIDADE QUEBRADA"},
 		MCP: []Chamada{{
 			Tool: "coverage.get",
 			Espera: []string{
@@ -298,8 +298,8 @@ func init() {
 				echo "MORTO ANTES DO SERVIDOR" >&2
 			fi`,
 		Args:         servirRetrato,
-		EsperaStderr: []string{"MORTO ANTES DO SERVIDOR"},
-		ProibeStderr: []string{"AINDA VIVO"},
+		ExpectOutput: []string{"MORTO ANTES DO SERVIDOR"},
+		ForbidOutput: []string{"AINDA VIVO"},
 		MCP: []Chamada{{
 			Tool:   "process.get",
 			Args:   `{"pid":$(cat /tmp/pid)}`,

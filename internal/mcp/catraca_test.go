@@ -290,7 +290,7 @@ func TestToolForaDoRegistryEhMetodoInexistenteNaoPermissaoNegada(t *testing.T) {
 	s, _ := servidorDeTeste(t, fatosDeTeste())
 	r := &Requisicao{Method: "tools/call",
 		Params: json.RawMessage(`{"name":"shell","arguments":{}}`)}
-	_, er := s.chamarTool(r)
+	_, _, er := s.chamarTool(r)
 	if er == nil {
 		t.Fatal("tool inexistente devia falhar")
 	}
@@ -329,22 +329,41 @@ func TestEraNaoVaza(t *testing.T) {
 	s, _ := servidorDeTeste(t, fatosDeTeste())
 	corpo, _ := s.listarTools()
 
+	// OS TRÊS, e não dois.
+	//
+	// Esta catraca conferia resultType e _meta e deixava de fora ttlMs e
+	// cacheScope — que os handlers punham no CORPO, então saíam nas DUAS eras.
+	// O doc do selar afirmava o contrário, e a mensagem do commit que trouxe a
+	// feature também. Uma catraca que verifica dois terços do que promete é
+	// pior que nenhuma: ela dá a garantia sem entregá-la.
+	daEra2026 := []string{"resultType", "_meta", "ttlMs", "cacheScope"}
+
 	moderno := map[string]any{}
-	_ = json.Unmarshal(s.selar(EraModerna, clonar(corpo)), &moderno)
-	if moderno["resultType"] != "complete" {
-		t.Error("era 2026 sem resultType: a spec o declara obrigatório")
-	}
-	if _, tem := moderno["_meta"]; !tem {
-		t.Error("era 2026 sem _meta/serverInfo")
+	_ = json.Unmarshal(s.selar(EraModerna, true, clonar(corpo)), &moderno)
+	for _, campo := range daEra2026 {
+		if _, tem := moderno[campo]; !tem {
+			t.Errorf("era 2026 sem %s", campo)
+		}
 	}
 
 	legado := map[string]any{}
-	_ = json.Unmarshal(s.selar(EraLegado, clonar(corpo)), &legado)
-	if _, tem := legado["resultType"]; tem {
-		t.Error("resultType VAZOU para uma resposta de 2025: ele nasceu na 2026-07-28")
+	_ = json.Unmarshal(s.selar(EraLegado, true, clonar(corpo)), &legado)
+	for _, campo := range daEra2026 {
+		if _, tem := legado[campo]; tem {
+			t.Errorf("%s VAZOU para uma resposta de 2025: ele nasceu na 2026-07-28",
+				campo)
+		}
 	}
-	if _, tem := legado["_meta"]; tem {
-		t.Error("_meta/serverInfo vazou para uma resposta de 2025")
+
+	// E o que NÃO é cacheável não ganha os campos de cache nem na era moderna:
+	// um resultado de tools/call descreve UM retrato num instante, e anunciá-lo
+	// cacheável convidaria o cliente a servir a resposta velha.
+	semCache := map[string]any{}
+	_ = json.Unmarshal(s.selar(EraModerna, false, clonar(corpo)), &semCache)
+	for _, campo := range []string{"ttlMs", "cacheScope"} {
+		if _, tem := semCache[campo]; tem {
+			t.Errorf("%s num resultado que não é cacheável", campo)
+		}
 	}
 }
 
@@ -704,7 +723,7 @@ func TestPanicoNaToolViraErroENaoDerrubaOServidor(t *testing.T) {
 	// exercitava a função isolada, e sobrevivia a reverter o despacho para
 	// `f.Rodar(...)` — provava que a proteção existe, não que ela é usada.
 	s.porNome[explosiva.Nome] = explosiva
-	corpo, er := s.chamarTool(&Requisicao{
+	corpo, _, er := s.chamarTool(&Requisicao{
 		Method: "tools/call",
 		Params: json.RawMessage(`{"name":"x.explode","arguments":{}}`),
 	})
@@ -965,5 +984,61 @@ func TestHandleDeAchadoCorrelacionadoNaoColide(t *testing.T) {
 			t.Fatalf("o índice %d aponta para %q e o achado é %q",
 				i, rel.Findings[i].Title, g.Findings[k].Title)
 		}
+	}
+}
+
+// O TETO É DO FRAME, e não do corpo da tool.
+//
+// Ele era medido sobre o valor que a tool devolvia — antes de o resultado ganhar
+// `content`, que é a MESMA carga serializada em texto para o cliente que ainda
+// não lê schema de saída. Medido contra um retrato real: 179 KB conferidos
+// contra um frame de 323 KB, 1,80x. Um teto de 4 MiB admitia quase 7 — e quem
+// quebra não é este servidor, é o limite de frame do CLIENTE, do outro lado,
+// onde o operador não tem como diagnosticar.
+func TestTetoDeResultadoMedeOFrameInteiro(t *testing.T) {
+	var buf bytes.Buffer
+	if err := dump.De(ambienteDeTeste(), fatosDeTeste()).Escrever(&buf); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "host.json")
+	if err := os.WriteFile(p, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := NovoAcervo()
+	if _, err := a.Carregar(p); err != nil {
+		t.Fatal(err)
+	}
+
+	// Um teto que a resposta de findings.list passa por causa do content
+	// duplicado, e que ela NÃO passaria se só o structuredContent fosse medido.
+	s := NovoServidor(Policy{Modo: ModoSnapshot}, a, "teste", nil)
+	corpo, _, er := s.chamarTool(&Requisicao{
+		Params: json.RawMessage(`{"name":"findings.list","arguments":{}}`)})
+	if er != nil {
+		t.Fatal(er)
+	}
+	frame := s.selar(EraModerna, false, corpo)
+	sc, _ := json.Marshal(corpo["structuredContent"])
+	if len(frame) <= len(sc) {
+		t.Fatalf("o fixture não exercita a duplicação: frame=%d sc=%d", len(frame), len(sc))
+	}
+
+	// Com o teto ENTRE os dois, a versão anterior deixava passar.
+	entre := int64((len(sc) + len(frame)) / 2)
+	apertado := NovoServidor(Policy{Modo: ModoSnapshot, MaxResultado: entre}, a, "teste", nil)
+	var saida bytes.Buffer
+	req := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"findings.list",` +
+		`"arguments":{},"_meta":{"` + MetaVersao + `":"` + Versao2026 + `","` +
+		MetaCapsCliente + `":{}}}}`
+	if err := apertado.Servir(strings.NewReader(req+"\n"), &saida); err != nil {
+		t.Fatal(err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(saida.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if _, temErro := resp["error"]; !temErro {
+		t.Fatalf("teto de %d bytes deixou passar um frame de %d: o corpo da tool "+
+			"tem %d, e é ele que estava sendo medido", entre, len(frame), len(sc))
 	}
 }

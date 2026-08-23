@@ -29,7 +29,7 @@ GOFLAGS := -trimpath
 # LD_PRELOAD e a binário de sistema trojanizado (SPEC 4).
 export CGO_ENABLED = 0
 
-.PHONY: all build helper vm-image test race race-unit lint verify clean dist binarios repro repro-confere scenarios scenarios-container images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix vm-matrix arches fuzz test-386
+.PHONY: all build helper vm-image test race race-unit lint verify clean dist binarios repro repro-confere scenarios scenarios-container images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix vm-matrix arches fuzz test-386 cap-sonda cap-proof
 
 all: verify
 
@@ -254,6 +254,24 @@ vm-ftrace-proof:
 # tocado. Controle negativo incluído: host limpo cala. Exige docker e qemu.
 vm-socket-proof:
 	./test/vm/socket-hidden-module.sh
+
+# cap-proof prova, com capability de ARQUIVO num contêiner descartável, que
+# env.CapRoot mede ALCANCE e não euid.
+#
+# A concessão passou a ser `euid==0 || (leitura de arquivo E ptrace)`, e isso é
+# uma afirmação sobre o KERNEL: que essas capabilities, e não outras, abrem as
+# quatro superfícies que CapRoot promete. O unitário injeta um conjunto de bits
+# e mede a decisão; ele não sabe se aquele conjunto corresponde a poder real.
+#
+# Aqui cada caso TENTA LER /etc/shadow. O caso decisivo é CAP_SYS_ADMIN sozinha:
+# ela é a capability mais larga do Linux, o código já a tratou como substituta da
+# DAC, e o kernel não a consulta naquela checagem. Sem qemu; o kernel do host
+# nunca é tocado.
+cap-sonda:
+	CGO_ENABLED=0 go build $(GOFLAGS) -o dist/cap-sonda ./test/cap/sonda
+
+cap-proof: cap-sonda
+	./test/cap/capability-proof.sh
 
 # matrix roda a matriz adversarial: monta técnicas de ataque de userspace num
 # contêiner descartável e mede quais checks disparam (regressão) e quais passam

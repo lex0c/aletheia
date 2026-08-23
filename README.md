@@ -1446,12 +1446,26 @@ Testes adicionais:
 make scenarios
 make race
 make mutacao
+make fuzz
+make test-386
+make cap-proof
 ```
 
 - `scenarios` executa a CLI contra ambientes Linux reais/isolados;
 - `race` roda o detector de data races, incluindo a suíte de cenários;
 - `mutacao` injeta mutações em decisões dos checks para verificar se os testes
-  detectam regressões semânticas.
+  detectam regressões semânticas;
+- `fuzz` busca no codec MCP, que é escrito à mão, o que ninguém imaginou — a
+  mensagem e o **framing**, onde mora a drenagem que impede a cauda de uma linha
+  gigante de virar mensagem nova;
+- `test-386` **roda** a suíte em 32 bits, e não só compila: em i386 o `Timespec`
+  do syscall é `int32`, e é por ele que passa a comparação de tempo e de tamanho
+  de arquivo;
+- `cap-proof` prova, com capability de arquivo num contêiner descartável, que
+  `env.CapRoot` mede **alcance** e não euid. Cada caso tenta ler `/etc/shadow`:
+  é a verdade de campo contra a qual a decisão do código é conferida. O caso
+  decisivo é `CAP_SYS_ADMIN` sozinha — a capability mais larga do Linux, que o
+  kernel **não** consulta na checagem DAC de leitura de arquivo.
 
 Reconstruir um release (o que quem baixa roda para conferir):
 

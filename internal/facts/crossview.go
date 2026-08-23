@@ -105,6 +105,24 @@ type CrossView struct {
 	Hidden  []HiddenPid  `json:"hidden_pids,omitempty"`
 	Threads []ThreadDiff `json:"thread_diff,omitempty"`
 
+	// O ESTADO DE LEITURA de cada testemunha, que os coletores já conhecem e
+	// que se perdia ao chegar na interface MCP.
+	//
+	// A regra de todo o Aletheia é "vazio ≠ ilegível": o coletor de módulos
+	// guarda okProc/errSys porque `/proc/modules` lido com zero módulos e
+	// `/proc/modules` negado por EACCES são fatos opostos. Mas esses bits
+	// ficavam locais ao coletor, e quem lê CrossView depois só via a cardinalidade
+	// — e cardinalidade zero não distingue "não havia" de "não pude ver". Uma
+	// camada de apresentação que infere "fonte lida" por `len()>0` desfaz a
+	// distinção que o coletor teve o cuidado de preservar. Estes campos carregam
+	// o fato até lá.
+	//
+	// ProcListLida é o sucesso do readdir de /proc — a testemunha de BASE contra
+	// a qual cada sondagem é conferida. ProcListN é a contagem no momento da
+	// coleta, que PidsListados (json:"-") não leva para o dump.
+	ProcListLida bool `json:"proc_list_read,omitempty"`
+	ProcListN    int  `json:"proc_list_count,omitempty"`
+
 	// ProbeAte é até onde a sondagem foi. Sem esse número, "nenhum PID oculto"
 	// não tem significado.
 	//
@@ -121,6 +139,11 @@ type CrossView struct {
 	ModProc []string `json:"modules_proc,omitempty"`
 	ModSys  []string `json:"modules_sys,omitempty"`
 	ModDiff []string `json:"modules_only_in_one,omitempty"`
+	// ModProcLido/ModSysLido são os okProc/errSys do coletor: uma fonte lida com
+	// zero módulos NÃO é a mesma coisa que uma fonte ilegível, e sem estes bits a
+	// tool confundiria as duas por len()==0.
+	ModProcLido bool `json:"modules_proc_read,omitempty"`
+	ModSysLido  bool `json:"modules_sys_read,omitempty"`
 
 	// A SEGUNDA visão da tabela de conexões: NETLINK_INET_DIAG, que o kernel
 	// serve por outro caminho de código que não o `tcp4_seq_show` do /proc.
@@ -131,6 +154,23 @@ type CrossView struct {
 	SocketDiag     int  `json:"sockets_netlink,omitempty"`
 	SocketProc     int  `json:"sockets_proc,omitempty"`
 	SocketDiagLido bool `json:"socket_netlink_read,omitempty"`
+	// A comparação de sockets é POR PROTOCOLO, e o estado de CADA um viaja —
+	// não uma contagem que some qual protocolo ficou de fora.
+	//
+	// A cardinalidade mentia por dois caminhos. "3 de 4 protocolos comparados"
+	// não diz QUAL não foi, e um socket escondido do /proc/net/udp6 passa se udp6
+	// foi o que faltou. Pior: o netlink PULA o protocolo cujo handler de
+	// diagnóstico não está carregado, para não autocarregá-lo — então udp/udp6
+	// podem nem entrar no denominador, e "2 de 2" viraria agree com metade da
+	// superfície de socket sem ninguém ter olhado. O estado por protocolo é a
+	// observabilidade por FONTE que o resto do Aletheia já faz.
+	//
+	//	compared         netlink consultou E /proc/net leu: as duas visões
+	//	                 se confrontaram
+	//	proc_unreadable  netlink consultou, /proc/net deu EACCES: não confrontado
+	//	diag_skipped     netlink NÃO consultou (handler de diag ausente, pulado
+	//	                 para não autocarregar): o protocolo existe e não foi visto
+	SocketProtos map[string]string `json:"socket_protocols,omitempty"`
 	// SocketDiagMotivo é por que a segunda visão não existiu, quando não
 	// existiu. É a frase que vai para o rodapé.
 	SocketDiagMotivo  string `json:"socket_netlink_reason,omitempty"`
@@ -138,6 +178,12 @@ type CrossView struct {
 	// SocketOcultos são os que o netlink entrega e /proc/net não — já
 	// reconfirmados contra a corrida de socket recém-nascido.
 	SocketOcultos []SocketOculto `json:"sockets_hidden,omitempty"`
+	// SocketInconclusivos conta os candidatos a oculto que a reconfirmação NAO
+	// resolveu — uma das quatro leituras falhou, ou a 2a enumeracao netlink foi
+	// truncada e o candidato pode estar alem do teto. E o estado que o coletor
+	// ja declarava por Partial, promovido a CAMPO para a tool nao responder
+	// "as tabelas concordam" onde houve discrepancia que ninguem fechou.
+	SocketInconclusivos int `json:"sockets_inconclusive,omitempty"`
 
 	// A TERCEIRA interface: os módulos que o ftrace conhece por terem função
 	// rastreável. Independente das outras duas — o registro do ftrace só é
@@ -146,6 +192,10 @@ type CrossView struct {
 	// /proc/modules.
 	ModFtrace     []string `json:"modules_ftrace,omitempty"`
 	ModFtraceDiff []string `json:"modules_ftrace_hidden,omitempty"`
+	// ModFtraceLido é se available_filter_functions foi lido. Sem root, ou num
+	// contêiner sem tracing próprio, ele não é — e "nenhum módulo escondido do
+	// ftrace" sem ter lido o ftrace não é afirmação.
+	ModFtraceLido bool `json:"modules_ftrace_read,omitempty"`
 }
 
 func collectCrossView(f *Facts, e *env.Env) {
@@ -470,6 +520,7 @@ func cruzarModulos(f *Facts) {
 	// fazia toda VM mínima sair com cobertura degradada — a mesma confusão
 	// entre "não há" e "não consegui ver", desta vez do lado do "não há".
 	sProc, okProc := readTrim("/proc/modules")
+	f.Cross.ModProcLido = okProc
 	if okProc {
 		for _, ln := range strings.Split(sProc, "\n") {
 			if fs := strings.Fields(ln); len(fs) > 0 {
@@ -481,6 +532,7 @@ func cruzarModulos(f *Facts) {
 	}
 
 	ents, errSys := os.ReadDir("/sys/module")
+	f.Cross.ModSysLido = errSys == nil
 	if errSys == nil {
 		for _, ent := range ents {
 			f.Cross.ModSys = append(f.Cross.ModSys, ent.Name())

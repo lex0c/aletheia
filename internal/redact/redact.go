@@ -194,7 +194,21 @@ func minusculaASCII(c byte) byte {
 }
 
 func redactURLCreds(a string) string {
+	// A GUARDA MORA AQUI, e não em quem chama.
+	//
+	// Sem ela, `i` vale -1 quando não há esquema, e `a[i+3:]` vira `a[2:]` —
+	// que estoura em qualquer string com menos de dois caracteres. Todos os
+	// chamadores antigos escondiam isso por acidente, conferindo
+	// `Contains(a, "://")` antes; um chamador novo, que não soubesse do
+	// contrato implícito, derrubava a coleta no host investigado ao encontrar
+	// um argumento de um caractere.
+	//
+	// Uma primitiva de redação não pode entrar em pânico com a entrada que ela
+	// existe para tratar: ela é chamada sobre bytes do alvo.
 	i := strings.Index(a, "://")
+	if i < 0 {
+		return a
+	}
 	j := strings.Index(a[i+3:], "@")
 	if j < 0 {
 		return a
@@ -241,4 +255,199 @@ func Valor(nome, v string) string {
 		return redactURLCreds(v)
 	}
 	return v
+}
+
+// Texto e TextoLivre: os DOIS redatores de string, e a diferença entre eles é
+// a lição mais cara desta feature.
+//
+// # O que quebrou
+//
+// A redação do dump passou de uma lista de quatro campos para uma caminhada
+// profunda sobre TODA string — o que fechou um vazamento real (setenta chaves
+// de topo levavam credencial embora). Só que ela aplicou `Cmdline` a tudo, e
+// `Cmdline` é um redator de LINHA DE COMANDO com estado entre tokens:
+//
+//	skipNext         `-p` manda mascarar o token SEGUINTE
+//	noCabecalhoAuth  `Authorization:` manda mascarar até fechar o cabeçalho
+//
+// Aplicar isso a texto que não é comando estraga nos dois sentidos. Medido:
+//
+//	VAZOU      ["mysql","-p","S3cr3t"] redigido string a string devolve o
+//	           segredo em claro — o estado que ligava `-p` ao valor se perdeu
+//	CORROMPEU  uma regra de auditd `-w /etc/passwd -p wa -k identity` virava
+//	           `-w <redacted> -p <redacted> -k identity`
+//	CORROMPEU  num valor multilinha, um `Authorization:` na primeira linha
+//	           mascarava as seguintes até o fim da string
+//
+// As duas direções são silenciosas, e o Facts cru não é guardado em lugar
+// nenhum: o dano no artefato é irrecuperável.
+//
+// # A separação
+//
+//	Cmdline(argv)  a sequência. Só ela liga uma flag ao token seguinte
+//	Texto(s)       UMA linha de comando como string, com o espaçamento
+//	               preservado e o estado ZERADO a cada linha
+//	TextoLivre(s)  todo o resto — caminho, regra de auditd, trecho de código,
+//	               linha de log. Segue o CABEÇALHO de autorização (que é
+//	               credencial em qualquer texto) e NÃO segue a flag (que é
+//	               semântica de comando e corromperia o que não é segredo)
+//
+// O que TextoLivre não alcança é a forma partida por FLAG (`-p` e o valor em
+// tokens separados), que só existe em linha de comando — e é por isso que os
+// campos de comando se declaram com `redact:"cmdline"` ou `redact:"linha"`.
+
+// Texto redige UMA LINHA DE COMANDO preservando o espaçamento.
+//
+// O estado é zerado a cada linha: sem isso, um `Authorization:` numa linha
+// mascarava todas as seguintes.
+func Texto(s string) string { return porLinha(s, Cmdline) }
+
+// TextoLivre redige texto que NÃO é linha de comando.
+//
+// Sem estado entre tokens, então `-w /etc/passwd` atravessa intacto e um
+// `Authorization:` no meio não contamina o resto.
+func TextoLivre(s string) string { return porLinha(s, semFlags) }
+
+// semFlags é o redator de texto livre: ele mantém o estado do CABEÇALHO e
+// descarta o da FLAG.
+//
+// A separação não é entre "com estado" e "sem estado" — foi assim que a primeira
+// versão errou. É entre duas regras com alcances diferentes:
+//
+//	flag       `-p` manda mascarar o token seguinte. Isso é semântica de LINHA
+//	           DE COMANDO. Aplicada a texto qualquer, ela destrói o que não é
+//	           segredo: uma regra de auditd `-w /etc/passwd -p wa -k identity`
+//	           vira `-w <redacted> -p <redacted> -k identity`
+//	cabeçalho  `Authorization:` seguido do valor em outros tokens. Isso vale em
+//	           QUALQUER texto — num .bashrc, num log, numa configuração —, e o
+//	           que vem depois é credencial em todos eles
+//
+// A contaminação que se temia era entre LINHAS, e quem a resolve é o reset por
+// linha do porLinha. Dentro de uma linha, seguir o cabeçalho é o comportamento
+// certo — foi a catraca global que mostrou isso, recusando um
+// `curl -H 'Authorization: Bearer SEGREDO'` que passava intacto.
+func semFlags(tokens []string) []string {
+	out := make([]string, 0, len(tokens))
+	noCabecalho, pularProximo := false, false
+	for _, a := range tokens {
+		if pularProximo {
+			pularProximo = false
+			if a != "" {
+				out = append(out, "<redacted>")
+				continue
+			}
+		}
+		if noCabecalho {
+			if !fechaCabecalhoAuth(a) {
+				out = append(out, "<redacted>")
+				continue
+			}
+			noCabecalho = false
+		}
+		if abreCabecalhoAuth(a) {
+			out = append(out, a)
+			noCabecalho = true
+			continue
+		}
+		if r, ok := redactInline(a); ok {
+			out = append(out, r)
+			continue
+		}
+		// A flag ESCRITA POR EXTENSO vale em texto livre.
+		//
+		// A ambiguidade que fez a regra de flag sair daqui é das de UMA LETRA:
+		// `-w` e `-p` são "watch" e "permissions" numa regra de auditd, e
+		// senha numa linha de comando. `--password`, `--token` e `--secret` não
+		// são outra coisa em lugar nenhum, e isSecretFlag casa por igualdade
+		// exata — `--key-hint` não vira `--key`.
+		//
+		// Isso fecha a forma partida nos campos que NÃO são comando (log,
+		// configuração, trecho de código) sem custar evidência, e o corpus de
+		// evidência limpa é quem confere esse custo.
+		if flagPorExtenso(a) {
+			pularProximo = true
+			out = append(out, a)
+			continue
+		}
+		out = append(out, redactURLCreds(a))
+	}
+	return out
+}
+
+// flagPorExtenso: flag de segredo que não é abreviação de uma letra.
+func flagPorExtenso(a string) bool {
+	if !isSecretFlag(a) {
+		return false
+	}
+	corpo := strings.TrimLeft(a, "-")
+	return len(corpo) > 1
+}
+
+// porLinha aplica o redator linha a linha, preservando newline e espaçamento.
+func porLinha(s string, redigir func([]string) []string) string {
+	if s == "" {
+		return s
+	}
+	if !strings.ContainsRune(s, '\n') {
+		return preservando(s, redigir)
+	}
+	linhas := strings.Split(s, "\n")
+	for i, ln := range linhas {
+		linhas[i] = preservando(ln, redigir)
+	}
+	return strings.Join(linhas, "\n")
+}
+
+// preservando separa TOKENS de SEPARADORES, redige só os primeiros e rejunta
+// com os separadores originais.
+//
+// `Linha` tokeniza com strings.Fields e rejunta com um espaço, o que serve para
+// uma linha de comando e destrói qualquer outra coisa — um trecho de código, uma
+// configuração alinhada. Este artefato é lido meses depois.
+func preservando(s string, redigir func([]string) []string) string {
+	if s == "" {
+		return s
+	}
+	var tokens, seps []string
+	i := 0
+	for i < len(s) {
+		j := i
+		for j < len(s) && !ehBranco(s[j]) {
+			j++
+		}
+		if j > i {
+			tokens = append(tokens, s[i:j])
+			seps = append(seps, "")
+		}
+		k := j
+		for k < len(s) && ehBranco(s[k]) {
+			k++
+		}
+		if k > j {
+			if len(seps) == 0 {
+				tokens = append(tokens, "")
+				seps = append(seps, s[j:k])
+			} else {
+				seps[len(seps)-1] = s[j:k]
+			}
+		}
+		i = k
+	}
+	if len(tokens) == 0 {
+		return s
+	}
+	redigidos := redigir(tokens)
+	var b strings.Builder
+	b.Grow(len(s))
+	for n := range redigidos {
+		b.WriteString(redigidos[n])
+		if n < len(seps) {
+			b.WriteString(seps[n])
+		}
+	}
+	return b.String()
+}
+
+func ehBranco(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
 }

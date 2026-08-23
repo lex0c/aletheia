@@ -46,6 +46,24 @@ var (
 	ErrGrandeDemais = errors.New("arquivo maior que o teto de leitura: NÃO foi lido")
 	ErrNaoEhArquivo = errors.New("não é arquivo comum (fifo, socket ou dispositivo): " +
 		"NÃO foi lido, porque abrir isto bloqueia ou consome sem fim")
+	// ErrSelado recusa QUALQUER leitura num Env reconstruído a partir de um
+	// artefato. Um dump é o registro de uma coleta que TERMINOU: o ambiente que
+	// dump.Env() devolve descreve as condições daquela coleta, e não é uma porta
+	// para o filesystem de agora.
+	//
+	// Sem isto a recusa cobria só metade do problema. Um dump com Source=image
+	// batia em ErrSemRaiz — mas um dump coletado no HOST VIVO tem Root vazio e
+	// Source=live, e aí ReadFile caía direto no os.ReadFile do processo. Medido:
+	// `d.Env(nil).ReadFile("/etc/hostname")` devolveu o hostname da máquina do
+	// ANALISTA, sete bytes, sem erro nenhum. A ferramenta responderia sobre a
+	// estação de quem investiga achando que fala do alvo.
+	//
+	// Nenhum check e nenhum dossiê lê filesystem hoje — todos são função pura
+	// sobre Facts —, então a porta nunca foi atravessada. É exatamente por isso
+	// que ela se fecha agora: uma porta que ninguém usa é barata de trancar, e
+	// cara de descobrir aberta depois que alguém passou.
+	ErrSelado = errors.New("este ambiente descreve uma coleta ENCERRADA: a " +
+		"leitura foi RECUSADA para não responder sobre o host de agora")
 	// ErrSemRaiz recusa leitura num Env de IMAGEM cuja raiz travada não está
 	// aberta. Ver raizIndisponivel.
 	ErrSemRaiz = errors.New("raiz travada da imagem indisponível: a leitura foi " +
@@ -65,6 +83,9 @@ var (
 // probeCaps já trata este par como ausência de CapFilesystem; aqui ele vira
 // recusa explícita, para que um acessor chamado mesmo assim erre alto.
 func (e *Env) raizIndisponivel() error {
+	if e.selado {
+		return ErrSelado
+	}
 	if e.Source == SourceImage && e.root == nil {
 		return ErrSemRaiz
 	}
@@ -137,7 +158,34 @@ func (e *Env) ReadFile(p string) ([]byte, error) {
 // Quem decide o tipo do objeto é quem escreve no disco do alvo, então a decisão
 // tem que ser tomada DEPOIS de abrir, sobre o descritor.
 func (e *Env) abrirSemTocarAtime(p string) (*os.File, error) {
-	const flags = os.O_RDONLY | syscall.O_NONBLOCK
+	return e.abrirComExtras(p, 0)
+}
+
+// abrirComExtras é o abrirSemTocarAtime com flags a mais.
+//
+// As flags eram `const` dentro dele, e a leitura direcionada do perfil completo
+// precisa de O_NOFOLLOW. Um segundo abridor copiado seria a segunda
+// implementação da mesma fronteira — a raiz travada, o O_NOATIME que degrada em
+// silêncio quando não se é dono, o O_NONBLOCK que impede o fifo de prender a
+// varredura para sempre. Duas cópias disso divergem, e a que diverge é sempre a
+// que ninguém está olhando.
+// observarAberturaReal é o gancho que permite a um teste PROVAR que nenhum
+// caminho da família de inspeção chega aqui com um objeto que ainda não foi
+// provado regular.
+//
+// Ele existe porque a asserção óbvia não distingue nada: uma recusa com
+// ErrNaoEhArquivo sai igual no código que abre-depois-verifica e no que
+// verifica-antes-de-abrir. O que separa os dois é se o open() do driver rodou —
+// e isso não aparece no valor de retorno.
+//
+// nil em produção; o custo é uma comparação por abertura.
+var observarAberturaReal func(caminho string)
+
+func (e *Env) abrirComExtras(p string, extras int) (*os.File, error) {
+	if observarAberturaReal != nil {
+		observarAberturaReal(p)
+	}
+	flags := os.O_RDONLY | syscall.O_NONBLOCK | extras
 	if err := e.raizIndisponivel(); err != nil {
 		return nil, err
 	}

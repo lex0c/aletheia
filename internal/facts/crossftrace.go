@@ -84,6 +84,11 @@ func cruzarModulosFtrace(f *Facts, e *env.Env) {
 		return
 	}
 
+	// available_filter_functions foi de fato lido: é o que distingue "nenhum
+	// módulo escondido do ftrace" de "não olhei o ftrace". Marcado mesmo quando
+	// tagsDeModuloDoFtrace devolve zero — fonte lida com zero tags é diferente de
+	// fonte não lida.
+	f.Cross.ModFtraceLido = true
 	f.Cross.ModFtrace = tagsDeModuloDoFtrace(texto)
 	f.Cross.ModFtraceDiff = ModulosSoNoFtrace(f.Cross.ModFtrace, f.Cross.ModProc)
 

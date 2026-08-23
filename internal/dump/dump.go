@@ -31,11 +31,15 @@ package dump
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"reflect"
+	"syscall"
 	"time"
 
 	"github.com/lex0c/aletheia/internal/env"
@@ -49,13 +53,89 @@ import (
 //
 // Ele é separado do facts.SchemaVersion de propósito — os dois podem mudar por
 // razões diferentes, e o dump carrega os dois números.
-const Schema = 1
+const Schema = 2
 
 // Dump é o que sai do host: o retrato E as condições em que ele foi tirado.
 type Dump struct {
-	Schema   int          `json:"schema"`
+	Schema int `json:"schema"`
+	// Redacao é a PROVA de que este artefato passou pela redação.
+	//
+	// Ela existe porque a afirmação estava sendo feita sem lastro: o servidor
+	// MCP publicava `redacted_at_source: true` em toda procedência, derivado de
+	// nada além do modo em que ele foi lançado. Um arquivo montado à mão com
+	// `{"schema":N,"facts":{"processes":[{"argv":["mysql","--password=x"]}]}}`
+	// é estruturalmente válido, e o servidor o anunciava como redigido — uma
+	// afirmação de segurança falsa sobre um artefato de procedência desconhecida.
+	//
+	// dump.Carregar já provava que o esquema é compatível; agora prova também
+	// que a redação aconteceu, e em que versão.
+	Redacao  Redacao      `json:"redaction"`
 	Ambiente Ambiente     `json:"env"`
 	Facts    *facts.Facts `json:"facts"`
+}
+
+// Redacao é o carimbo da redação no artefato.
+type Redacao struct {
+	Aplicada bool `json:"applied"`
+	Versao   int  `json:"version"`
+	// Dispensada é o operador tendo escrito --allow-secrets: a redação NÃO foi
+	// aplicada, e não foi por acidente nem por versão antiga.
+	//
+	// Ela existe porque "não aplicada" e "dispensada" levam a leituras opostas.
+	// Sem carimbo, um artefato cru se apresenta como RedacaoAusente — que quer
+	// dizer "este arquivo não prova ter sido redigido; desconfie da
+	// procedência". Um artefato deliberadamente cru é o contrário disso: a
+	// procedência é conhecida, e o conteúdo é cru DE PROPÓSITO, e quem o recebe
+	// precisa saber que está segurando segredo em claro.
+	//
+	// O campo é aditivo e falha seguro nos dois sentidos: um dump antigo não o
+	// tem e continua sendo lido como estava, e um binário antigo lendo um dump
+	// novo o ignora e vê RedacaoAusente — que é a leitura conservadora.
+	Dispensada bool `json:"waived,omitempty"`
+}
+
+// RedacaoVersao é a versão da POLÍTICA de redação que este binário aplica.
+//
+//	(sem carimbo)  a lista curada de quatro campos — argv, cron, ExecStart.
+//	               Vazava setenta chaves de topo, e não deixava rastro de si
+//	1              redação PROFUNDA: toda string do Facts, com opt-out por
+//	               `redact:"-"` no campo
+//
+// Ela é separada do Schema porque as duas mudam por razões diferentes: a forma
+// do artefato e a política aplicada a ele.
+const RedacaoVersao = 1
+
+// EstadoDaRedacao é o que o artefato PROVA sobre a própria redação.
+type EstadoDaRedacao string
+
+const (
+	// RedacaoAplicada: carimbo presente, na versão que este binário conhece.
+	RedacaoAplicada EstadoDaRedacao = "applied"
+	// RedacaoAusente: nenhum carimbo. O artefato NÃO prova ter sido redigido —
+	// o que é diferente de provar que não foi.
+	RedacaoAusente EstadoDaRedacao = "absent"
+	// RedacaoDesconhecida: carimbo de uma versão que este binário não conhece.
+	// O dump é de uma versão mais nova, e a política aplicada nele pode não ser
+	// a que este binário assumiria.
+	RedacaoDesconhecida EstadoDaRedacao = "unknown_version"
+	// RedacaoDispensada: o operador escreveu --allow-secrets, e a redação NÃO
+	// foi aplicada de propósito. O artefato carrega segredo em CLARO — argv
+	// inteiro, environ inteiro, linha de cron com token — e quem o recebe
+	// precisa tratá-lo como o material sensível que ele é.
+	RedacaoDispensada EstadoDaRedacao = "waived"
+)
+
+// Estado devolve o que o artefato prova sobre a própria redação.
+func (r Redacao) Estado() EstadoDaRedacao {
+	switch {
+	case r.Dispensada:
+		return RedacaoDispensada
+	case !r.Aplicada:
+		return RedacaoAusente
+	case r.Versao == RedacaoVersao:
+		return RedacaoAplicada
+	}
+	return RedacaoDesconhecida
 }
 
 // Ambiente é o `env.Env` na forma que atravessa o tempo.
@@ -103,7 +183,30 @@ type Ambiente struct {
 // julgar linhagem —, e o que sai para o disco é a versão que pode virar
 // fixture, anexo de ticket e arquivo em repositório (SPEC 5.4).
 func De(e *env.Env, f *facts.Facts) *Dump {
-	return &Dump{Schema: Schema, Ambiente: ambienteDe(e), Facts: redigir(f)}
+	// A REDAÇÃO É DISPENSADA PELA MESMA FLAG QUE MANDOU COLETAR O SEGREDO.
+	//
+	// e.Segredos é o --allow-secrets do servidor MCP, e ele governa as duas
+	// metades: readEnviron guarda todos os valores, e aqui a redação não roda.
+	// Separar as duas produziria meia-medida — um Facts com segredo que a
+	// escrita apaga, ou um artefato carimbado como cru sem o segredo que ele
+	// promete.
+	//
+	// O caminho do `collect` nunca liga essa flag: dump em disco sai redigido,
+	// sempre.
+	if e != nil && e.Segredos {
+		return &Dump{
+			Schema:   Schema,
+			Redacao:  Redacao{Dispensada: true, Versao: RedacaoVersao},
+			Ambiente: ambienteDe(e),
+			Facts:    f,
+		}
+	}
+	return &Dump{
+		Schema:   Schema,
+		Redacao:  Redacao{Aplicada: true, Versao: RedacaoVersao},
+		Ambiente: ambienteDe(e),
+		Facts:    redigir(f),
+	}
 }
 
 func ambienteDe(e *env.Env) Ambiente {
@@ -121,56 +224,264 @@ func ambienteDe(e *env.Env) Ambiente {
 
 // redigir tira do artefato o que não pode sair do host.
 //
-// O environ já sai redigido do coletor — só os NOMES das variáveis, e o valor
-// apenas de uma allowlist. O que faltava era o argv: `mysqldump -pS3cr3t` está
-// na linha de comando de qualquer host que faça backup, e o relatório já o
-// redigia enquanto o dump o levaria inteiro para o repositório.
+// # Por que ela deixou de ser uma lista de campos
 //
-// A cópia é rasa de propósito: só o slice de processos é clonado, porque é o
-// único lugar alterado. O resto compartilha memória com o Facts vivo, que
-// continua servindo à execução em curso.
+// Ela redigia QUATRO superfícies escolhidas a dedo: o argv do processo, o
+// comando e as variáveis de uma linha de cron, e o ExecStart de uma unit. A
+// escolha estava certa para as quatro, e o método estava errado — porque a
+// lista precisa ser mantida, e não foi.
+//
+// Medido, enchendo toda superfície textual do Facts com uma linha que carrega
+// credencial e conferindo o que sobrevive à escrita: SETENTA chaves de topo
+// atravessavam. Entre elas o `.bashrc` do usuário (Trigger.Lines[].Text, que um
+// check põe na evidência verbatim), o histórico de shell, o `Environment=` de
+// unit, o `ProxyCommand` do cliente SSH. O caminho até o modelo é curto:
+//
+//	~/.bashrc -> TriggerLine.Text -> dump -> check -> Finding.Evidence
+//	          -> finding.get -> a IA
+//
+// E o servidor MCP declara essas tools como DadosRedigidosNaOrigem, que promete
+// "não contém segredo em claro". A promessa era falsa.
+//
+// Agora a redação é PROFUNDA e a direção do erro é a outra: toda string do
+// Facts passa por redact.Texto, e quem NÃO quer isso se declara com
+// `redact:"-"`. Um coletor novo nasce protegido, e o modo de falha vira
+// "redigiu demais" — visível e reversível — no lugar de "vazou", que é
+// invisível.
+//
+// A cópia é PROFUNDA, e a anterior era rasa de propósito para não dobrar o pico
+// de memória no host suspeito. O preço mudou de lado: um Facts real de um host
+// grande tem dezenas de MB, e dobrá-los por um instante na escrita custa menos
+// que publicar credencial num artefato que vai para ticket, repositório e para
+// dentro de um modelo remoto. Os campos não exportados ficam para trás, e é o
+// que se quer: nada deles é serializado.
+// Redigir aplica a política deste binário a uma cópia do Facts.
+//
+// Ela é exportada porque a redação tem DOIS papéis, e o servidor MCP precisa do
+// segundo. No `collect` ela é procedência: o carimbo conta o que aconteceu com
+// o artefato. No MCP ela precisa ser ENFORCEMENT: um dump não é autenticado, e
+// o carimbo é um campo que quem escreveu o arquivo escolheu. Confiar nele para
+// decidir o que sai daqui é confiar no alvo.
+//
+// A operação é idempotente — medido, byte a byte estável a partir da primeira
+// passada —, então re-aplicá-la sobre um artefato honesto não custa evidência.
+func Redigir(f *facts.Facts) *facts.Facts { return redigir(f) }
+
 func redigir(f *facts.Facts) *facts.Facts {
 	if f == nil {
 		return nil
 	}
-	c := *f
-	c.Processes = make([]facts.Process, len(f.Processes))
-	copy(c.Processes, f.Processes)
-	for i := range c.Processes {
-		c.Processes[i].Argv = redact.Cmdline(c.Processes[i].Argv)
-	}
-	// O argv de um processo não é o único lugar onde segredo mora, e era o
-	// único redigido. `*/5 * * * * curl -u svc:S3cr3t https://api/… | sh` numa
-	// linha de cron, um `ExecStart=` com --token=, e uma variável de crontab
-	// carregam a mesma classe de segredo — e os checks os põem como EVIDÊNCIA,
-	// que o report.Human e o JSONL imprimem verbatim. Este dump é descrito no
-	// doc do pacote como fixture, anexo de ticket e arquivo em repositório.
-	c.Cron = make([]facts.CronEntry, len(f.Cron))
-	copy(c.Cron, f.Cron)
-	for i := range c.Cron {
-		c.Cron[i].Cmd = redact.Linha(c.Cron[i].Cmd)
-		if n := len(c.Cron[i].Env); n > 0 {
-			env := make([]facts.EnvSetting, n)
-			copy(env, c.Cron[i].Env)
-			for j := range env {
-				env[j].Value = redact.Valor(env[j].Key, env[j].Value)
-			}
-			c.Cron[i].Env = env
-		}
-	}
-	c.Units = make([]facts.Unit, len(f.Units))
-	copy(c.Units, f.Units)
-	for i := range c.Units {
-		if n := len(c.Units[i].Exec); n > 0 {
-			ex := make([]facts.ExecLine, n)
-			copy(ex, c.Units[i].Exec)
-			for j := range ex {
-				ex[j].Cmd = redact.Linha(ex[j].Cmd)
-			}
-			c.Units[i].Exec = ex
-		}
-	}
+	c := redigirValor(reflect.ValueOf(f).Elem(), "").Interface().(facts.Facts)
 	return &c
+}
+
+// TagRedacao classifica o campo. O valor decide QUAL redator se aplica.
+//
+//	(ausente)  texto livre — redact.TextoLivre, sem estado entre tokens
+//	cmdline    uma sequência argv: redact.Cmdline sobre a FATIA inteira
+//	linha      uma linha de comando como string: redact.Texto
+//	valor      um par nome/valor: redact.Valor, que mascara pelo NOME
+//	-          intocado; os bytes exatos importam
+const TagRedacao = "redact"
+
+// redigirValor devolve uma cópia redigida do valor.
+//
+// # Por que a classe do campo importa
+//
+// A primeira versão desta caminhada aplicava o redator de LINHA DE COMANDO a
+// toda string, e ele tem estado entre tokens — `-p` manda mascarar o token
+// seguinte, `Authorization:` manda mascarar até fechar o cabeçalho. Aplicado
+// string a string, esse estado se perde; aplicado a texto que não é comando,
+// ele estraga o que não é segredo. Medido, os dois sentidos:
+//
+//	["mysql","-p","S3cr3t"]           o segredo saía EM CLARO
+//	"-w /etc/passwd -p wa -k identity"  virava "-w <redacted> -p <redacted> …"
+//
+// A classe restaura o contexto onde ele existe. O padrão continua sendo
+// redigir — um coletor novo nasce protegido —, e o que ele perde em relação ao
+// redator de comando é só a forma PARTIDA (`-p` e o valor em tokens
+// separados), que só existe em linha de comando e portanto só nos campos que
+// se declaram.
+//
+// Ela constrói em vez de mutar porque o Facts vivo continua servindo à execução
+// em curso: os checks precisam do argv inteiro para casar indicador e para
+// julgar linhagem, e redigir no lugar os cegaria.
+// terminaEmByte responde se o tipo é uma sequência de bytes em qualquer
+// profundidade: []byte, [][]byte, e assim por diante.
+//
+// A recursão importa: só olhar o elemento imediato deixaria [][]byte esvaziar
+// cada entrada e manter a fatia externa com o comprimento original — uma lista
+// de nulos que não diz nada e ainda vaza a contagem.
+func terminaEmByte(t reflect.Type) bool {
+	for t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+		t = t.Elem()
+	}
+	return t.Kind() == reflect.Uint8
+}
+
+func redigirValor(v reflect.Value, classe string) reflect.Value {
+	switch v.Kind() {
+	case reflect.String:
+		if classe == "linha" {
+			return reflect.ValueOf(redact.Texto(v.String())).Convert(v.Type())
+		}
+		return reflect.ValueOf(redact.TextoLivre(v.String())).Convert(v.Type())
+
+	case reflect.Struct:
+		out := reflect.New(v.Type()).Elem()
+		if classe == "valor" {
+			return redigirPar(v)
+		}
+		for i := 0; i < v.NumField(); i++ {
+			campo := v.Type().Field(i)
+			if !campo.IsExported() || campo.Tag.Get("json") == "-" {
+				// Não exportado o reflect nem alcançaria; `json:"-"` o alcança e
+				// não vai para lugar nenhum. Copiar profundamente o DriftDados —
+				// que pode ser a comparação inteira de dois retratos — para
+				// descartá-lo no encoder é trabalho no host que a ferramenta
+				// prometeu não gastar.
+				continue
+			}
+			c := campo.Tag.Get(TagRedacao)
+			if c == "-" {
+				out.Field(i).Set(v.Field(i))
+				continue
+			}
+			out.Field(i).Set(redigirValor(v.Field(i), c))
+		}
+		return out
+
+	case reflect.Slice:
+		if v.IsNil() {
+			return v
+		}
+		// BYTE CRU NÃO ATRAVESSA. É a única classe cujo padrão é DESCARTAR, e o
+		// motivo é que não existe redação semântica de bytes arbitrários: a
+		// redação tokeniza por branco e reconhece a forma de uma atribuição, e
+		// nada disso se aplica a uma sequência que pode ser binária.
+		//
+		// A caminhada recursiva descia até o elemento, encontrava um uint8, e o
+		// devolvia igual — sem caso de String, nada acontecia. O campo novo
+		// Process.EnvBruto atravessou a redação intacto, e o servidor MCP
+		// carimbava aquele retrato como `redaction_enforced: enforced`. A
+		// garantia era objetivamente falsa para este tipo.
+		//
+		// Um campo que precise dos bytes exatos declara `redact:"-"` e assume a
+		// responsabilidade em voz alta. O padrão protege o campo que ainda não
+		// existe: quem acrescentar um []byte amanhã não precisa lembrar desta
+		// conversa.
+		if terminaEmByte(v.Type()) {
+			return reflect.Zero(v.Type())
+		}
+		// ARGV é uma SEQUÊNCIA, e só ela liga uma flag ao token seguinte.
+		if classe == "cmdline" && v.Type().Elem().Kind() == reflect.String {
+			return reflect.ValueOf(redact.Cmdline(paraStrings(v))).Convert(v.Type())
+		}
+		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := 0; i < v.Len(); i++ {
+			out.Index(i).Set(redigirValor(v.Index(i), classe))
+		}
+		return out
+
+	case reflect.Map:
+		if v.IsNil() {
+			return v
+		}
+		out := reflect.MakeMapWithSize(v.Type(), v.Len())
+		iter := v.MapRange()
+		mapaNomeValor := v.Type().Key().Kind() == reflect.String &&
+			v.Type().Elem().Kind() == reflect.String
+		for iter.Next() {
+			// A CHAVE também: um mapa de lacunas por caminho tem o caminho na
+			// chave, e um caminho pode carregar segredo tanto quanto um valor.
+			k := redigirValor(iter.Key(), classe)
+			if mapaNomeValor {
+				// map[string]string é, quase sempre, NOME -> VALOR: o environ de
+				// um processo, as variáveis de uma crontab. O nome é o que
+				// denuncia o segredo (`AWS_SECRET_ACCESS_KEY`), e é a proteção
+				// que a lista curada tinha e a caminhada por string perdeu.
+				//
+				// A decisão é pelo TIPO e não pela etiqueta, de propósito: assim
+				// um mapa novo nasce protegido. Havia um `redact:"valor"` no
+				// Process.Env que não mudava nada — decorativo, e decoração que
+				// se parece com declaração é o que faz alguém confiar nela.
+				out.SetMapIndex(k, reflect.ValueOf(
+					redigirNomeValor(iter.Key().String(), iter.Value().String()),
+				).Convert(v.Type().Elem()))
+				continue
+			}
+			out.SetMapIndex(k, redigirValor(iter.Value(), classe))
+		}
+		return out
+
+	case reflect.Pointer:
+		if v.IsNil() {
+			return v
+		}
+		out := reflect.New(v.Type().Elem())
+		out.Elem().Set(redigirValor(v.Elem(), classe))
+		return out
+
+	case reflect.Interface:
+		if v.IsNil() {
+			return v
+		}
+		out := reflect.New(v.Type()).Elem()
+		out.Set(redigirValor(v.Elem(), classe))
+		return out
+	}
+	return v
+}
+
+// redigirPar trata a struct que é um par nome/valor — o EnvSetting de uma
+// crontab. O NOME é o que denuncia o segredo.
+//
+// Ela redige TODOS os campos, e não só o Value. A primeira versão fazia
+// `out.Set(v)` — cópia da struct inteira — e reescrevia apenas o Value; o
+// EnvSetting tem também um `File`, e ele saía CRU. A catraca global pegou, que
+// é exatamente para isso que ela existe: perguntar "o segredo saiu?" em vez de
+// "os campos que eu lembrei foram redigidos?".
+func redigirPar(v reflect.Value) reflect.Value {
+	out := reflect.New(v.Type()).Elem()
+	var nome string
+	for i := 0; i < v.NumField(); i++ {
+		if v.Type().Field(i).Name == "Key" && v.Field(i).Kind() == reflect.String {
+			nome = v.Field(i).String()
+		}
+	}
+	for i := 0; i < v.NumField(); i++ {
+		campo := v.Type().Field(i)
+		if !campo.IsExported() {
+			continue
+		}
+		if campo.Tag.Get(TagRedacao) == "-" {
+			out.Field(i).Set(v.Field(i))
+			continue
+		}
+		if campo.Name == "Value" && campo.Type.Kind() == reflect.String {
+			out.Field(i).SetString(redigirNomeValor(nome, v.Field(i).String()))
+			continue
+		}
+		out.Field(i).Set(redigirValor(v.Field(i), campo.Tag.Get(TagRedacao)))
+	}
+	return out
+}
+
+// redigirNomeValor aplica a redação por NOME e, se ela não disse nada, a de
+// texto livre — que ainda pega a forma embutida.
+func redigirNomeValor(nome, valor string) string {
+	if r := redact.Valor(nome, valor); r != valor {
+		return r
+	}
+	return redact.TextoLivre(valor)
+}
+
+func paraStrings(v reflect.Value) []string {
+	out := make([]string, v.Len())
+	for i := range out {
+		out[i] = v.Index(i).String()
+	}
+	return out
 }
 
 // Escrever emite o dump, em fluxo e SEM indentação.
@@ -214,20 +525,102 @@ var (
 // (40k arquivos de código etc.), então um dump real fica muito abaixo disto.
 var MaxDump int64 = 512 << 20
 
+// AbrirArtefato abre um arquivo que veio de FORA — dump ou sidecar — tratando-o
+// como entrada hostil.
+//
+// O `env` já evoluiu para isto do lado do host investigado: abre com O_NONBLOCK,
+// faz fstat no DESCRITOR realmente aberto e recusa o que não é arquivo comum.
+// A razão está escrita lá: um `mkfifo` no caminho que a ferramenta sempre lê
+// pendura a varredura para sempre, e decidir pelo CAMINHO em vez de pelo
+// descritor deixa uma janela de troca que não precisa de privilégio nenhum.
+//
+// O artefato tinha a mesma exposição e nenhuma dessas defesas: `os.Open` seco.
+// Um `mkfifo incident.json` travava o servidor MCP antes de ele responder a
+// primeira mensagem — e o arquivo vem de um host comprometido, de um pendrive,
+// de um caso de IR. É a mesma classe de entrada, e agora tem a mesma porta.
+func AbrirArtefato(caminho string) (*os.File, error) {
+	fh, err := os.OpenFile(caminho, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := fh.Stat()
+	if err != nil {
+		fh.Close()
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		fh.Close()
+		return nil, fmt.Errorf("%s não é arquivo comum (fifo, socket ou "+
+			"dispositivo): RECUSADO, porque abrir isto bloqueia ou consome sem fim",
+			caminho)
+	}
+	return fh, nil
+}
+
+// CarregarComDigest lê o dump UMA VEZ e devolve o digest DOS MESMOS BYTES.
+//
+// # Por que uma leitura só
+//
+// O servidor MCP abria o caminho duas vezes: uma para hashear e outra para
+// interpretar. Entre as duas existe uma janela em que o arquivo pode ser
+// trocado — e o resultado é o pior possível para um servidor que deixa uma IA
+// CITAR evidência: o snapshot_id identifica o conteúdo A, e os fatos servidos
+// são o conteúdo B. A citação aponta para bytes que ninguém analisou.
+//
+// O `collect` já resolve isto do outro lado, e a razão está escrita lá: ele
+// calcula o hash DURANTE a escrita, justamente para não haver janela entre
+// conteúdo e digest. Aqui é a mesma regra na leitura — um descritor, um
+// TeeReader, os mesmos bytes para o hash e para o decodificador.
+//
+// E o teto entra ANTES do trabalho: o hash antigo era um io.Copy sem limite, e
+// um artefato de 80 GB era lido e hasheado por inteiro para só então o
+// MaxDump o recusar. O teto só valia depois de o dano que ele existe para
+// impedir já ter acontecido.
+func CarregarComDigest(caminho string) (*Dump, string, error) {
+	if caminho == "-" {
+		return nil, "", errors.New("CarregarComDigest não lê da entrada padrão: " +
+			"o digest identifica um ARQUIVO, e um fluxo não tem identidade a citar")
+	}
+	fh, err := AbrirArtefato(caminho)
+	if err != nil {
+		return nil, "", err
+	}
+	defer fh.Close()
+
+	h := sha256.New()
+	b, err := lerComTeto(io.TeeReader(fh, h))
+	if err != nil {
+		return nil, "", err
+	}
+	d, err := interpretar(b)
+	if err != nil {
+		return nil, "", err
+	}
+	return d, hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // Carregar lê um dump do disco, ou de "-" para a entrada padrão.
 func Carregar(caminho string) (*Dump, error) {
 	var r io.Reader = os.Stdin
 	if caminho != "-" {
-		fh, err := os.Open(caminho)
+		fh, err := AbrirArtefato(caminho)
 		if err != nil {
 			return nil, err
 		}
 		defer fh.Close()
 		r = fh
 	}
-	// LimitReader a MaxDump+1: lê no máximo um byte além do teto para saber que
-	// ESTOUROU sem carregar o resto. Vale para stdin (que não dá para statar) e
-	// para arquivo, sem corrida entre statar e ler.
+	b, err := lerComTeto(r)
+	if err != nil {
+		return nil, err
+	}
+	return interpretar(b)
+}
+
+// lerComTeto lê no máximo um byte além do teto — o suficiente para saber que
+// ESTOUROU sem carregar o resto. Vale para stdin (que não dá para statar) e
+// para arquivo, sem corrida entre statar e ler.
+func lerComTeto(r io.Reader) ([]byte, error) {
 	b, err := io.ReadAll(io.LimitReader(r, MaxDump+1))
 	if err != nil {
 		return nil, err
@@ -236,6 +629,10 @@ func Carregar(caminho string) (*Dump, error) {
 		return nil, fmt.Errorf("dump grande demais: passa de %d MiB — recusado "+
 			"para não estourar a memória do analisador", MaxDump>>20)
 	}
+	return b, nil
+}
+
+func interpretar(b []byte) (*Dump, error) {
 	var d Dump
 	if err := json.Unmarshal(b, &d); err != nil {
 		return nil, err
@@ -327,6 +724,10 @@ func (d *Dump) Env(local *env.Env) (*env.Env, error) {
 		e.CapReason["dump:"+n] = "a coleta declarou a capacidade " + n +
 			", que este binário não conhece: use a versão que coletou"
 	}
+	// O ambiente do artefato NÃO abre porta para o host de agora — nem quando a
+	// coleta foi feita num host vivo, caso em que Root é vazio e um ReadFile
+	// caía no filesystem do analista. Ver env.ErrSelado.
+	e.Selar()
 	return e, nil
 }
 

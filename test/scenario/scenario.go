@@ -200,6 +200,12 @@ type Scenario struct {
 	// conhecimento, ele precisa poder afirmar também que não há lacuna ali.
 	ForbidGap []string
 
+	// MCP é a conversa com o servidor MCP, quando Cmd == "mcp".
+	//
+	// O contrato deste modo é OUTRO: não há achado nem linha de cobertura no
+	// stdout — há JSON-RPC. Ver mcp.go.
+	MCP []Chamada
+
 	// Exit é o código esperado. -1 = não verificar.
 	Exit int
 
@@ -294,6 +300,15 @@ func Register(s Scenario) {
 	// coleta. Um `SemAvisos` ali seria verdadeiro por vacuidade, que é
 	// exatamente a armadilha do `MaxWarn: 0` descrita acima: parece proteção e
 	// não confere nada. O que um cenário de preserve afirma vai em ExpectOutput.
+	//
+	// O `mcp`: pela mesma vacuidade, por outro caminho. O orçamento é contado
+	// sobre o JSONL de achados, e o modo MCP não produz um — o que sai no
+	// stdout é JSON-RPC, e a contagem de avisos viaja DENTRO da resposta de uma
+	// tool. Declarar `SemAvisos` ali seria um número que o harness nunca lê.
+	//
+	// O que aquele modo afirma no lugar é mais forte, e está no M1: a lista de
+	// críticos vem VAZIA e o veredito NÃO diz OK. É a mesma pergunta — "o
+	// silêncio aqui significa o quê?" — feita nos termos do canal.
 	if s.Untestable == "" && orcamentoDeRuidoFazSentido(s.Cmd) {
 		if _, declarado := s.Orcamento(); !declarado && len(s.Expect) == 0 {
 			panic("cenário " + s.ID + ": não afirma achado nenhum, então ele existe " +
@@ -301,6 +316,35 @@ func Register(s Scenario) {
 				"(MaxWarn: N, medido; ou SemAvisos, para exigir silêncio)")
 		}
 	}
+	// CAMPO INERTE NÃO PASSA.
+	//
+	// O modo MCP tem outro contrato de saída, e assertMCP não lê nada da
+	// família de achados — Expect, Forbid, ExpectGap, o orçamento, a exigência
+	// de cobertura. Declará-los ali seria escrever asserção que ninguém avalia.
+	//
+	// E o Expect é PIOR que inerte: CoveredCheckIDs credita todo Expect de todo
+	// cenário, então um check citado num cenário de MCP contaria como
+	// demonstrado sem que nada o tivesse demonstrado — o invariante "todo check
+	// tem cenário" passaria a mentir. É a mesma armadilha do MaxWarn: 0, num
+	// lugar novo: parece proteção, e não confere nada.
+	if s.Cmd == "mcp" {
+		inertes := map[string]bool{
+			"Expect": len(s.Expect) > 0, "Forbid": len(s.Forbid) > 0,
+			"ForbidFinding": len(s.ForbidFinding) > 0,
+			"ExpectGap":     len(s.ExpectGap) > 0, "ForbidGap": len(s.ForbidGap) > 0,
+			"MaxWarn":          s.MaxWarn != 0,
+			"MustBeIncomplete": s.MustBeIncomplete, "MustBeComplete": s.MustBeComplete,
+		}
+		for campo, usado := range inertes {
+			if usado {
+				panic("cenário " + s.ID + ": " + campo + " não é lido no modo mcp — " +
+					"o contrato ali é a resposta JSON-RPC (ver o campo MCP). " +
+					"Uma asserção que ninguém avalia é pior que nenhuma, e um " +
+					"Expect aqui ainda creditaria cobertura que ninguém demonstrou")
+			}
+		}
+	}
+
 	// Uma lacuna conhecida sem prova da ausência não documenta nada: ela precisa
 	// AFIRMAR que a ferramenta ficou calada sobre o artefato do ataque, senão
 	// "known gap" vira comentário não verificado — e não falha quando a lacuna
@@ -320,14 +364,26 @@ func Register(s Scenario) {
 // muda, e a contagem depende do ritmo da amostragem; o `preserve` não conta
 // nada, porque não produz achado.
 func orcamentoDeRuidoFazSentido(cmd string) bool {
-	return cmd != "watch" && cmd != "preserve" && cmd != "info"
+	return cmd != "watch" && cmd != "preserve" && cmd != "info" && cmd != "mcp"
 }
 
 // Varredura diz se o cenário ANALISA o host. Só quem analisa tem cobertura a
 // declarar: o `preserve` copia bytes e vai embora, e o `info` responde sobre UM
 // alvo sem concluir nada. Uma linha de cobertura em qualquer um dos dois
 // afirmaria uma conclusão que ninguém tirou.
-func (s Scenario) Varredura() bool { return s.Cmd != "preserve" && s.Cmd != "info" }
+// Varredura diz se este cenário produz um relatório com cobertura.
+//
+// `preserve` COPIA e `info` RESPONDE — nenhum dos dois roda check, e uma linha
+// de cobertura ali afirmaria uma conclusão que ninguém tirou.
+//
+// `mcp` NÃO entra nesta lista, e a ausência dele é deliberada: aquele modo tem
+// um caminho de asserção próprio (assertMCP), e nunca chega em assertScenario,
+// que é o único lugar de onde isto é consultado. Um `&& s.Cmd != "mcp"` aqui
+// seria um braço que nenhum teste alcança — a mesma decoração que a conferência
+// de newline do transporte era antes de sair.
+func (s Scenario) Varredura() bool {
+	return s.Cmd != "preserve" && s.Cmd != "info"
+}
 
 // Orcamento devolve o teto de avisos e se ele foi DECLARADO. É a função que
 // separa "este cenário aceita até N avisos" de "ninguém disse nada sobre ruído

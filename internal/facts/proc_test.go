@@ -150,11 +150,11 @@ func writeFile(path, content string) error {
 // defeito original, e igualmente inútil.
 func TestReadProcessSeparaSumidoDeIlegivel(t *testing.T) {
 	// PID que não pode existir: acima de qualquer pid_max praticado.
-	if _, got := readProcess(1 << 30); got != readGone {
+	if _, got := readProcess(1<<30, false); got != readGone {
 		t.Errorf("PID inexistente devolveu %v, quer readGone", got)
 	}
 	// O próprio processo é sempre legível.
-	if _, got := readProcess(os.Getpid()); got != readOK {
+	if _, got := readProcess(os.Getpid(), false); got != readOK {
 		t.Errorf("o próprio PID devolveu %v, quer readOK", got)
 	}
 }
@@ -189,7 +189,108 @@ func TestPanicNoColetorNaoDerrubaOProcesso(t *testing.T) {
 			t.Fatalf("o panic escapou do guarda: %v", r)
 		}
 	}()
-	if _, out, _ := readProcessGuarded(-1); out == readOK {
+	if _, out, _ := readProcessGuarded(-1, false); out == readOK {
 		t.Error("PID inválido não pode sair como leitura bem-sucedida")
+	}
+}
+
+// "NÃO CONSEGUI LER" NÃO É "AMBIENTE VAZIO".
+//
+// readEnviron descartava o erro de /proc/<pid>/environ com `_`, e um EACCES ou
+// um processo que terminou saíam como Env nulo — indistinguível de um processo
+// sem variável nenhuma, coisa que praticamente não existe fora de thread de
+// kernel.
+//
+// É o fato que sustenta process.environ, a tool mais sensível do perfil
+// completo do servidor MCP: ali um objeto vazio se lê como "não havia
+// credencial nenhuma".
+func TestEnvironDistingueLacunaDeAmbienteVazio(t *testing.T) {
+	// 1. O próprio processo: leitura bem-sucedida.
+	meu := &Process{PID: os.Getpid()}
+	readEnviron(meu, false)
+	if !meu.EnvLido {
+		t.Fatal("a leitura do próprio ambiente falhou: o teste não mede nada")
+	}
+	if meu.EnvErro != "" {
+		t.Errorf("leitura ok e com erro registrado: %q", meu.EnvErro)
+	}
+	if len(meu.EnvKeys) == 0 {
+		t.Error("nenhuma chave observada no próprio processo")
+	}
+
+	// 2. Um pid que não existe: LACUNA, e o motivo dito.
+	morto := &Process{PID: 1 << 30}
+	readEnviron(morto, false)
+	if morto.EnvLido {
+		t.Fatal("um pid inexistente não pode sair como ambiente LIDO")
+	}
+	if morto.EnvErro == "" {
+		t.Error("a lacuna precisa carregar o motivo: sem ele, quem lê o relatório " +
+			"não distingue permissão negada de processo que terminou")
+	}
+	if len(morto.Env) != 0 || len(morto.EnvKeys) != 0 {
+		t.Errorf("uma leitura que falhou não pode produzir chave: %v", morto.EnvKeys)
+	}
+}
+
+// A REPRESENTAÇÃO FIEL SÓ EXISTE SOB CONSENTIMENTO, E EXISTE INTEIRA.
+//
+// EnvBruto guarda as entradas como o kernel as expôs — ordem, duplicatas e
+// entradas sem sinal de igual. Ela carrega VALOR, então gravá-la sem
+// --allow-secrets seria o vazamento que a allowlist existe para evitar.
+//
+// As duas metades importam: sem o campo, process.environ volta a responder pela
+// projeção, que colapsa chave repetida e perde a ordem — e é a ordem que decide
+// qual ocorrência de LD_PRELOAD o ld.so honrou.
+func TestEnvBrutoSoComConsentimentoEFiel(t *testing.T) {
+	// 1. SEM consentimento: nem uma entrada crua entra no Facts.
+	semSegredo := &Process{PID: os.Getpid()}
+	readEnviron(semSegredo, false)
+	if !semSegredo.EnvLido {
+		t.Fatal("a leitura do próprio ambiente falhou: o teste não mede nada")
+	}
+	if len(semSegredo.EnvBruto) != 0 {
+		t.Errorf("sem --allow-secrets o Facts guardou %d entradas CRUAS: elas "+
+			"carregam valor, e é isso que a allowlist evita",
+			len(semSegredo.EnvBruto))
+	}
+	if len(semSegredo.EnvKeys) == 0 {
+		t.Error("as CHAVES continuam sendo registradas mesmo sem consentimento")
+	}
+
+	// 2. COM consentimento: uma entrada crua por variável observada, e cada uma
+	//    reconstrói exatamente a chave que a projeção registrou.
+	comSegredo := &Process{PID: os.Getpid()}
+	readEnviron(comSegredo, true)
+	if len(comSegredo.EnvBruto) == 0 {
+		t.Fatal("com --allow-secrets a representação fiel tem de existir: sem " +
+			"ela, process.environ responde pela projeção, que perde ordem e " +
+			"duplicata")
+	}
+	if len(comSegredo.EnvBruto) < len(comSegredo.EnvKeys) {
+		t.Errorf("%d entradas cruas para %d chaves: a representação fiel tem de "+
+			"ter ao menos uma por chave — ela é que guarda as duplicatas",
+			len(comSegredo.EnvBruto), len(comSegredo.EnvKeys))
+	}
+	// E as entradas batem com o mapa: a projeção sai delas, não de outro lugar.
+	for _, cru := range comSegredo.EnvBruto {
+		k, v, ok := strings.Cut(string(cru), "=")
+		if !ok {
+			continue
+		}
+		if got, tem := comSegredo.Env[k]; tem && got != v {
+			// Divergir aqui é legítimo SÓ com duplicata: o mapa guarda a
+			// última. Confere se há outra entrada com a mesma chave.
+			n := 0
+			for _, o := range comSegredo.EnvBruto {
+				if kk, _, ok := strings.Cut(string(o), "="); ok && kk == k {
+					n++
+				}
+			}
+			if n < 2 {
+				t.Errorf("%s: entrada crua diz %q e o mapa diz %q, sem duplicata "+
+					"que explique", k, v, got)
+			}
+		}
 	}
 }

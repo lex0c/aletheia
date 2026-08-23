@@ -273,6 +273,27 @@ type Env struct {
 	// todo coletor.
 	Progress ProgressSink
 
+	// Segredos é o operador tendo dito --allow-secrets, e ele atravessa a coleta
+	// inteira porque as DUAS metades dependem dele.
+	//
+	// A primeira é o que se COLETA: readEnviron guarda só os valores de uma
+	// allowlist, e o resto sai como nome sem valor. A segunda é o que se
+	// ESCREVE: dump.De redige argv, cron, unit e gatilho ao montar o artefato.
+	//
+	// Um dos dois sozinho é meia-medida perigosa. Coletar o environ inteiro e
+	// então redigi-lo gastaria a leitura para jogar fora; pular a redação sobre
+	// um Facts que já nasceu sem os valores entregaria um artefato marcado como
+	// cru e sem o segredo que ele promete. Uma flag, as duas metades.
+	//
+	// O padrão é false, e nenhum caminho de CLI o liga a não ser o mcp com
+	// --profile full --allow-secrets: `collect` nunca escreve dump cru em disco.
+	Segredos bool
+
+	// selado marca o ambiente RECONSTRUÍDO — o que dump.Env() devolve. Ele
+	// descreve as condições de uma coleta que já terminou, então todo acesso a
+	// filesystem por ele é recusado com ErrSelado. Ver raizIndisponivel.
+	selado bool
+
 	Now   time.Time // sempre UTC
 	Clock ClockState
 
@@ -331,6 +352,14 @@ type Env struct {
 }
 
 // Close libera a raiz travada.
+// Selar torna o ambiente incapaz de ler filesystem, para sempre. Não há como
+// dessselar: quem precisa do host vivo constrói um Env com env.Novo, que é o
+// caminho onde o operador já disse o que autoriza.
+func (e *Env) Selar() { e.selado = true }
+
+// Selado responde se este ambiente descreve uma coleta encerrada.
+func (e *Env) Selado() bool { return e.selado }
+
 func (e *Env) Close() {
 	if e.root != nil {
 		e.root.Close()
@@ -511,9 +540,9 @@ func (e *Env) grant(c Cap, ok bool, reason string) {
 }
 
 func (e *Env) probeCaps() {
-	// root
-	e.grant(CapRoot, os.Geteuid() == 0,
-		"não estamos como root: environ, dono de socket, /etc/shadow e /root ficam invisíveis")
+	// root — pelo ALCANCE, e não pelo euid. Ver alcancaSuperficiePrivilegiada.
+	alcanca, porQue := alcancaSuperficiePrivilegiada()
+	e.grant(CapRoot, alcanca, porQue)
 
 	// filesystem — em image depende da raiz travada ter aberto.
 	if e.Source == SourceImage && e.root == nil {

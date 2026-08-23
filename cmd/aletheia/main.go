@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -81,6 +80,8 @@ COMANDOS
   preserve      guarda a evidência antes que ela suma — inclusive tráfego
                 (--pcap). O ÚNICO que escreve
   info          responde sobre UM alvo: process, net, git, ip, port, file
+  mcp           serve um retrato a um agente por MCP, sobre stdio. Concede
+                OBSERVAÇÃO, não execução
   checks        catálogo: id, §ref, modo, grupo, requires, falsos positivos
   version       versão e hash deste binário
 
@@ -193,6 +194,91 @@ INFO — a pergunta que vem ANTES do veredito
   O censo compara as tarefas de cada uid com o RLIMIT_NPROC dele — é o número
   que explica Resource temporarily unavailable em su, fork e execve — e NOMEIA
   a repetição quando ela tem forma conhecida (cron que se sobrepõe, pool).
+
+MCP — a pergunta que a IA faz DE VOLTA
+  aletheia mcp --snapshot host.json
+  aletheia mcp --snapshot antes.json --snapshot depois.json
+
+  Serve os retratos a um agente pelo Model Context Protocol, em stdio. O ciclo
+  que ele fecha é hipótese → adquirir a evidência → correlacionar → pedir a
+  próxima aquisição, sem entregar um shell.
+
+  A regra: o servidor concede OBSERVAÇÃO, não EXECUÇÃO. Não existe tool que
+  escreva, execute comando, mate processo, resolva nome ou abra conexão. Dado do
+  host é entrada ADVERSÁRIA — o argv que o implante escolheu pode conter texto
+  endereçado ao modelo —, e por isso ele chega sempre marcado como não confiável,
+  nunca no nome nem na descrição de uma tool.
+
+  Remoto, sem agente: o transporte é stdio, então o canal é o ssh que já
+  existe. -T é OBRIGATÓRIO — com pty o stdout vem com a própria requisição
+  ecoada e com CRLF, e o framing quebra:
+
+      ssh -T host 'sudo -n /opt/aletheia mcp --live --allow-root'
+
+  Sem sudo ele sobe como uid comum e DECLARA o que não alcança. A cadeia de
+  acesso da própria investigação aparece no retrato: compare horários antes de
+  atribuir a conta de IR ao invasor.
+
+  --snapshot F  o retrato a servir (REPETÍVEL). Tudo que este processo poderá
+                abrir é fixado aqui: nenhuma tool aceita caminho de arquivo, ou
+                o modelo ganharia leitura arbitrária na estação de quem investiga
+  --live        o agente tira o retrato dele, com snapshot.capture. Duas únicas
+                tools leem o host; todo o resto responde sobre um RETRATO, que é
+                o que impede trinta chamadas de misturar instantes diferentes
+  --root PATH   o mesmo, sobre uma imagem montada
+  --allow-root  autoriza observação PRIVILEGIADA. Sem ela, "sudo aletheia mcp"
+                FALHA — e falha também sem root, se o processo carregar
+                capability que alcance o mesmo: euid não basta, um uid=1000 com
+                CAP_DAC_READ_SEARCH lê /etc/shadow. O servidor herda o
+                privilégio do processo e nunca o adquire, e rodar privilegiado
+                é decisão dita, não acidente de sudo
+  --audit-log F grava a trilha de invocações também em F. Ela sempre sai no
+                stderr; arquivo só quando pedido, porque preserve continua
+                sendo o único comando que escreve por padrão
+  --profile full
+                destrava LER O HOST por um caminho que o modelo escolhe:
+                file.read, file.hash, file.xattrs, file.capabilities. Só em
+                --live/--root — um dump não carrega conteúdo de arquivo.
+                Estas tools NÃO respondem sobre um retrato: elas leem AGORA, e
+                o envelope delas diz isso em vez de fingir procedência. Por
+                padrão NENHUM symlink é atravessado, em posição nenhuma do
+                caminho, e o percurso usa O_PATH — device node é identificado
+                sem o driver ser acordado
+  --allow-secrets
+                destrava os bytes CRUS saírem daqui: file.read, file.xattrs e
+                process.environ. Exige --profile full. Também manda a COLETA
+                guardar o valor de toda variável de ambiente, e o retrato sai
+                carimbado "redaction: waived" — ele carrega segredo em claro.
+                A trava importa porque o Aletheia não tem egress, mas o cliente
+                MCP quase certamente manda o resultado a um modelo remoto, e
+                essa metade não está sob controle desta ferramenta.
+                Em --snapshot ela tem outro sentido: o servidor RE-REDIGE todo
+                artefato no ingresso, porque o carimbo de um dump não
+                autenticado é procedência e não barreira; a flag dispensa essa
+                imposição, sem prometer recuperar o que já saiu redigido
+  --capture-budget D
+                orçamento COOPERATIVO de leitura do host, acumulado pela sessão
+                inteira (padrão 10m). Ele faz duas coisas: recusa admitir uma
+                captura nova quando o saldo acaba, e limita cada varredura ao
+                MENOR entre --capture-budget restante e o orçamento por captura.
+                Uma captura já admitida pode passar do saldo nas etapas que não
+                são interrompíveis — não há cancelamento fino neste domínio.
+                Existe porque o teto de retratos vivos limita memória, e
+                capturar/liberar em laço nunca esbarra nele enquanto cobra uma
+                varredura por volta. Liberar não devolve: memória volta,
+                trabalho já feito não. 0 desliga, com aviso
+
+  Na aquisição, scope=volatile lê /proc e sockets e é ~9x mais barato — e NÃO
+  sustenta achado: o motor recusa rodar check sobre coleta parcial, e a resposta
+  é zero achados COM o catálogo inteiro declarado não verificado. scope=complete
+  é a varredura inteira. Enquanto ela roda, o servidor não responde outra
+  chamada: os coletores não são interrompíveis, e isso é dito em vez de fingido.
+
+  Toda resposta em forma de achado carrega o VEREDITO e a COBERTURA, e o schema
+  os exige. É a promessa do exit code traduzida para um canal que não tem exit
+  code: uma lista de achados vazia com INCOMPLETE significa "não consegui
+  olhar", e sem esses dois campos ela chegaria ao modelo como "host limpo".
+
 
 FLAGS DE collect E analyze
   collect --out F [--root PATH] [--ignore PATH] [--all-fs]   escreve o dump ("-" = stdout)
@@ -325,6 +411,8 @@ func main() {
 		os.Exit(runInfo(os.Args[2:]))
 	case "checks":
 		os.Exit(runChecks(os.Args[2:]))
+	case "mcp":
+		os.Exit(runMCP(os.Args[2:]))
 	case "version":
 		e := env.Probe(env.Options{Version: version})
 		fmt.Printf("aletheia %s\n%s\nsha256=%s\n", version, e.ToolPath, e.ToolSHA256)
@@ -508,7 +596,6 @@ func runWtf(args []string) int {
 		Deadline: start.Add(*budget),
 		Budget:   *budget,
 	})
-	collectorGaps(r, f)
 
 	bl, code := aplicarBaseline(r, f, e, *base)
 	if code != 0 {
@@ -804,7 +891,6 @@ func runBaseline(args []string) int {
 
 	selected := check.Select(check.Selection{})
 	r := check.Run(selected, f, e)
-	collectorGaps(r, f)
 	prog.Stop() // a linha some antes de escrever a baseline
 
 	bl := baseline.Capturar(r, f, f.Host.Hostname, version, e.Now)
@@ -842,25 +928,6 @@ func seNao(ok bool, texto string) string {
 		return ""
 	}
 	return texto
-}
-
-// collectorGaps move a falha de COLETA para o eixo próprio dela: não é um check
-// que deixou de rodar, é dado que não pôde ser lido. Sai da aritmética de
-// checks e continua impedindo um veredito de OK.
-func collectorGaps(r *check.Report, f *facts.Facts) {
-	// Ordem FIXA: `f.Partial` é mapa, e a lista sai daqui para o JSONL e para a
-	// baseline. Sem ordenar, duas execuções idênticas produzem arquivos
-	// diferentes — e comparar dois JSONL por diff é como se audita frota.
-	coletores := make([]string, 0, len(f.Partial))
-	for c := range f.Partial {
-		coletores = append(coletores, c)
-	}
-	sort.Strings(coletores)
-	for _, collector := range coletores {
-		for _, reason := range f.Partial[collector] {
-			r.Coverage.CollectorGaps = append(r.Coverage.CollectorGaps, collector+": "+reason)
-		}
-	}
 }
 
 // abrirSaidaJSON valida e ABRE o destino do --json ANTES da parte cara.

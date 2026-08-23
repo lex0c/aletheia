@@ -231,7 +231,7 @@ type BindDaUnit struct {
 
 type ExecLine struct {
 	Key string `json:"key"` // ExecStart | ExecStartPre | …
-	Cmd string `json:"cmd"`
+	Cmd string `json:"cmd" redact:"linha"`
 	// RawCmd é o comando como escrito no arquivo, ANTES de resolver o nome nu
 	// contra qualquer search path. A resolução EFETIVA (com o ExecSearchPath do
 	// drop-in e o PATH fixo do systemd) só é possível pós-merge; guardar o cru

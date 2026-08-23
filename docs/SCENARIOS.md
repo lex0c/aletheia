@@ -3,7 +3,7 @@
 GERADO de `internal/checks` e `test/scenario`. Não edite à mão:
 `go test ./test/scenario -run TestDocumentoDeCenarios -update`.
 
-128 checks, 220 cenários.
+128 checks, 237 cenários.
 
 Um **check** é uma pergunta que a ferramenta faz ao host. Um **cenário** é um
 host montado de propósito — em contêiner, imagem ou microVM — que prova a
@@ -344,9 +344,26 @@ contêiner não alcança — hidepid, sysctl, módulo, cgroup, eBPF.
 | `L3-python-hook-vs-o-do-pacote` | live | usercustomize.py do invasor ao lado do sitecustomize.py que o dpkg entregou |
 | `L4-fabrica-com-python-instalado` | live | python instalado e nenhum hook plantado: estado de fábrica não é ataque |
 | `M1-injecao-rx-anon` | live | injeção W^X: no retrato a região é r-xp anônima e NUNCA foi gravável-e-executável |
+| `M1-mcp-vazio-nunca-e-limpo` | live | contêiner limpo: a lista de críticos sai vazia e o veredito NÃO diz OK |
 | `M1-processo-de-container-nao-vira-aviso` | vm | binário em camada de imagem, com cgroup de contêiner: é o normal |
+| `M10-mcp-captura-completa-conclui` | live | execução fileless plantada e capturada AO VIVO: o retrato cunhado pelo agente sustenta o achado |
+| `M11-mcp-captura-volatil-nao-conclui` | live | captura barata com o MESMO implante do M10: zero achados, e o check que o pegaria declarado NÃO EXECUTADO |
+| `M12-mcp-live-recusa-root-sem-consentimento` | live | aquisição ao vivo como root e sem --allow-root: o servidor recusa subir |
+| `M13-mcp-imagem-montada-adquire-e-recusa-o-que-nao-existe` | live | aquisição sobre --root: escopo completo, achado de persistência, e nenhuma tool de processo ou rede |
+| `M14-mcp-perfil-completo-le-o-host` | live | --profile full --allow-secrets: leitura direcionada, cadeia de symlink como evidência, e environ sem redação |
+| `M15-mcp-injecao-pelos-canais-do-perfil-completo` | live | conteúdo de arquivo, xattr, environ e alvo de symlink: os quatro chegam marcados, e nenhum toca a superfície de ferramentas |
+| `M16-mcp-arquivo-que-muda-durante-a-leitura` | live | o alvo reescreve o arquivo enquanto file.hash o lê: o digest sai declarado INSTÁVEL, e o controle que ninguém toca sai estável |
+| `M17-mcp-crossview-testemunhas-do-kernel` | live | crossview.get: os cinco eixos separados, e a consequência dita por extenso |
 | `M2-conteudo-de-imagem-executado-fora` | vm | o MESMO binário, com o cgroup do host: alguém rodou fora do contêiner |
+| `M2-mcp-o-veredito-acompanha-o-implante` | live | execução fileless plantada: a MESMA consulta que sai vazia no host limpo traz o crítico aqui |
 | `M3-mapeamento-apagado` | live | biblioteca mapeada EXECUTÁVEL e apagada: o exe principal fica íntegro, a lib some do disco |
+| `M3-mcp-injecao-nao-alcanca-a-superficie` | live | argv[0] endereçado ao modelo: chega inteiro em data, marcado, e não toca a lista de ferramentas |
+| `M4-mcp-nao-existe-tool-de-execucao` | live | o registry concede observação, não execução: nenhuma tool escreve, executa ou mata |
+| `M5-mcp-recusa-root-sem-consentimento` | live | como root e sem --allow-root: o servidor recusa subir, e diz por quê |
+| `M6-mcp-paridade-de-cobertura-com-analyze` | live | a cobertura que o MCP publica é a MESMA que o analyze imprime sobre o mesmo retrato |
+| `M7-mcp-responde-sobre-o-retrato` | live | o processo é morto ANTES do servidor subir: o dossiê continua respondendo sobre ele |
+| `M8-mcp-lacuna-de-coleta-tambem-e-regiao-declarada` | live | nome hostil num arquivo que não abre: o texto do alvo alcança observability, e o caminho vem declarado |
+| `M9-mcp-responde-sobre-o-artefato-e-nao-sobre-a-maquina` | live | retrato de uma imagem montada servido de outra máquina: as respostas são do artefato, e as tools de processo nem existem |
 | `N1-alternatives-legitimo` | live | cadeia do update-alternatives apontando para binário COM dono |
 | `N2-alternatives-sequestrado` | live | a MESMA cadeia, apontando para lugar sem dono: continua achado |
 | `NF1-netfilter-backdoor-oculto` | vm | backdoor de netfilter que se esconde de /proc/modules é pego pelo cross.module_view via a função do hook no ftrace |

@@ -73,12 +73,52 @@ type Process struct {
 	// Argv vem de /proc/<pid>/cmdline: MESMA fonte que o ps lê, e o processo
 	// pode reescrevê-la. Serve para ver o disfarce, não para confirmar
 	// identidade — isso é o Exe (runbook §3.5).
-	Argv         []string `json:"argv,omitempty"`
+	Argv         []string `json:"argv,omitempty" redact:"cmdline"`
 	CmdlineEmpty bool     `json:"cmdline_empty,omitempty"`
 
-	// EnvKeys tem TODAS as chaves; Env só os valores da allowlist (SPEC 5.4).
-	EnvKeys []string          `json:"env_keys,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
+	// EnvKeys tem as chaves OBSERVADAS; Env só os valores da allowlist
+	// (SPEC 5.4) — ou todos, quando o operador dispensou a redação.
+	EnvKeys []string `json:"env_keys,omitempty"`
+
+	// EnvLido separa "o ambiente está vazio" de "não consegui ler o ambiente".
+	//
+	// readNULTrunc devolve erro em EACCES, EIO e ESRCH, e ele era descartado:
+	// o processo saía com Env e EnvKeys nulos, indistinguível de um processo
+	// que de fato não tem variável nenhuma — coisa que praticamente não existe.
+	// É "não observei" virando "não havia nada", no fato que sustenta a tool
+	// mais sensível do perfil completo.
+	//
+	// O campo é POSITIVO (lido, e não "falhou") de propósito: o zero value de um
+	// Facts montado à mão em teste é `false`, e o lado seguro é o que não
+	// afirma leitura.
+	EnvLido bool `json:"env_read,omitempty"`
+	// EnvCortado diz que o ambiente passou do teto e as variáveis seguintes NÃO
+	// foram examinadas. Separado de Truncated porque a decisão de recusar uma
+	// resposta completa não pode depender de procurar uma palavra numa lista de
+	// frases em português.
+	EnvCortado bool `json:"env_truncated,omitempty"`
+	// EnvErro é a evidência de POR QUE a leitura falhou. Nunca controle de
+	// fluxo: quem decide é EnvLido.
+	EnvErro string `json:"env_error,omitempty"`
+
+	// EnvBruto são as entradas do environ COMO O KERNEL AS EXPÔS: na ordem
+	// original, com duplicatas, e com as entradas sem '=' preservadas.
+	//
+	// Env e EnvKeys são projeções, e cada uma perde algo. O mapa colapsa chave
+	// repetida — e a repetição é observável: o ld.so honra a ÚLTIMA (medido,
+	// com dois LD_PRELOAD e um alvo inexistente em cada posição), enquanto o
+	// getenv da libc devolve a primeira. Consumidores diferentes do mesmo
+	// ambiente discordam, e um retrato que só guarda o mapa apaga a pergunta.
+	// A ordenação de EnvKeys destrói a ordem, que é o que decide aquilo.
+	//
+	// [][]byte, e não []string: environ é byte arbitrário, e o encoding/json
+	// troca UTF-8 inválido por U+FFFD numa string. Em []byte ele vira base64, e
+	// os bytes atravessam o artefato como estavam.
+	//
+	// Só é preenchido sob --allow-secrets: as entradas cruas carregam VALOR, e
+	// gravá-las sem consentimento seria o vazamento que a allowlist evita.
+	EnvBruto [][]byte          `json:"env_raw,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`
 
 	CapEff    uint64 `json:"cap_eff"`
 	TracerPID int    `json:"tracer_pid,omitempty"`
@@ -275,6 +315,14 @@ func collectProcesses(f *Facts, e *env.Env) {
 	// cruzada acusar de OCULTO todo processo alheio que não pudemos abrir.
 	f.PidsListados = pids
 
+	// O SUCESSO do readdir, promovido a CrossView: é a testemunha de base da
+	// comparação de processos, e o dump não leva PidsListados (json:"-"). Sem
+	// isso, crossview.get teria de inferir "a listagem foi lida" por outro sinal
+	// — e inferir estado de leitura por cardinalidade é o defeito que o cross
+	// inteiro existe para não cometer.
+	f.Cross.ProcListLida = true
+	f.Cross.ProcListN = len(pids)
+
 	// A leitura de cada PID é INDEPENDENTE das outras: são arquivos diferentes,
 	// sem estado compartilhado. Ler em paralelo é o único alívio real para um
 	// servidor grande — o custo por processo é syscall, e o kernel formata o
@@ -307,7 +355,7 @@ func collectProcesses(f *Facts, e *env.Env) {
 				if i >= len(pids) {
 					return
 				}
-				slots[i].p, slots[i].outcome, slots[i].panicked = readProcessGuarded(pids[i])
+				slots[i].p, slots[i].outcome, slots[i].panicked = readProcessGuarded(pids[i], e.Segredos)
 			}
 		}()
 	}
@@ -491,17 +539,17 @@ const (
 //
 // É a mesma correção que o runGuarded fez para os checks, no lugar onde a
 // paralelização a desfez.
-func readProcessGuarded(pid int) (p *Process, out readOutcome, panicked string) {
+func readProcessGuarded(pid int, segredos bool) (p *Process, out readOutcome, panicked string) {
 	defer func() {
 		if r := recover(); r != nil {
 			p, out, panicked = nil, readDenied, fmt.Sprint(r)
 		}
 	}()
-	p, out = readProcess(pid)
+	p, out = readProcess(pid, segredos)
 	return p, out, ""
 }
 
-func readProcess(pid int) (*Process, readOutcome) {
+func readProcess(pid int, segredos bool) (*Process, readOutcome) {
 	p := &Process{PID: pid, NS: map[string]string{}}
 
 	st, err := readTrimErr(procPath(pid, "stat"))
@@ -544,7 +592,7 @@ func readProcess(pid int) (*Process, readOutcome) {
 	readExe(p)
 	readCwd(p)
 	readCmdline(p)
-	readEnviron(p)
+	readEnviron(p, segredos)
 	readCgroup(p)
 	readNS(p)
 	readFDs(p)
@@ -742,8 +790,18 @@ func reconfirmCmdline(f *Facts) {
 	}
 }
 
-func readEnviron(p *Process) {
-	kv, cortado, _ := readNULTrunc(procPath(p.PID, "environ"))
+func readEnviron(p *Process, segredos bool) {
+	kv, cortado, err := readNULTrunc(procPath(p.PID, "environ"))
+	if err != nil {
+		// LACUNA, e não ambiente vazio. O erro era descartado aqui, e o
+		// processo saía com Env nulo — o que uma tool lê como "não há variável
+		// nenhuma", que é a leitura mais tranquilizadora possível de uma
+		// leitura que não aconteceu.
+		p.EnvErro = motivoDeLeitura(err)
+		return
+	}
+	p.EnvLido = true
+	p.EnvCortado = cortado
 	if cortado {
 		p.Truncated = append(p.Truncated, "o ambiente passa de "+
 			strconv.Itoa(maxNUL>>20)+" MB e foi CORTADO: as variáveis "+
@@ -754,16 +812,37 @@ func readEnviron(p *Process) {
 	}
 	p.Env = map[string]string{}
 	for _, e := range kv {
+		if segredos {
+			// A representação FIEL, antes de qualquer projeção. Ver EnvBruto.
+			p.EnvBruto = append(p.EnvBruto, []byte(e))
+		}
 		k, v, ok := strings.Cut(e, "=")
 		if !ok {
 			continue
 		}
 		p.EnvKeys = append(p.EnvKeys, k)
-		if envAllowed(k) {
+		// segredos é o --allow-secrets do servidor MCP, e ele só chega aqui
+		// depois de o operador ter escrito a flag. Sem ele, o valor de tudo que
+		// não está na allowlist NÃO é lido para dentro do Facts — a chave fica,
+		// o valor não. Ver env.Env.Segredos.
+		if segredos || envAllowed(k) {
 			p.Env[k] = v
 		}
 	}
 	sort.Strings(p.EnvKeys)
+}
+
+// motivoDeLeitura traduz o errno para o operador. É EVIDÊNCIA, e nunca controle
+// de fluxo: quem decide se houve leitura é EnvLido.
+func motivoDeLeitura(err error) string {
+	switch {
+	case os.IsNotExist(err):
+		return "o processo terminou entre a listagem e a leitura"
+	case os.IsPermission(err):
+		return "sem permissão para ler o ambiente deste processo: ele é de outro " +
+			"uid, e falta CAP_SYS_PTRACE ou root"
+	}
+	return "falha ao ler o ambiente: " + err.Error()
 }
 
 // readLimites lê o teto de processos do /proc/<pid>/limits.

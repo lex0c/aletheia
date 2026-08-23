@@ -454,6 +454,22 @@ var shellEnv = check.Check{
 	},
 }
 
+// linhasExecutaveisDoTrigger devolve o que um gatilho EXECUTA, na representação
+// certa por tipo.
+//
+// Para apt.conf.d é AptHooks — o fato semântico que o lexer do apt extraiu dos
+// bytes crus. Trigger.Lines não serve ali: ele passou pelo parser genérico, que
+// descarta a linha começada por #, e um hook escondido atrás de um bloco /* … */
+// mal fechado some dele. Para todo o resto, Lines É o que executa.
+//
+// A escolha mora AQUI, num lugar só, porque foi a duplicação dela que produziu o
+// defeito: o timestomp leu AptHooks e o trigger_exec continuou em Lines, e o
+// mesmo hook era visto por um check e invisível para o outro. Todo consumidor que
+// pergunta "o que este gatilho executa?" chama isto.
+func linhasExecutaveisDoTrigger(t *facts.Trigger) []facts.TriggerLine {
+	return t.LinhasExecutaveis()
+}
+
 // triggerExec — runbook §7.7 e §7.12.
 //
 // A mesma pergunta dos outros gatilhos, sobre os que sobraram: rc.local,
@@ -512,7 +528,7 @@ var triggerExec = check.Check{
 			// gerenciador guarda. Sem hash disponível não há isenção.
 			donoDoGatilho := entregueIntactoPeloPacote(f, t.File)
 
-			for _, ln := range t.Lines {
+			for _, ln := range linhasExecutaveisDoTrigger(t) {
 				motivo, sev, ok := execSuspect(linhaExecutavel(ln.Text))
 				if ok && donoDoGatilho {
 					ok = false
@@ -533,10 +549,17 @@ var triggerExec = check.Check{
 						continue
 					}
 				}
+				// A ORIGEM da linha, não o gatilho: um hook de apt trazido por #include
+				// mora noutro arquivo, e apontar 99x quando o payload está em
+				// /opt/.apt-hidden é evidência com etiqueta errada.
+				arquivo := t.File
+				if ln.File != "" {
+					arquivo = ln.File
+				}
 				ev := []string{
 					ln.Text,
 					motivo,
-					"arquivo: " + t.File + ":" + strconv.Itoa(ln.N),
+					"arquivo: " + arquivo + ":" + strconv.Itoa(ln.N),
 					"QUANDO roda: " + t.When,
 				}
 				if t.Kind == "rc" && !t.Exec {
@@ -560,6 +583,10 @@ var triggerExec = check.Check{
 		}
 		r.Partial = append(r.Partial, f.PersistDenied["startup"]...)
 		r.Partial = append(r.Partial, f.PersistDenied["githook"]...)
+		// A resolução da config do apt (#clear, #include ilegível) é lacuna DESTE
+		// check: um hook não resolvido pode não ter sido enumerado, e a completude
+		// tem de cair em vez de certificar "nenhum hook a mais".
+		r.Partial = append(r.Partial, f.Partial["apt"]...)
 		return r
 	},
 }

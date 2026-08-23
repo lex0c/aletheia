@@ -138,13 +138,13 @@ func collectCrossSockets(f *Facts, e *env.Env) {
 
 	seguros := e.DiagSeguros
 
-	diag1, diagOK1, cortado := dumpDiag(f, c, seguros)
+	diag1, diagOK1, cortado1 := dumpDiag(f, c, seguros)
 	if len(diagOK1) == 0 {
 		return // dumpDiag já declarou o porquê (nenhum protocolo consultável)
 	}
 	f.Cross.SocketDiagLido = true
 	f.Cross.SocketDiag = len(diag1)
-	f.Cross.SocketDiagCortado = cortado
+	f.Cross.SocketDiagCortado = len(cortado1) > 0
 
 	// 1ª leitura de /proc, restrita aos protocolos que o netlink respondeu, com
 	// o SUCESSO por protocolo — não só as chaves. Sem esse sucesso, "o socket
@@ -159,6 +159,27 @@ func collectCrossSockets(f *Facts, e *env.Env) {
 		if !procOK1[proto] {
 			f.partial("net", "/proc/net/"+proto+" não pôde ser lido: as conexões de "+
 				proto+" NÃO foram confrontadas com o netlink")
+		}
+	}
+
+	// O estado de CADA um dos quatro protocolos inet, para a tool não inferir
+	// "comparado" por cardinalidade. diagOK1 é quem o netlink consultou com
+	// SUCESSO; procOK1 é quem o /proc/net leu. Quem não está em diagOK1 ou foi
+	// PULADO (handler de diag ausente, para não autocarregar) ou foi TENTADO e
+	// FALHOU — e as duas causas não são a mesma coisa. seguros diz qual: um
+	// protocolo seguro que não entrou em diagOK1 foi consultado e deu erro.
+	f.Cross.SocketProtos = map[string]string{}
+	for _, proto := range []string{"tcp", "tcp6", "udp", "udp6"} {
+		switch {
+		case diagOK1[proto] && procOK1[proto]:
+			f.Cross.SocketProtos[proto] = "compared"
+		case diagOK1[proto]:
+			f.Cross.SocketProtos[proto] = "proc_unreadable"
+		case seguros[proto]:
+			// Handler carregado, netlink tentou e falhou: não é o skip de autoload.
+			f.Cross.SocketProtos[proto] = "diag_failed"
+		default:
+			f.Cross.SocketProtos[proto] = "diag_skipped"
 		}
 	}
 
@@ -186,7 +207,7 @@ func collectCrossSockets(f *Facts, e *env.Env) {
 	// consegui reler" seria a ferramenta quebrando a própria confiança do
 	// kernel por uma falha de leitura dela mesma.
 	proc2, procOK2 := lerProcNet(diagOK1)
-	diag2, diagOK2, _ := dumpDiag(nil, c, seguros)
+	diag2, diagOK2, cortado2 := dumpDiag(nil, c, seguros)
 
 	var inconclusivos int
 	for chave, sk := range candidatos {
@@ -195,6 +216,9 @@ func collectCrossSockets(f *Facts, e *env.Env) {
 			procOK1: procOK1[sk.Proto], procOK2: procOK2[sk.Proto],
 			diagOK1: diagOK1[sk.Proto], diagOK2: diagOK2[sk.Proto],
 			emProc2: proc2[chave], emDiag2: emDiag2,
+			// A 2ª enumeração netlink pode ter sido TRUNCADA para este protocolo:
+			// aí um candidato ausente dela pode estar além do teto, não morto.
+			diagCompleto2: !cortado2[sk.Proto],
 		}) {
 		case ocultoInconclusivo:
 			inconclusivos++
@@ -205,6 +229,7 @@ func collectCrossSockets(f *Facts, e *env.Env) {
 			})
 		}
 	}
+	f.Cross.SocketInconclusivos = inconclusivos
 	if inconclusivos > 0 {
 		f.partial("net", strconv.Itoa(inconclusivos)+" socket(s) candidatos a oculto NÃO "+
 			"puderam ser reconfirmados: uma das quatro leituras (/proc ou netlink, 1ª ou 2ª "+
@@ -219,6 +244,7 @@ type observacao struct {
 	diagOK1, diagOK2 bool // o dump de netlink foi observado em cada passada?
 	emProc2          bool // o socket REapareceu em /proc na 2ª passada?
 	emDiag2          bool // o socket CONTINUA no netlink na 2ª passada?
+	diagCompleto2    bool // a 2ª enumeração netlink NÃO foi truncada p/ este proto
 }
 
 type resultadoOculto int
@@ -243,8 +269,15 @@ func classificarOculto(o observacao) resultadoOculto {
 	if o.emProc2 { // reapareceu em /proc: socket recém-nascido, não oculto
 		return ocultoCorrida
 	}
-	if !o.emDiag2 { // sumiu do netlink: socket que fechou, não oculto
-		return ocultoCorrida
+	if !o.emDiag2 {
+		// Sumiu do netlink na 2ª passada. Se essa passada foi TRUNCADA para o
+		// protocolo, o candidato pode ter ficado além do teto — não morreu, a
+		// ferramenta é que não olhou até ele. Descartar como corrida seria um
+		// falso negativo nascido do próprio limite da coleta.
+		if !o.diagCompleto2 {
+			return ocultoInconclusivo
+		}
+		return ocultoCorrida // sumiu de uma enumeração COMPLETA: socket que fechou
 	}
 	return ocultoConfirmado
 }
@@ -297,10 +330,10 @@ func procNetLido(err error) bool {
 // O conjunto de protocolos que responderam não é detalhe: udp_diag é um módulo
 // separado do tcp_diag em boa parte das distribuições, e um host onde só o
 // segundo existe compararia UDP contra o vazio.
-func dumpDiag(f *Facts, c *netlink.Conexao, seguros map[string]bool) (map[string]netlink.SocketInet, map[string]bool, bool) {
+func dumpDiag(f *Facts, c *netlink.Conexao, seguros map[string]bool) (map[string]netlink.SocketInet, map[string]bool, map[string]bool) {
 	out := map[string]netlink.SocketInet{}
 	lidos := map[string]bool{}
-	cortado := false
+	cortado := map[string]bool{}
 	for _, fam := range []uint8{netlink.FamiliaIPv4, netlink.FamiliaIPv6} {
 		for _, proto := range []uint8{netlink.ProtoTCP, netlink.ProtoUDP} {
 			nomeP := nomeDeFamilia(fam, proto)
@@ -320,7 +353,7 @@ func dumpDiag(f *Facts, c *netlink.Conexao, seguros map[string]bool) (map[string
 				return nil
 			})
 			if err == netlink.ErrCortado {
-				cortado = true
+				cortado[nomeP] = true
 			} else if err != nil {
 				if f != nil {
 					f.partial("net", "netlink não enumerou "+nomeP+" ("+err.Error()+

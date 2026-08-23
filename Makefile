@@ -29,7 +29,7 @@ GOFLAGS := -trimpath
 # LD_PRELOAD e a binário de sistema trojanizado (SPEC 4).
 export CGO_ENABLED = 0
 
-.PHONY: all build helper vm-image test race race-unit lint verify clean dist binarios repro repro-confere scenarios scenarios-container images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix vm-matrix arches
+.PHONY: all build helper vm-image test race race-unit lint verify clean dist binarios repro repro-confere scenarios scenarios-container images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix vm-matrix arches fuzz test-386 cap-sonda cap-proof
 
 all: verify
 
@@ -87,6 +87,40 @@ race:
 race-unit: export CGO_ENABLED = 1
 race-unit:
 	go test -race -count=1 ./internal/... ./cmd/...
+
+# fuzz procura o que ninguém imaginou no CODEC, que é escrito à mão.
+#
+# A lista de entradas hostis de transporte_test.go é a que o autor pensou: frame
+# acima do teto, id de tipo inválido, batch, _meta malformado. Ela vale, e não
+# cobre a classe inteira — num parser que fica atrás de um servidor que pode
+# rodar como root, o que interessa é o caso que não ocorreu a ninguém.
+#
+# O corpus de semente roda no `make test` normal (go test executa os f.Add sem
+# -fuzz). Este alvo é a busca de verdade, com orçamento: 60s por alvo já
+# produziu 4 milhões de execuções por alvo nesta máquina.
+#
+# O terceiro alvo é o parser de DUMP, e ele é o mais exposto dos três: o modelo
+# de ameaça do --snapshot diz que o artefato NÃO é autenticado, e quem o escreveu
+# escolhe o que ele diz. A redação de ingresso do MCP é uma caminhada REFLEXIVA
+# sobre essa estrutura, e ela acontece antes de qualquer check rodar.
+#
+# FUZZTIME sobrescreve: `make fuzz FUZZTIME=10m` antes de tag.
+FUZZTIME ?= 60s
+fuzz:
+	go test ./internal/mcp/  -run FuzzDecodificar -fuzz FuzzDecodificar -fuzztime $(FUZZTIME)
+	go test ./internal/mcp/  -run FuzzLeitor      -fuzz FuzzLeitor      -fuzztime $(FUZZTIME)
+	go test ./internal/dump/ -run FuzzCarregar    -fuzz FuzzCarregar    -fuzztime $(FUZZTIME)
+
+# test-386 RODA a suíte em 32 bits, e não só compila.
+#
+# `arches` faz vet e build cruzados, o que pega tipo divergente e nada mais. Em
+# i386 o Timespec do syscall é int32, o int é de 32 bits, e a comparação de
+# tempo e de tamanho de arquivo passa por eles — a família file.* nasceu inteira
+# depois desse alvo existir, e nunca tinha sido EXECUTADA ali.
+#
+# Roda sem qemu: o binário de 32 bits executa direto num host x86-64.
+test-386:
+	GOOS=linux GOARCH=386 go test -count=1 ./internal/... ./cmd/...
 
 lint:
 	gofmt -l . | tee /dev/stderr | grep -q . && { echo "arquivos não formatados"; exit 1; } || true
@@ -226,6 +260,24 @@ vm-ftrace-proof:
 # tocado. Controle negativo incluído: host limpo cala. Exige docker e qemu.
 vm-socket-proof:
 	./test/vm/socket-hidden-module.sh
+
+# cap-proof prova, com capability de ARQUIVO num contêiner descartável, que
+# env.CapRoot mede ALCANCE e não euid.
+#
+# A concessão passou a ser `euid==0 || (leitura de arquivo E ptrace)`, e isso é
+# uma afirmação sobre o KERNEL: que essas capabilities, e não outras, abrem as
+# quatro superfícies que CapRoot promete. O unitário injeta um conjunto de bits
+# e mede a decisão; ele não sabe se aquele conjunto corresponde a poder real.
+#
+# Aqui cada caso TENTA LER /etc/shadow. O caso decisivo é CAP_SYS_ADMIN sozinha:
+# ela é a capability mais larga do Linux, o código já a tratou como substituta da
+# DAC, e o kernel não a consulta naquela checagem. Sem qemu; o kernel do host
+# nunca é tocado.
+cap-sonda:
+	CGO_ENABLED=0 go build $(GOFLAGS) -o dist/cap-sonda ./test/cap/sonda
+
+cap-proof: cap-sonda
+	./test/cap/capability-proof.sh
 
 # matrix roda a matriz adversarial: monta técnicas de ataque de userspace num
 # contêiner descartável e mede quais checks disparam (regressão) e quais passam

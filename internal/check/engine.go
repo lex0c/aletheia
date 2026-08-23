@@ -209,6 +209,7 @@ func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 				Manual: []string{"rode `aletheia scan`, que faz a coleta completa"},
 			})
 		}
+		r.Coverage.CollectorGaps = LacunasDeColeta(f)
 		return r
 	}
 
@@ -315,8 +316,53 @@ func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 	// assim que "o executável deste processo mudou" alcança o achado que fala
 	// do processo.
 	marcarDrift(r, f)
+	// DEPOIS de tudo: a falha de COLETA é o eixo que não passa por check
+	// nenhum, e sem ela um relatório pode sair completo tendo lido metade do
+	// host.
+	r.Coverage.CollectorGaps = LacunasDeColeta(f)
 	r.sortFindings()
 	return r
+}
+
+// LacunasDeColeta é a falha de COLETA no eixo próprio dela: não é um check que
+// deixou de rodar, é dado que não pôde ser lido. Sai da aritmética de checks e
+// continua impedindo um veredito de OK.
+//
+// # Por que ela vive aqui, e é PURA
+//
+// Ela era uma função de `package main`, chamada à mão nos cinco pontos que
+// rodam checks — três deles indiretamente, por `emitir`. Funcionava, e tinha
+// duas consequências ruins. A primeira é que um sexto ponto de chamada nasceria
+// sem ela, e o sintoma seria uma cobertura silenciosamente melhor que a
+// verdade: nada quebra, o número sobe, o veredito melhora. A segunda apareceu
+// quando o servidor MCP precisou da mesma cobertura — de `internal/`, aquela
+// função não existe, e a saída óbvia seria reescrevê-la. Duas implementações da
+// mesma contabilidade divergem em silêncio, que foi exatamente o que aconteceu
+// com o agrupamento de achados antes de GroupByIDSev existir.
+//
+// RunWith a aplica sozinho, para que ninguém possa esquecer. E ela devolve a
+// LISTA em vez de mexer num Report, porque quem só precisa saber o que a coleta
+// não leu — o servidor MCP respondendo um dossiê, sem rodar check nenhum — não
+// deveria ter de fabricar um relatório para descobrir.
+func LacunasDeColeta(f *facts.Facts) []string {
+	if f == nil || len(f.Partial) == 0 {
+		return nil
+	}
+	// Ordem FIXA: `f.Partial` é mapa, e a lista sai daqui para o JSONL e para a
+	// baseline. Sem ordenar, duas execuções idênticas produzem arquivos
+	// diferentes — e comparar dois JSONL por diff é como se audita frota.
+	coletores := make([]string, 0, len(f.Partial))
+	for c := range f.Partial {
+		coletores = append(coletores, c)
+	}
+	sort.Strings(coletores)
+	var out []string
+	for _, coletor := range coletores {
+		for _, razao := range f.Partial[coletor] {
+			out = append(out, coletor+": "+razao)
+		}
+	}
+	return out
 }
 
 // applyTrustDowngrade marca retroativamente os achados que dependeram de um
@@ -358,6 +404,19 @@ func (r *Report) applyTrustDowngrade() {
 // que mente sobre a lista de PIDs também serve o VFS: o `openat` que lê
 // /etc/crontab passa por ele. O único modo que sobrevive é o de imagem
 // montada, onde o kernel é o do analista (§35.6).
+// MensagemDeQuebraDeKernel devolve a frase que um check kernelBreaker publica em
+// KernelTrustBroken ao disparar CRITICAL, e se o ID é de fato kernelBreaker.
+//
+// Existe para quem TRANSPORTA KernelTrustBroken por outra interface — a tool
+// crossview.get — e precisa atribuir a quebra ao EIXO certo. A pergunta "este
+// eixo quebrou a confiança?" tem de ser respondida pela MESMA lista que o motor
+// publicou, testando se a frase deste breaker está nela; recompor a decisão a
+// partir dos fatos seria a segunda contabilidade que o resto do projeto evita.
+func MensagemDeQuebraDeKernel(id string) (string, bool) {
+	m, ok := kernelBreakers[id]
+	return m, ok
+}
+
 func (r *Report) invalidarAusencias(fonte env.Source, completos []Check) {
 	var motivos []string
 	for _, f := range r.Findings {
@@ -554,6 +613,20 @@ func GroupByIDSev(fs []Finding) []Group {
 type SubjectGroup struct {
 	Subject  string
 	Findings []Finding
+
+	// Indices são as posições de Findings em Report.Findings, na mesma ordem.
+	//
+	// Existem porque quem publica os achados por um HANDLE posicional (o
+	// servidor MCP) precisa do índice verdadeiro, e recuperá-lo por um mapa
+	// ID+Subject+Chave+Sev é reconstruir uma identidade que o próprio
+	// Finding.Chave documenta como COLIDENTE: um check que dispara duas vezes
+	// no mesmo sujeito, com a mesma severidade e sem Chave — proc.deleted_mapping
+	// com duas bibliotecas apagadas no mesmo pid — produz duas entradas
+	// indistinguíveis, e o mapa fica com a última. Os dois achados voltavam com
+	// o mesmo handle, e um deles ficava inalcançável.
+	//
+	// Correlate já rastreia isto em posDoAlvo e descartava.
+	Indices []int
 }
 
 // Sev é a maior severidade do grupo: um implante com três avisos e um crítico
@@ -649,7 +722,9 @@ func (r *Report) Correlate() ([]SubjectGroup, []Finding) {
 		for _, i := range posDoAlvo[subj] {
 			agrupado[i] = true
 		}
-		grupos = append(grupos, SubjectGroup{Subject: subj, Findings: fs})
+		grupos = append(grupos, SubjectGroup{
+			Subject: subj, Findings: fs, Indices: posDoAlvo[subj],
+		})
 	}
 
 	// Mais severo primeiro; empatando, quem tem mais sinais.

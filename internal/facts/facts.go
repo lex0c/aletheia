@@ -256,7 +256,50 @@ import (
 //	   guardar só o valor efetivo por arquivo. Num dump v16 ela traz todas as
 //	   atribuições, e comparar as duas versões acusaria remoção onde houve
 //	   apenas uma linha sombreada que deixou de ser guardada.
-const SchemaVersion = 17
+//	18 O CrossView passou a carregar o estado de LEITURA de cada testemunha, e
+//	   essa observabilidade não é lida por check nenhum — é lida pela tool
+//	   crossview.get, que AO CONTRÁRIO de process.environ alcança dump (fonte
+//	   live servida em modo snapshot). Num dump v17 esses bits vêm falsos, e
+//	   falso ali é "não lido": a tool renderizaria not_compared para uma
+//	   comparação que aconteceu, ou agree com uma testemunha marcada não lida.
+//	   Por isso o número sobe e o Carregar recusa o v17 em vez de respondê-lo
+//	   torto.
+//
+//	   ProcListLida/ProcListN  o sucesso e a contagem do readdir de /proc, a
+//	     testemunha de BASE da comparação de processos — PidsListados é json:"-"
+//	     e não viajava.
+//	   ModProcLido/ModSysLido/ModFtraceLido  okProc/errSys/achou dos coletores:
+//	     fonte lida com zero módulos ≠ fonte ilegível.
+//	   SocketProtos  o estado por protocolo inet (compared|proc_unreadable|
+//	     diag_skipped). A contagem "3 de 4" não dizia QUAL faltou, e o netlink
+//	     pula o protocolo sem handler de diag para não autocarregar — "2 de 2"
+//	     virava agree com udp/udp6 nunca olhados.
+//	19 Trigger.AptHooks: os hooks ATIVOS de um apt.conf, extraídos na coleta com
+//	   o lexer do apt sobre os bytes crus. Antes, o poder de execução de um
+//	   apt.conf e o persist.trigger_exec liam Trigger.Lines — e Lines passou pelo
+//	   parser genérico, que descarta a linha começada por #. Um hook escondido
+//	   atrás de um bloco /* … */ que fecha depois de um # (`/*\n# */ Pre-Invoke
+//	   {…}`) some de Lines inteiro: falso negativo determinístico numa superfície
+//	   que o atacante controla. Num dump v18 AptHooks vem vazio, e vazio ali é
+//	   "nenhum hook" sobre um arquivo que pode ter um — então o número sobe e o
+//	   Carregar recusa o v18 em vez de responder ausência sobre o que não foi
+//	   extraído.
+//	20 CrossView.SocketInconclusivos: os candidatos a socket oculto que a
+//	   reconfirmacao NAO fechou. O coletor ja o sabia (Partial), mas o estado
+//	   nao viajava — e crossview.get, vendo SocketOcultos vazio e os quatro
+//	   protocolos comparados, respondia agree onde tinha havido uma
+//	   discrepancia que ninguem resolveu. Num dump v19 o campo vem zerado, e
+//	   zero ali afirma "nenhum inconclusivo" sobre uma coleta que pode ter
+//	   tido — entao o numero sobe e o Carregar recusa o v19. Junto, a 2a
+//	   enumeracao netlink truncada deixou de descartar candidato como corrida.
+//	21 TriggerLine.File: a ORIGEM de uma linha de gatilho, quando ela não vem do
+//	   próprio arquivo — um hook de apt trazido por #include mora noutro
+//	   arquivo. A evidência do persist.trigger_exec passou a apontar para a
+//	   origem: apontar 99x quando o payload está em /opt/.apt-hidden é
+//	   etiqueta errada. Num dump v20 o campo vem vazio, e vazio ali significa
+//	   "a linha é do próprio gatilho" — que num dump antigo sem hooks de
+//	   include é verdade, mas passou a ser um fato de forma nova.
+const SchemaVersion = 21
 
 // Facts é o retrato do host.
 type Facts struct {

@@ -75,7 +75,7 @@ var arquivoDePacoteAlterado = check.Check{
 				ev = append(ev, "é um arquivo de CONFIGURAÇÃO que o pacote entrega "+
 					"para ser editado: divergir é o normal, e o que interessa é se "+
 					"quem editou foi o administrador")
-				if gatilhoDeExecucao(d.Path) {
+				if gatilhoDeExecucao(f, d.Path) {
 					sev = check.SevCritical
 					ev = append(ev, "MAS ele EXECUTA: acrescentar uma linha aqui é "+
 						"persistência que mantém o dono de pacote e passa por toda "+
@@ -258,7 +258,38 @@ var dataFalsificada = check.Check{
 // que não está no /etc/skel é o normal, não um sinal. Os dotfiles por usuário
 // continuam saindo como AVISO pelo check de timestomp — que é onde já estavam —,
 // e o que muda aqui é apenas a PROMOÇÃO a crítico.
-func gatilhoComPoder(t *facts.Trigger) bool { return t.User == "" }
+//
+// pkg_hook é a exceção onde PRESENÇA não é execução. Nos outros diretórios, um
+// arquivo existir já significa que ele roda: um script em /etc/update-motd.d
+// roda no login. Mas /etc/apt/apt.conf.d guarda CONFIGURAÇÃO, e só alguns
+// arquivos ali definem um HOOK que executa comando (DPkg::Pre-Install-Pkgs,
+// *::Pre-Invoke, *::Post-Invoke). A maioria só ajusta opção — Unattended-Upgrade,
+// APT::Periodic, Acquire. Tratar o 50unattended-upgrades (data de pacote, ctime
+// de build, sem dono de pacote no dump) como alvo de persistência o promovia a
+// CRITICAL de timestomp num servidor de produção limpo. Um pkg_hook só tem poder
+// se de fato roda comando.
+func gatilhoComPoder(t *facts.Trigger) bool {
+	if t.User != "" {
+		return false
+	}
+	if t.Kind == "pkg_hook" {
+		return pkgHookRodaComando(t)
+	}
+	return true
+}
+
+// pkgHookRodaComando diz se um apt.conf EXECUTA algo — se define um hook ativo.
+//
+// A pergunta é respondida pelo FATO SEMÂNTICO que a coleta extraiu com o lexer
+// do apt (Trigger.AptHooks), não por reparsear texto. Reconstruir a gramática do
+// apt sobre Trigger.Lines era frágil por construção: Lines já passou pelo parser
+// genérico, que descarta a linha começada por # — e um hook escondido atrás de um
+// bloco /* … */ que fecha depois de um # sumia da representação inteira. dnf/yum
+// não são apt.conf.d e não têm AptHooks: a config deles LIGA um plugin cujo
+// código mora noutro lugar, e o arquivo em si não executa.
+func pkgHookRodaComando(t *facts.Trigger) bool {
+	return len(t.AptHooks) > 0
+}
 
 func arquivoComPoder(f *facts.Facts, p string) string {
 	for i := range f.Suid {
@@ -294,7 +325,7 @@ func arquivoComPoder(f *facts.Facts, p string) string {
 			return "e é um gatilho de " + t.Kind + " (" + t.When + "): a data foi " +
 				"mexida num alvo de persistência"
 		}
-		for _, ln := range t.Lines {
+		for _, ln := range linhasExecutaveisDoTrigger(t) {
 			if facts.PrimeiroCaminhoAbsoluto(ln.Text) == p {
 				return "e o gatilho " + t.File + " o executa: a data foi mexida " +
 					"num alvo de persistência"
@@ -327,11 +358,23 @@ func duracaoEmDias(h int) string {
 
 // gatilhoDeExecucao diz se o arquivo de configuração EXECUTA alguma coisa.
 // Modificar um deles é persistência que mantém o dono de pacote.
-func gatilhoDeExecucao(p string) bool {
+func gatilhoDeExecucao(f *facts.Facts, p string) bool {
+	// apt.conf.d é o único destes diretórios onde PRESENÇA não é execução: a
+	// maioria dos arquivos só ajusta opção. Promover a CRITICAL um config de
+	// opção modificado, dizendo "MAS ele EXECUTA", é falso exatamente no caso que
+	// o fato AptHooks passou a distinguir. Só executa quem define hook.
+	if strings.Contains(p, "/apt/apt.conf") {
+		for i := range f.Triggers {
+			if f.Triggers[i].File == p {
+				return len(f.Triggers[i].AptHooks) > 0
+			}
+		}
+		return false // não coletado como gatilho: nenhum hook conhecido
+	}
 	for _, d := range []string{
 		"/etc/init.d/", "/etc/pam.d/", "/etc/cron.", "/etc/profile.d/",
 		"/etc/update-motd.d/", "/etc/rc.local", "/etc/rc.d/",
-		"/etc/NetworkManager/dispatcher.d/", "/etc/apt/apt.conf.d/",
+		"/etc/NetworkManager/dispatcher.d/",
 	} {
 		if strings.HasPrefix(p, d) {
 			return true

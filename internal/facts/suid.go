@@ -656,15 +656,19 @@ func capabilityDoArquivo(e *env.Env, p string) (uint64, bool) {
 	if err != nil || n < 12 {
 		return 0, false
 	}
-	magic := le32(buf[0:])
-	perm := uint64(le32(buf[4:]))
-	if n >= 20 {
-		perm |= uint64(le32(buf[12:])) << 32
+	// O DESDOBRAMENTO mora em env, e é um só: aqui a aquisição é por CAMINHO,
+	// durante a varredura de SUID, e na inspeção direcionada é por DESCRITOR.
+	// Duas cópias do mesmo desdobramento de bits divergiriam, e a que
+	// divergisse seria a que ninguém está olhando.
+	m, efetivo, ok := env.MascaraDeCapability(buf[:n])
+	if !ok {
+		return 0, false
 	}
-	const flagEfetivo = 0x000001
-	return perm, magic&flagEfetivo != 0
+	return m, efetivo
 }
 
+// le32 continua aqui porque login.go também o usa para ler o utmp binário — é
+// leitura de inteiro little-endian, e não desdobramento de capability.
 func le32(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
 }

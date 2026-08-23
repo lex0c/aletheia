@@ -361,7 +361,7 @@ func lerHooks(f *Facts, e *env.Env, dir string) {
 			continue
 		}
 		p := dir + "/" + n
-		if t, ok := lerTrigger(e, p, "git_hook",
+		if t, ok := lerTrigger(f, e, p, "git_hook",
 			"a cada operação de git — sobrevive ao redeploy e não mora em /etc", ""); ok {
 			if t.Ilegvel {
 				f.denyPersist("githook", p+" existe e não pôde ser LIDO: um git hook "+

@@ -1449,6 +1449,13 @@ var gatilhoDeExecucao = Classe{
 		if temLacuna(f, "githook") {
 			out["githook"] = "a varredura de hooks de git declarou lacuna"
 		}
+		// A config do apt tem FONTE própria: um #clear ou um #include ilegível é
+		// incerteza sobre os hooks do APT, e não pode cegar surgiu/sumiu de
+		// /etc/profile.d, rc.local, PAM e o resto que vêm da mesma varredura de
+		// gatilhos mas foram lidos inteiros. Cada fonte suprime só as suas.
+		if temLacuna(f, "apt") {
+			out["apt"] = "a resolução da config do apt declarou lacuna (#clear ou #include)"
+		}
 		if len(out) == 0 {
 			return nil
 		}
@@ -1477,8 +1484,12 @@ var gatilhoDeExecucao = Classe{
 		out := make([]Entidade, 0, len(f.Triggers))
 		for i := range f.Triggers {
 			t := &f.Triggers[i]
+			// LinhasExecutaveis, não t.Lines: para apt.conf.d o que executa é o
+			// hook (AptHooks), e um hook adversário que muda entre dois retratos
+			// não aparece em Lines. Sem isto, o drift do gatilho é cego ao mesmo
+			// fato que subiu o SchemaVersion para existir.
 			var linhas []string
-			for _, l := range t.Lines {
+			for _, l := range t.LinhasExecutaveis() {
 				linhas = append(linhas, redact.Linha(l.Text))
 			}
 			conteudo := juntarSequencia(linhas)
@@ -1489,8 +1500,11 @@ var gatilhoDeExecucao = Classe{
 			// coletor de git achou: as duas enchem f.Triggers, e cada uma falha
 			// do seu jeito.
 			fonte := "startup"
-			if t.Kind == "git_hook" {
+			switch {
+			case t.Kind == "git_hook":
 				fonte = "githook"
+			case t.EhApt():
+				fonte = "apt"
 			}
 			out = append(out, Entidade{
 				ID: t.File, Alvos: []string{t.File}, Fonte: fonte,

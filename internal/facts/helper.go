@@ -44,7 +44,7 @@ type HelperDoKernel struct {
 	// Nome é o mecanismo: modprobe, core_pattern ou uevent_helper.
 	Nome  string `json:"name"`
 	Fonte string `json:"source"`
-	Valor string `json:"value"`
+	Valor string `json:"value" redact:"linha"`
 	// Alvo é o programa extraído do valor, quando o valor aponta para um. Vazio
 	// significa que aquele valor NÃO executa nada — o core_pattern sem "|" é um
 	// modelo de nome de arquivo, e não um programa.

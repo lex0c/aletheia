@@ -7,6 +7,8 @@ import (
 
 	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/facts"
+
+	"github.com/lex0c/aletheia/internal/redact"
 )
 
 // Os quatro alvos que um respondedor investiga um por um, e que hoje custam
@@ -22,29 +24,29 @@ import (
 // Linha é um par rótulo/valor do dossiê, com uma nota opcional que diz o que
 // aquele valor SIGNIFICA. A nota é o que separa isto de uma saída crua.
 type Linha struct {
-	Rotulo string
-	Valor  string
-	Nota   string
+	Rotulo string `json:"label"`
+	Valor  string `json:"value"`
+	Nota   string `json:"meaning,omitempty"`
 }
 
 // Dossie é a resposta sobre um alvo.
 type Dossie struct {
-	Alvo string
+	Alvo string `json:"target"`
 	// Achou é falso quando o alvo não existe nos fatos. Não é erro: é resposta.
-	Achou bool
+	Achou bool `json:"found"`
 	// Blocos são as seções, na ordem em que ajudam a decidir.
-	Blocos []Bloco
+	Blocos []Bloco `json:"blocks,omitempty"`
 	// Sinais são as coisas que pedem olhar humano — o que um scan chamaria de
 	// achado, aqui dito sem veredito.
-	Sinais []string
+	Sinais []string `json:"signals,omitempty"`
 	// Proximo são os comandos que fazem sentido em seguida, já preenchidos.
-	Proximo []string
+	Proximo []string `json:"next,omitempty"`
 }
 
 // Bloco é uma seção do dossiê.
 type Bloco struct {
-	Titulo string
-	Linhas []Linha
+	Titulo string  `json:"title"`
+	Linhas []Linha `json:"lines,omitempty"`
 }
 
 func (d *Dossie) bloco(titulo string, ls ...Linha) {
@@ -378,6 +380,63 @@ func Arquivo(f *facts.Facts, caminho string) *Dossie {
 		executadoPorRoot = append(executadoPorRoot, Linha{a.Origem, a.Onde, nota})
 	}
 	d.bloco("O ROOT EXECUTA ISTO", executadoPorRoot...)
+
+	// O QUE ESTE ARQUIVO DEFINE — a pergunta INVERSA, e ela faltava.
+	//
+	// O bloco de baixo pergunta "quem manda executar este arquivo", casando o
+	// caminho contra o COMANDO de cada agendamento. Ninguém perguntava se o
+	// caminho É a fonte: um `/etc/cron.d/telemetry` respondia "este caminho não
+	// aparece em nada que esta coleta examinou" — sobre o arquivo que o próprio
+	// achado `persist.cron_suspect` cita como evidência.
+	//
+	// A lacuna apareceu num teste com cliente MCP real: o modelo achou o cron
+	// backdoor, perguntou pelo arquivo, e recebeu found:false. É a próxima
+	// pergunta óbvia depois de um achado de persistência, e o dossiê não
+	// alcançava o artefato da própria conclusão.
+	var define []Linha
+	for i := range f.Cron {
+		c := &f.Cron[i]
+		if c.File != caminho {
+			continue
+		}
+		d.Achou = true
+		quando := c.Schedule
+		if quando == "" && c.Reboot {
+			quando = "no boot"
+		}
+		define = append(define, Linha{"agenda " + nz(quando, "?"),
+			redact.Linha(c.Cmd), "como " + nz(c.User, "?")})
+	}
+	for i := range f.Units {
+		u := &f.Units[i]
+		if u.Path != caminho {
+			continue
+		}
+		d.Achou = true
+		for _, ex := range u.Exec {
+			define = append(define, Linha{"unit " + u.Name,
+				redact.Linha(ex.Cmd), ex.Key})
+		}
+		if len(u.Exec) == 0 {
+			define = append(define, Linha{"unit " + u.Name, u.Kind, "sem Exec"})
+		}
+	}
+	for i := range f.Triggers {
+		t := &f.Triggers[i]
+		if t.File != caminho {
+			continue
+		}
+		d.Achou = true
+		for _, ln := range t.Lines {
+			define = append(define, Linha{
+				t.Kind + ":" + strconv.Itoa(ln.N), redact.Linha(ln.Text),
+				"executa " + nz(t.When, "no gatilho")})
+		}
+		if len(t.Lines) == 0 {
+			define = append(define, Linha{t.Kind, t.File, "sem linha que execute"})
+		}
+	}
+	d.bloco("O QUE ESTE ARQUIVO DEFINE", define...)
 
 	var agendado []Linha
 	for i := range f.Cron {

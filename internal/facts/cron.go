@@ -33,7 +33,7 @@ type CronEntry struct {
 
 	User     string `json:"user,omitempty"`
 	Schedule string `json:"schedule,omitempty"`
-	Cmd      string `json:"cmd"`
+	Cmd      string `json:"cmd" redact:"linha"`
 
 	// IntervalSec é o menor intervalo que o gatilho produz; 0 = não periódico
 	// ou não determinado. É o que responde à §2.7 — a cadência do beacon.
@@ -42,7 +42,7 @@ type CronEntry struct {
 
 	// Env é o ambiente capturado junto do job. Só `at` guarda isso, e é um
 	// achado por si: SSH_CONNECTION ali dentro entrega o IP de quem agendou.
-	Env []EnvSetting `json:"env,omitempty"`
+	Env []EnvSetting `json:"env,omitempty" redact:"valor"`
 
 	ModUTC string `json:"mod_utc,omitempty"`
 }

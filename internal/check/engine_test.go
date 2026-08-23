@@ -440,3 +440,46 @@ func TestThreadCountNaoEstaEmKernelBreakers(t *testing.T) {
 		}
 	}
 }
+
+// A lacuna de COLETA é montada pelo MOTOR, e não por quem chama.
+//
+// Ela já foi uma função de `package main` invocada à mão em cinco lugares.
+// Funcionava, e o modo de falha era silencioso: um sexto chamador nasceria sem
+// ela, a cobertura sairia melhor que a verdade, e nada quebraria. Este teste
+// existe para que ela não volte para fora.
+func TestMotorMontaAsLacunasDeColetaSozinho(t *testing.T) {
+	f := &facts.Facts{Partial: map[string][]string{
+		"proc": {"250 processos com /proc/<pid>/fd ilegível"},
+		"net":  {"o módulo udp_diag não está carregado"},
+	}}
+	r := Run([]Check{mkCheck("a")}, f, liveEnv(env.CapProcfs))
+
+	if len(r.Coverage.CollectorGaps) != 2 {
+		t.Fatalf("quero 2 lacunas de coleta montadas pelo motor, tenho %v", r.Coverage.CollectorGaps)
+	}
+	// Ordem FIXA: `Partial` é mapa, e a lista vai para o JSONL que a auditoria
+	// de frota compara por diff.
+	if r.Coverage.CollectorGaps[0] != "net: o módulo udp_diag não está carregado" {
+		t.Fatalf("a ordem tem de ser estável por nome de coletor, tenho %v", r.Coverage.CollectorGaps)
+	}
+	// E ela sozinha derruba o veredito: todos os checks completos e ainda assim
+	// há host que ninguém leu.
+	if !r.Coverage.Incomplete() {
+		t.Fatal("lacuna de coleta tem de impedir cobertura completa")
+	}
+	if r.Verdict() != "INCOMPLETE" {
+		t.Fatalf("quero INCOMPLETE, tenho %s", r.Verdict())
+	}
+}
+
+// E na coleta VOLÁTIL também: aquele caminho retorna cedo, e o retorno cedo é
+// onde este tipo de montagem costuma ficar de fora.
+func TestVolatilTambemMontaLacunaDeColeta(t *testing.T) {
+	f := &facts.Facts{Volatil: true, Partial: map[string][]string{
+		"proc": {"sem CapProcfs"},
+	}}
+	r := Run([]Check{mkCheck("a")}, f, liveEnv(env.CapProcfs))
+	if len(r.Coverage.CollectorGaps) != 1 {
+		t.Fatalf("o retorno cedo do volátil perdeu a lacuna: %v", r.Coverage.CollectorGaps)
+	}
+}

@@ -80,3 +80,71 @@ func TestTimestompClusterPequenoContinuaCritico(t *testing.T) {
 		t.Fatalf("cluster de 2 não é extração em massa: %+v", r.Findings)
 	}
 }
+
+// pkg_hook é o gatilho onde PRESENÇA não é execução, e confundir os dois
+// promovia um host limpo a comprometido.
+//
+// /etc/apt/apt.conf.d/50unattended-upgrades tem a forma exata de um timestomp —
+// mtime na data de build do pacote (anos atrás), ctime na hora em que a camada
+// da imagem foi criada, e nenhum pacote reivindicando o arquivo no dump. Mas ele
+// só define OPÇÃO (Unattended-Upgrade::*, APT::Periodic::*): não roda comando
+// nenhum. Tratá-lo como alvo de persistência o fazia CRITICAL de timestomp num
+// servidor de produção intocado — o T1 da suíte de cenários caía exatamente
+// aqui.
+//
+// Um pkg_hook só tem poder se define um HOOK que executa. Sem hook, o timestomp
+// dele não é promovido; com hook, continua sendo — este teste prova os dois
+// lados na MESMA forma temporal, para que a diferença seja só o conteúdo.
+func TestPkgHookSoTemPoderSeRodaComando(t *testing.T) {
+	ts := func(p string) facts.Timestomp {
+		return facts.Timestomp{Path: p, ModUTC: "2022-12-31T20:59:00Z",
+			MetaUTC: "2026-08-23T16:00:31Z", DeltaH: 31939, Cluster: 1}
+	}
+	// Só opção — a forma do 50unattended-upgrades. Sem AptHooks: o coletor não
+	// extraiu hook nenhum (a extração é testada em TestAnalisarAptHooks).
+	soOpcao := facts.Trigger{
+		File: "/etc/apt/apt.conf.d/50unattended-upgrades", Kind: "pkg_hook",
+		When: "a cada operação do gerenciador de pacotes",
+	}
+	f := &facts.Facts{Timestomps: []facts.Timestomp{ts(soOpcao.File)},
+		Triggers: []facts.Trigger{soOpcao}}
+	r := dataFalsificada.Run(dataFalsificada, f, testEnv())
+	if len(r.Findings) != 0 {
+		t.Errorf("um apt.conf.d só de OPÇÃO virou achado de timestomp (%d): é o FP "+
+			"que fazia o servidor de produção limpo sair CRITICAL", len(r.Findings))
+	}
+
+	// Mesma forma temporal, mas com um HOOK ativo (AptHooks preenchido pelo
+	// coletor): continua CRITICAL. A promoção lê o fato semântico, não texto.
+	comHook := soOpcao
+	comHook.File = "/etc/apt/apt.conf.d/99backdoor"
+	comHook.AptHooks = []facts.TriggerLine{{N: 1, Text: "/usr/local/bin/x || true"}}
+	f2 := &facts.Facts{Timestomps: []facts.Timestomp{ts(comHook.File)},
+		Triggers: []facts.Trigger{comHook}}
+	r2 := dataFalsificada.Run(dataFalsificada, f2, testEnv())
+	if len(r2.Findings) != 1 || r2.Findings[0].Sev != check.SevCritical {
+		t.Errorf("um apt hook que RODA comando, com data mexida, deixou de ser "+
+			"CRITICAL: a correção do FP não pode cegar a detecção real. Achados: %d",
+			len(r2.Findings))
+	}
+}
+
+// dnf/yum plugin config compartilha o kind pkg_hook mas não tem gramática de
+// hook do apt: dar poder a ele pela gramática errada seria falso sinal. O
+// arquivo de config só liga um plugin cujo código mora noutro lugar.
+func TestPkgHookForaDoAptNaoTemPoder(t *testing.T) {
+	// O coletor só extrai AptHooks de apt.conf.d, então um plugin dnf/yum não
+	// tem hook — a config dele LIGA um plugin cujo código mora noutro lugar, e o
+	// arquivo em si não executa. Sem AptHooks, não é alvo de persistência, mesmo
+	// que a config contenha a palavra "post-invoke".
+	trig := facts.Trigger{File: "/etc/dnf/plugins/evil.conf", Kind: "pkg_hook",
+		When: "a cada operação do gerenciador de pacotes"}
+	f := &facts.Facts{
+		Timestomps: []facts.Timestomp{{Path: trig.File, ModUTC: "2022-01-01T00:00:00Z",
+			MetaUTC: "2026-08-23T16:00:31Z", DeltaH: 40000, Cluster: 1}},
+		Triggers: []facts.Trigger{trig}}
+	r := dataFalsificada.Run(dataFalsificada, f, testEnv())
+	if len(r.Findings) != 0 {
+		t.Errorf("config de plugin dnf virou achado de timestomp (%d)", len(r.Findings))
+	}
+}

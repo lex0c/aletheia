@@ -24,54 +24,54 @@ import (
 
 // CensoDeGit é o retrato de um repositório.
 type CensoDeGit struct {
-	Dir     string
-	HEAD    string
-	Remotes []facts.RemoteGit
+	Dir     string            `json:"dir"`
+	HEAD    string            `json:"head,omitempty"`
+	Remotes []facts.RemoteGit `json:"remotes,omitempty"`
 
 	// Executa é a superfície de execução do repositório, ordenada.
-	Executa []facts.OpcaoDeGit
-	Hooks   []facts.HookDeGit
+	Executa []facts.OpcaoDeGit `json:"executes,omitempty"`
+	Hooks   []facts.HookDeGit  `json:"hooks,omitempty"`
 	// HooksRedirecionados diz que os hooks NÃO estão em .git/hooks.
-	HooksRedirecionados string
+	HooksRedirecionados string `json:"hooks_path,omitempty"`
 
 	// Reescritas são os movimentos de reflog que reescreveram histórico.
-	Reescritas []Reescrita
-	Movimentos int
+	Reescritas []Reescrita `json:"rewrites,omitempty"`
+	Movimentos int         `json:"reflog_moves,omitempty"`
 
-	Escondidos []string
+	Escondidos []string `json:"hidden,omitempty"`
 
 	// Identidades é QUEM moveu ref neste repositório, com a contagem. Sai do
 	// reflog, que registra nome e e-mail de cada movimento — e uma identidade
 	// que aparece duas vezes em quinhentos movimentos é uma visita.
-	Identidades []Contagem
+	Identidades []Contagem `json:"identities,omitempty"`
 
-	Refs          int
-	ObjetosSoltos int
-	Packs         int
+	Refs          int `json:"refs,omitempty"`
+	ObjetosSoltos int `json:"loose_objects,omitempty"`
+	Packs         int `json:"packs,omitempty"`
 
-	Atributos []string
-	Intrusos  []string
+	Atributos []string `json:"attributes,omitempty"`
+	Intrusos  []string `json:"intruders,omitempty"`
 
 	// HooksAtivos são os que têm bit de execução: só eles rodam.
-	HooksAtivos int
+	HooksAtivos int `json:"hooks_active,omitempty"`
 
-	IndexUTC string
-	HeadUTC  string
+	IndexUTC string `json:"index_utc,omitempty"`
+	HeadUTC  string `json:"head_utc,omitempty"`
 
-	Padroes []Padrao
-	Lacunas []string
+	Padroes []Padrao `json:"patterns,omitempty"`
+	Lacunas []string `json:"gaps,omitempty"`
 }
 
 // Reescrita é um movimento de reflog que apagou ou trocou histórico.
 type Reescrita struct {
-	Acao    string
-	De      string
-	Para    string
-	Quem    string
-	QuandoU string
-	Msg     string
+	Acao    string `json:"action"`
+	De      string `json:"from"`
+	Para    string `json:"to"`
+	Quem    string `json:"who,omitempty"`
+	QuandoU string `json:"when_utc,omitempty"`
+	Msg     string `json:"message,omitempty"`
 	// Recupera é o comando que traz de volta o que foi reescrito.
-	Recupera string
+	Recupera string `json:"recover,omitempty"`
 }
 
 // acoesQueReescrevem são as ações de reflog que TROCAM o que já existia, em vez

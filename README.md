@@ -612,10 +612,57 @@ Também funciona sobre um dump:
 ./aletheia info --from host.json process 812
 ```
 
+> **Mudança de saída em `info --json`.** As chaves passaram a ser snake_case em
+> inglês, como o resto do JSON produzido pela ferramenta: `Rotulo` virou
+> `label`, `Valor` virou `value`, `Nota` virou `meaning`, e o mesmo vale para os
+> censos de processo, de rede e de git. Até a v1.7.0 elas saíam com o nome do
+> campo em Go. O JSONL de `scan`/`analyze` — que é o consumido pela agregação de
+> frota — **não** mudou.
+
 Use `info` quando a pergunta for "o que está acontecendo?" e `scan` quando a
 pergunta for "quais sinais de comprometimento existem?".
 
 ---
+
+## MCP — investigação conduzida por um agente
+
+O subcomando `mcp` expõe a triagem a um agente por Model Context Protocol, sobre
+stdio. O agente consulta achados, cobertura, dossiês e drift; e, sob
+consentimento explícito, adquire evidência nova do host.
+
+O servidor roda **dentro do host investigado** — não há nuvem, servidor central
+nem agente residente. Para uma máquina remota, o canal é o SSH que já existe:
+
+```sh
+ssh -T alvo 'sudo -n /opt/aletheia mcp --live --allow-root'
+```
+
+A regra que governa o desenho:
+
+> O servidor concede **observação, não execução**. Dado do host é entrada
+> adversária. Privilégio é herdado, nunca adquirido. Evidência ausente nunca é
+> ausência de evidência.
+
+Não existe tool que execute comando, escreva no host, encerre processo, resolva
+nome ou abra conexão. O que a policy não autoriza não aparece em `tools/list`, e
+a ausência é declarada em `session.status` com o motivo.
+
+**Lista vazia não é host limpo.** O `outputSchema` de toda tool em forma de
+achado exige `verdict` e `coverage`. Uma resposta sem achados vem acompanhada de
+`INCOMPLETE` e da lista do que não foi verificado — é a promessa do exit code
+traduzida para um canal que não tem exit code.
+
+| Lançamento | Tools | O que acrescenta |
+| --- | --- | --- |
+| `--snapshot dump.json` | 18 | achados, cobertura, dossiês, drift |
+| `--live` | 20 | `snapshot.capture` / `snapshot.release`, `crossview.get` |
+| `--root PATH` | 13 | imagem montada: sem `/proc`, sem processo, sem socket |
+| `+ --profile full` | 22 | `file.hash`, `file.capabilities` |
+| `+ --allow-secrets` | 25 | `file.read`, `file.xattrs`, `process.environ` |
+
+Referência completa — catálogo de tools, contrato de resposta, modelo de
+segurança, limites declarados e diagnóstico: **[docs/MCP.md](docs/MCP.md)**.
+Fluxos de investigação: [docs/PLAYBOOKS.md](docs/PLAYBOOKS.md), cenários 16–20.
 
 ## Quando usar cada comando
 
@@ -631,6 +678,7 @@ o comportamento aparece e some?          -> watch
 tenho um estado conhecido anterior?      -> baseline
 o que MUDOU desde um retrato que eu tinha? -> drift
 quero saber exatamente quais regras há?  -> checks
+quero que uma IA investigue o retrato?   -> mcp
 ```
 
 Catorze fluxos concretos de investigação — do "entrei no servidor e alguma
@@ -698,6 +746,7 @@ ontem" tem a forma de um deploy.
 | `preserve` | preserva artefatos voláteis ou arquivos selecionados |
 | `baseline` | captura um estado de referência |
 | `drift` | compara com um retrato anterior: o que mudou desde ele |
+| `mcp` | serve um retrato a um agente de IA por MCP, sobre stdio |
 | `checks` | lista checks, requisitos e falsos positivos conhecidos |
 | `version` | mostra versão, caminho e hash do binário |
 
@@ -927,7 +976,13 @@ artefatos solicitados, por exemplo:
 - `collect --out`;
 - `baseline -o`;
 - `scan --json`;
-- `preserve --out`.
+- `preserve --out`;
+- `mcp --audit-log`.
+
+`mcp` sem `--audit-log` não escreve nada: a trilha de invocações sai no `stderr`,
+que o cliente MCP pode capturar, encaminhar ou ignorar. O destino do
+`--audit-log` precisa ser um arquivo comum — a saída padrão é o canal do
+protocolo, e a ferramenta recusa apontar a trilha para lá.
 
 As leituras de arquivos tentam usar `O_NOATIME` para reduzir alteração da
 timeline. Quando o kernel ou as permissões não permitem esse modo, a ferramenta
@@ -985,6 +1040,21 @@ Essa separação também permite que os checks sejam testados sobre fatos
 controlados, enquanto cenários de integração exercitam a CLI contra sistemas
 reais.
 
+O servidor MCP entra como **mais um consumidor do mesmo domínio**, e não como um
+segundo caminho de investigação:
+
+```text
+   CLI (info / scan / analyze / drift) ----+
+                                           +--> info · check · drift · facts · dump · env
+   tools MCP (internal/mcp) ---------------+
+```
+
+Ele não executa `aletheia info …` para parsear a saída, e não tem lógica de
+investigação própria: uma pergunta nova nasce em `internal/info` e é servida
+pelos dois lados. Do contrário o CLI e o agente passariam a responder coisas
+diferentes sobre o mesmo retrato — e a cobertura, que é o rodapé obrigatório dos
+dois, viraria duas contabilidades que divergem em silêncio.
+
 ### Docs
 
 | | |
@@ -1020,12 +1090,26 @@ Testes adicionais:
 make scenarios
 make race
 make mutacao
+make fuzz
+make test-386
+make cap-proof
 ```
 
 - `scenarios` executa a CLI contra ambientes Linux reais/isolados;
 - `race` roda o detector de data races, incluindo a suíte de cenários;
 - `mutacao` injeta mutações em decisões dos checks para verificar se os testes
-  detectam regressões semânticas.
+  detectam regressões semânticas;
+- `fuzz` busca no codec MCP, que é escrito à mão, o que ninguém imaginou — a
+  mensagem e o **framing**, onde mora a drenagem que impede a cauda de uma linha
+  gigante de virar mensagem nova;
+- `test-386` **roda** a suíte em 32 bits, e não só compila: em i386 o `Timespec`
+  do syscall é `int32`, e é por ele que passa a comparação de tempo e de tamanho
+  de arquivo;
+- `cap-proof` prova, com capability de arquivo num contêiner descartável, que
+  `env.CapRoot` mede **alcance** e não euid. Cada caso tenta ler `/etc/shadow`:
+  é a verdade de campo contra a qual a decisão do código é conferida. O caso
+  decisivo é `CAP_SYS_ADMIN` sozinha — a capability mais larga do Linux, que o
+  kernel **não** consulta na checagem DAC de leitura de arquivo.
 
 Reconstruir um release (o que quem baixa roda para conferir):
 

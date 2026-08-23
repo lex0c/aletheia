@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,6 +42,14 @@ type Trigger struct {
 	// carregar ruído; guardar só o que executa é o que os checks avaliam.
 	Lines []TriggerLine `json:"lines,omitempty"`
 
+	// AptHooks são os hooks ATIVOS de um apt.conf — o comando que
+	// Pre-Install-Pkgs/Pre-Invoke/Post-Invoke executa —, extraídos com o lexer
+	// do apt sobre os bytes crus. Existe porque Lines passou pelo parser
+	// genérico, que descarta linha começada por # e assim perde um hook escondido
+	// atrás de um bloco /* … */ mal fechado. Os checks de execução e de poder
+	// leem isto para apt, nao Lines. Ver analisarAptHooks.
+	AptHooks []TriggerLine `json:"apt_hooks,omitempty"`
+
 	// EscapeN é a linha onde há SEQUÊNCIA DE ESCAPE de terminal, ou 0.
 	//
 	// Ela mora fora de Lines de propósito: o truque usa uma linha de
@@ -56,10 +65,54 @@ type Trigger struct {
 	EscapeN int `json:"escape_line,omitempty"`
 }
 
+// LinhasExecutaveis devolve o que um gatilho EXECUTA, na representacao certa
+// por tipo. Para apt.conf.d é AptHooks — o fato semantico do lexer do apt, imune
+// ao descarte de linha-# do parser generico. Para o resto, Lines.
+//
+// Mora no FATO, e nao num check, porque é semantica do gatilho: todo consumidor
+// que pergunta "o que este gatilho executa?" — persist.trigger_exec,
+// integrity.timestomp e o DRIFT — precisa da mesma resposta, ou um hook escondido
+// fica visivel para um e invisivel para outro.
+func (t *Trigger) LinhasExecutaveis() []TriggerLine {
+	if t.EhApt() {
+		return t.AptHooks
+	}
+	return t.Lines
+}
+
+// EhApt diz se este gatilho é um arquivo de configuração do apt, cujos hooks têm
+// coleta e observabilidade próprias — inclusive uma FONTE de drift separada, para
+// um #clear local não cegar a comparação de /etc/profile.d e companhia.
+func (t *Trigger) EhApt() bool {
+	return t.Kind == "pkg_hook" && ehArquivoApt(t.File)
+}
+
+// ehArquivoApt reconhece os arquivos de configuração do apt cujos hooks o lexer
+// dedicado analisa — o principal /etc/apt/apt.conf e os fragmentos de
+// apt.conf.d. Central para os consumidores não divergirem no recorte.
+// nomeValidoAptParts reproduz a regra de Dir::Etc::Parts do apt: um fragmento é
+// carregado só se o nome não tem extensão ou termina em .conf, e é feito apenas
+// de [A-Za-z0-9_-]. .bak, .disabled, ~, .dpkg-*, @ e afins ficam de fora — o apt
+// os ignora, e um hook neles NÃO executa.
+func nomeValidoAptParts(n string) bool {
+	return reAptParts.MatchString(n)
+}
+
+var reAptParts = regexp.MustCompile(`^[A-Za-z0-9_-]+(\.conf)?$`)
+
+func ehArquivoApt(p string) bool {
+	return strings.Contains(p, "/apt/apt.conf")
+}
+
 // TriggerLine é uma linha executável, com o que decide se ela é suspeita.
 type TriggerLine struct {
 	N    int    `json:"n"`
-	Text string `json:"text"`
+	Text string `json:"text" redact:"linha"`
+
+	// File é a ORIGEM da linha quando ela não vem do próprio gatilho — um hook
+	// trazido por #include mora noutro arquivo, e a evidência (e a data) têm de
+	// apontar para ELE, não para quem incluiu. Vazio = o arquivo do gatilho.
+	File string `json:"file,omitempty"`
 
 	// Added marca a linha que NÃO existe no /etc/skel correspondente. É o
 	// baseline de graça da §7.6: o esqueleto é a versão que a distribuição
@@ -74,6 +127,9 @@ type TriggerLine struct {
 
 // gatilhosDeSistema: caminho fixo, alcance de todo mundo.
 var gatilhosDeSistema = []struct{ path, kind, when string }{
+	// O arquivo PRINCIPAL do apt, lido além dos fragmentos de apt.conf.d. Um
+	// DPkg::Pre-Invoke aqui é executado igual, e ficava fora da coleta.
+	{"/etc/apt/apt.conf", "pkg_hook", "a cada operação do gerenciador de pacotes"},
 	{"/etc/profile", "shell", "shell de LOGIN, para todo usuário"},
 	{"/etc/bash.bashrc", "shell", "shell INTERATIVO, para todo usuário — roda a cada login SSH"},
 	{"/etc/zsh/zshenv", "shell", "SEMPRE em zsh, inclusive shell não interativo"},
@@ -166,7 +222,7 @@ func collectTriggers(f *Facts, e *env.Env) {
 		}
 	}
 	for _, g := range gatilhosDeSistema {
-		if t, ok := lerTrigger(e, g.path, g.kind, g.when, ""); ok {
+		if t, ok := lerTrigger(f, e, g.path, g.kind, g.when, ""); ok {
 			registrar(t, g.when)
 			continue
 		}
@@ -187,7 +243,16 @@ func collectTriggers(f *Facts, e *env.Env) {
 			if e.IsDir(p) {
 				continue
 			}
-			if t, ok := lerTrigger(e, p, g.kind, g.when, ""); ok {
+			// apt.conf.d NÃO carrega qualquer arquivo: o apt aplica a regra de
+			// Dir::Etc::Parts e só lê nome válido sem extensão ou com .conf. Um
+			// 99implant.bak ou 99x.disabled é IGNORADO pelo gerenciador, e tratá-lo
+			// como gatilho "a cada operação do apt" seria afirmar execução sobre um
+			// arquivo que o apt nunca roda — falso positivo determinístico.
+			if g.kind == "pkg_hook" && strings.Contains(g.dir, "/apt/apt.conf.d") &&
+				!nomeValidoAptParts(n) {
+				continue
+			}
+			if t, ok := lerTrigger(f, e, p, g.kind, g.when, ""); ok {
 				registrar(t, g.when)
 			}
 		}
@@ -208,7 +273,7 @@ func collectTriggers(f *Facts, e *env.Env) {
 		u := home[strings.LastIndexByte(home, '/')+1:]
 		for _, g := range gatilhosDeHome {
 			p := home + "/" + g.nome
-			t, ok := lerTrigger(e, p, "shell", g.when, u)
+			t, ok := lerTrigger(f, e, p, "shell", g.when, u)
 			if !ok {
 				if _, negado := lookup(e, p); negado {
 					negados = append(negados, p)
@@ -254,7 +319,7 @@ func procurarPHP(f *Facts, e *env.Env, dir string, prof int) {
 		if !strings.HasSuffix(n, ".ini") {
 			continue
 		}
-		if t, ok := lerTrigger(e, p, "php",
+		if t, ok := lerTrigger(f, e, p, "php",
 			"antes de CADA requisição, em qualquer rota", ""); ok {
 			if t.Ilegvel {
 				f.denyPersist("startup", p+" existe e não pôde ser LIDO: o "+
@@ -268,7 +333,7 @@ func procurarPHP(f *Facts, e *env.Env, dir string, prof int) {
 // lerTrigger extrai as linhas EXECUTÁVEIS. Comentário e atribuição simples
 // ficam de fora — guardar o arquivo inteiro carregaria ruído, e o que os checks
 // avaliam é o que roda.
-func lerTrigger(e *env.Env, path, kind, when, user string) (Trigger, bool) {
+func lerTrigger(f *Facts, e *env.Env, path, kind, when, user string) (Trigger, bool) {
 	fi, err := e.Lstat(path)
 	if err != nil {
 		return Trigger{}, false
@@ -292,6 +357,12 @@ func lerTrigger(e *env.Env, path, kind, when, user string) (Trigger, bool) {
 	if ehBinario(b) {
 		t.Binario = true
 		return t, true
+	}
+	// apt.conf.d ganha extração SEMÂNTICA dos hooks, sobre os bytes crus e com o
+	// lexer do apt — antes de o parser genérico de linhas descartar informação
+	// que a gramática do apt ainda usaria. Ver analisarAptHooks.
+	if kind == "pkg_hook" && ehArquivoApt(path) {
+		t.AptHooks = resolverAptHooks(f, e, path, b, map[string]bool{path: true}, 0)
 	}
 	linhas := strings.Split(string(b), "\n")
 	ultimaComConteudo := 0

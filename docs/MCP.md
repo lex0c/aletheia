@@ -455,6 +455,18 @@ make cap-proof       # a regra de privilégio contra kernel real
 make test-386        # a suíte em 32 bits
 ```
 
-A suíte de cenários inclui a fronteira de injeção (M3), a paridade de cobertura
-com o `analyze` (M6), a captura ao vivo (M10–M11), o portão de consentimento
-(M12), a aquisição de imagem (M13) e o perfil completo (M14).
+A suíte de cenários inclui a fronteira de injeção sobre argv (M3) e sobre os
+quatro canais do perfil completo (M15), a ausência de superfície de execução
+(M4), a paridade de cobertura com o `analyze` (M6), a captura ao vivo (M10–M11),
+o portão de consentimento (M12), a aquisição de imagem (M13) e o perfil completo
+(M14).
+
+`make fuzz` cobre três parsers: a mensagem JSON-RPC, o framing do transporte e o
+**carregamento do dump** — este último é o mais exposto, porque o artefato não é
+autenticado por desenho e a redação de ingresso percorre reflexivamente uma
+estrutura que o atacante moldou.
+
+Um dump hostil é limitado por `MaxDump` (512 MiB). Medido, a expansão em memória
+depois de parse, redação e índice é de cerca de **1,8×** o tamanho do arquivo —
+o teto de leitura vale, portanto, aproximadamente 1 GiB de heap no lado do
+analista.

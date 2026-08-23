@@ -11,8 +11,10 @@
 # apareceria como um binário que se comporta diferente do que foi testado.
 #
 # E ele não publica nada que não tenha passado pelas próprias invariantes do
-# projeto — `make dist` depende de `make verify`, que roda vet, os testes
-# unitários e a CONFIRMAÇÃO de que o binário é estático.
+# projeto — um passo `make verify` roda ANTES do `make dist` (vet, os testes
+# unitários e a CONFIRMAÇÃO de que o binário é estático). Antes esse gate era
+# carona do `dist`; agora é passo próprio, porque `make dist` só constrói — para
+# não rodar a suíte inteira em toda build local de quem desenvolve.
 #
 # # O que ele NÃO roda, e por quê
 #
@@ -77,8 +79,15 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "publicar=${GITHUB_REF_TYPE}" >> "$GITHUB_OUTPUT"
 
-      # make dist ⇒ make verify ⇒ lint + testes + build estático CONFIRMADO,
-      # depois amd64, 386 e arm64.
+      # O gate de teste do release. Um push de TAG não dispara o ci.yml (que roda
+      # em push na main e em pull_request), então é AQUI que a suíte roda antes de
+      # publicar — sem isto, um release sairia sem nunca ter sido testado. Já foi
+      # carona do `make dist`; virou passo próprio quando o dist passou a só
+      # construir, para não pesar em toda build local.
+      - name: verify
+        run: make verify
+
+      # make dist = binarios (amd64, 386, arm64) + sha256. O teste já rodou acima.
       - name: build
         run: make dist VERSION="${{ steps.ver.outputs.version }}"
 

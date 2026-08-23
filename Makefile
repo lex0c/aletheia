@@ -160,7 +160,12 @@ binarios:
 			-o dist/aletheia-linux-$$arch ./cmd/aletheia || exit 1; \
 	done
 
-dist: verify binarios
+# dist só CONSTRÓI o artefato — não roda a suíte. Verificar e empacotar são
+# preocupações separadas: `make verify` (ou `make all`) é o portão de teste, e o
+# CI o roda em todo PR. O pipeline de release roda `make verify` num passo
+# próprio ANTES do dist, para nunca publicar binário não testado — o gate segue
+# existindo, só deixou de ser carona do dist e de pesar em toda build local.
+dist: binarios
 	sha256sum dist/aletheia-linux-*
 
 # repro reconstrói o release SEM rodar a suíte: é a receita de quem BAIXOU o

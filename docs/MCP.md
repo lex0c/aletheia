@@ -33,25 +33,17 @@ cliente MCP
                                     /proc · /sys · FS · netlink
 ```
 
-Isso difere do padrão dos MCPs de segurança comerciais, em que o servidor MCP
-fala com a API de uma plataforma e a plataforma fala com um agente instalado:
+Não há intermediário entre o servidor e a evidência: a mesma leitura de `/proc`
+que o `scan` faz é a que responde ao agente. Consequências operacionais:
 
-| Produto | Onde o MCP roda | Como alcança o host |
-| --- | --- | --- |
-| CrowdStrike Falcon MCP | estação ou contêiner | HTTPS → Falcon Cloud → sensor |
-| SentinelOne Purple MCP | estação ou contêiner | HTTPS → console → agent |
-| Google SecOps MCP | infraestrutura Google | HTTP MCP → SecOps |
-| Velociraptor MCP | perto do servidor | gRPC → servidor → client |
-| `aletheia mcp` | **dentro do host investigado** | leitura direta |
-
-Consequências operacionais:
-
-- **Sem pré-provisionamento.** Não é preciso ter instalado nada antes do
-  incidente; basta copiar um binário estático.
-- **Aquisição sob demanda.** O agente pede evidência que não foi antecipada por
-  nenhum artifact ou query definido previamente.
-- **Sem superfície de rede.** O servidor não abre porta e não aceita conexão. O
-  único canal remoto é SSH, que já existe.
+- **Sem pré-provisionamento.** Nada precisa estar instalado antes do incidente;
+  basta copiar um binário estático, sem dependência dinâmica.
+- **Aquisição sob demanda.** A pergunta do agente vira leitura no momento em que
+  é feita, sem depender de uma consulta ter sido definida antes.
+- **Sem superfície de rede.** O servidor não abre porta e não aceita conexão; o
+  transporte é stdio. Para uma máquina remota, o canal é o SSH que já existe.
+- **Sem credencial de plataforma.** Não há token, chave de API ou tenant: o
+  alcance é o do processo, e ele é herdado de quem o lançou.
 - **A investigação aparece no retrato.** Ver §7.5.
 
 ---

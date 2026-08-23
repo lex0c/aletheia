@@ -262,8 +262,9 @@ var toolFileInspect = Ferramenta{
 	Titulo:    "De onde veio este arquivo, e quem mexe nele",
 	Descricao: "Procedência (que pacote o entregou, se o hash confere), poder (setuid, " +
 		"capabilities em xattr, atributo imutável), quem manda executá-lo (cron, " +
-		"unit) e se o root o executa. NÃO lê o conteúdo: isto responde sobre o " +
-		"arquivo a partir do que a coleta já examinou. Um caminho que não aparece " +
+		"unit) e se o root o executa. NÃO lê o conteúdo, e não toca o host: isto responde " +
+		"sobre o arquivo a partir do que a coleta já examinou — para ler os BYTES " +
+		"agora, veja file.read, no perfil completo. Um caminho que não aparece " +
 		"em nada NÃO significa que ele não existe — significa que nada nesta " +
 		"varredura o referencia.",
 	Entrada: entradaSnapshotExigindo([]string{"path"},

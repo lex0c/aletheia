@@ -18,7 +18,7 @@ import (
 // destruir uma das três enquanto lê as outras é o investigador apagando a
 // resposta de "quem leu isto, e quando".
 func TestLeituraPreservaOAtime(t *testing.T) {
-	raiz := t.TempDir()
+	raiz := dirQueRastreiaAtime(t)
 	p := filepath.Join(raiz, "authorized_keys")
 	if err := os.WriteFile(p, []byte("ssh-rsa AAAA x@y\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -28,25 +28,7 @@ func TestLeituraPreservaOAtime(t *testing.T) {
 	if err := os.Chtimes(p, antigo, antigo); err != nil {
 		t.Fatal(err)
 	}
-	// PROVA que este filesystem mexe no atime, antes de afirmar que a leitura
-	// não mexeu. Sem isto o teste passa por vacuidade: em `noatime` — que é
-	// como o /tmp desta máquina está montado, e é onde t.TempDir() cai —
-	// leitura nenhuma move atime, e a asserção fica verdadeira mesmo com o
-	// O_NOATIME removido. Foi assim que a primeira versão deste teste passou
-	// no mutante.
-	if err := lerCru(p); err != nil {
-		t.Fatal(err)
-	}
-	if depoisDoCru, err := atimeDe(p); err != nil {
-		t.Skipf("atime não é legível aqui: %v", err)
-	} else if depoisDoCru.Equal(antigo) {
-		t.Skip("o filesystem deste TempDir está em noatime: nada move atime " +
-			"aqui, e o teste não teria como distinguir a correção da ausência dela")
-	}
-	// De volta ao passado, agora com a garantia de que o relógio anda.
-	if err := os.Chtimes(p, antigo, antigo); err != nil {
-		t.Fatal(err)
-	}
+	// dirQueRastreiaAtime já provou que o relógio anda aqui.
 	antes, err := atimeDe(p)
 	if err != nil {
 		t.Fatal(err)
@@ -66,6 +48,53 @@ func TestLeituraPreservaOAtime(t *testing.T) {
 		t.Errorf("o atime andou de %v para %v: a leitura apagou a data em que "+
 			"alguém leu este arquivo pela última vez", antes, depois)
 	}
+}
+
+// dirQueRastreiaAtime devolve um diretório onde o atime de fato anda.
+//
+// O teste de atime pulava quando TMPDIR estava em noatime — que é o caso desta
+// máquina — e pular é honesto, mas uma garantia cujo teste nunca roda no
+// ambiente de quem desenvolve é quase uma garantia que ninguém confere. Foi
+// assim que a regressão do percurso por descritor passou: o coletor tinha
+// teste, o teste pulava, e o caminho novo nasceu sem O_NOATIME.
+//
+// Então há um segundo chão: o diretório do pacote, que está num filesystem de
+// verdade. Só se NENHUM dos dois rastrear é que o teste pula.
+func dirQueRastreiaAtime(t *testing.T) string {
+	t.Helper()
+	rastreia := func(dir string) bool {
+		p := filepath.Join(dir, "sonda-atime")
+		if os.WriteFile(p, []byte("x"), 0o644) != nil {
+			return false
+		}
+		antigo := time.Date(2026, 6, 1, 3, 0, 0, 0, time.UTC)
+		if os.Chtimes(p, antigo, antigo) != nil {
+			return false
+		}
+		if lerCru(p) != nil {
+			return false
+		}
+		depois, err := atimeDe(p)
+		return err == nil && !depois.Equal(antigo)
+	}
+	if d := t.TempDir(); rastreia(d) {
+		return d
+	}
+	d, err := os.MkdirTemp(".", "atime")
+	if err != nil {
+		t.Skipf("sem onde medir atime: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	// ABSOLUTO: AbrirParaInspecao normaliza com path.Clean("/"+p), então um
+	// caminho relativo viraria outro caminho, ancorado na raiz.
+	if abs, err := filepath.Abs(d); err == nil {
+		d = abs
+	}
+	if !rastreia(d) {
+		t.Skip("nenhum filesystem alcançável rastreia atime: aqui o teste não " +
+			"distinguiria a correção da ausência dela")
+	}
+	return d
 }
 
 func atimeDe(p string) (time.Time, error) {

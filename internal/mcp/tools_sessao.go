@@ -228,12 +228,17 @@ type orcamento struct {
 	Cooperativo bool `json:"cooperative"`
 }
 
-const notaDeRedacaoSnapshot = "este servidor responde sobre um DUMP. Quando o " +
-	"artefato traz o carimbo (redaction: applied), toda superfície textual dele " +
-	"passou pela redação na ORIGEM, e não existe flag que destrave o que não está " +
-	"no arquivo — não conclua que não havia segredo. Quando ele diz absent, o " +
-	"artefato NÃO PROVA ter sido redigido: trate o conteúdo como possivelmente " +
-	"em claro, e desconfie da procedência do arquivo."
+const notaDeRedacaoSnapshot = "este servidor responde sobre um DUMP, e leia " +
+	"enforced antes de redaction.\n\n" +
+	"enforced é o que ESTE servidor garante: com 'enforced', os dados passaram " +
+	"pela redação deste binário no ingresso, seja lá o que o arquivo afirme " +
+	"sobre si — um dump não é autenticado, e o carimbo dele é um campo que quem " +
+	"escreveu o arquivo escolheu. Com 'waived', o operador autorizou servir o " +
+	"que estiver ali, e pode haver segredo em claro.\n\n" +
+	"redaction é PROCEDÊNCIA: applied significa que a redação também aconteceu " +
+	"na origem, e aí não existe flag que destrave o que não está no arquivo — " +
+	"não conclua que não havia segredo. absent significa que o artefato não " +
+	"prova ter sido redigido; desconfie da procedência dele."
 
 var toolStatus = Ferramenta{
 	Anotacoes: SomenteLeitura,
@@ -273,7 +278,10 @@ var toolStatus = Ferramenta{
  "redaction":{"type":"array","description":"o que cada retrato PROVA sobre a propria redacao, lido do carimbo do artefato — nunca o que este servidor afirma. Ausente fora do modo snapshot, onde os retratos nascem de captura e nao de arquivo.",
   "items":{"type":"object","properties":{
    "snapshot_id":{"type":"string"},
-   "redaction":{"type":"string","enum":["applied","absent","unknown_version","waived"]}}}},
+   "redaction":{"type":"string","enum":["applied","absent","unknown_version","waived"],
+    "description":"o que o ARTEFATO afirma sobre si. Procedencia, nao garantia: um dump nao é autenticado"},
+   "enforced":{"type":"string","enum":["enforced","waived"],
+    "description":"o que ESTE servidor fez antes de servir. enforced: os dados passaram pela redacao deste binario, independentemente do que o arquivo afirmasse. É a unica das duas que vale como garantia"}}}},
  "redaction_note":{"type":"string"},
  "snapshots":{"type":"array","items":{"type":"object"}},
  "unavailable_tools":{"type":"array","items":{"type":"object",
@@ -304,8 +312,18 @@ var toolStatus = Ferramenta{
 		}
 		if s.pol.Modo == ModoSnapshot {
 			for _, r := range s.acervo.Todos() {
+				p := r.Procedencia()
+				// OS DOIS. `redaction` é o que o artefato AFIRMA sobre si, e um
+				// dump não é autenticado — é procedência. `redaction_enforced`
+				// é o que este servidor FEZ antes de servir, e é a única das
+				// duas que vale como garantia.
+				//
+				// Publicar só a primeira aqui, que é a tela em que o operador
+				// olha primeiro, oferecia o campo fraco no lugar do forte.
 				d.Redacao = append(d.Redacao, map[string]string{
-					"snapshot_id": r.ID, "redaction": r.Procedencia().Redacao,
+					"snapshot_id": r.ID,
+					"redaction":   p.Redacao,
+					"enforced":    p.RedacaoImposta,
 				})
 			}
 			d.NotaDeRedacao = notaDeRedacaoSnapshot

@@ -146,43 +146,24 @@ func (e *Env) AbrirParaInspecao(p string, seguirLink bool) (*os.File, Identidade
 	return fh, id, nil
 }
 
+// identidadeDe extrai a identidade de um FileInfo, indo ao Stat_t por baixo.
+//
+// UMA função, e não duas. Havia uma segunda que montava o mesmo Identidade a
+// partir do Stat_t cru, e as duas já divergiam na forma de derivar o Tipo — a
+// primeira por os.FileMode, a segunda por S_IFMT. Duas implementações da mesma
+// tradução divergem, e a que diverge é a que ninguém está olhando.
 func identidadeDe(fi os.FileInfo) Identidade {
-	id := Identidade{
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return identidadeDeStat(st)
+	}
+	// Sem Stat_t não há inode, e inode é metade do que esta struct existe para
+	// dizer. Devolver o pouco que dá é melhor que devolver zeros com cara de
+	// fato.
+	return Identidade{
 		Modo:     fmt.Sprintf("%04o", fi.Mode().Perm()),
-		Tipo:     tipoDe(fi.Mode()),
 		Tamanho:  fi.Size(),
 		MtimeUTC: fi.ModTime().UTC().Format(time.RFC3339),
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return id
-	}
-	id.Dev, id.Inode = uint64(st.Dev), uint64(st.Ino)
-	id.Nlink, id.UID, id.GID = uint64(st.Nlink), st.Uid, st.Gid
-	id.CtimeUTC = time.Unix(int64(st.Ctim.Sec), int64(st.Ctim.Nsec)).
-		UTC().Format(time.RFC3339)
-	return id
-}
-
-func tipoDe(m os.FileMode) string {
-	switch {
-	case m.IsRegular():
-		return "regular"
-	case m&os.ModeSymlink != 0:
-		return "symlink"
-	case m.IsDir():
-		return "dir"
-	case m&os.ModeNamedPipe != 0:
-		return "fifo"
-	case m&os.ModeSocket != 0:
-		return "socket"
-	case m&os.ModeDevice != 0:
-		if m&os.ModeCharDevice != 0 {
-			return "chardev"
-		}
-		return "blockdev"
-	}
-	return "other"
 }
 
 // LerJanela lê no máximo n bytes a partir de offset. Devolve o que leu e se
@@ -397,8 +378,13 @@ const oPath = 0x200000
 // Só depois de provado regular o arquivo é reaberto para leitura, por
 // /proc/self/fd/N — que reabre o MESMO inode, sem uma segunda resolução de
 // caminho. A raiz do percurso é "/" no host vivo e a raiz da imagem em modo
-// image; como nenhum link é atravessado e validarCaminho já recusou caminho não
-// normalizado — logo, sem ".." —, a contenção é por construção.
+// image, e a contenção é por construção — mas o mecanismo é o path.Clean("/"+p)
+// LOGO ABAIXO, e não o validarCaminho do pacote mcp.
+//
+// A distinção importa: uma garantia que depende de validação em OUTRO pacote é
+// uma garantia que o próximo chamador quebra sem saber. Clean sobre caminho
+// absoluto absorve todo "..", porque não há como subir acima da raiz — medido
+// contra uma imagem montada, com /../fora.txt e /etc/../../fora.txt.
 func (e *Env) abrirPorDescritor(p string) (*os.File, Identidade, error) {
 	if err := e.raizIndisponivel(); err != nil {
 		return nil, Identidade{}, err
@@ -418,11 +404,16 @@ func (e *Env) abrirPorDescritor(p string) (*os.File, Identidade, error) {
 
 	partes := strings.Split(strings.Trim(path.Clean("/"+p), "/"), "/")
 	atual := dirfd
-	fechar := func() {
-		if atual != dirfd {
-			syscall.Close(atual)
+	// pai é o descritor do diretório que contém o componente atual. Ele fica
+	// vivo até o fim porque a reabertura sem /proc precisa dele — reabrir pelo
+	// NOME a partir do pai pinado não é uma segunda resolução do caminho.
+	pai := dirfd
+	fechar := func(fd int) {
+		if fd != dirfd {
+			syscall.Close(fd)
 		}
 	}
+	defer func() { fechar(pai) }()
 	for i, parte := range partes {
 		if parte == "" {
 			continue
@@ -430,11 +421,12 @@ func (e *Env) abrirPorDescritor(p string) (*os.File, Identidade, error) {
 		fd, err := syscall.Openat(atual, parte,
 			syscall.O_RDONLY|oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 		if err != nil {
-			fechar()
 			return nil, Identidade{}, &os.PathError{Op: "openat", Path: parte, Err: err}
 		}
-		fechar()
-		atual = fd
+		if atual != pai {
+			fechar(pai)
+		}
+		pai, atual = atual, fd
 
 		var st syscall.Stat_t
 		if err := syscall.Fstat(atual, &st); err != nil {
@@ -463,7 +455,7 @@ func (e *Env) abrirPorDescritor(p string) (*os.File, Identidade, error) {
 			// node, dev tal, inode tal" é o que quem investiga queria saber.
 			return nil, id, ErrNaoEhArquivo
 		}
-		fh, err := reabrirParaLeitura(atual)
+		fh, err := reabrirParaLeitura(atual, pai, parte, id.Inode)
 		syscall.Close(atual)
 		if err != nil {
 			return nil, id, err
@@ -476,17 +468,79 @@ func (e *Env) abrirPorDescritor(p string) (*os.File, Identidade, error) {
 
 // reabrirParaLeitura converte o descritor O_PATH num descritor de leitura.
 //
-// Por /proc/self/fd/N, que reabre o MESMO inode — não é uma segunda resolução
-// do caminho, e por isso não reabre a janela que o percurso fechou.
-func reabrirParaLeitura(fd int) (*os.File, error) {
-	return os.OpenFile("/proc/self/fd/"+strconv.Itoa(fd),
-		os.O_RDONLY|syscall.O_NONBLOCK, 0)
+// # O atime é evidência, e esta função é onde ele quase morreu
+//
+// O percurso por descritor substituiu abrirComExtras, e com ele foi embora o
+// O_NOATIME — que existe neste pacote inteiro por um motivo: quando um arquivo
+// foi lido pela última vez é FATO sobre o host investigado, e uma ferramenta de
+// resposta a incidente que o apaga ao olhar destrói a evidência que veio buscar.
+//
+// Medido num filesystem que rastreia atime (btrfs, relatime): ReadFile
+// preservava, e file.read passou a destruir — igual a um `cat`. Um agente
+// paginando dez arquivos apagava o atime dos dez.
+//
+// O O_NOATIME exige ser DONO do arquivo ou ter CAP_FOWNER, então ele DEGRADA:
+// tenta com, e cai para sem. É a mesma escada de abrirComExtras.
+//
+// # E por que existe um segundo caminho
+//
+// /proc/self/fd/N reabre o MESMO inode sem resolver caminho de novo, e é o
+// caminho preferido. Mas /proc pode não estar montado — um shell de resgate, um
+// initramfs — e ali `file.read` falhava inteiro, com um erro que fala de
+// /proc/self/fd/3 para quem pediu /etc/shadow.
+//
+// O segundo caminho reabre pelo NOME a partir do descritor do diretório pai,
+// que continua pinado, e então CONFERE o inode contra o que o percurso
+// identificou. Se alguém trocou o arquivo entre as duas aberturas, os inodes
+// divergem e a leitura é recusada — a corrida vira recusa, não resposta errada.
+func reabrirParaLeitura(fd, pai int, nome string, esperado uint64) (*os.File, error) {
+	const flags = os.O_RDONLY | syscall.O_NONBLOCK
+	viaProc := "/proc/self/fd/" + strconv.Itoa(fd)
+	if fh, err := os.OpenFile(viaProc, flags|syscall.O_NOATIME, 0); err == nil {
+		return fh, nil
+	}
+	if fh, err := os.OpenFile(viaProc, flags, 0); err == nil {
+		return fh, nil
+	}
+	return reabrirPeloPai(pai, nome, esperado, flags)
+}
+
+func reabrirPeloPai(pai int, nome string, esperado uint64, flags int) (*os.File, error) {
+	abrir := func(f int) (int, error) {
+		return syscall.Openat(pai, nome, f|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	}
+	novo, err := abrir(flags | syscall.O_NOATIME)
+	if err != nil {
+		if novo, err = abrir(flags); err != nil {
+			return nil, err
+		}
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(novo, &st); err != nil {
+		syscall.Close(novo)
+		return nil, err
+	}
+	if uint64(st.Ino) != esperado {
+		syscall.Close(novo)
+		return nil, errors.New("o arquivo foi TROCADO entre a identificação e a " +
+			"leitura: o inode mudou. A leitura foi recusada em vez de devolver " +
+			"o conteúdo de outro objeto com o nome pedido")
+	}
+	return os.NewFile(uintptr(novo), nome), nil
 }
 
 func identidadeDeStat(st *syscall.Stat_t) Identidade {
 	id := Identidade{
 		Dev: uint64(st.Dev), Inode: uint64(st.Ino),
-		Modo:  fmt.Sprintf("%04o", os.FileMode(st.Mode).Perm()),
+		// 07777, e não os 0777 de FileMode.Perm().
+		//
+		// Perm() descarta setuid, setgid e sticky — e um binário 4755 saía
+		// daqui como 0755. É precisamente o bit que se procura num host
+		// comprometido: `find -perm /4000` é a caça clássica, e a família file.*
+		// existe para dizer o que o objeto aberto É. Reportar 0755 sobre um
+		// setuid root é uma falsa tranquilidade vinda da tool que promete
+		// identidade.
+		Modo:  fmt.Sprintf("%04o", st.Mode&0o7777),
 		Nlink: uint64(st.Nlink), UID: st.Uid, GID: st.Gid,
 		Tamanho:  st.Size,
 		MtimeUTC: time.Unix(int64(st.Mtim.Sec), int64(st.Mtim.Nsec)).UTC().Format(time.RFC3339),

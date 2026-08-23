@@ -7,6 +7,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func raizDeInspecao(t *testing.T) (*Env, string) {
@@ -356,5 +357,158 @@ func TestDeviceNodeEhRecusadoComIdentidade(t *testing.T) {
 		if id.Inode == 0 {
 			t.Errorf("%s: a recusa jogou fora a identidade", c.p)
 		}
+	}
+}
+
+// O ATIME É EVIDÊNCIA, E LER NÃO PODE APAGÁ-LO.
+//
+// Quando um arquivo foi lido pela última vez é fato sobre o host investigado —
+// é o que responde "este backdoor chegou a rodar?". Uma ferramenta de resposta
+// a incidente que apaga isso ao olhar destrói a evidência que veio buscar.
+//
+// O pacote inteiro tem O_NOATIME por esse motivo, e o percurso por descritor
+// que substituiu abrirComExtras o perdeu: medido em btrfs com relatime,
+// file.read passou a se comportar como um `cat`.
+func TestLeituraDirecionadaNaoApagaOAtime(t *testing.T) {
+	dir := dirQueRastreiaAtime(t)
+	alvo := filepath.Join(dir, "backdoor.sh")
+	if err := os.WriteFile(alvo, []byte("conteudo forense"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	antigo := time.Now().Add(-72 * time.Hour)
+	if err := os.Chtimes(alvo, antigo, antigo); err != nil {
+		t.Fatal(err)
+	}
+
+	e := &Env{Source: SourceLive, Caps: CapFilesystem, CapReason: map[string]string{}}
+	antes, err := atimeDe(alvo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fh, _, err := e.AbrirParaInspecao(alvo, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LerJanela(fh, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	fh.Close()
+
+	depois, err := atimeDe(alvo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !antes.Equal(depois) {
+		t.Errorf("a leitura direcionada MOVEU o atime: %s -> %s.\n"+
+			"Quando um arquivo foi lido pela última vez é evidência sobre o host "+
+			"investigado, e esta família de tools existe para observar sem "+
+			"perturbar.", antes.Format(time.RFC3339), depois.Format(time.RFC3339))
+	}
+}
+
+// O MODE CARREGA setuid, setgid E sticky.
+//
+// FileMode.Perm() mascara com 0777 e descarta os três — um binário 4755 saía
+// daqui como 0755. É precisamente o bit que se procura num host comprometido:
+// `find -perm /4000` é a caça clássica, e esta família existe para dizer o que o
+// objeto aberto É.
+func TestModeCarregaOsBitsDeSetuid(t *testing.T) {
+	dir := t.TempDir()
+	alvo := filepath.Join(dir, "suid")
+	if err := os.WriteFile(alvo, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// syscall.Chmod, e não os.Chmod: o FileMode do Go representa setuid num bit
+	// próprio (ModeSetuid), então os.Chmod(p, 0o4755) DESCARTA o 04000 em
+	// silêncio. Foi assim que a primeira versão deste teste mediu nada.
+	if err := syscall.Chmod(alvo, 0o4755); err != nil {
+		t.Skipf("sem chmod setuid: %v", err)
+	}
+
+	e := &Env{Source: SourceLive, Caps: CapFilesystem, CapReason: map[string]string{}}
+	// Os DOIS caminhos: o percurso por descritor e o open que segue link. Eles
+	// já tiveram tradutores de identidade separados, e já divergiam.
+	for _, seguir := range []bool{false, true} {
+		fh, id, err := e.AbrirParaInspecao(alvo, seguir)
+		if err != nil {
+			t.Fatalf("follow=%v: %v", seguir, err)
+		}
+		fh.Close()
+		if id.Modo != "4755" {
+			t.Errorf("follow=%v: mode=%q, queria 4755 — o bit setuid é o achado",
+				seguir, id.Modo)
+		}
+		if id.Tipo != "regular" {
+			t.Errorf("follow=%v: tipo=%q", seguir, id.Tipo)
+		}
+	}
+}
+
+// A REABERTURA SEM /proc RECUSA UM ARQUIVO TROCADO.
+//
+// /proc/self/fd/N reabre o MESMO inode por construção, e é o caminho preferido.
+// Mas /proc pode não estar montado — um shell de resgate, um initramfs —, e ali
+// file.read falhava inteiro com um erro que fala de /proc/self/fd/3 para quem
+// pediu /etc/shadow.
+//
+// O segundo caminho reabre pelo NOME a partir do descritor do diretório pai,
+// que continua pinado. Isso reabre uma janela minúscula: entre a identificação e
+// a reabertura, alguém com escrita no diretório pode trocar o arquivo. A janela
+// não é fechada com uma promessa — ela é CONFERIDA: o inode reaberto tem de ser
+// o mesmo, e divergir vira recusa em vez de conteúdo de outro objeto.
+func TestReaberturaSemProcRecusaArquivoTrocado(t *testing.T) {
+	dir := t.TempDir()
+	alvo := filepath.Join(dir, "alvo")
+	if err := os.WriteFile(alvo, []byte("o certo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pai, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Close(pai)
+
+	var st syscall.Stat_t
+	if err := syscall.Stat(alvo, &st); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Inode confere: abre.
+	fh, err := reabrirPeloPai(pai, "alvo", uint64(st.Ino), os.O_RDONLY)
+	if err != nil {
+		t.Fatalf("com o inode certo tinha de abrir: %v", err)
+	}
+	b := make([]byte, 16)
+	n, _ := fh.Read(b)
+	fh.Close()
+	if string(b[:n]) != "o certo" {
+		t.Errorf("leu %q", b[:n])
+	}
+
+	// 2. O arquivo é TROCADO por outro com o mesmo nome — o que um atacante com
+	//    escrita no diretório faz.
+	if err := os.Remove(alvo); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(alvo, []byte("o do atacante"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var novo syscall.Stat_t
+	if err := syscall.Stat(alvo, &novo); err != nil {
+		t.Fatal(err)
+	}
+	if novo.Ino == st.Ino {
+		t.Skip("o filesystem reciclou o inode: o teste não distingue nada aqui")
+	}
+
+	if fh, err := reabrirPeloPai(pai, "alvo", uint64(st.Ino), os.O_RDONLY); err == nil {
+		b := make([]byte, 32)
+		n, _ := fh.Read(b)
+		fh.Close()
+		t.Fatalf("o arquivo foi trocado e a reabertura devolveu %q: a resposta "+
+			"descreveria a identidade de um objeto e o conteúdo de outro", b[:n])
+	} else if !strings.Contains(err.Error(), "TROCADO") {
+		t.Errorf("a recusa precisa dizer o que houve: %v", err)
 	}
 }

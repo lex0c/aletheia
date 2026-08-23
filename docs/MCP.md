@@ -70,7 +70,34 @@ pode ser induzida por texto plantado no alvo. A ausência é declarada em
 
 ## 3. Ligando num cliente
 
-### 3.1 Local
+O servidor fala **stdio e nada mais**: não abre porta, não sobe daemon, não usa
+TLS nem token — não há nada escutando para autenticar. A fronteira de confiança é
+outra, e são duas:
+
+1. **Quem lança o processo, e com quais flags.** A policy é fixada no lançamento
+   (§2): `--snapshot` não toca o host; `--live`/`--root` adquirem; `--profile
+   full`/`--allow-secrets` destravam leitura de arquivo e bytes crus. O cliente
+   MCP nunca muda isso — ele herda o que o operador iniciou.
+2. **Para host remoto, o canal SSH** (§3.4). A "exposição" é o SSH, não um
+   endpoint MCP na rede.
+
+Como expor com o menor risco:
+
+| Situação | Como | Por quê |
+| --- | --- | --- |
+| Triagem por IA, o caso comum | `--snapshot dump.json` | o modelo lê um artefato SELADO; zero acesso ao host, mesmo que o cliente seja hostil |
+| Host vivo, mesma máquina | `--live` (+ `--allow-root` sob `sudo -n`) | a policy limita a superfície; a redação barra segredo em claro |
+| Host remoto | `ssh -T … aletheia mcp --live` (§3.4) | transporte stdio sobre SSH; o servidor nunca escuta em porta |
+| Exposição em rede sem autenticação | **não faça** | o registry é a barreira, mas um listener aberto num binário root é superfície que a ferramenta evita por desenho |
+
+O padrão recomendado para IA é `--snapshot`: colha o dump uma vez, sirva o
+artefato, e o modelo investiga sem nunca alcançar o host. É o mesmo dado que o
+`analyze` lê, e a redação já aconteceu na origem.
+
+### 3.1 Claude Code
+
+Escopo de projeto — versionado, compartilhado com o time — em `.mcp.json` na raiz
+do repositório:
 
 ```json
 { "mcpServers": {
@@ -78,13 +105,62 @@ pode ser induzida por texto plantado no alvo. A ausência é declarada em
                   "args": ["mcp", "--snapshot", "/casos/vm-23.json"] } } }
 ```
 
-Alguns clientes normalizam o ponto do nome da tool para underscore ao autorizar.
-No Claude Code a allowlist usa `mcp__aletheia__findings_list`, não
-`...findings.list`; o nome no protocolo continua com ponto. Autorizar com a
-forma errada falha em silêncio — o modelo enxerga as tools e não consegue
-chamá-las.
+Ou pela CLI, sem editar arquivo:
 
-### 3.2 Remoto, por SSH
+```sh
+claude mcp add aletheia -- /opt/aletheia mcp --snapshot /casos/vm-23.json
+claude mcp add aletheia -s user -- /opt/aletheia mcp --snapshot /casos/vm-23.json  # escopo de usuário
+```
+
+`/mcp` mostra a conexão e as tools que ela expõe. A allowlist de permissões usa o
+nome com **underscore**, não com ponto:
+
+```json
+{ "permissions": { "allow": [
+    "mcp__aletheia__findings_list",
+    "mcp__aletheia__finding_get",
+    "mcp__aletheia__crossview_get"
+] } }
+```
+
+`mcp__aletheia` sozinho autoriza TODAS as tools do servidor; `mcp__aletheia__<tool>`
+autoriza uma. O nome no protocolo continua com ponto (`findings.list`) — a
+normalização é só da allowlist, e autorizar com a forma errada falha em silêncio:
+o modelo vê as tools e não consegue chamá-las.
+
+### 3.2 Codex CLI
+
+O `codex` fala MCP por stdio. Em `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.aletheia]
+command = "/opt/aletheia"
+args = ["mcp", "--snapshot", "/casos/vm-23.json"]
+```
+
+Ou `codex mcp add aletheia -- /opt/aletheia mcp --snapshot /casos/vm-23.json` nas
+versões que trazem o subcomando. Variável de ambiente, se precisar, vai em
+`env = { CHAVE = "valor" }` no mesmo bloco.
+
+### 3.3 ChatGPT (conectores)
+
+Os conectores do ChatGPT (Developer Mode) esperam um servidor MCP **remoto por
+HTTP** (streamable HTTP/SSE), com uma URL. O `aletheia mcp` é stdio e não escuta
+em porta — então não há integração direta, e isso é por desenho (§6).
+
+Usar mesmo assim exige uma ponte stdio↔HTTP na frente do servidor (`supergateway`,
+`mcpo` e afins). A ponte é sua responsabilidade e seu risco: ela vira o listener
+de rede que o servidor não tem. Se for inevitável:
+
+- Sirva **`--snapshot`**, nunca `--live`/`--root`: mesmo uma ponte comprometida só
+  lê um dump selado.
+- Escute em **`127.0.0.1`** apenas, com autenticação na ponte.
+- Nunca publique a ponte numa rede alcançável.
+
+O caminho de primeira classe, sem rede, é o cliente CLI — Claude Code ou Codex —
+falando stdio direto.
+
+### 3.4 Remoto, por SSH
 
 ```json
 { "mcpServers": {
@@ -108,7 +184,7 @@ pares de CRLF, a requisição ecoada no início do stream, e a sessão pendurada
 O banner do `sshd` e o `motd` **não** poluem o stdout: saem por stderr, junto do
 diagnóstico e da trilha de auditoria do servidor.
 
-### 3.3 Privilégio na sessão remota
+### 3.5 Privilégio na sessão remota
 
 | Invocação | Resultado |
 | --- | --- |
@@ -122,6 +198,40 @@ que não alcançou. Requer entrada em `sudoers` apenas para o binário:
 ```text
 ir ALL=(ALL) NOPASSWD: /opt/aletheia
 ```
+
+### 3.6 Exemplo de ponta a ponta
+
+No alvo — ou sobre a imagem montada em outra máquina — colha o retrato uma vez:
+
+```sh
+aletheia collect --out /casos/vm-23.json
+```
+
+Aponte o cliente para o dump (§3.1) e deixe o modelo conduzir. Um ciclo típico,
+sem nenhuma tool de execução:
+
+```text
+session.status        onde estou, o que posso, confio no dado?
+coverage.get          o que NÃO foi verificado, e a confiança do kernel
+crossview.get         as visões do kernel batem? (antes de crer numa ausência)
+findings.list         o que o motor concluiu, com veredito e cobertura
+finding.get <id>      evidência, próximos passos, falsos positivos
+process.get <pid>     o dossiê do processo que o achado cita
+file.inspect <path>   procedência do arquivo, quem manda executá-lo
+snapshot.compare      contra um retrato anterior, se houver
+```
+
+O modelo não executa comando, não escreve, não abre rede: o registry não oferece
+essas tools no perfil padrão (§6.1). Para conferir qualquer conclusão fora do
+agente, o mesmo dump responde pela CLI, e a cobertura que o MCP publica é a mesma
+que o `analyze` produz — há catraca para isso:
+
+```sh
+aletheia analyze /casos/vm-23.json -vv
+```
+
+Fluxos de investigação completos, incluindo agente remoto sem instalar nada e "do
+achado ao arquivo": [PLAYBOOKS.md](PLAYBOOKS.md), cenários 16–20.
 
 ---
 
@@ -466,9 +576,9 @@ nenhum intermediário compartilhado deve guardá-la.
 | Sintoma | Causa provável |
 | --- | --- |
 | o modelo vê as tools e não consegue chamá-las | allowlist com ponto em vez de underscore (§3.1) |
-| stdout não parseia; resposta começa com a requisição | `ssh` sem `-T` (§3.2) |
+| stdout não parseia; resposta começa com a requisição | `ssh` sem `-T` (§3.4) |
 | a sessão remota não termina | idem |
-| `sudo: a password is required` | falta `NOPASSWD` para o binário (§3.3) |
+| `sudo: a password is required` | falta `NOPASSWD` para o binário (§3.5) |
 | `dump de esquema incompatível` | dump de outra versão; recolete ou analise com a versão que coletou |
 | `nenhum retrato existe ainda` | modo live/image antes de `snapshot.capture` |
 | `esta pergunta exige um retrato COMPLETO` | a tool não se sustenta em `scope=volatile` (§7.3) |

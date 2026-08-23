@@ -88,17 +88,26 @@ var toolSnapshotCapture = Ferramenta{
 		// cobra uma varredura do host investigado. Sem este portão, a única
 		// coisa entre um laço de correção do modelo e uma carga contínua na
 		// máquina comprometida era a boa vontade do cliente.
-		if _, resta := s.orcamentoDeColeta(); resta <= 0 {
-			gasto, _ := s.orcamentoDeColeta()
+		gasto, resta, comTeto := s.orcamentoDeColeta()
+		if comTeto && resta <= 0 {
 			return nil, erro(CodInvalidParams, fmt.Sprintf(
 				"o orçamento de coleta desta sessão acabou: %s já foram gastos "+
 					"lendo o host investigado, de um teto de %s.\n\n"+
 					"snapshot.release NÃO devolve orçamento — ele devolve memória, e "+
 					"trabalho já feito não volta. Os retratos já capturados continuam "+
 					"respondendo normalmente; o que acabou é a capacidade de tirar "+
-					"outro. Para continuar, o operador reinicia o servidor.",
+					"outro. Para continuar, o operador reinicia o servidor com um "+
+					"--capture-budget maior.",
 				gasto.Round(time.Millisecond), s.pol.OrcamentoDeColeta))
 		}
+
+		// O CRONÔMETRO COMEÇA AQUI, e não depois da aquisição.
+		//
+		// env.Probe sonda o host — abre a raiz travada em modo imagem, testa
+		// /proc, netlink e bpf —, e isso é trabalho feito no alvo. Cobrá-lo fora
+		// do relógio deixava a recusa por teto quase de graça no trecho medido,
+		// e um laço podia gastar descritor e sonda sem gastar orçamento.
+		inicio := time.Now()
 		e, err := s.adquirir()
 		if err != nil {
 			return nil, erro(CodInternalError, "não foi possível sondar o ambiente: "+
@@ -110,13 +119,23 @@ var toolSnapshotCapture = Ferramenta{
 		// encontrado". Não interrompe a coleta no meio, e a descrição da tool
 		// diz isso em vez de fingir.
 		if escopo == EscopoCompleto && s.pol.Budget > 0 {
-			e.WalkDeadline = time.Now().Add(s.pol.Budget)
+			prazo := s.pol.Budget
+			// O MENOR ENTRE OS DOIS. Um saldo de 10ms admitia a captura e então
+			// lhe entregava dois minutos de varredura: o "teto total" de um
+			// segundo autorizava dois minutos de trabalho. Descontado o que
+			// env.Probe já consumiu, porque ele também foi trabalho no alvo.
+			if resto := resta - time.Since(inicio); comTeto && resto < prazo {
+				prazo = resto
+			}
+			if prazo < 0 {
+				prazo = 0
+			}
+			e.WalkDeadline = time.Now().Add(prazo)
 		}
 		// A cobrança é do tempo REAL, e acontece tenha a captura dado certo ou
 		// não: o host pagou pela varredura de qualquer jeito, e cobrar só o
 		// sucesso deixaria a falha repetível de graça. Capturar assume a posse
 		// do Env e sempre o fecha.
-		inicio := time.Now()
 		r, err := s.acervo.Capturar(e, escopo)
 		s.cobrarColeta(time.Since(inicio))
 		if err != nil {

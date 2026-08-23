@@ -21,10 +21,28 @@ type argsSnapshot struct {
 // isso não é rigor gratuito — escolher um "padrão" faria o modelo receber
 // resposta sobre o retrato errado sem nunca saber que havia outro, que é a
 // forma mais cara de erro num servidor de investigação.
-func (s *Servidor) retratoDe(id string) (*Retrato, *ErroRPC) {
+// O MÍNIMO É PARÂMETRO, e não uma cortesia de quem escreve a tool.
+//
+// Ferramenta.EscopoMin era declarativo: file.inspect e net.ip funcionavam
+// porque os handlers DELES passavam EscopoCompleto adiante, e snapshot.compare
+// declarava a mesma exigência sem impô-la — resolvia os dois retratos por aqui e
+// só recusava quando os alcances DIFERIAM. Dois voláteis passavam.
+//
+// E passar era pior do que parece: o Env de um retrato volátil preserva as
+// capabilities sondadas no host, então CapFilesystem está lá, `Partial["unit"]`
+// não está, e o drift lê "nenhuma unit antes, nenhuma unit depois" como
+// simetria. Sai `symmetric=true, changes=[]` sobre duas coletas que nunca
+// olharam unit nenhuma. É o falso "não mudou" que este projeto inteiro existe
+// para não produzir.
+//
+// Com o mínimo na assinatura, não há como resolver um retrato sem dizer o que
+// ele precisa sustentar. EscopoQualquer é a resposta explícita para "qualquer um
+// serve" — e explícito é o ponto: escrever a palavra é uma decisão, esquecer o
+// argumento não compila.
+func (s *Servidor) retratoDe(id string, minimo Escopo) (*Retrato, *ErroRPC) {
 	if id == "" {
 		if r, ok := s.acervo.Unico(); ok {
-			return r, nil
+			return r, exigirEscopo(r, minimo)
 		}
 		if s.acervo.Vazio() {
 			if s.pol.Modo != ModoSnapshot {
@@ -57,7 +75,7 @@ func (s *Servidor) retratoDe(id string) (*Retrato, *ErroRPC) {
 		return nil, erroComDados(CodInvalidParams, err.Error(),
 			map[string]any{"snapshots": s.ids(), "hint": dica})
 	}
-	return r, nil
+	return r, exigirEscopo(r, minimo)
 }
 
 // ids são os handles, e SÓ eles.
@@ -96,11 +114,8 @@ func (s *Servidor) ids() []string {
 // inteira existe para não cometer — ausência lida como resposta, quando o certo
 // é "esta pergunta não se aplica a esta fonte".
 func (s *Servidor) retratoComFonte(id string, fontes env.Source, escopoMin Escopo) (*Retrato, *ErroRPC) {
-	r, er := s.retratoDe(id)
+	r, er := s.retratoDe(id, escopoMin)
 	if er != nil {
-		return nil, er
-	}
-	if er := exigirEscopo(r, escopoMin); er != nil {
 		return nil, er
 	}
 	if fontes != 0 && r.Fonte&fontes == 0 {
@@ -197,11 +212,20 @@ type dadosStatus struct {
 }
 
 type orcamento struct {
-	TetoMs  int64 `json:"total_ms"`
-	GastoMs int64 `json:"spent_ms"`
-	RestaMs int64 `json:"remaining_ms"`
+	// SemTeto é o operador tendo dito --capture-budget=0. TetoMs e RestaMs
+	// somem junto: publicar "resta 0" ali se leria como esgotado, que é o
+	// oposto. Ausência é a forma honesta de dizer "não se aplica".
+	SemTeto bool   `json:"unlimited"`
+	TetoMs  int64  `json:"total_ms,omitempty"`
+	GastoMs int64  `json:"spent_ms"`
+	RestaMs *int64 `json:"remaining_ms,omitempty"`
 	// Devolvivel é sempre false: release devolve MEMÓRIA, não trabalho.
 	Devolvivel bool `json:"reclaimable"`
+	// Cooperativo é sempre true, e está escrito para não deixar dúvida: este
+	// orçamento é portão de admissão mais teto nas varreduras que respeitam
+	// prazo. Uma captura já admitida pode passar do saldo nas etapas que não
+	// são interrompíveis — não há context.Context neste domínio.
+	Cooperativo bool `json:"cooperative"`
 }
 
 const notaDeRedacaoSnapshot = "este servidor responde sobre um DUMP. Quando o " +
@@ -237,9 +261,13 @@ var toolStatus = Ferramenta{
  "host_mutation":{"type":"boolean","description":"sempre false: nenhuma tool escreve no host"},
  "command_execution":{"type":"boolean","description":"sempre false: nao existe tool que execute comando"},
  "capture_budget":{"type":"object","description":"quanto tempo de leitura do host esta sessao ainda pode gastar em snapshot.capture. Ausente em modo snapshot, onde nao ha aquisicao. Esgotado, os retratos ja tirados continuam respondendo — o que acaba é a capacidade de tirar outro.",
-  "properties":{"total_ms":{"type":"integer"},"spent_ms":{"type":"integer"},
+  "required":["unlimited","spent_ms","reclaimable","cooperative"],
+  "properties":{
+   "unlimited":{"type":"boolean","description":"o operador desligou o teto com --capture-budget=0; total_ms e remaining_ms ficam AUSENTES, porque 'resta 0' ali se leria como esgotado"},
+   "total_ms":{"type":"integer"},"spent_ms":{"type":"integer"},
    "remaining_ms":{"type":"integer"},
-   "reclaimable":{"type":"boolean","description":"sempre false: snapshot.release devolve memoria, nao trabalho ja feito"}}},
+   "reclaimable":{"type":"boolean","description":"sempre false: snapshot.release devolve memoria, nao trabalho ja feito"},
+   "cooperative":{"type":"boolean","description":"sempre true: é portao de admissao mais teto nas varreduras que respeitam prazo. Uma captura JA ADMITIDA pode passar do saldo nas etapas nao interrompiveis — nao ha cancelamento fino neste dominio, e fingir que ha seria mentira"}}},
  "root_authorized":{"type":"boolean"},
  "secrets_authorized":{"type":"boolean"},
  "redaction":{"type":"array","description":"o que cada retrato PROVA sobre a propria redacao, lido do carimbo do artefato — nunca o que este servidor afirma. Ausente fora do modo snapshot, onde os retratos nascem de captura e nao de arquivo.",
@@ -264,11 +292,14 @@ var toolStatus = Ferramenta{
 			FerramentasIndisponiveis: s.fora,
 		}
 		if s.pol.Modo != ModoSnapshot {
-			gasto, resta := s.orcamentoDeColeta()
+			gasto, resta, comTeto := s.orcamentoDeColeta()
 			d.Coleta = &orcamento{
-				TetoMs:  s.pol.OrcamentoDeColeta.Milliseconds(),
-				GastoMs: gasto.Milliseconds(),
-				RestaMs: resta.Milliseconds(),
+				SemTeto: !comTeto, GastoMs: gasto.Milliseconds(), Cooperativo: true,
+			}
+			if comTeto {
+				ms := resta.Milliseconds()
+				d.Coleta.TetoMs = s.pol.OrcamentoDeColeta.Milliseconds()
+				d.Coleta.RestaMs = &ms
 			}
 		}
 		if s.pol.Modo == ModoSnapshot {
@@ -359,7 +390,7 @@ var toolSnapshotInfo = Ferramenta{
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
-		r, er := s.retratoDe(a.SnapshotID)
+		r, er := s.retratoDe(a.SnapshotID, EscopoQualquer)
 		if er != nil {
 			return nil, er
 		}
@@ -389,7 +420,7 @@ var toolHostOverview = Ferramenta{
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
-		r, er := s.retratoDe(a.SnapshotID)
+		r, er := s.retratoDe(a.SnapshotID, EscopoQualquer)
 		if er != nil {
 			return nil, er
 		}

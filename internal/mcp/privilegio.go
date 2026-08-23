@@ -108,3 +108,37 @@ func LerPrivilegio() Privilegio {
 	}
 	return p
 }
+
+// ExigeConsentimento decide se este processo precisa do --allow-root, e diz por
+// quê.
+//
+// # "Não sei" não é "não tenho"
+//
+// A decisão era `priv.Elevado`, e Elevado é falso quando as capabilities não
+// puderam ser lidas — de modo que a incerteza virava a resposta mais
+// tranquilizadora possível, exatamente na direção que este projeto combate em
+// todo lugar menos aqui. capget(2) tornou a leitura quase infalível, e é
+// justamente por isso que a falha dela merece desconfiança: se nem o kernel
+// respondeu, este processo não sabe o que consegue ver.
+//
+// A recusa vale só em modo de AQUISIÇÃO. Servindo um artefato, o servidor não
+// lê o host: o privilégio não muda uma linha do que chega ao modelo, e recusar
+// ali tiraria o `--snapshot` de ambientes de resgate sem ganhar nada.
+func ExigeConsentimento(p Privilegio, modo Modo) (bool, string) {
+	if p.Root {
+		return true, "este processo é root (euid 0)."
+	}
+	if len(p.CapsEfetivas) > 0 {
+		return true, "este processo carrega capability de observação, e euid não " +
+			"é a medida: elas alcançam superfície que um uid comum não alcança."
+	}
+	if modo != ModoSnapshot && !p.CapsLidas {
+		return true, "NÃO foi possível determinar o privilégio deste processo: " +
+			"capget(2) falhou e /proc/self/status não respondeu.\n" +
+			"Este servidor vai LER o host, e não sabe com que alcance. Tratar " +
+			"'não sei' como 'não tenho' seria a leitura mais tranquilizadora de " +
+			"uma verificação que não aconteceu — que é o erro que esta ferramenta " +
+			"inteira existe para não cometer."
+	}
+	return false, ""
+}

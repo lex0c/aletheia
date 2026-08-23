@@ -23,12 +23,18 @@ var toolSnapshotCompare = Ferramenta{
 	EscopoMin: EscopoCompleto,
 	Nome:      "snapshot.compare",
 	Titulo:    "O que mudou entre dois retratos",
-	Descricao: "Compara dois retratos declarados no lançamento e devolve o que " +
-		"surgiu, sumiu e mudou. A mudança é datada por INTERVALO ('entre t0 e t1'), " +
-		"nunca por instante: a ferramenta não estava presente na hora. LEIA " +
-		"coverage: os dois retratos precisam ter tido o mesmo alcance, e as famílias " +
-		"em que um lado viu menos que o outro saem DECLARADAS como não comparadas — " +
-		"o silêncio delas não vale como 'nada mudou'.",
+	Descricao: "Compara dois retratos JÁ CARREGADOS — os dumps fixados no " +
+		"lançamento, ou os que snapshot.capture cunhou nesta sessão — e devolve o " +
+		"que surgiu, sumiu e mudou. A mudança é datada por INTERVALO ('entre t0 e " +
+		"t1'), nunca por instante: a ferramenta não estava presente na hora.\n\n" +
+		"Os DOIS precisam ser de escopo complete. Um retrato volátil não coletou " +
+		"unit, cron nem pacote, e o ambiente dele ainda declara as capabilities " +
+		"sondadas no host — então a comparação leria 'nenhuma unit antes, nenhuma " +
+		"unit depois' como simetria e devolveria 'nada mudou' sobre o que ninguém " +
+		"olhou. A recusa é o contrário de um falso negativo silencioso.\n\n" +
+		"LEIA coverage: as famílias em que um lado viu menos que o outro saem " +
+		"DECLARADAS como não comparadas — o silêncio delas não vale como 'nada " +
+		"mudou'.",
 	Entrada: json.RawMessage(`{"type":"object","additionalProperties":false,
 "required":["before_id","after_id"],
 "properties":{
@@ -69,11 +75,11 @@ var toolSnapshotCompare = Ferramenta{
 			return nil, erro(CodInvalidParams,
 				"before_id e after_id são o mesmo retrato: não há o que comparar")
 		}
-		antes, er := s.retratoDe(a.Antes)
+		antes, er := s.retratoDe(a.Antes, EscopoCompleto)
 		if er != nil {
 			return nil, er
 		}
-		depois, er := s.retratoDe(a.Depois)
+		depois, er := s.retratoDe(a.Depois, EscopoCompleto)
 		if er != nil {
 			return nil, er
 		}
@@ -89,17 +95,14 @@ var toolSnapshotCompare = Ferramenta{
 		// comparar um retrato com root contra um sem root fabricaria "sumiu"
 		// para tudo que só root enxerga. O escopo é o mesmo eixo, um nível
 		// acima.
-		if antes.Escopo() != depois.Escopo() {
-			return nil, erroComDados(CodInvalidParams,
-				"os dois retratos têm ALCANCES diferentes ("+string(antes.Escopo())+
-					" e "+string(depois.Escopo())+"): o volátil não examina unit, cron, "+
-					"pacote nem hash, e comparar os dois faria TUDO que só o completo "+
-					"vê sair como \"sumiu\" — uma remoção em massa que não aconteceu",
-				map[string]any{
-					"before_scope": string(antes.Escopo()),
-					"after_scope":  string(depois.Escopo()),
-				})
-		}
+		// Não há teste de alcance aqui, e a ausência é o conserto.
+		//
+		// Havia um: ele recusava quando os dois DIFERIAM, e por isso deixava
+		// passar volátil × volátil — dois retratos que não coletaram unit, cron
+		// nem pacote, comparados entre si, devolvendo simetria sobre o nada. A
+		// exigência agora é de cada lado, no retratoDe acima, e um teste de
+		// diferença aqui seria inalcançável: guarda que nenhum teste consegue
+		// exercitar é pior que guarda nenhuma.
 		la, ld := ladoDe(antes), ladoDe(depois)
 		ressalva, er := conferirOrdem(la, ld)
 		if er != nil {

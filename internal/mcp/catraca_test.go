@@ -609,7 +609,7 @@ func TestErroDeProtocoloNaoCarregaTextoDoAlvo(t *testing.T) {
 
 	// Com um retrato só o handle é opcional; forçamos o erro pedindo um id que
 	// não existe, que é o outro caminho que devolvia rótulo.
-	_, er := s.retratoDe("snap-inexistente")
+	_, er := s.retratoDe("snap-inexistente", EscopoQualquer)
 	if er == nil {
 		t.Fatal("id desconhecido devia falhar")
 	}

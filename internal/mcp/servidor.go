@@ -49,16 +49,21 @@ type Servidor struct {
 	muGasto       sync.Mutex
 }
 
-// orcamentoDeColeta devolve o gasto e o que sobra. Sobra zero significa que
-// mais nenhuma captura acontece neste processo — nem depois de um release.
-func (s *Servidor) orcamentoDeColeta() (gasto, resta time.Duration) {
+// orcamentoDeColeta devolve o gasto, o que sobra, e se há teto.
+//
+// O terceiro retorno não é redundante: sem ele, "sem teto" e "saldo esgotado"
+// se escrevem os dois como resta==0, e as duas levam a decisões opostas.
+func (s *Servidor) orcamentoDeColeta() (gasto, resta time.Duration, comTeto bool) {
 	s.muGasto.Lock()
 	defer s.muGasto.Unlock()
+	if s.pol.SemTetoDeColeta {
+		return s.gastoDeColeta, 0, false
+	}
 	resta = s.pol.OrcamentoDeColeta - s.gastoDeColeta
 	if resta < 0 {
 		resta = 0
 	}
-	return s.gastoDeColeta, resta
+	return s.gastoDeColeta, resta, true
 }
 
 // cobrarColeta soma o tempo de uma aquisição, tenha ela dado certo ou não: o

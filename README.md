@@ -820,16 +820,31 @@ notado depois. Os coletores não são interrompíveis, e a descrição da tool d
 isso em vez de fingir.
 
 O **alcance viaja na resposta**: `provenance.scope` e o `scope` de
-`snapshot.list` fazem parte da identidade do retrato, e `snapshot.compare`
-**recusa** comparar alcances diferentes. Comparar um retrato completo com um
-volátil produzia 771 mudanças, 770 delas "sumiu" — nada sumiu; a segunda coleta
-é que não olhou.
+`snapshot.list` fazem parte da identidade do retrato, e toda tool que não se
+sustenta num volátil o **recusa** em vez de responder uma ausência que se lê
+como resposta.
+
+`snapshot.compare` exige que os **dois** sejam `complete`. Completo × volátil
+produzia 771 mudanças, 770 delas "sumiu" — nada sumiu; a segunda coleta é que
+não olhou. E volátil × volátil é pior, porque é silencioso: nenhuma unit dos
+dois lados vira "simetria", e o `Env` de um retrato volátil ainda declara as
+capabilities sondadas no host, então nem a cobertura acusa. Sai `nada mudou`
+sobre famílias que ninguém coletou.
 
 Há dois limites, e eles medem coisas diferentes. O **teto de retratos vivos**
 limita memória. O **orçamento de coleta** (`--capture-budget`, padrão 10m)
 limita trabalho: capturar e liberar em laço mantém sempre um só retrato vivo e
 nunca esbarra no teto, enquanto cobra uma varredura do host investigado por
-volta. Liberar não devolve orçamento — memória volta, trabalho já feito não —, e
+volta.
+
+O orçamento é **cooperativo**, e a palavra é literal: ele recusa admitir uma
+captura nova quando o saldo acaba, e limita cada varredura ao menor entre o
+saldo restante e o orçamento por captura — mas uma captura **já admitida** pode
+passar do saldo nas etapas que não são interrompíveis. Não há cancelamento fino
+neste domínio, e `session.status` diz `cooperative: true` em vez de prometer um
+relógio rígido. `--capture-budget=0` desliga, com aviso.
+
+Liberar não devolve orçamento — memória volta, trabalho já feito não —, e
 o que resta é publicado em `session.status` antes de ser batido, para o modelo
 não precisar gastar uma captura inteira para aprender que não podia.
 

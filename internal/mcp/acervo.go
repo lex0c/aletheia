@@ -313,6 +313,15 @@ const (
 	EscopoVolatil Escopo = "volatile"
 	// EscopoCompleto é a varredura inteira: a única que sustenta findings.
 	EscopoCompleto Escopo = "complete"
+
+	// EscopoQualquer é o piso que TODO retrato satisfaz, e existe para ser
+	// escrito.
+	//
+	// Ele é o mesmo valor de EscopoVolatil, e a diferença é de intenção: quem
+	// resolve um retrato tem de dizer o que a pergunta exige dele, e "qualquer
+	// um serve" é uma resposta legítima — desde que seja uma resposta, e não um
+	// argumento esquecido. Um alias faz a decisão aparecer no diff.
+	EscopoQualquer = EscopoVolatil
 )
 
 // Capturar tira um retrato AGORA e o registra.
@@ -332,6 +341,24 @@ const (
 // O custo é uma cópia profunda do Facts por captura, que é exatamente o que o
 // `collect` já paga na escrita.
 func (a *Acervo) Capturar(e *env.Env, escopo Escopo) (*Retrato, error) {
+	if e == nil {
+		return nil, errors.New("captura sem ambiente")
+	}
+	// A POSSE É ASSUMIDA NA PRIMEIRA LINHA, e não em cada saída.
+	//
+	// O comentário lá embaixo já afirmava que esta função sempre fecha o Env, e
+	// não era verdade: o teto cheio e o "volátil não vale para imagem" retornam
+	// ANTES, e em --root o env.Probe do chamador já abriu um os.Root. Um modelo
+	// em laço contra um acervo cheio abria um descritor por chamada — e o
+	// snapshot.release não alcança nenhum deles, porque esses Env nunca chegaram
+	// a entrar no acervo.
+	//
+	// O defer também cobre o que ainda não existe: um erro novo no meio, um
+	// pânico recuperado lá em cima por rodarProtegido, um estágio de coleta que
+	// passe a poder falhar. Fechar em cada saída é uma disciplina que se perde
+	// no primeiro `return` acrescentado com pressa.
+	defer e.Close()
+
 	// O TETO VEM ANTES DA COLETA.
 	//
 	// Ele era conferido no fim, na hora de registrar — depois de facts.Collect
@@ -381,18 +408,12 @@ func (a *Acervo) Capturar(e *env.Env, escopo Escopo) (*Retrato, error) {
 	// já usa, e agora os dois convergem na mesma estrutura.
 	congelado, err := d.Env(nil)
 	if err != nil {
-		e.Close()
 		return nil, err
 	}
-	// A captura assume a POSSE do Env vivo e sempre o fecha. Fechá-lo em quem
-	// chama deixava o descritor aberto no caminho de pânico, que rodarProtegido
-	// recupera lá em cima — e em modo imagem cada captura segura um os.Root.
-	e.Close()
 
 	fonte := e.Source
 	id, err := idDeCaptura()
 	if err != nil {
-		e.Close()
 		return nil, err
 	}
 	r := &Retrato{

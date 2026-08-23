@@ -57,14 +57,24 @@ func runMCP(args []string) int {
 	// O orçamento de TRABALHO é do operador: é a máquina dele que paga a
 	// varredura. Um teto que ele não pode levantar viraria armadilha numa
 	// investigação longa; um que ele não pode baixar, numa máquina em produção.
+	//
+	// Zero DITO é diferente de zero por omissão, e por isso a distinção vem do
+	// fs.Visit e não do valor: Padroes() troca o zero silencioso pelo padrão, e
+	// sem esta separação `--capture-budget=0` imprimia "desliga o teto" e subia
+	// com dez minutos.
 	if *orcamento < 0 {
 		fmt.Fprintln(os.Stderr, "mcp: --capture-budget não pode ser negativo")
 		return 3
 	}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "capture-budget" && *orcamento == 0 {
+			pol.SemTetoDeColeta = true
+		}
+	})
 	pol.OrcamentoDeColeta = *orcamento
-	if pol.Modo != mcp.ModoSnapshot && *orcamento == 0 {
+	if pol.Modo != mcp.ModoSnapshot && pol.SemTetoDeColeta {
 		fmt.Fprintln(os.Stderr,
-			"mcp: --capture-budget=0 desliga o teto de trabalho da aquisição.\n"+
+			"mcp: --capture-budget=0 desliga o orçamento de trabalho da aquisição.\n"+
 				"Capturar e liberar em laço passa a poder varrer o host investigado\n"+
 				"sem fim, e o teto de retratos vivos não impede isso — ele limita\n"+
 				"memória, não trabalho.")
@@ -89,9 +99,11 @@ func runMCP(args []string) int {
 	// que o operador autoriza é ALCANCE DE OBSERVAÇÃO PRIVILEGIADO — e a
 	// mensagem diz isso.
 	priv := mcp.LerPrivilegio()
-	if priv.Elevado && !pol.PermitirRoot {
+	exige, porQue := mcp.ExigeConsentimento(priv, pol.Modo)
+	if exige && !pol.PermitirRoot {
 		fmt.Fprintln(os.Stderr,
 			"mcp: recusei iniciar com observação privilegiada.\n"+
+				porQue+"\n"+
 				"O servidor herda o privilégio deste processo, e com ele enxerga mais do\n"+
 				"host — incluindo o que uma tool de inspeção devolveria a um modelo\n"+
 				"remoto. Isso é decisão sua, e precisa ser dita:\n\n"+
@@ -140,7 +152,7 @@ func runMCP(args []string) int {
 				"\n⚠ O DUMP NÃO CONFERE COM A SOMA ESCRITA NA COLETA: %s\n"+
 					"  o arquivo mudou depois de coletado. Compare com o número que foi\n"+
 					"  para o war log. O servidor SEGUE — e o que sair dele descreve\n"+
-					"  outro arquivo. A procedência de toda resposta diz checksum_mismatch.\n\n", c)
+					"  outro arquivo. A procedência de toda resposta diz sidecar_mismatch.\n\n", c)
 		case mcp.SomaAusente:
 			fmt.Fprintf(os.Stderr, "mcp: %s sem arquivo de soma ao lado: "+
 				"NÃO foi possível conferir se ele mudou desde a coleta\n", c)

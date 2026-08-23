@@ -100,7 +100,7 @@ var toolFindingsList = Ferramenta{
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
-		r, er := s.retratoDe(a.SnapshotID)
+		r, er := s.retratoDe(a.SnapshotID, EscopoQualquer)
 		if er != nil {
 			return nil, er
 		}
@@ -210,7 +210,7 @@ var toolFindingGet = Ferramenta{
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
-		r, er := s.retratoDe(a.SnapshotID)
+		r, er := s.retratoDe(a.SnapshotID, EscopoQualquer)
 		if er != nil {
 			return nil, er
 		}
@@ -274,7 +274,7 @@ var toolFindingsCorrelate = Ferramenta{
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
-		r, er := s.retratoDe(a.SnapshotID)
+		r, er := s.retratoDe(a.SnapshotID, EscopoQualquer)
 		if er != nil {
 			return nil, er
 		}
@@ -341,7 +341,7 @@ var toolCoverageGet = Ferramenta{
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
-		r, er := s.retratoDe(a.SnapshotID)
+		r, er := s.retratoDe(a.SnapshotID, EscopoQualquer)
 		if er != nil {
 			return nil, er
 		}

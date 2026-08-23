@@ -2,6 +2,9 @@ package mcp
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -131,7 +134,7 @@ func TestTetoDeRetratosVivosELiberacao(t *testing.T) {
 		t.Fatalf("o release tinha de devolver a vaga: %v", er)
 	}
 	// E o liberado some de verdade.
-	if _, er := s.retratoDe(primeiro); er == nil {
+	if _, er := s.retratoDe(primeiro, EscopoQualquer); er == nil {
 		t.Fatal("o retrato liberado continua respondendo")
 	}
 }
@@ -327,5 +330,333 @@ func TestOrcamentoDeColetaEhPublicado(t *testing.T) {
 	st2 := chamar(t, sn, "session.status", `{}`)
 	if _, tem := st2["data"].(map[string]any)["capture_budget"]; tem {
 		t.Error("modo snapshot publicou orçamento de coleta: não há o que orçar")
+	}
+}
+
+// TODA TOOL QUE DECLARA EscopoCompleto O IMPÕE.
+//
+// EscopoMin era declaração e não portão: file.inspect e net.ip recusavam porque
+// os handlers DELES passavam a exigência adiante, e snapshot.compare declarava a
+// mesma coisa sem impô-la. Dois retratos voláteis passavam, e o drift comparava
+// duas coletas que nunca olharam unit — devolvendo simetria sobre o nada.
+//
+// A catraca é sobre o REGISTRY, e não sobre a lista de hoje: uma tool futura que
+// declare a exigência e esqueça de aplicá-la falha aqui, e uma que apareça sem
+// linha na tabela falha pedindo a linha.
+func TestQuemExigeCompletoRecusaOVolatil(t *testing.T) {
+	s := servidorVivo(t, ModoLive, "")
+	primeiro := capturar(t, s, "volatile")["data"].(map[string]any)["snapshot_id"].(string)
+	segundo := capturar(t, s, "volatile")["data"].(map[string]any)["snapshot_id"].(string)
+
+	// O snapshot_id vai explícito: com dois retratos carregados, omiti-lo
+	// produziria uma recusa por AMBIGUIDADE, e o teste passaria sem nunca ter
+	// exercitado o portão de escopo.
+	args := map[string]string{
+		"net.ip":       fmt.Sprintf(`{"address":"127.0.0.1","snapshot_id":%q}`, primeiro),
+		"file.inspect": fmt.Sprintf(`{"path":"/etc/passwd","snapshot_id":%q}`, primeiro),
+		"snapshot.compare": fmt.Sprintf(`{"before_id":%q,"after_id":%q}`,
+			primeiro, segundo),
+	}
+
+	exigentes := 0
+	for _, f := range s.ativas {
+		if f.EscopoMin != EscopoCompleto {
+			continue
+		}
+		exigentes++
+		a, ok := args[f.Nome]
+		if !ok {
+			t.Errorf("%s declara EscopoMin: EscopoCompleto e não está na tabela "+
+				"deste teste. Sem argumento válido, ninguém confere se a "+
+				"declaração é portão ou decoração.", f.Nome)
+			continue
+		}
+		_, er := f.Rodar(s, json.RawMessage(a))
+		if er == nil {
+			t.Errorf("%s declara exigir um retrato COMPLETO e respondeu sobre "+
+				"volátil: a declaração não é portão", f.Nome)
+			continue
+		}
+		if !strings.Contains(er.Message, "volátil") {
+			t.Errorf("%s: a recusa precisa dizer por quê: %s", f.Nome, er.Message)
+		}
+	}
+	if exigentes == 0 {
+		t.Fatal("nenhuma tool declara EscopoCompleto: ou o registry mudou, ou " +
+			"esta catraca virou decoração")
+	}
+}
+
+// E a matriz inteira do compare, que é onde o buraco estava.
+func TestCompararExigeOsDoisCompletos(t *testing.T) {
+	s := servidorVivo(t, ModoLive, "")
+	s.acervo.Teto = 4
+	vol1 := capturar(t, s, "volatile")["data"].(map[string]any)["snapshot_id"].(string)
+	vol2 := capturar(t, s, "volatile")["data"].(map[string]any)["snapshot_id"].(string)
+	com1 := capturar(t, s, "complete")["data"].(map[string]any)["snapshot_id"].(string)
+	com2 := capturar(t, s, "complete")["data"].(map[string]any)["snapshot_id"].(string)
+
+	casos := []struct {
+		nome          string
+		antes, depois string
+		aceita        bool
+	}{
+		{"volátil × volátil", vol1, vol2, false},
+		{"volátil × completo", vol1, com1, false},
+		{"completo × volátil", com1, vol1, false},
+		{"completo × completo", com1, com2, true},
+	}
+	for _, c := range casos {
+		_, er := s.porNome["snapshot.compare"].Rodar(s, json.RawMessage(
+			fmt.Sprintf(`{"before_id":%q,"after_id":%q}`, c.antes, c.depois)))
+		if c.aceita && er != nil {
+			t.Errorf("%s: recusado — %s", c.nome, er.Message)
+		}
+		if !c.aceita && er == nil {
+			t.Errorf("%s: ACEITO. Um retrato volátil não coletou unit, cron nem "+
+				"pacote, e o Env dele ainda carrega CapFilesystem: o drift lê "+
+				"'nenhuma unit antes, nenhuma unit depois' como simetria e "+
+				"devolve changes=[] sobre o que ninguém olhou", c.nome)
+		}
+	}
+}
+
+// descritoresAbertos conta o que este processo segura. É a medida direta: um
+// os.Root aberto e não fechado aparece aqui, e nenhum raciocínio sobre
+// ownership substitui contar.
+func descritoresAbertos(t *testing.T) int {
+	t.Helper()
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("sem /proc/self/fd: %v", err)
+	}
+	return len(ents)
+}
+
+// A CAPTURA RECUSADA NÃO DEIXA DESCRITOR PARA TRÁS.
+//
+// Em --root, o env.Probe do chamador abre um os.Root ANTES de Capturar ser
+// chamada. Os dois caminhos de recusa precoce — teto cheio e "volátil não vale
+// para imagem" — retornavam antes de qualquer Close, e o snapshot.release não
+// alcança esses Env porque eles nunca entraram no acervo.
+//
+// Um modelo em laço contra um acervo cheio abria um descritor por chamada, e o
+// orçamento de trabalho quase não os cobrava: o cronômetro só media o trecho
+// depois da aquisição.
+func TestCapturaRecusadaNaoVazaDescritor(t *testing.T) {
+	raiz := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(raiz, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := servidorVivo(t, ModoImagem, raiz)
+
+	// Uma primeira chamada para pagar qualquer alocação preguiçosa; a contagem
+	// começa depois dela.
+	_, _ = s.porNome["snapshot.capture"].Rodar(s, json.RawMessage(`{"scope":"volatile"}`))
+	antes := descritoresAbertos(t)
+
+	// 1. volátil sobre imagem: recusa antes de coletar qualquer coisa.
+	for i := 0; i < 20; i++ {
+		if _, er := s.porNome["snapshot.capture"].Rodar(s,
+			json.RawMessage(`{"scope":"volatile"}`)); er == nil {
+			t.Fatal("volátil não se aplica a uma imagem montada")
+		}
+	}
+	if depois := descritoresAbertos(t); depois > antes {
+		t.Errorf("20 recusas de escopo deixaram %d descritor(es) abertos "+
+			"(%d -> %d). Em --root cada aquisição abre um os.Root, e o "+
+			"snapshot.release não alcança um Env que nunca entrou no acervo",
+			depois-antes, antes, depois)
+	}
+
+	// 2. teto cheio: recusa antes de coletar, com o mesmo problema.
+	s.acervo.Teto = 1
+	capturar(t, s, "complete")
+	antes = descritoresAbertos(t)
+	for i := 0; i < 20; i++ {
+		if _, er := s.porNome["snapshot.capture"].Rodar(s,
+			json.RawMessage(`{"scope":"complete"}`)); er == nil {
+			t.Fatal("o teto era 1 e já havia um retrato")
+		}
+	}
+	if depois := descritoresAbertos(t); depois > antes {
+		t.Errorf("20 recusas por teto deixaram %d descritor(es) abertos (%d -> %d)",
+			depois-antes, antes, depois)
+	}
+}
+
+// "NÃO SEI" NÃO É "NÃO TENHO".
+//
+// O portão decidia por priv.Elevado, que é falso quando as capabilities não
+// puderam ser lidas. Num ambiente de resgate sem /proc — que é onde esta
+// ferramenta é usada — a incerteza virava a resposta mais tranquilizadora, e o
+// servidor subia sem consentimento para ler o host com um alcance que ele mesmo
+// não conhecia.
+func TestPrivilegioIndeterminadoExigeConsentimentoNaAquisicao(t *testing.T) {
+	casos := []struct {
+		nome  string
+		priv  Privilegio
+		modo  Modo
+		exige bool
+		diz   string
+	}{
+		{"root", Privilegio{Root: true, CapsLidas: true}, ModoLive, true, "euid 0"},
+		{"uid comum, caps lidas e vazias", Privilegio{CapsLidas: true}, ModoLive, false, ""},
+		{"uid comum com capability", Privilegio{CapsLidas: true,
+			CapsEfetivas: []string{"CAP_BPF"}}, ModoLive, true, "capability de observação"},
+
+		// O caso da correção: leitura falhou, e o servidor vai LER o host.
+		{"caps ilegíveis, aquisição", Privilegio{}, ModoLive, true, "NÃO foi possível determinar"},
+		{"caps ilegíveis, imagem", Privilegio{}, ModoImagem, true, "NÃO foi possível determinar"},
+
+		// E servindo artefato o privilégio não muda uma linha do que chega ao
+		// modelo: recusar ali tiraria o --snapshot do resgate sem ganhar nada.
+		{"caps ilegíveis, snapshot", Privilegio{}, ModoSnapshot, false, ""},
+	}
+	for _, c := range casos {
+		exige, porQue := ExigeConsentimento(c.priv, c.modo)
+		if exige != c.exige {
+			t.Errorf("%s: exige=%v, queria %v (%s)", c.nome, exige, c.exige, porQue)
+			continue
+		}
+		if c.diz != "" && !strings.Contains(porQue, c.diz) {
+			t.Errorf("%s: a recusa precisa dizer por quê; falta %q em: %s",
+				c.nome, c.diz, porQue)
+		}
+		if !c.exige && porQue != "" {
+			t.Errorf("%s: não exige e deu motivo: %s", c.nome, porQue)
+		}
+	}
+}
+
+// --capture-budget=0 DESLIGA MESMO.
+//
+// Zero por omissão e zero DITO eram a mesma coisa: Padroes() trocava os dois
+// pelo padrão, e a CLI imprimia "desliga o teto" antes de subir com dez
+// minutos. Errar para o lado seguro não desculpa a interface mentir sobre uma
+// opção explícita do operador.
+func TestSemTetoDeColetaNaoVoltaAoPadrao(t *testing.T) {
+	p := Policy{Modo: ModoLive, SemTetoDeColeta: true}.Padroes()
+	if p.OrcamentoDeColeta != 0 {
+		t.Fatalf("Padroes() ressuscitou o teto: %s", p.OrcamentoDeColeta)
+	}
+
+	a := NovoAcervo()
+	s := NovoServidor(p, a, "teste", nil, func() (*env.Env, error) {
+		return env.Probe(env.Options{Version: "teste"}), nil
+	})
+	t.Cleanup(func() {
+		for _, r := range a.Todos() {
+			_ = a.Liberar(r.ID)
+		}
+	})
+
+	gasto, resta, comTeto := s.orcamentoDeColeta()
+	if comTeto {
+		t.Fatal("o servidor subiu com teto depois de o operador o desligar")
+	}
+	if gasto != 0 || resta != 0 {
+		t.Errorf("sessão nova: gasto=%s resta=%s", gasto, resta)
+	}
+
+	// E capturar continua possível depois de gastar — não há saldo a acabar.
+	capturar(t, s, "volatile")
+	if _, er := s.porNome["snapshot.capture"].Rodar(s,
+		json.RawMessage(`{"scope":"volatile"}`)); er != nil {
+		t.Fatalf("com o teto desligado a segunda captura tem de passar: %v", er)
+	}
+
+	// O status diz "ilimitado" em vez de publicar um saldo que se leria como
+	// esgotado.
+	b := chamar(t, s, "session.status", `{}`)["data"].(map[string]any)["capture_budget"].(map[string]any)
+	if b["unlimited"] != true {
+		t.Errorf("session.status não declara o desligamento: %v", b)
+	}
+	if _, tem := b["remaining_ms"]; tem {
+		t.Error(`remaining_ms presente com o teto desligado: "resta 0" ali se ` +
+			`leria como esgotado, que é o oposto`)
+	}
+	if b["cooperative"] != true {
+		t.Error("o orçamento não se declara cooperativo")
+	}
+}
+
+// O PRAZO DA VARREDURA É O MENOR ENTRE OS DOIS.
+//
+// O saldo admitia a captura e o WalkDeadline saía de Budget sem olhar o que
+// restava: um "teto total" de 1s autorizava dois minutos de varredura.
+//
+// A medida é do PRAZO, e não do tempo que a captura levou. Uma captura normal
+// dura ~1,5s de qualquer jeito, então cronometrar não distinguiria um prazo de
+// 40ms de um de dois minutos — o teste passaria sem o grampo existir.
+func TestPrazoDaVarreduraNaoUltrapassaOSaldo(t *testing.T) {
+	const saldo = 40 * time.Millisecond
+
+	a := NovoAcervo()
+	a.Teto = 4
+	var prazo time.Duration
+	var mediu bool
+	s := NovoServidor(
+		Policy{Modo: ModoLive, Budget: 2 * time.Minute, OrcamentoDeColeta: saldo},
+		a, "teste", nil, nil)
+	s.adquirir = func() (*env.Env, error) {
+		e := env.Probe(env.Options{Version: "teste"})
+		// O Env é observado DEPOIS que a tool escreve o prazo nele — a leitura
+		// acontece no defer abaixo, quando a captura já passou por aqui.
+		t.Cleanup(func() {
+			if !e.WalkDeadline.IsZero() {
+				mediu = true
+			}
+		})
+		return e, nil
+	}
+	t.Cleanup(func() {
+		for _, r := range a.Todos() {
+			_ = a.Liberar(r.ID)
+		}
+	})
+
+	// Para ler o prazo é preciso segurar o Env: o adquirir devolve o ponteiro, e
+	// a tool o preenche antes de entregá-lo a Capturar.
+	var capturado *env.Env
+	s.adquirir = func() (*env.Env, error) {
+		capturado = env.Probe(env.Options{Version: "teste"})
+		return capturado, nil
+	}
+
+	inicio := time.Now()
+	if _, er := s.porNome["snapshot.capture"].Rodar(s,
+		json.RawMessage(`{"scope":"complete"}`)); er != nil {
+		t.Fatalf("há saldo: a captura devia ser ADMITIDA, apenas com prazo curto: %v", er)
+	}
+	if capturado == nil || capturado.WalkDeadline.IsZero() {
+		t.Fatal("a captura completa não definiu WalkDeadline nenhum")
+	}
+	prazo = capturado.WalkDeadline.Sub(inicio)
+	mediu = true
+
+	// A folga é a distância entre DOIS RELÓGIOS: este teste marca antes de
+	// chamar a tool, e a tool marca antes de sondar o ambiente. Medido, a
+	// diferença fica em dezenas de microssegundos — e a coisa contra a qual isto
+	// protege são DOIS MINUTOS, então a folga não afrouxa nada. A mutação que
+	// devolve o prazo ao Budget marca 2m0,017s.
+	const folga = 5 * time.Millisecond
+	if prazo > saldo+folga {
+		t.Errorf("WalkDeadline ficou em %s com saldo de %s (Budget=2min): o "+
+			"prazo da varredura tem de ser o MENOR entre o orçamento por "+
+			"captura e o que resta da sessão — senão um teto total de 1s "+
+			"autoriza dois minutos de trabalho no host", prazo, saldo)
+	}
+	if prazo >= s.pol.Budget {
+		t.Errorf("o prazo (%s) veio do Budget por captura e não do saldo", prazo)
+	}
+	if !mediu {
+		t.Fatal("o teste não chegou a medir nada")
+	}
+
+	// E o saldo agora acabou, então a próxima é recusada.
+	if _, er := s.porNome["snapshot.capture"].Rodar(s,
+		json.RawMessage(`{"scope":"complete"}`)); er == nil {
+		t.Error("o saldo acabou e a captura seguinte passou")
 	}
 }

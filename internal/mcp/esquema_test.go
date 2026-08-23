@@ -239,16 +239,17 @@ func fatosComAchado() *facts.Facts {
 // retratos nascem de captura, não de artefato.
 func TestOutputSchemaTambemValeEmModoLive(t *testing.T) {
 	s := servidorVivo(t, ModoLive, "")
-	// Três capturados aqui, mais o que a própria snapshot.capture tira quando
+	// Dois capturados aqui, mais o que a própria snapshot.capture tira quando
 	// chega a vez dela no registry.
-	s.acervo.Teto = 4
-	// Um completo, porque é o único que sustenta findings.list e o dossiê de
-	// arquivo; e dois voláteis, porque snapshot.compare exige um par de MESMO
-	// alcance — comparar coletas de alcances diferentes é o que produz 770
-	// "sumiu" que ninguém apagou.
+	s.acervo.Teto = 3
+	// DOIS COMPLETOS, e não um completo mais dois voláteis.
+	//
+	// A versão anterior capturava um completo e dois voláteis, e parDeMesmoEscopo
+	// achava o par volátil — de modo que a catraca de schema estava exercitando
+	// justamente o caminho que snapshot.compare não devia aceitar. Ela validava
+	// a forma de uma resposta que não devia existir.
 	capturar(t, s, "complete")
-	capturar(t, s, "volatile")
-	capturar(t, s, "volatile")
+	capturar(t, s, "complete")
 	validarRegistry(t, s, argsDeTeste(t, s))
 }
 
@@ -325,9 +326,9 @@ func argsDeTeste(t *testing.T, s *Servidor) map[string]string {
 		args["snapshot.info"] = fmt.Sprintf(`{"snapshot_id":%q}`, s.acervo.Todos()[0].ID)
 	}
 	if _, tem := s.porNome["snapshot.compare"]; tem {
-		antes, depois, ok := parDeMesmoEscopo(s)
+		antes, depois, ok := parDeCompletos(s)
 		if !ok {
-			t.Fatal("snapshot.compare precisa de dois retratos de mesmo alcance")
+			t.Fatal("snapshot.compare precisa de dois retratos COMPLETOS")
 		}
 		args["snapshot.compare"] = fmt.Sprintf(
 			`{"before_id":%q,"after_id":%q}`, antes, depois)
@@ -372,14 +373,18 @@ func comSnapshot(t *testing.T, s *Servidor, f Ferramenta, args string) string {
 	return args
 }
 
-func parDeMesmoEscopo(s *Servidor) (string, string, bool) {
-	r := s.acervo.Todos()
-	for i := range r {
-		for j := i + 1; j < len(r); j++ {
-			if r[i].Escopo() == r[j].Escopo() {
-				return r[i].ID, r[j].ID, true
-			}
+// parDeCompletos escolhe o par que snapshot.compare aceita. O critério é
+// COMPLETO, e não "mesmo alcance": dois voláteis têm o mesmo alcance e mesmo
+// assim não sustentam comparação nenhuma.
+func parDeCompletos(s *Servidor) (string, string, bool) {
+	var ids []string
+	for _, r := range s.acervo.Todos() {
+		if r.Escopo() == EscopoCompleto {
+			ids = append(ids, r.ID)
 		}
 	}
-	return "", "", false
+	if len(ids) < 2 {
+		return "", "", false
+	}
+	return ids[0], ids[1], true
 }

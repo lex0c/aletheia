@@ -226,11 +226,16 @@ MCP — a pergunta que a IA faz DE VOLTA
                 stderr; arquivo só quando pedido, porque preserve continua
                 sendo o único comando que escreve por padrão
   --capture-budget D
-                tempo TOTAL de leitura do host que a sessão pode gastar em
-                snapshot.capture (padrão 10m). O teto de retratos vivos limita
-                memória; capturar e liberar em laço nunca esbarra nele e cobra
-                uma varredura por volta. Liberar não devolve orçamento: memória
-                volta, trabalho já feito não. 0 desliga, com aviso
+                orçamento COOPERATIVO de leitura do host, acumulado pela sessão
+                inteira (padrão 10m). Ele faz duas coisas: recusa admitir uma
+                captura nova quando o saldo acaba, e limita cada varredura ao
+                MENOR entre --capture-budget restante e o orçamento por captura.
+                Uma captura já admitida pode passar do saldo nas etapas que não
+                são interrompíveis — não há cancelamento fino neste domínio.
+                Existe porque o teto de retratos vivos limita memória, e
+                capturar/liberar em laço nunca esbarra nele enquanto cobra uma
+                varredura por volta. Liberar não devolve: memória volta,
+                trabalho já feito não. 0 desliga, com aviso
 
   Na aquisição, scope=volatile lê /proc e sockets e é ~9x mais barato — e NÃO
   sustenta achado: o motor recusa rodar check sobre coleta parcial, e a resposta

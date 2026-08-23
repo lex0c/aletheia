@@ -104,8 +104,8 @@ type Policy struct {
 	// o mecanismo existente sustenta, e a descrição da tool diz isso.
 	Budget time.Duration
 
-	// OrcamentoDeColeta é o teto de trabalho ACUMULADO em aquisição, por
-	// processo.
+	// OrcamentoDeColeta é o orçamento COOPERATIVO de trabalho em aquisição,
+	// acumulado por processo.
 	//
 	// O teto de retratos vivos limita MEMÓRIA, e só. Capturar e liberar em laço
 	// mantém um retrato vivo o tempo todo e nunca esbarra nele — enquanto cada
@@ -114,8 +114,33 @@ type Policy struct {
 	// estranho, deixa eu capturar de novo") transforma um servidor de
 	// observação num gerador de carga.
 	//
+	// # O que ele é, exatamente
+	//
+	// Duas coisas, e nenhuma delas é um relógio de parede rígido:
+	//
+	//  1. um PORTÃO DE ADMISSÃO: sem saldo, snapshot.capture recusa antes de
+	//     tocar no host;
+	//  2. um TETO nas varreduras que respeitam prazo: o env.WalkDeadline de cada
+	//     captura é o MENOR entre Budget e o saldo restante.
+	//
+	// O que ele NÃO é: uma captura já admitida pode passar do saldo nas etapas
+	// que não são interrompíveis. Não existe context.Context neste domínio, e
+	// fingir corte fino seria mentira — a mesma que a descrição de
+	// snapshot.capture já recusa contar sobre cancelamento.
+	//
+	// A versão anterior admitia com 10ms de saldo e então entregava dois minutos
+	// de WalkDeadline, porque o prazo saía de Budget sem olhar o que restava.
+	//
 	// Liberar NÃO devolve orçamento: memória volta, trabalho já feito não.
 	OrcamentoDeColeta time.Duration
+
+	// SemTetoDeColeta é o operador dizendo, explicitamente, que não quer teto.
+	//
+	// Ele existe porque zero já significava "não disse nada" — Padroes() o
+	// trocava pelo padrão, e `--capture-budget=0` imprimia "desliga o teto" e
+	// subia com dez minutos. Uma flag que diz uma coisa e faz outra é pior que
+	// flag nenhuma, mesmo quando erra para o lado seguro.
+	SemTetoDeColeta bool
 }
 
 // Padroes preenche o que o operador não disse.
@@ -129,7 +154,7 @@ func (p Policy) Padroes() Policy {
 	if p.Budget <= 0 {
 		p.Budget = BudgetPadrao
 	}
-	if p.OrcamentoDeColeta <= 0 {
+	if !p.SemTetoDeColeta && p.OrcamentoDeColeta <= 0 {
 		p.OrcamentoDeColeta = OrcamentoDeColetaPadrao
 	}
 	return p
@@ -154,10 +179,18 @@ const (
 	// OrcamentoDeColetaPadrao é quanto tempo de coleta uma sessão inteira pode
 	// gastar no host investigado.
 	//
-	// Dez minutos comportam algo como quatro dezenas de capturas completas num
-	// host normal (~1,5s cada) ou centenas de voláteis (~164ms) — muito acima
-	// de qualquer investigação real, e muito abaixo do que um laço produz em
-	// poucos minutos. É o teto que separa uso de acidente, não um racionamento.
+	// A conta, com os números certos: 600 segundos são ~400 capturas completas
+	// num host normal (~1,5s cada) ou ~3.600 voláteis (~164ms). Uma investigação
+	// humana faz dezenas, não centenas.
+	//
+	// O outro extremo é o que decide o número: num filesystem grande, cada
+	// captura completa pode encostar no Budget de 2 minutos, e aí dez minutos
+	// dão CINCO capturas. É por causa desse extremo que o padrão não é um
+	// minuto — e é por isso que a recusa ensina o --capture-budget em vez de só
+	// dizer não.
+	//
+	// Um laço autônomo consome os dez minutos em dez minutos de relógio, tenha o
+	// host o tamanho que tiver. O padrão separa uso de acidente; não raciona.
 	OrcamentoDeColetaPadrao = 10 * time.Minute
 )
 

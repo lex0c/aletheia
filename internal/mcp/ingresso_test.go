@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -142,5 +144,75 @@ func TestImposicaoNaoAlteraArtefatoHonesto(t *testing.T) {
 		t.Errorf("a redação de ingresso MUDOU um artefato já redigido: ela tem "+
 			"de ser idempotente, senão a imposição custa evidência.\n%d vs %d bytes",
 			len(b1), len(b2))
+	}
+}
+
+// UM DUMP HOSTIL NÃO ENTREGA SEGREDO POR UM CAMPO DE BYTES.
+//
+// A redação de ingresso é o que sustenta `redaction_enforced: enforced`, e ela é
+// uma caminhada reflexiva. Ela tratava string e descia até o elemento de um
+// []byte — onde encontrava um uint8, para o qual não havia caso, e o devolvia
+// igual.
+//
+// O campo Process.EnvBruto, que existe justamente para guardar bytes crus,
+// atravessava intacto. Nenhuma tool servida hoje o expõe sem consentimento, mas
+// a garantia publicada no envelope era objetivamente falsa para aquele tipo — e
+// uma fronteira de segurança não vale "enquanto ninguém encostar".
+//
+// Este teste é o caminho do MCP inteiro: artefato hostil em disco, carga pelo
+// acervo, e a busca no que ficou servido.
+func TestDumpHostilNaoServeSegredoEmCampoDeBytes(t *testing.T) {
+	const segredo = "AWS_SECRET_ACCESS_KEY=SUPERSECRETO-DO-HOST"
+
+	f := &facts.Facts{
+		SchemaVersion: facts.SchemaVersion,
+		CollectedAt:   "2026-08-17T21:03:11Z",
+		Source:        "live",
+		Host:          facts.Host{Hostname: "web-01"},
+		Processes: []facts.Process{{
+			PID: 812, Comm: "app", EnvLido: true,
+			EnvBruto: [][]byte{[]byte(segredo)},
+		}},
+	}
+	// O artefato AFIRMA que foi redigido. Ele não foi.
+	d := &dump.Dump{
+		Schema:  dump.Schema,
+		Redacao: dump.Redacao{Aplicada: true, Versao: dump.RedacaoVersao},
+		Facts:   f,
+	}
+	d.Ambiente.Source = "live"
+	d.Ambiente.Caps = []string{"procfs"}
+	d.Ambiente.CollectedAt = "2026-08-17T21:03:11Z"
+
+	caminho := filepath.Join(t.TempDir(), "hostil.json")
+	b, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "SUPERSECRETO") &&
+		!strings.Contains(string(b), base64.StdEncoding.EncodeToString([]byte(segredo))) {
+		t.Fatal("o segredo não entrou no artefato: o teste não mede nada")
+	}
+	if err := os.WriteFile(caminho, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NovoAcervo()
+	r, err := a.Carregar(caminho)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Redigido || r.Procedencia().RedacaoImposta != ImposicaoAplicada {
+		t.Fatalf("o retrato não se declara imposto: %v", r.Procedencia().RedacaoImposta)
+	}
+
+	for _, p := range r.Fatos.Processes {
+		for i, cru := range p.EnvBruto {
+			if bytes.Contains(cru, []byte("SUPERSECRETO")) {
+				t.Fatalf("pid %d, entrada %d: o segredo atravessou a redação de "+
+					"ingresso num campo de bytes, e o servidor declarou "+
+					"redaction_enforced=enforced sobre ele.\n%q", p.PID, i, cru)
+			}
+		}
 	}
 }

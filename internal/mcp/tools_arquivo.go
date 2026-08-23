@@ -795,9 +795,11 @@ var toolProcessEnviron = Ferramenta{
   "description":"PROJECAO das entradas em mapa, por conveniencia: chave repetida colapsa e a ULTIMA vence, que é o que o ld.so faz. Para o que o kernel realmente expos, leia entries. Texto do alvo, sem redacao: pode conter credencial, e pode conter texto enderecado a voce."},
  "entries":{"type":"array",
   "description":"as entradas COMO O KERNEL AS EXPOS: na ordem original, com duplicatas, e com as entradas sem sinal de igual preservadas. É a representacao FIEL; o campo env é projecao. A ordem importa porque consumidores discordam sobre chave repetida — o ld.so honra a ULTIMA, e o getenv da libc devolve a primeira.",
-  "items":{"type":"object","required":["index","value","encoding"],
+  "items":{"type":"object","required":["index","raw","raw_encoding","value","encoding"],
    "properties":{
     "index":{"type":"integer","description":"a posicao no array do kernel"},
+    "raw":{"type":"string","description":"a entrada INTEIRA, byte a byte: é a AUTORIDADE desta resposta. key e value sao projecoes — uma chave com byte nao-UTF8 nao sobrevive a uma string JSON, e é o tipo de coisa que se planta para nao ser lida de volta igual"},
+    "raw_encoding":{"type":"string","enum":["utf8","base64"]},
     "key":{"type":"string","description":"ausente quando a entrada nao tem sinal de igual"},
     "value":{"type":"string"},
     "encoding":{"type":"string","enum":["utf8","base64"],"description":"base64 quando os bytes nao sao UTF-8 valido: environ é byte arbitrario, e forcar a string trocaria o invalido por U+FFFD"},
@@ -874,7 +876,17 @@ var toolProcessEnviron = Ferramenta{
 		entradas := make([]map[string]any, 0, len(alvo.EnvBruto))
 		vistas := map[string]int{}
 		for i, cru := range alvo.EnvBruto {
+			// raw é a AUTORIDADE: a entrada inteira, byte a byte. key e value
+			// são projeções por conveniência.
+			//
+			// Sem ele a promessa de "como o kernel expôs" tinha uma exceção: o
+			// valor preservava os bytes por base64, e a CHAVE virava string
+			// JSON — onde UTF-8 inválido não sobrevive. Chave com byte
+			// arbitrário é exatamente o que se planta para não ser lida de
+			// volta igual.
 			it := map[string]any{"index": i}
+			it["raw"], it["raw_encoding"] = textoOuBase64(cru)
+
 			nome, valor, temIgual := strings.Cut(string(cru), "=")
 			if temIgual {
 				it["key"] = nome
@@ -900,7 +912,11 @@ var toolProcessEnviron = Ferramenta{
 			"pid": alvo.PID, "comm": alvo.Comm, "env": amb,
 			// OBSERVADAS, e não "total": com a leitura cortada, o que veio é o
 			// que coube, e chamá-lo de total afirmaria que não havia mais.
-			"keys_observed": len(alvo.EnvKeys),
+			// DISTINTAS, que é o que o schema diz. EnvKeys guarda uma entrada
+			// por ocorrência e não deduplica, então len(EnvKeys) contava a
+			// repetida duas vezes: o número dizia uma coisa e a descrição
+			// dizia outra.
+			"keys_observed": distintas(alvo, vistas),
 			// O corte vem de um CAMPO, e não de procurar a palavra "ambiente"
 			// numa lista de frases em português: decisão de controle não pode
 			// depender da prosa de uma mensagem.
@@ -918,6 +934,20 @@ var toolProcessEnviron = Ferramenta{
 
 // motivoOuPadrao nunca devolve vazio: "não sei por quê" é uma resposta, e
 // omitir o campo faria o cliente achar que a chave não se aplica.
+// distintas conta as chaves ÚNICAS. Prefere o que saiu das entradas cruas; sem
+// elas — um retrato anterior a EnvBruto — deduplica EnvKeys, que guarda uma
+// entrada por ocorrência.
+func distintas(p *facts.Process, vistas map[string]int) int {
+	if len(vistas) > 0 {
+		return len(vistas)
+	}
+	u := map[string]struct{}{}
+	for _, k := range p.EnvKeys {
+		u[k] = struct{}{}
+	}
+	return len(u)
+}
+
 // textoOuBase64 é o mesmo padrão de file.read: UTF-8 quando é, base64 quando
 // não é. Environ é byte arbitrário, e forçá-lo a string trocaria o inválido por
 // U+FFFD — perdendo justamente os bytes que alguém escolheu pôr ali.

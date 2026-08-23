@@ -837,4 +837,33 @@ func TestEnvironPreservaOrdemDuplicataEBytes(t *testing.T) {
 	if err != nil || len(dec) < 2 || dec[0] != 0xff || dec[1] != 0xfe {
 		t.Errorf("os bytes não voltaram inteiros: %v (%v)", dec, err)
 	}
+
+	// raw É A AUTORIDADE, e ele reconstrói a entrada inteira.
+	//
+	// Sem ele a promessa tinha exceção: o valor preservava bytes por base64 e a
+	// CHAVE virava string JSON, onde UTF-8 inválido não sobrevive.
+	for _, e := range ent {
+		it := e.(map[string]any)
+		cru := it["raw"].(string)
+		if it["raw_encoding"] == "base64" {
+			b, err := base64.StdEncoding.DecodeString(cru)
+			if err != nil {
+				t.Errorf("raw base64 ilegível: %v", err)
+				continue
+			}
+			cru = string(b)
+		}
+		i := int(it["index"].(float64))
+		if cru != string(p.EnvBruto[i]) {
+			t.Errorf("entrada %d: raw=%q, o kernel expôs %q",
+				i, cru, p.EnvBruto[i])
+		}
+	}
+
+	// keys_observed são as DISTINTAS, que é o que o schema diz. As cinco
+	// entradas têm quatro chaves, uma delas repetida.
+	if got := d["keys_observed"]; got != float64(3) {
+		t.Errorf("keys_observed=%v; há 5 entradas, 1 malformada e LD_PRELOAD "+
+			"repetida — logo 3 chaves distintas", got)
+	}
 }

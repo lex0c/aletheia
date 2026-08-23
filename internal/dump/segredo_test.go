@@ -3,6 +3,7 @@ package dump
 import (
 	"bytes"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -52,6 +53,24 @@ func TestNenhumaSuperficieDoFactsVazaSegredo(t *testing.T) {
 					"`redact:\"-\"` NELE e escreva por quê — a exceção é do campo, "+
 					"nunca do artefato.\n\nforma: %s", forma)
 			}
+
+			// E A BUSCA ESTRUTURAL, porque a textual não vê tudo.
+			//
+			// bytes.Contains procura a sentinela LITERAL no JSON serializado, e
+			// nem todo campo se serializa como texto: um []byte vira base64, e o
+			// segredo atravessa invisível para essa busca. Foi o que aconteceu
+			// com Process.EnvBruto — a catraca que se anuncia global aprovou o
+			// campo mais cru do Facts passando intacto, duas vezes: primeiro
+			// porque não sabia PLANTAR num []byte, depois porque não sabia
+			// PROCURAR dentro de um.
+			//
+			// A caminhada olha o valor, e não a representação. Ela não depende
+			// de como o encoder decidiu escrever aquilo.
+			if onde := procurarSentinela(reflect.ValueOf(De(ambienteDeTeste(), f).Facts), forma, ""); len(onde) > 0 {
+				t.Fatalf("o segredo sobreviveu à redação em campo que a busca "+
+					"textual NÃO enxerga (base64, por exemplo):\n  %s\n\nforma: %s",
+					strings.Join(onde, "\n  "), forma)
+			}
 		})
 	}
 }
@@ -92,6 +111,20 @@ func preencherTudo(v reflect.Value, texto string, prof int) {
 		if !v.CanSet() {
 			return
 		}
+		// BYTE É PLANTADO COMO BYTE.
+		//
+		// A recursão descia até o elemento e encontrava um uint8, onde não há
+		// caso que plante nada — então esta catraca, que se anuncia GLOBAL,
+		// tinha um ponto cego exatamente no tipo de dado mais cru que o Facts
+		// pode carregar. Ela aprovou o Process.EnvBruto atravessando a redação
+		// intacto.
+		//
+		// Um teste que não consegue plantar num campo não afirma nada sobre ele,
+		// e o silêncio se lê como aprovação.
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			v.SetBytes([]byte(texto))
+			return
+		}
 		s := reflect.MakeSlice(v.Type(), 1, 1)
 		preencherTudo(s.Index(0), texto, prof+1)
 		v.Set(s)
@@ -112,4 +145,50 @@ func preencherTudo(v reflect.Value, texto string, prof int) {
 		preencherTudo(p.Elem(), texto, prof+1)
 		v.Set(p)
 	}
+}
+
+// procurarSentinela percorre o VALOR e devolve os caminhos onde a sentinela
+// aparece — em string ou em sequência de bytes, em qualquer profundidade.
+//
+// Ela existe porque a busca textual no artefato serializado depende de o encoder
+// ter escrito aquele campo como texto. Um []byte vira base64 e some da busca; um
+// campo futuro com encoder próprio sumiria também.
+func procurarSentinela(v reflect.Value, alvo, caminho string) []string {
+	var achados []string
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if !v.IsNil() {
+			achados = append(achados, procurarSentinela(v.Elem(), alvo, caminho)...)
+		}
+	case reflect.String:
+		if strings.Contains(v.String(), sentinela) {
+			achados = append(achados, caminho+" = "+v.String())
+		}
+	case reflect.Slice, reflect.Array:
+		if v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.Uint8 {
+			if bytes.Contains(v.Bytes(), []byte(sentinela)) {
+				achados = append(achados, caminho+" (bytes) = "+string(v.Bytes()))
+			}
+			return achados
+		}
+		for i := 0; i < v.Len(); i++ {
+			achados = append(achados, procurarSentinela(v.Index(i), alvo,
+				caminho+"["+strconv.Itoa(i)+"]")...)
+		}
+	case reflect.Map:
+		for _, k := range v.MapKeys() {
+			achados = append(achados, procurarSentinela(k, alvo, caminho+".<chave>")...)
+			achados = append(achados, procurarSentinela(v.MapIndex(k), alvo,
+				caminho+"["+k.String()+"]")...)
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			if !v.Type().Field(i).IsExported() {
+				continue
+			}
+			achados = append(achados, procurarSentinela(v.Field(i), alvo,
+				caminho+"."+v.Type().Field(i).Name)...)
+		}
+	}
+	return achados
 }

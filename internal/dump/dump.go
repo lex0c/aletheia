@@ -306,6 +306,19 @@ const TagRedacao = "redact"
 // Ela constrói em vez de mutar porque o Facts vivo continua servindo à execução
 // em curso: os checks precisam do argv inteiro para casar indicador e para
 // julgar linhagem, e redigir no lugar os cegaria.
+// terminaEmByte responde se o tipo é uma sequência de bytes em qualquer
+// profundidade: []byte, [][]byte, e assim por diante.
+//
+// A recursão importa: só olhar o elemento imediato deixaria [][]byte esvaziar
+// cada entrada e manter a fatia externa com o comprimento original — uma lista
+// de nulos que não diz nada e ainda vaza a contagem.
+func terminaEmByte(t reflect.Type) bool {
+	for t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+		t = t.Elem()
+	}
+	return t.Kind() == reflect.Uint8
+}
+
 func redigirValor(v reflect.Value, classe string) reflect.Value {
 	switch v.Kind() {
 	case reflect.String:
@@ -341,6 +354,24 @@ func redigirValor(v reflect.Value, classe string) reflect.Value {
 	case reflect.Slice:
 		if v.IsNil() {
 			return v
+		}
+		// BYTE CRU NÃO ATRAVESSA. É a única classe cujo padrão é DESCARTAR, e o
+		// motivo é que não existe redação semântica de bytes arbitrários: a
+		// redação tokeniza por branco e reconhece a forma de uma atribuição, e
+		// nada disso se aplica a uma sequência que pode ser binária.
+		//
+		// A caminhada recursiva descia até o elemento, encontrava um uint8, e o
+		// devolvia igual — sem caso de String, nada acontecia. O campo novo
+		// Process.EnvBruto atravessou a redação intacto, e o servidor MCP
+		// carimbava aquele retrato como `redaction_enforced: enforced`. A
+		// garantia era objetivamente falsa para este tipo.
+		//
+		// Um campo que precise dos bytes exatos declara `redact:"-"` e assume a
+		// responsabilidade em voz alta. O padrão protege o campo que ainda não
+		// existe: quem acrescentar um []byte amanhã não precisa lembrar desta
+		// conversa.
+		if terminaEmByte(v.Type()) {
+			return reflect.Zero(v.Type())
 		}
 		// ARGV é uma SEQUÊNCIA, e só ela liga uma flag ao token seguinte.
 		if classe == "cmdline" && v.Type().Elem().Kind() == reflect.String {

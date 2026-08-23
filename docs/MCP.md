@@ -182,7 +182,8 @@ qualifica esse intervalo.
 
 | Campo | O que é |
 | --- | --- |
-| `entries` | as entradas **como o kernel as expôs**: ordem original, duplicatas, e entradas sem sinal de igual preservadas |
+| `entries[].raw` | a entrada inteira, **byte a byte** — é a autoridade da resposta |
+| `entries` | as entradas **como o kernel as expôs**: ordem original, duplicatas, e entradas sem sinal de igual preservadas. `key` e `value` são projeções de `raw` |
 | `env` | projeção em mapa, por conveniência: chave repetida colapsa e a **última vence** |
 | `duplicate_keys` | as chaves que aparecem mais de uma vez |
 
@@ -191,8 +192,11 @@ A repetição é observável e os consumidores discordam: medido, o `ld.so` honr
 primeira. Um implante posto na primeira posição some da projeção e aparece em
 `entries`.
 
-Valores que não são UTF-8 válido saem em `base64`, com `encoding` declarado por
-entrada — forçá-los a string trocaria os bytes inválidos por U+FFFD.
+Bytes que não são UTF-8 válido saem em `base64`, com o encoding declarado por
+campo — forçá-los a string trocaria os inválidos por U+FFFD. Isso vale para
+`raw` e para `value`: uma **chave** com byte arbitrário é exatamente o que se
+planta para não ser lida de volta igual, e por isso `raw` é a autoridade e não
+`key`.
 
 ### 4.4 Erros
 
@@ -282,7 +286,11 @@ O carimbo de redação dele é um campo escolhido por quem escreveu o arquivo, e
 não serve como barreira.
 
 Em modo snapshot o servidor **re-aplica a redação no ingresso**, qualquer que
-seja o carimbo. A operação é idempotente, então um artefato honesto atravessa
+seja o carimbo. Sequência de bytes não atravessa: não existe redação semântica
+de bytes arbitrários — a redação tokeniza e reconhece a forma de uma atribuição,
+e nada disso se aplica a conteúdo possivelmente binário —, então o padrão para
+`[]byte` é **descartar**, e um campo que precise dos bytes exatos declara
+`redact:"-"` em voz alta. A operação é idempotente, então um artefato honesto atravessa
 sem perda; um artefato que minta sai redigido. Custo medido: 53 ms para um dump
 de 1,7 MB com 317 processos, uma vez na carga.
 

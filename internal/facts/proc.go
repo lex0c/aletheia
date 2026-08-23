@@ -315,6 +315,14 @@ func collectProcesses(f *Facts, e *env.Env) {
 	// cruzada acusar de OCULTO todo processo alheio que não pudemos abrir.
 	f.PidsListados = pids
 
+	// O SUCESSO do readdir, promovido a CrossView: é a testemunha de base da
+	// comparação de processos, e o dump não leva PidsListados (json:"-"). Sem
+	// isso, crossview.get teria de inferir "a listagem foi lida" por outro sinal
+	// — e inferir estado de leitura por cardinalidade é o defeito que o cross
+	// inteiro existe para não cometer.
+	f.Cross.ProcListLida = true
+	f.Cross.ProcListN = len(pids)
+
 	// A leitura de cada PID é INDEPENDENTE das outras: são arquivos diferentes,
 	// sem estado compartilhado. Ler em paralelo é o único alívio real para um
 	// servidor grande — o custo por processo é syscall, e o kernel formata o

@@ -256,7 +256,7 @@ import (
 //	   guardar só o valor efetivo por arquivo. Num dump v16 ela traz todas as
 //	   atribuições, e comparar as duas versões acusaria remoção onde houve
 //	   apenas uma linha sombreada que deixou de ser guardada.
-const SchemaVersion = 17
+const SchemaVersion = 18
 
 // Facts é o retrato do host.
 type Facts struct {

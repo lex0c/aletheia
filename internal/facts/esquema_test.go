@@ -33,7 +33,7 @@ import (
 // teste: daria uma sensação de cobertura que não existe.
 func TestImpressaoDoEsquema(t *testing.T) {
 	const (
-		esquemaEsperado = 17
+		esquemaEsperado = 18
 		// Atualizada sem subir o SchemaVersion, e a razão fica aqui porque a
 		// catraca manda escrevê-la.
 		//
@@ -56,7 +56,19 @@ func TestImpressaoDoEsquema(t *testing.T) {
 		// alcança dump nenhum —, e a ausência num dump anterior é o estado
 		// conservador: sem entradas cruas, a tool responde pela projeção e diz
 		// que a projeção é o que ela é.
-		impressaoGravada = "41ffcf4ac4f3e309"
+		// Subida de novo, e desta vez o SchemaVersion SOBE junto (17→18). O
+		// CrossView passou a carregar o estado de LEITURA de cada testemunha —
+		// ProcListLida/N, ModProcLido, ModSysLido, ModFtraceLido,
+		// SocketDiagProtos, SocketProcProtos. Diferente do EnvBruto acima, aqui a
+		// regra do SchemaVersion MANDA subir: o consumidor é crossview.get, e ao
+		// contrário de process.environ ele ALCANÇA dump (fonte live servida em
+		// modo snapshot). Um dump v17, lido por este binário sem a subida, traria
+		// esses bits vazios — e a tool renderizaria "not_compared" para uma
+		// comparação que de fato aconteceu, ou pior, "agree" com uma testemunha
+		// marcada como não lida. A subida faz o loader RECUSAR o dump antigo em
+		// vez de respondê-lo torto. É o mesmo "vazio ≠ ilegível" que o resto do
+		// Aletheia sustenta, agora atravessando a fronteira MCP.
+		impressaoGravada = "c80be7c607311f84"
 	)
 	if SchemaVersion != esquemaEsperado {
 		t.Fatalf("SchemaVersion=%d e este teste conhece o %d: atualize os dois "+

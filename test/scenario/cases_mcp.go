@@ -955,7 +955,7 @@ func init() {
 	//     um booleano `trust_broken` sozinho não ensina ninguém a ler o resto.
 	Register(Scenario{
 		ID:     "M17-mcp-crossview-testemunhas-do-kernel",
-		Desc:   "crossview.get: os quatro eixos separados, e a consequência dita por extenso",
+		Desc:   "crossview.get: os cinco eixos separados, e a consequência dita por extenso",
 		Images: []string{"debian:12"},
 		Cmd:    "mcp",
 		Plant:  `sleep 300 & sleep 0.5`,
@@ -980,6 +980,7 @@ func init() {
 					"data.axes.1.axis": "sockets",
 					"data.axes.2.axis": "modules",
 					"data.axes.3.axis": "modules_ftrace",
+					"data.axes.4.axis": "bpf",
 					"provenance.scope": "complete",
 				},
 				Espera: []string{

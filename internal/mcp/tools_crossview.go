@@ -24,7 +24,7 @@ import (
 //
 // # A forma da resposta, e por que ela não é um despejo
 //
-// Quatro eixos, e cada um é UM PAR de testemunhas com um estado entre elas.
+// Cinco eixos, e cada um é UM PAR de testemunhas com um estado entre elas.
 //
 // O par é a unidade porque o estado é uma relação, e relação não tem três
 // pontas: /proc/modules e /sys/module se conferem por um motivo, o ftrace e
@@ -32,6 +32,16 @@ import (
 // dividiam um eixo, o "agree" de uma carregava de graça a afirmação da outra —
 // e no host onde isto foi escrito a segunda nunca chegou a acontecer, porque
 // ler available_filter_functions exige root.
+//
+// # trust_broken é do MOTOR, não dos eixos
+//
+// O booleano vem de KernelTrustBroken do Report — a mesma fonte que coverage.get
+// publica —, nunca de varrer os eixos por "disagree". São coisas diferentes: os
+// eixos EXPLICAM, o motor DECIDE. O quinto eixo (bpf) existe justamente porque
+// sem ele a tool que responde "o kernel mente?" era cega para o modo mais forte
+// de mentir — um programa eBPF que existe e não aparece na enumeração. Amarrar o
+// booleano ao motor garante que a tool nunca diga "nada contradiz o kernel"
+// enquanto o motor diz o oposto; o eixo bpf faz a explicação acompanhar.
 //
 // O estado tem TRÊS valores, não dois:
 //
@@ -82,26 +92,29 @@ var toolCrossView = Ferramenta{
 	Entrada: entradaSnapshot(""),
 	Saida: esquemaEnvelope(`{"type":"object","required":["trust_broken","axes"],
 "properties":{
- "declared_gaps":{"type":"array","items":{"type":"string"},
-  "description":"o que a propria comparacao declarou nao ter conseguido fazer. Um eixo em not_compared diz QUE nao houve comparacao; isto costuma dizer POR QUE. É o recorte de observability.collector_gaps deste coletor, e nao uma segunda contagem"},
- "trust_broken":{"type":"boolean","description":"true quando ALGUM eixo diverge. A partir daqui, ausencia de achado neste host NAO vale como prova — os achados continuam valendo"},
+ "trust_broken":{"type":"boolean","description":"vem da MESMA fonte que coverage.get: len(kernel_trust_broken)>0 do motor, nao um recalculo dos eixos. true = duas visoes do kernel discordam. A partir daqui, ausencia de achado neste host NAO vale como prova — os achados continuam valendo"},
+ "breakers":{"type":"array","items":{"type":"string"},"description":"presente quando trust_broken: a lista AUTORITATIVA do que quebrou, verbatim do motor (o mesmo que observability.kernel_trust_broken). Um quebra-confiança que nenhum eixo explique aparece AQUI mesmo assim"},
  "meaning":{"type":"string","description":"o que este estado significa para o resto da investigacao, em prosa"},
  "axes":{"type":"array","items":{"type":"object",
   "required":["axis","state","meaning"],
   "properties":{
-   "axis":{"type":"string","enum":["processes","sockets","modules","modules_ftrace"]},
+   "axis":{"type":"string","enum":["processes","sockets","modules","modules_ftrace","bpf"]},
    "state":{"type":"string","enum":["agree","disagree","not_compared"],
-    "description":"agree: as duas testemunhas olharam e concordam. disagree: olharam e DISCORDAM. not_compared: a segunda nao respondeu, e aqui 'nada oculto' nao significa nada"},
+    "description":"agree: as duas testemunhas olharam e concordam. disagree: olharam e DISCORDAM. not_compared: uma testemunha necessaria nao respondeu, e aqui 'nada oculto' nao significa nada"},
    "witnesses":{"type":"array","items":{"type":"object",
     "properties":{
      "name":{"type":"string"},
      "count":{"type":"integer","description":"quantos objetos esta testemunha viu"},
      "reach":{"type":"integer","description":"ate onde ela olhou, quando o alcance é limitado"},
-     "read":{"type":"boolean"},
+     "read":{"type":"boolean","description":"se esta testemunha foi de fato lida — FATO coletado, nao inferido por count>0: fonte lida com zero é diferente de fonte ilegivel"},
      "truncated":{"type":"boolean"},
+     "protocols_compared":{"type":"integer","description":"sockets: em quantos protocolos /proc/net foi confrontado com o netlink"},
+     "protocols_total":{"type":"integer","description":"sockets: quantos protocolos o netlink devolveu"},
      "reason":{"type":"string","description":"por que ela nao respondeu, quando nao respondeu"}}}},
    "divergences":{"type":"array","items":{"type":"object"},
-    "description":"o que uma testemunha viu e a outra negou. Pequeno por natureza: é o achado"},
+    "description":"o que uma testemunha viu e a outra negou. Pequeno por natureza: é o achado. Cortado no teto quando patologicamente grande"},
+   "divergences_total":{"type":"integer","description":"o total real de divergencias, mesmo quando a lista foi cortada"},
+   "divergences_truncated":{"type":"boolean","description":"true quando divergences traz menos que divergences_total"},
    "note":{"type":"string","description":"o que a comparacao deste eixo NAO cobre. Leia antes de tratar 'agree' como varredura completa"},
    "meaning":{"type":"string"}}}}}}`, false),
 	Rodar: func(s *Servidor, args json.RawMessage) (any, *ErroRPC) {
@@ -115,18 +128,31 @@ var toolCrossView = Ferramenta{
 		if er != nil {
 			return nil, er
 		}
+
+		// trust_broken NÃO é recalculado a partir dos eixos: ele vem da ÚNICA
+		// fonte autoritativa, o mesmo Report que coverage.get publica.
+		//
+		// Recalcular criaria duas verdades sobre o mesmo retrato. E elas
+		// DIVERGIRIAM: os eixos aqui são processos, sockets e módulos, mas o
+		// motor tem um quarto quebra-confiança que nenhum deles cobre —
+		// cross.bpf_hidden, um programa eBPF que existe e não aparece na
+		// enumeração. Um host com só esse defeito teria os eixos todos em agree
+		// e KernelTrustBroken != []. A tool diria "nada contradiz o kernel"
+		// enquanto o motor diria o oposto. Uma propriedade de segurança global
+		// tem uma fonte só.
+		//
+		// Relatorio() é memoizado por retrato: se coverage.get ou findings.list
+		// já rodou, isto é de graça; se não, roda o mesmo check que rodaria.
+		rel := r.Relatorio()
+		quebrada := len(rel.KernelTrustBroken) > 0
+
 		c := &r.Fatos.Cross
 		eixos := []map[string]any{
 			eixoDeProcessos(r.Fatos),
 			eixoDeSockets(c),
 			eixoDeModulos(c),
 			eixoDeFtrace(c),
-		}
-		quebrada := false
-		for _, e := range eixos {
-			if e["state"] == "disagree" {
-				quebrada = true
-			}
+			eixoDeBPF(r.Fatos),
 		}
 		dados := map[string]any{
 			"trust_broken": quebrada,
@@ -135,31 +161,42 @@ var toolCrossView = Ferramenta{
 				"nada aqui contradiz o kernel. Isso NÃO é prova de host limpo — é " +
 				"a ausência de uma contradição específica.",
 		}
-		// O que a própria comparação declarou não ter conseguido fazer.
-		//
-		// Isto é uma PROJEÇÃO FILTRADA de observability.collector_gaps, não uma
-		// segunda contabilidade: as duas saem do mesmo facts.Partial, e a
-		// diferença é só o recorte. A distinção importa porque duas contagens
-		// que se recalculam divergem em silêncio — foi o defeito que
-		// check.GroupByIDSev existiu para corrigir —, e uma que apenas filtra a
-		// outra não pode divergir.
-		//
-		// O recorte se paga: collector_gaps mistura todo coletor da execução, e
-		// quem lê "not_compared" precisa do POR QUÊ deste eixo, não de procurá-lo
-		// no meio de bpf, logs e net. TestLacunaDeclaradaEhAMesmaDoEnvelope
-		// segura a identidade entre as duas.
-		if g := r.Fatos.Partial["cross"]; len(g) > 0 {
-			dados["declared_gaps"] = g
-		}
 		if quebrada {
+			// A LISTA autoritativa do que quebrou, verbatim do motor. Ela também
+			// sai em observability.kernel_trust_broken (mesmo slice, mesma
+			// fonte); aparece aqui, ao lado dos eixos, para o modelo correlacionar
+			// o booleano com o motivo sem trocar de bloco. Se um dia entrar um
+			// quinto quebra-confiança que nenhum eixo explique, ele aparece AQUI
+			// mesmo assim — a lista não depende de os eixos o cobrirem.
+			dados["breakers"] = rel.KernelTrustBroken
 			dados["meaning"] = "duas visões do MESMO kernel discordam, e por " +
 				"caminhos de código diferentes. Alguma coisa entre elas está " +
 				"filtrando o que você vê. A partir daqui, ausência de achado neste " +
 				"host não vale como prova; os achados continuam valendo, e valem " +
-				"mais."
+				"mais. Veja breakers e os eixos em disagree."
 		}
-		return envelopar(r, ObservabilidadeDeFatos(r.Fatos), dados), nil
+		return envelopar(r, ObservabilidadeDeRelatorio(rel), dados), nil
 	},
+}
+
+// maxDivergencias é o teto por eixo. A divergência é o achado, e o achado é
+// pequeno por natureza — mas "por natureza" não é garantia, e esta é a tool que
+// diz se o kernel está mentindo: ela não pode ser a que estoura o frame por
+// tamanho e falha inteira justamente quando há mais o que mostrar. Acima do
+// teto, a lista é cortada SEMANTICAMENTE e o corte é declarado, como toda
+// truncagem neste servidor — nunca JSON cortado no meio.
+const maxDivergencias = 100
+
+// comCorte planta as divergências no eixo, cortando no teto e declarando o
+// corte. total é sempre publicado, então o número real nunca some.
+func comCorte(e map[string]any, div []map[string]any) {
+	e["divergences_total"] = len(div)
+	if len(div) > maxDivergencias {
+		e["divergences"] = div[:maxDivergencias]
+		e["divergences_truncated"] = true
+	} else {
+		e["divergences"] = div
+	}
 }
 
 func eixoDeProcessos(f *facts.Facts) map[string]any {
@@ -175,12 +212,16 @@ func eixoDeProcessos(f *facts.Facts) map[string]any {
 	// segundo. Então ela sai quando existe e some quando não existe, em vez de
 	// ser reconstruída a partir de len(Processes): somar processo lido com
 	// processo que sumiu produziria um número que ninguém mediu.
+	// read vem do FATO coletado (ProcListLida = o readdir de /proc teve
+	// sucesso), não de "alguma sondagem rodou". São eventos diferentes: o
+	// readdir podia falhar por conta própria, e antes disto a testemunha de base
+	// era marcada lida quando na verdade quem foi lido foi a SONDAGEM.
 	listagem := map[string]any{
 		"name": "listagem de /proc (readdir)",
-		"read": c.ProbeAte > 0 || c.ProbeProcfsAte > 0,
+		"read": c.ProcListLida,
 	}
-	if n := len(f.PidsListados); n > 0 {
-		listagem["count"] = n
+	if c.ProcListN > 0 {
+		listagem["count"] = c.ProcListN
 	}
 	testemunhas := []map[string]any{
 		listagem,
@@ -215,9 +256,16 @@ func eixoDeProcessos(f *facts.Facts) map[string]any {
 	}
 	switch {
 	case len(div) > 0:
-		e["state"], e["divergences"] = "disagree", div
+		// A divergência já CONFIRMADA sobrevive a qualquer lacuna posterior: o
+		// achado vale mesmo que a listagem de base tenha ficado ilegível depois.
+		e["state"] = "disagree"
+		comCorte(e, div)
 		e["meaning"] = "há processo que responde ao kernel e não aparece na " +
 			"listagem, ou cuja contagem de threads diverge de si mesma"
+	case !c.ProcListLida:
+		e["state"] = "not_compared"
+		e["meaning"] = "o readdir de /proc — a testemunha de base — não foi lido: " +
+			"sem ele não há contra o que conferir a sondagem"
 	case c.ProbeAte == 0 && c.ProbeProcfsAte == 0:
 		e["state"] = "not_compared"
 		e["meaning"] = "nenhuma sondagem rodou: não há segunda testemunha, e " +
@@ -243,10 +291,22 @@ func eixoDeSockets(c *facts.CrossView) map[string]any {
 	if c.SocketDiagMotivo != "" {
 		netlink["reason"] = c.SocketDiagMotivo
 	}
+	// A comparação de sockets é POR PROTOCOLO. /proc/net não é uma leitura só:
+	// read reflete se ELE foi lido em ao menos um dos protocolos que o netlink
+	// devolveu, não um `true` fixo — antes a testemunha se declarava lida mesmo
+	// quando /proc/net/tcp deu EACCES e só udp foi comparado.
+	procNet := map[string]any{
+		"name": "/proc/net", "count": c.SocketProc,
+		"read": c.SocketProcProtos > 0,
+	}
+	if c.SocketDiagProtos > 0 {
+		procNet["protocols_compared"] = c.SocketProcProtos
+		procNet["protocols_total"] = c.SocketDiagProtos
+	}
 	e := map[string]any{
 		"axis": "sockets",
 		"witnesses": []map[string]any{
-			{"name": "/proc/net", "count": c.SocketProc, "read": true},
+			procNet,
 			netlink,
 		},
 	}
@@ -256,7 +316,8 @@ func eixoDeSockets(c *facts.CrossView) map[string]any {
 		for _, so := range c.SocketOcultos {
 			div = append(div, map[string]any{"kind": "socket_oculto", "socket": so})
 		}
-		e["state"], e["divergences"] = "disagree", div
+		e["state"] = "disagree"
+		comCorte(e, div)
 		e["meaning"] = "o netlink entrega conexão que o /proc/net nega. As duas " +
 			"tabelas são do mesmo kernel, por caminhos de código diferentes"
 	case !c.SocketDiagLido:
@@ -267,19 +328,37 @@ func eixoDeSockets(c *facts.CrossView) map[string]any {
 		e["state"] = "not_compared"
 		e["meaning"] = "a resposta do netlink foi CORTADA: a parte não lida não " +
 			"foi comparada com nada"
+	case c.SocketProcProtos == 0:
+		// O netlink falou, mas /proc/net não foi lido em NENHUM dos protocolos
+		// que ele devolveu: não houve confronto. "Nenhum socket oculto" aqui é a
+		// ausência de uma comparação, não o resultado dela.
+		e["state"] = "not_compared"
+		e["meaning"] = "o netlink respondeu, mas /proc/net não pôde ser lido em " +
+			"nenhum dos protocolos comparados: não houve confronto"
 	default:
 		e["state"] = "agree"
 		e["meaning"] = "as duas tabelas de conexão mostram o mesmo conjunto"
+		if c.SocketProcProtos < c.SocketDiagProtos {
+			e["meaning"] = "as tabelas concordam nos protocolos confrontados, mas " +
+				"nem todos foram: /proc/net foi lido em " +
+				strconv.Itoa(c.SocketProcProtos) + " de " +
+				strconv.Itoa(c.SocketDiagProtos) + " protocolos"
+		}
 	}
 	return e
 }
 
 func eixoDeModulos(c *facts.CrossView) map[string]any {
+	// read vem de ModProcLido/ModSysLido, não da cardinalidade: /proc/modules
+	// lido com zero módulos existe (um kernel sem módulo carregado), e é o
+	// oposto de /proc/modules negado por EACCES. Marcar read por len()>0
+	// fundiria os dois — e num host onde /proc/modules deu EACCES e /sys/module
+	// leu 300, a resposta diria "agree" com uma testemunha marcada não lida.
 	e := map[string]any{
 		"axis": "modules",
 		"witnesses": []map[string]any{
-			{"name": "/proc/modules", "count": len(c.ModProc), "read": len(c.ModProc) > 0},
-			{"name": "/sys/module", "count": len(c.ModSys), "read": len(c.ModSys) > 0},
+			{"name": "/proc/modules", "count": len(c.ModProc), "read": c.ModProcLido},
+			{"name": "/sys/module", "count": len(c.ModSys), "read": c.ModSysLido},
 		},
 	}
 	// As contagens divergem por construção e isso NÃO é achado: /sys/module lista
@@ -303,14 +382,20 @@ func eixoDeModulos(c *facts.CrossView) map[string]any {
 	}
 	switch {
 	case len(div) > 0:
-		e["state"], e["divergences"] = "disagree", div
+		e["state"] = "disagree"
+		comCorte(e, div)
 		e["meaning"] = "um módulo aparece numa interface do kernel e some de outra"
-	case len(c.ModProc) == 0 && len(c.ModSys) == 0:
+	case !c.ModProcLido || !c.ModSysLido:
+		// not_compared vem do estado de LEITURA, não de len()==0: uma fonte
+		// ilegível não é uma fonte vazia, e sem as duas lidas não houve confronto.
 		e["state"] = "not_compared"
-		e["meaning"] = "nenhuma interface de módulo foi lida: não há comparação"
+		e["meaning"] = "uma das interfaces de módulo não foi lida: não há confronto"
 	default:
 		e["state"] = "agree"
-		e["meaning"] = "as interfaces de módulo mostram o mesmo conjunto"
+		// A frase descreve o que foi de fato VERIFICADO, não mais que isso. A
+		// comparação corre num sentido só (/proc ⊂ /sys por construção), então
+		// "mostram o mesmo conjunto" afirmava demais — o próprio note desmentia.
+		e["meaning"] = "nenhum módulo declarado em /proc/modules faltou em /sys/module"
 	}
 	return e
 }
@@ -328,9 +413,9 @@ func eixoDeFtrace(c *facts.CrossView) map[string]any {
 		"axis": "modules_ftrace",
 		"witnesses": []map[string]any{
 			{"name": "registro do ftrace (available_filter_functions)",
-				"count": len(c.ModFtrace), "read": len(c.ModFtrace) > 0},
+				"count": len(c.ModFtrace), "read": c.ModFtraceLido},
 			{"name": "/proc/modules", "count": len(c.ModProc),
-				"read": len(c.ModProc) > 0},
+				"read": c.ModProcLido},
 		},
 		"note": "esta comparação é a que pega o módulo que se DESENCADEIA das " +
 			"listas: o registro do ftrace só é limpo no descarregamento real. Ler " +
@@ -346,10 +431,11 @@ func eixoDeFtrace(c *facts.CrossView) map[string]any {
 				"meaning": "o ftrace tem função rastreável anotada para este módulo " +
 					"e ele nega estar carregado"})
 		}
-		e["state"], e["divergences"] = "disagree", div
+		e["state"] = "disagree"
+		comCorte(e, div)
 		e["meaning"] = "o kernel guarda função rastreável de um módulo que ele " +
 			"próprio diz não ter carregado"
-	case len(c.ModFtrace) == 0 || len(c.ModProc) == 0:
+	case !c.ModFtraceLido || !c.ModProcLido:
 		e["state"] = "not_compared"
 		e["meaning"] = "o registro do ftrace não foi lido — ou este host não " +
 			"expõe tracing próprio, ou lê-lo exigiria privilégio que a coleta não " +
@@ -358,6 +444,81 @@ func eixoDeFtrace(c *facts.CrossView) map[string]any {
 		e["state"] = "agree"
 		e["meaning"] = "todo módulo com função rastreável no ftrace também se " +
 			"declara carregado em /proc/modules"
+	}
+	return e
+}
+
+// eixoDeBPF é o quarto quebra-confiança do kernel, e o que faltava.
+//
+// coverage.get e a catraca de trust_broken já sabem que cross.bpf_hidden é
+// kernelBreaker; o que não existia era a EXPLICAÇÃO perguntável: quando o motor
+// diz que a confiança quebrou por BPF, qual foi a divergência. Um programa eBPF
+// que existe e não aparece na enumeração é a forma mais forte de ocultamento de
+// kernel — e a tool que responde "o kernel está mentindo?" não podia vê-la.
+//
+// Este eixo reflete a ROTA DE ENUMERAÇÃO, que está limpa nos fatos: a lista de
+// programas (idr_get_next) contra os ids CITADOS por descritor, pin ou link
+// (idr_find). Esconder de forma consistente das duas é mais difícil, e a
+// divergência é o achado.
+//
+// Ele NÃO recalcula o veredito: o gate de OcultosConfirmados é o mesmo do
+// check (sem a confirmação de duas passadas, id citado e não listado é
+// inconclusivo, não acusação), e a segunda rota do bpf_hidden — trampolim de
+// ftrace sem programa que o explique — depende de lógica de tipos que vive no
+// check. Por isso o veredito autoritativo é trust_broken/breakers, e o note
+// deste eixo aponta para lá: um "agree" AQUI é sobre a rota de enumeração, não
+// um atestado de que não há problema de BPF.
+func eixoDeBPF(f *facts.Facts) map[string]any {
+	b := &f.BPF
+	enumeracao := map[string]any{
+		"name":  "enumeração do kernel (bpf(2), idr_get_next)",
+		"count": len(b.Programas), "read": b.Enumerado,
+		"truncated": b.ProgramasCortado,
+	}
+	if !b.Enumerado && b.Motivo != "" {
+		enumeracao["reason"] = b.Motivo
+	}
+	e := map[string]any{
+		"axis": "bpf",
+		"witnesses": []map[string]any{
+			enumeracao,
+			{"name": "referência direta (fd/pin/link → idr_find)",
+				"read": b.Enumerado},
+		},
+		"note": "este eixo cobre a rota de ENUMERAÇÃO. A segunda rota do " +
+			"bpf_hidden — trampolim de ftrace sem programa que o explique — é " +
+			"decidida pelo motor; o veredito completo de BPF está em trust_broken " +
+			"e breakers, e um 'agree' aqui não é atestado de que não há problema.",
+	}
+	switch {
+	case b.OcultosConfirmados && len(b.Ocultos) > 0:
+		div := make([]map[string]any, 0, len(b.Ocultos))
+		for _, id := range b.Ocultos {
+			div = append(div, map[string]any{"kind": "bpf_id_oculto", "prog_id": id,
+				"meaning": "este id é citado por um descritor, pin ou link e a " +
+					"enumeração do kernel não o devolve: perguntar pelo id e pedir a " +
+					"lista são caminhos diferentes dentro do kernel"})
+		}
+		e["state"] = "disagree"
+		comCorte(e, div)
+		e["meaning"] = "há id de eBPF citado por referência viva que a enumeração " +
+			"do kernel nega existir"
+	case !b.Enumerado:
+		e["state"] = "not_compared"
+		e["meaning"] = "a enumeração de eBPF não rodou — normalmente falta " +
+			"CAP_BPF/root —, então não houve contra o que conferir as referências"
+	case len(b.Ocultos) > 0 && !b.OcultosConfirmados:
+		// Mesma prudência do check: id citado e não listado sem a confirmação de
+		// duas passadas é inconclusivo — dump anterior à correção do truncamento,
+		// ou coleta que não completou. Não se acusa a partir dele.
+		e["state"] = "not_compared"
+		e["meaning"] = "há id de eBPF citado e não listado, mas a confirmação de " +
+			"ocultamento (duas enumerações completas) não consta: inconclusivo, " +
+			"não é divergência"
+	default:
+		e["state"] = "agree"
+		e["meaning"] = "todo id de eBPF citado por referência viva também aparece " +
+			"na enumeração do kernel"
 	}
 	return e
 }

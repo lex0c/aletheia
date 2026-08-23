@@ -145,6 +145,7 @@ func collectCrossSockets(f *Facts, e *env.Env) {
 	f.Cross.SocketDiagLido = true
 	f.Cross.SocketDiag = len(diag1)
 	f.Cross.SocketDiagCortado = cortado
+	f.Cross.SocketDiagProtos = len(diagOK1)
 
 	// 1ª leitura de /proc, restrita aos protocolos que o netlink respondeu, com
 	// o SUCESSO por protocolo — não só as chaves. Sem esse sucesso, "o socket
@@ -155,12 +156,19 @@ func collectCrossSockets(f *Facts, e *env.Env) {
 
 	// Protocolo que o netlink respondeu mas /proc não pôde ser LIDO: não é
 	// comparável, e a ausência de um socket nele NÃO pode virar achado.
+	protosComProc := 0
 	for proto := range diagOK1 {
 		if !procOK1[proto] {
 			f.partial("net", "/proc/net/"+proto+" não pôde ser lido: as conexões de "+
 				proto+" NÃO foram confrontadas com o netlink")
+			continue
 		}
+		protosComProc++
 	}
+	// Em quantos dos protocolos que o netlink devolveu o /proc/net também foi
+	// lido: é o que separa "as duas tabelas concordam" de "a segunda tabela não
+	// foi confrontada em protocolo nenhum".
+	f.Cross.SocketProcProtos = protosComProc
 
 	// Candidatos: no diag, ausentes do /proc — SÓ para protocolos em que a 1ª
 	// leitura de /proc foi de fato OBSERVADA.

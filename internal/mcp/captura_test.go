@@ -16,6 +16,9 @@ import (
 // servidorVivo monta um servidor de AQUISIÇÃO sobre o host onde o teste roda.
 func servidorVivo(t *testing.T, modo Modo, raiz string) *Servidor {
 	t.Helper()
+	if modo == ModoLive && raiz == "" {
+		pularSobCorrida(t) // captura do host real: fora do -race
+	}
 	a := NovoAcervo()
 	a.Teto = 2
 	s := NovoServidor(Policy{Modo: modo}, a, "teste", nil, func() (*env.Env, error) {

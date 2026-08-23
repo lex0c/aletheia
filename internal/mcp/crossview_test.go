@@ -535,3 +535,51 @@ func TestSocketProtosAusenteFalhaFechado(t *testing.T) {
 		}
 	}
 }
+
+// P2: a segunda rota do cross.bpf_hidden (trampolim de ftrace sem programa) é
+// refletida no eixo bpf, não deixada em agree enquanto trust_broken aponta para
+// ela.
+//
+// O eixo modela diretamente só a rota de id citado (Ocultos). A rota do
+// trampolim quebra a confiança sem nenhum Ocultos. Sem a reconciliação, a
+// resposta trazia trust_broken=true, breakers=[BPF...] e bpf.state=agree — uma
+// IA teria de cruzar breakers com a nota do eixo para entender. Agora o eixo
+// reflete a quebra, do lado autoritativo do motor.
+func TestBPFTrampolineRefletidoNoEixo(t *testing.T) {
+	f := fatosDeTeste()
+	f.Cross = facts.CrossView{
+		ProcListLida: true, ProcListN: 2,
+		ProbeAte: 4194304, ProbeProcfsAte: 4194304, PidMax: 4194304,
+		ModProcLido: true, ModSysLido: true, ModProc: []string{"a"}, ModSys: []string{"a"},
+		ModFtraceLido:  true,
+		SocketDiagLido: true, SocketProtos: protosCompared(),
+	}
+	// Enumeração de eBPF COMPLETA e sem id oculto: a rota de Ocultos está limpa.
+	f.BPF = facts.BPF{Enumerado: true}
+	// Mas o ftrace mostra um trampolim de eBPF, e não há programa que o explique
+	// (nenhum enumerado): é a segunda rota, e o check a torna CRITICAL.
+	f.Ftrace = []facts.HookFtrace{{Simbolo: "vfs_read", Callback: "bpf_trampoline_12345"}}
+
+	s, r := servidorDeTeste(t, f)
+	if len(r.Relatorio().KernelTrustBroken) == 0 {
+		t.Fatal("o trampolim sem programa não quebrou a confiança: o cenário não " +
+			"exercita a segunda rota do cross.bpf_hidden")
+	}
+	m := chamar(t, s, "crossview.get", "{}")
+	data := m["data"].(map[string]any)
+	if data["trust_broken"] != true {
+		t.Fatalf("trust_broken=%v com KernelTrustBroken != []", data["trust_broken"])
+	}
+	var bpf map[string]any
+	for _, ax := range data["axes"].([]any) {
+		a := ax.(map[string]any)
+		if a["axis"] == "bpf" {
+			bpf = a
+		}
+	}
+	if bpf["state"] != "disagree" || bpf["trust_breaking"] != true {
+		t.Errorf("o eixo bpf ficou em state=%v trust_breaking=%v enquanto o kernel "+
+			"quebrou por bpf: a segunda rota não foi refletida", bpf["state"],
+			bpf["trust_breaking"])
+	}
+}

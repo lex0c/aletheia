@@ -41,6 +41,14 @@ type Trigger struct {
 	// carregar ruído; guardar só o que executa é o que os checks avaliam.
 	Lines []TriggerLine `json:"lines,omitempty"`
 
+	// AptHooks são os hooks ATIVOS de um apt.conf — o comando que
+	// Pre-Install-Pkgs/Pre-Invoke/Post-Invoke executa —, extraídos com o lexer
+	// do apt sobre os bytes crus. Existe porque Lines passou pelo parser
+	// genérico, que descarta linha começada por # e assim perde um hook escondido
+	// atrás de um bloco /* … */ mal fechado. Os checks de execução e de poder
+	// leem isto para apt, nao Lines. Ver analisarAptHooks.
+	AptHooks []TriggerLine `json:"apt_hooks,omitempty"`
+
 	// EscapeN é a linha onde há SEQUÊNCIA DE ESCAPE de terminal, ou 0.
 	//
 	// Ela mora fora de Lines de propósito: o truque usa uma linha de
@@ -292,6 +300,12 @@ func lerTrigger(e *env.Env, path, kind, when, user string) (Trigger, bool) {
 	if ehBinario(b) {
 		t.Binario = true
 		return t, true
+	}
+	// apt.conf.d ganha extração SEMÂNTICA dos hooks, sobre os bytes crus e com o
+	// lexer do apt — antes de o parser genérico de linhas descartar informação
+	// que a gramática do apt ainda usaria. Ver analisarAptHooks.
+	if kind == "pkg_hook" && strings.Contains(path, "/apt/apt.conf.d/") {
+		t.AptHooks = analisarAptHooks(b)
 	}
 	linhas := strings.Split(string(b), "\n")
 	ultimaComConteudo := 0

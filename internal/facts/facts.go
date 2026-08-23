@@ -274,7 +274,17 @@ import (
 //	     diag_skipped). A contagem "3 de 4" não dizia QUAL faltou, e o netlink
 //	     pula o protocolo sem handler de diag para não autocarregar — "2 de 2"
 //	     virava agree com udp/udp6 nunca olhados.
-const SchemaVersion = 18
+//	19 Trigger.AptHooks: os hooks ATIVOS de um apt.conf, extraídos na coleta com
+//	   o lexer do apt sobre os bytes crus. Antes, o poder de execução de um
+//	   apt.conf e o persist.trigger_exec liam Trigger.Lines — e Lines passou pelo
+//	   parser genérico, que descarta a linha começada por #. Um hook escondido
+//	   atrás de um bloco /* … */ que fecha depois de um # (`/*\n# */ Pre-Invoke
+//	   {…}`) some de Lines inteiro: falso negativo determinístico numa superfície
+//	   que o atacante controla. Num dump v18 AptHooks vem vazio, e vazio ali é
+//	   "nenhum hook" sobre um arquivo que pode ter um — então o número sobe e o
+//	   Carregar recusa o v18 em vez de responder ausência sobre o que não foi
+//	   extraído.
+const SchemaVersion = 19
 
 // Facts é o retrato do host.
 type Facts struct {

@@ -278,70 +278,17 @@ func gatilhoComPoder(t *facts.Trigger) bool {
 	return true
 }
 
-// pkgHookRodaComando diz se um arquivo de configuração de gerenciador de pacote
-// EXECUTA algo, em vez de só ajustar opção.
+// pkgHookRodaComando diz se um apt.conf EXECUTA algo — se define um hook ativo.
 //
-// A gramática é a do APT, e só o apt.conf.d é avaliado por ela. /etc/dnf/plugins
-// e /etc/yum/pluginconf.d compartilham o kind pkg_hook, mas a config deles só
-// LIGA um plugin (enabled=1) cujo código é um .py em outro lugar — o arquivo de
-// config não é o alvo que executa, então dar poder de execução a ele pela
-// gramática errada seria um falso sinal. Fora de apt.conf.d, não há hook a
-// reconhecer aqui.
-//
-// Para o apt, executar é definir um hook: Pre-Install-Pkgs, Pre-Invoke ou
-// Post-Invoke recebem uma string que o apt roda como shell. Opção
-// (Unattended-Upgrade::*, APT::Periodic::*, Acquire::*) não roda nada.
-//
-// O apt.conf tem TRÊS formas de comentário — // até o fim da linha, # até o fim
-// da linha, e o bloco /* … */ que pode cruzar linhas —, e a config padrão traz
-// EXEMPLOS de hook comentados nas três. Casar dentro de um comentário
-// reintroduziria o falso positivo por outra porta, então os três são removidos
-// antes da busca. O parser de Trigger já descarta a linha que COMEÇA com #, mas
-// não o # no meio nem o bloco, e é isso que este passo cobre.
+// A pergunta é respondida pelo FATO SEMÂNTICO que a coleta extraiu com o lexer
+// do apt (Trigger.AptHooks), não por reparsear texto. Reconstruir a gramática do
+// apt sobre Trigger.Lines era frágil por construção: Lines já passou pelo parser
+// genérico, que descarta a linha começada por # — e um hook escondido atrás de um
+// bloco /* … */ que fecha depois de um # sumia da representação inteira. dnf/yum
+// não são apt.conf.d e não têm AptHooks: a config deles LIGA um plugin cujo
+// código mora noutro lugar, e o arquivo em si não executa.
 func pkgHookRodaComando(t *facts.Trigger) bool {
-	if !strings.Contains(t.File, "/apt/apt.conf.d/") {
-		return false
-	}
-	emBloco := false
-	for _, ln := range t.Lines {
-		s, dentro := semComentarioApt(ln.Text, emBloco)
-		emBloco = dentro
-		low := strings.ToLower(s)
-		if strings.Contains(low, "pre-invoke") ||
-			strings.Contains(low, "post-invoke") ||
-			strings.Contains(low, "pre-install-pkgs") {
-			return true
-		}
-	}
-	return false
-}
-
-// semComentarioApt remove de uma linha os comentários do apt.conf — bloco
-// /* … */ (que pode ter começado antes e terminar depois), linha // e linha # —,
-// devolvendo o código restante e se um bloco continua ABERTO na próxima linha.
-func semComentarioApt(linha string, emBloco bool) (string, bool) {
-	var out strings.Builder
-	for i := 0; i < len(linha); {
-		if emBloco {
-			if j := strings.Index(linha[i:], "*/"); j >= 0 {
-				i += j + 2
-				emBloco = false
-				continue
-			}
-			return out.String(), true // resto é comentário; bloco segue aberto
-		}
-		if strings.HasPrefix(linha[i:], "/*") {
-			emBloco = true
-			i += 2
-			continue
-		}
-		if strings.HasPrefix(linha[i:], "//") || linha[i] == '#' {
-			break // comentário de linha: descarta o resto
-		}
-		out.WriteByte(linha[i])
-		i++
-	}
-	return out.String(), emBloco
+	return len(t.AptHooks) > 0
 }
 
 func arquivoComPoder(f *facts.Facts, p string) string {

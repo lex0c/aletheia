@@ -206,6 +206,34 @@ var toolCrossView = Ferramenta{
 			}
 		}
 
+		// Reconciliação do eixo bpf com o motor. cross.bpf_hidden tem DUAS rotas
+		// — id citado e não enumerado, e trampolim de ftrace sem programa que o
+		// explique —, e o eixo modela só a primeira (a que está limpa nos fatos).
+		// Quando o motor quebrou por bpf mas o eixo não observou Ocultos, a
+		// quebra veio pela outra rota, e deixar o eixo em agree enquanto
+		// trust_broken aponta para bpf seria a inconsistência que a revisão notou.
+		// A decisão continua sendo do motor (quebras[msg]); o eixo só passa a
+		// refleti-la, apontando para o finding pelo detalhe dos símbolos.
+		if msg, ok := check.MensagemDeQuebraDeKernel("cross.bpf_hidden"); ok && quebras[msg] {
+			for _, e := range eixos {
+				if e["axis"] != "bpf" || e["state"] == "disagree" {
+					continue
+				}
+				e["state"] = "disagree"
+				e["trust_breaking"] = true
+				div := []map[string]any{{
+					"kind": "bpf_trampoline_sem_programa",
+					"meaning": "o ftrace mostra trampolim de eBPF interceptando " +
+						"função de kernel e a enumeração não devolve programa que o " +
+						"explique — a SEGUNDA rota do cross.bpf_hidden. Os símbolos " +
+						"estão no finding cross.bpf_hidden.",
+				}}
+				comCorte(e, div)
+				e["meaning"] = "há trampolim de eBPF sem programa enumerado que o " +
+					"explique: o kernel mantém um hook de eBPF que ele próprio não lista"
+			}
+		}
+
 		dados := map[string]any{
 			"trust_broken": quebrada,
 			"axes":         eixos,

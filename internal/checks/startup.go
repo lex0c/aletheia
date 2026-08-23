@@ -249,7 +249,15 @@ var shellStartup = check.Check{
 			// gerenciador guarda. Sem hash disponível não há isenção.
 			donoDoGatilho := entregueIntactoPeloPacote(f, t.File)
 
-			for _, ln := range t.Lines {
+			// apt.conf.d executa pelos HOOKS, não pelas linhas de config. AptHooks
+			// é o que o lexer do apt extraiu dos bytes crus, imune ao descarte de
+			// linha-# que faria um hook escondido atrás de /* … */ sumir de Lines.
+			// Para os outros gatilhos, Lines é o que executa.
+			linhasDeExec := t.Lines
+			if len(t.AptHooks) > 0 || strings.Contains(t.File, "/apt/apt.conf.d/") {
+				linhasDeExec = t.AptHooks
+			}
+			for _, ln := range linhasDeExec {
 				motivo, sev, ok := execSuspect(linhaExecutavel(ln.Text))
 				if ok && donoDoGatilho {
 					ok = false

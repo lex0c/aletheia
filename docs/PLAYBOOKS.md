@@ -916,7 +916,7 @@ mesmo dado, e é a divergência entre elas que o denuncia:
 | `sockets` | `/proc/net` × `NETLINK_INET_DIAG` | há conexão que a tabela de texto nega |
 | `modules` | `/proc/modules` × `/sys/module` | um módulo se desencadeou de uma lista e ficou na outra |
 | `modules_ftrace` | registro do ftrace × `/proc/modules` | o kernel guarda função rastreável de um módulo que diz não ter carregado — o registro só é limpo no descarregamento real |
-| `bpf` | enumeração do kernel × referências vivas (fd/pin/link) | um programa eBPF é citado por referência viva e a enumeração do kernel não o devolve — o modo mais forte de ocultação de kernel |
+| `bpf` | enumeração do kernel × referências vivas (fd/pin/link) e × trampolins do ftrace | um programa eBPF é citado por referência viva e a enumeração não o devolve, ou o ftrace mostra um trampolim de eBPF sem programa enumerado que o explique — o modo mais forte de ocultação de kernel |
 
 Cada eixo tem **três** estados, e o terceiro é o que decide a pergunta:
 

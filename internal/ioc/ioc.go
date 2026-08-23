@@ -32,6 +32,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 )
 
 // MaxLista é o teto do arquivo de indicadores, pela mesma razão que
@@ -77,6 +78,9 @@ type Lista struct {
 	// operador saber que parte da lista dele não entrou — nunca para serem
 	// engolidas.
 	Avisos []string
+
+	once sync.Once
+	ix   *indice
 }
 
 var (
@@ -238,25 +242,80 @@ func deduzir(v string) Tipo {
 	return Texto
 }
 
+// indice acelera o Casar. Ver montarIndice.
+type indice struct {
+	porTipo map[Tipo][]Indicador
+	// exato resolve Hash e IP num acesso de mapa. A chave é o valor em
+	// minúsculas, porque a comparação daqueles dois tipos é EqualFold e o
+	// carregador já normaliza — o ToLower aqui é o cinto de segurança para
+	// quem montar Lista na mão.
+	exato map[Tipo]map[string][]Indicador
+}
+
+// montarIndice é construído UMA vez, na primeira consulta.
+//
+// O Casar varria l.Itens inteiro a cada chamada, com o filtro de tipo DENTRO do
+// laço — sem bucketing, e sem mapa nem para Hash e IP, que são igualdade exata.
+// Medido: 14,2 ns por indicador por chamada.
+//
+// O volume de chamadas é o que torna isso caro: varrerProcessos emite
+// `5 + len(EnvKeys)` por processo e varrerRede duas por socket, então um
+// servidor com 30 mil processos e 100 mil sockets faz ~950 mil chamadas. Com
+// uma lista de 10 mil indicadores — um export de MISP/CTI comum, e muito abaixo
+// do teto de 16 MiB do MaxLista — isso dava 135 segundos. O `wtf` tem orçamento
+// de 2s, e o motor só confere o Deadline ENTRE checks: uma vez dentro do
+// ioc.match nada interrompia.
+//
+// A lista é imutável depois de carregada (o leitor devolve e ninguém acrescenta),
+// então o índice é montado sob sync.Once e vale para o resto da execução.
+func (l *Lista) montarIndice() {
+	l.once.Do(func() {
+		ix := &indice{
+			porTipo: map[Tipo][]Indicador{},
+			exato:   map[Tipo]map[string][]Indicador{},
+		}
+		for _, ind := range l.Itens {
+			ix.porTipo[ind.Tipo] = append(ix.porTipo[ind.Tipo], ind)
+			if ind.Tipo != Hash && ind.Tipo != IP {
+				continue
+			}
+			m := ix.exato[ind.Tipo]
+			if m == nil {
+				m = map[string][]Indicador{}
+				ix.exato[ind.Tipo] = m
+			}
+			k := strings.ToLower(ind.Valor)
+			m[k] = append(m[k], ind)
+		}
+		l.ix = ix
+	})
+}
+
 // Casar devolve os indicadores daquele tipo que casam com o valor dado. A
 // SEMÂNTICA da comparação é do tipo, não de quem chama.
 func (l *Lista) Casar(t Tipo, valor string) []Indicador {
 	if l == nil || valor == "" {
 		return nil
 	}
+	l.montarIndice()
+
+	// Hash e IP são igualdade exata: acesso de mapa, e o custo para de depender
+	// do tamanho da lista.
+	if t == Hash || t == IP {
+		return l.ix.exato[t][strings.ToLower(valor)]
+	}
+
+	// Os outros três precisam de comparação real, mas agora só contra os
+	// indicadores DAQUELE tipo. Numa lista típica, dominada por hash e IP, isso
+	// sozinho já corta a maior parte do trabalho.
 	var out []Indicador
-	for _, ind := range l.Itens {
-		if ind.Tipo != t {
-			continue
-		}
+	for _, ind := range l.ix.porTipo[t] {
 		var bate bool
 		switch t {
 		case Caminho:
 			bate = casaCuringa(ind.Valor, valor)
 		case Texto:
 			bate = strings.Contains(valor, ind.Valor)
-		case Hash, IP:
-			bate = strings.EqualFold(ind.Valor, valor)
 		case Chave:
 			bate = ind.Valor == blobDeChave(valor)
 		default:

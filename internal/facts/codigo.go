@@ -1819,7 +1819,7 @@ func collectCodigo(f *Facts, e *env.Env) {
 		}
 	} else {
 		raizes = append([]string{}, codigoRaizes...)
-		raizes = append(raizes, homeDirs(e)...)
+		raizes = append(raizes, homeDirs(f, e, "codigo")...)
 	}
 
 	// Orçamento POR RAIZ, não global. Com um contador único, uma raiz enorme —

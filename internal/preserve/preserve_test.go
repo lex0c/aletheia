@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func coletor(t *testing.T) (*Coletor, string) {
@@ -291,5 +292,60 @@ func TestMemoriaCapturaMapeamentoApagado(t *testing.T) {
 	}
 	if fi, err := os.Stat(filepath.Join(dir, filepath.Base(achou.Destino))); err != nil || fi.Size() == 0 {
 		t.Errorf("o arquivo do dump não foi escrito: %v", err)
+	}
+}
+
+// Um FIFO no lugar do arquivo não pode pendurar a coleta — nem levar junto o
+// manifesto de custódia.
+//
+// O `copiar` usava os.Open seco sobre um caminho que o operador copia de um
+// achado, ou seja, um caminho num host que o atacante ainda controla. Trocar o
+// arquivo por um fifo (ele já escreve naquele diretório — foi lá que o webshell
+// apareceu) pendurava o open(2) para SEMPRE.
+//
+// E o pior não era o travamento: o primeiro SIGINT não alcança, porque o
+// bloqueio é anterior ao copiaInterrompivel, que é o único ponto que olha
+// c.Parar; o segundo cai em os.Exit(130) e pula o escreverManifesto. O
+// diretório ficava com as peças já preservadas e SEM os hashes de origem, que
+// só existiam na memória do processo. Evidência sem cadeia de custódia é o que
+// o cabeçalho deste pacote chama de pior que coleta nenhuma.
+//
+// O teste exige as três coisas: volta rápido, recusa DECLARADA (não silêncio), e
+// nenhuma peça inventada.
+func TestFifoNoLugarDoArquivoNaoPenduraENaoEngoleAFalha(t *testing.T) {
+	dir := t.TempDir()
+	alvo := filepath.Join(dir, "alvo")
+	if err := syscall.Mkfifo(alvo, 0o600); err != nil {
+		t.Skipf("mkfifo indisponível: %v", err)
+	}
+	saida := t.TempDir()
+	c, err := Novo(saida, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	feito := make(chan error, 1)
+	go func() { feito <- c.Arquivo(alvo) }()
+
+	select {
+	case err := <-feito:
+		if err == nil {
+			t.Fatal("o fifo foi 'preservado' com sucesso: não há conteúdo para copiar")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Arquivo() não voltou em 10s sobre um fifo — o open(2) está " +
+			"bloqueando, e nem o SIGINT alcança esse ponto: a coleta pendura e o " +
+			"manifesto de custódia não chega a ser escrito")
+	}
+
+	if len(c.Itens) != 0 {
+		t.Errorf("peça registrada para um fifo: %+v", c.Itens)
+	}
+	if len(c.Erros) != 1 {
+		t.Fatalf("a recusa NÃO virou lacuna declarada: Erros=%+v — silêncio aqui "+
+			"faz o alvo sumir do manifesto como se nunca tivesse sido pedido", c.Erros)
+	}
+	if !strings.Contains(c.Erros[0].Motivo, "fifo") {
+		t.Errorf("o motivo não diz o que foi encontrado: %q", c.Erros[0].Motivo)
 	}
 }

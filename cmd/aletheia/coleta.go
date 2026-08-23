@@ -73,6 +73,30 @@ func runCollect(args []string) int {
 	e.Ignorar(ignore)
 	e.CodigoTudo = *allFS
 
+	// O destino é ABERTO antes da coleta, e não depois.
+	//
+	// Era aberto depois: trinta segundos tocando um host possivelmente
+	// comprometido, o retrato inteiro pronto na memória, e só então o
+	// openJSONOut recusava o nome já existente — exit 3, e a coleta jogada
+	// fora. Num host que pode não existir amanhã, a janela se perde por um
+	// arquivo que já estava lá.
+	//
+	// É o mesmo defeito que o `scan --json` já tinha e já consertou, com o
+	// raciocínio escrito no abrirSaidaJSON: validar o barato antes do caro. O
+	// collect — cujo propósito inteiro é produzir este arquivo, e cujo próprio
+	// resumo diz "o retrato é único" — tinha ficado de fora.
+	var fh *os.File
+	if *out != "-" {
+		var err error
+		fh, err = openJSONOut(*out)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 3
+		}
+		defer fh.Close() // rede de segurança; o Close que VALE é o de baixo
+		marcarSaidaVazia(*out)
+	}
+
 	aoInterromper()
 	prog := progress.New(os.Stderr, time.Now(), *noProg, corHabilitada(os.Stderr))
 	e.Progress = prog
@@ -91,17 +115,10 @@ func runCollect(args []string) int {
 	// `preserve` hasheia em fluxo enquanto copia.
 	soma := sha256.New()
 	w := io.Writer(io.MultiWriter(os.Stdout, soma))
-	var fh *os.File
-	if *out != "-" {
-		var err error
-		fh, err = openJSONOut(*out)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 3
-		}
-		defer fh.Close() // rede de segurança; o Close que VALE é o de baixo
+	if fh != nil {
 		w = io.MultiWriter(fh, soma)
 	}
+	saidaComecouAEscrever()
 	if err := d.Escrever(w); err != nil {
 		fmt.Fprintf(os.Stderr, "collect: erro ao escrever o dump: %v\n", err)
 		return 3
@@ -275,6 +292,38 @@ func parseComPosicionais(fs *flag.FlagSet, args []string) ([]string, error) {
 		pos = append(pos, fs.Arg(0))
 		args = fs.Args()[1:]
 	}
+}
+
+// recusaPosicional é a OUTRA metade do problema que parseComPosicionais resolve.
+//
+// Nos subcomandos que TÊM posicional, o `flag` parando no primeiro deles falhava
+// ruidosamente, e a volta foi parsear em rodadas. Nos que NÃO têm posicional
+// nenhum — scan, wtf e baseline, onde a imagem entra por --root — a mesma parada
+// falha em SILÊNCIO: tudo depois do posicional, inclusive as flags, vira sobra
+// descartada sem uma palavra.
+//
+// O desfecho é o pior que esta ferramenta pode produzir. `scan /mnt/imagem --ioc
+// incidente.txt` varre o host do ANALISTA, nunca carrega a lista de indicadores,
+// imprime RESULT: OK e sai 0: uma execução que não respondeu nada sobre o alvo,
+// com a cara exata de uma execução limpa e completa. É a mentira central da
+// ferramenta cometida pela borda mais boba possível.
+//
+// Recusar é obrigatório, mas não basta: quem digitou o caminho primeiro aprendeu
+// isso no analyze, no drift e no info, que legitimamente têm posicional. Por
+// isso o erro ENSINA a forma certa em vez de só reclamar.
+func recusaPosicional(fs *flag.FlagSet, cmd string) bool {
+	if fs.NArg() == 0 {
+		return false
+	}
+	a := fs.Arg(0)
+	fmt.Fprintf(os.Stderr, "%s: argumento inesperado %q — este comando não tem posicional.\n", cmd, a)
+	if strings.HasPrefix(a, "/") || strings.Contains(a, "/") {
+		fmt.Fprintf(os.Stderr, "A imagem entra por flag:  aletheia %s --root %s\n", cmd, a)
+	}
+	fmt.Fprintln(os.Stderr, "Recusado de propósito: o parser para no primeiro posicional, "+
+		"então tudo que viesse depois — INCLUSIVE as flags — seria descartado em silêncio, "+
+		"e a varredura responderia sobre o host errado com cara de execução limpa.")
+	return true
 }
 
 func runAnalyze(args []string) int {
@@ -454,7 +503,7 @@ func emitir(r *check.Report, f *facts.Facts, e *env.Env, o saida) int {
 	if code != 0 {
 		return code
 	}
-	jn := aplicarJanela(r, o.janela)
+	jn := aplicarJanela(r, o.janela, e.Now)
 
 	humanOut := io.Writer(os.Stdout)
 	if o.jsonOut == "-" {

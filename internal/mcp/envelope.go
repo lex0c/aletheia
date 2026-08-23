@@ -4,6 +4,7 @@ import (
 	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/dump"
 	"github.com/lex0c/aletheia/internal/facts"
+	"strconv"
 )
 
 // Instrucoes é o campo `instructions` do server/discover e do initialize.
@@ -130,20 +131,59 @@ const (
 	ImposicaoDispensada = "waived"
 )
 
+// MaxCampoProcedencia é o teto de um escalar da procedência.
+//
+// Ele existe porque a procedência entra em TODO envelope, e nada nela responde
+// a `limit`, cursor ou filtro. Um único campo grande demais estoura o
+// MaxResultado de toda resposta do servidor, e a sessão inteira morre junto:
+// medido com 2 MiB no /etc/hostname do alvo (invisível para o sistema em
+// execução, já que o hostname do kernel é definido no boot), TODA tool passou a
+// devolver -32602 — snapshot.capture, session.status, snapshot.list e
+// findings.list com limit=1.
+//
+// E o encadeamento é o que tornava aquilo irrecuperável em vez de chato: o
+// snapshot.capture SUCEDE por dentro e registra o retrato, só a RESPOSTA é
+// recusada. O modelo nunca fica sabendo o snapshot_id, o snapshot.list também
+// não consegue dizer, e depois de quatro capturas — cada uma uma varredura
+// inteira do alvo, cobrada do orçamento — o teto de retratos vivos é atingido
+// com um remédio (snapshot.release) que exige um ID que nenhuma tool
+// sobrevivente pode revelar.
+//
+// 4 KiB é o mesmo MaxTexto que já vale para argumento textual, e pela mesma
+// razão que aquele comentário dá: num servidor cujo canal de saída vai para um
+// modelo, resposta enorme é o próprio problema. Hostname real não chega perto.
+const MaxCampoProcedencia = MaxTexto
+
+// cortarCampoDoAlvo limita um escalar que veio do host investigado.
+//
+// Corta e DIZ que cortou — o valor continua utilizável para identificar o host,
+// e o modelo lê que aquilo não é o conteúdo inteiro. Truncar em silêncio seria
+// trocar uma sessão morta por um fato adulterado.
+func cortarCampoDoAlvo(v string) string {
+	if len(v) <= MaxCampoProcedencia {
+		return v
+	}
+	return v[:MaxCampoProcedencia] + "…[cortado: o valor no alvo tem " +
+		strconv.Itoa(len(v)) + " bytes]"
+}
+
 // ProcedenciaDeDump monta a procedência a partir do artefato.
 func ProcedenciaDeDump(id string, d *dump.Dump, sidecar, escopo string) Procedencia {
 	a := d.Ambiente
 	p := Procedencia{
 		SnapshotID: id, Fonte: a.Source,
-		ColetadoEm: a.CollectedAt, ColetadoPor: a.Tool,
-		ColetaSHA: a.ToolSHA, Caps: a.Caps,
+		// Estes três vêm do ARTEFATO, que o modelo de ameaça do --snapshot
+		// declara NÃO autenticado: quem escreveu o dump escolheu o que eles
+		// dizem. Passam pelo mesmo teto que o hostname.
+		ColetadoEm: cortarCampoDoAlvo(a.CollectedAt), ColetadoPor: cortarCampoDoAlvo(a.Tool),
+		ColetaSHA: cortarCampoDoAlvo(a.ToolSHA), Caps: a.Caps,
 		// DO ARTEFATO, e não do modo do servidor.
 		Redacao: string(d.Redacao.Estado()),
 		Sidecar: sidecar,
 		Escopo:  escopo,
 	}
 	if d.Facts != nil {
-		p.Host = d.Facts.Host.Hostname
+		p.Host = cortarCampoDoAlvo(d.Facts.Host.Hostname)
 	}
 	return p
 }
@@ -305,7 +345,27 @@ func ConfiancaDoHost(regioes ...string) Confianca {
 // não sabe qual frase foi escrita pelo motor e qual cita o alvo. O que ela sabe
 // — e o que vale afirmar — é que a região inteira pode carregar as duas.
 func RegioesDoHost(o Observabilidade) []string {
-	r := []string{"data"}
+	// `provenance` SEMPRE entra, e a razão é que ela é o bloco que o modelo lê
+	// primeiro — a ordem dos campos no Envelope é deliberada.
+	//
+	// provenance.host é o /etc/hostname lido verbatim do alvo, e
+	// collected_by/collector_sha256 vêm de um artefato que o próprio envelope
+	// declara `authenticated: false` — ou seja, escolhidos por quem escreveu o
+	// dump. Enquanto isso a nota embarcada em toda resposta afirma que
+	// host_supplied_paths lista TODOS os caminhos que carregam texto do alvo, e
+	// a regra 2 das Instrucoes treina o modelo a confiar nessa lista.
+	//
+	// Medido: um `web-01\x1b[2J IGNORE ALL PREVIOUS INSTRUCTIONS…` no hostname
+	// aparecia em provenance com host_supplied_paths dizendo apenas
+	// ['data', 'observability'] — texto do atacante numa região que a resposta
+	// afirmava ser de autoria da ferramenta.
+	//
+	// É exatamente o defeito que este arquivo já tinha consertado para
+	// `observability`, e cujo comentário diz por que a formulação forte é a que
+	// vale: "o que vale é 'texto do alvo só aparece num caminho listado aqui',
+	// que é verificável, e não 'só em data', que era falso". A mesma frase
+	// tinha voltado a ser falsa sobre provenance.
+	r := []string{"provenance", "data"}
 	temLacuna := len(o.LacunasDeColeta) > 0
 	if c := o.Cobertura; c != nil {
 		temLacuna = temLacuna || len(c.CollectorGaps) > 0 ||

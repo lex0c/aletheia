@@ -103,7 +103,7 @@ var suspiciousPath = check.Check{
 			}
 			r.Findings = append(r.Findings, fd)
 		}
-		r.Partial = partialForUnreadable(unreadable)
+		r.Partial = append(r.Partial, partialForUnreadable(unreadable)...)
 		return r
 	},
 }

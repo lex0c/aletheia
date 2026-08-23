@@ -551,11 +551,46 @@ func (c *Coletor) copiar(origem, nome, tipo string) (Item, error) {
 	if err != nil {
 		return Item{}, err
 	}
-	src, err := os.Open(origem)
+	// O_NONBLOCK na abertura, e o TIPO conferido no descritor.
+	//
+	// Era `os.Open` seco, sobre um caminho que o operador copia de um achado —
+	// ou seja, um caminho num host que o atacante ainda controla. Duas coisas
+	// saíam disso, e as duas foram medidas:
+	//
+	// Um `mkfifo` no lugar do arquivo (o atacante já escreve naquele diretório;
+	// foi lá que o webshell apareceu) pendurava o open(2) para SEMPRE. O
+	// primeiro SIGINT não alcança: o bloqueio é anterior ao copiaInterrompivel,
+	// que é o único ponto que olha c.Parar. O segundo cai em os.Exit(130) e
+	// pula o escreverManifesto — então o diretório fica com as peças já
+	// preservadas e SEM os hashes de origem, que só existiam na memória do
+	// processo. É o desfecho que o cabeçalho deste arquivo chama de pior que
+	// coleta nenhuma.
+	//
+	// E `--file /dev/watchdog` era aceito: o open do driver roda, e o host
+	// investigado reinicia.
+	//
+	// A defesa já existia no projeto — env.abrirVerificado e
+	// dump.AbrirArtefato fazem exatamente isto, e o comentário do segundo diz
+	// que nasceu porque um os.Open seco travou o servidor MCP antes da primeira
+	// resposta. Não tinha sido estendida para o irmão que escreve evidência.
+	fd, err := syscall.Open(origem, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return Item{}, err
 	}
+	src := os.NewFile(uintptr(fd), origem)
 	defer src.Close()
+	fi, err := src.Stat()
+	if err != nil {
+		return Item{}, err
+	}
+	if !fi.Mode().IsRegular() {
+		// Recusa DECLARADA: quem chama transforma isto em linha preserve_failed,
+		// então o manifesto diz que o alvo existia e não foi preservado — em vez
+		// de o diretório simplesmente não ter a peça.
+		return Item{}, fmt.Errorf("%s não é arquivo comum (%s): preservar um fifo, "+
+			"device ou socket não copia conteúdo nenhum — e abri-lo pode pendurar a "+
+			"coleta ou alterar o host. NÃO foi preservado", origem, tipoDeArquivo(fi.Mode()))
+	}
 
 	dst, err := os.OpenFile(destino, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -777,4 +812,22 @@ func nomeSeguro(p string) string {
 		s = s[:120] + "-" + hex.EncodeToString(soma[:4])
 	}
 	return s
+}
+
+// tipoDeArquivo nomeia o que NÃO é arquivo comum, para a recusa dizer o que
+// encontrou em vez de só dizer não.
+func tipoDeArquivo(m os.FileMode) string {
+	switch {
+	case m&os.ModeNamedPipe != 0:
+		return "fifo"
+	case m&os.ModeSocket != 0:
+		return "socket"
+	case m&os.ModeCharDevice != 0:
+		return "device de caractere"
+	case m&os.ModeDevice != 0:
+		return "device de bloco"
+	case m.IsDir():
+		return "diretório"
+	}
+	return m.String()
 }

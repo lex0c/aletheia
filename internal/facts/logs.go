@@ -32,7 +32,19 @@ type ArquivoDeLog struct {
 	// Base é o nome sem o sufixo de rotação: `auth.log.2.gz` vira `auth.log`.
 	Base string `json:"base"`
 	// Geracao é o número da rotação; zero é o arquivo vivo.
-	Geracao int   `json:"generation"`
+	Geracao int `json:"generation"`
+	// Datada diz que a rotação foi identificada pelo SUFIXO DE DATA do
+	// logrotate (`dateext`, que produz `wtmp-20260801`) e não por contador.
+	//
+	// A distinção precisa viajar no dump porque as duas formas respondem
+	// perguntas diferentes. Para "existe rotacionado ao lado?" — a guarda que
+	// separa logrotate de antiforense — as duas servem igual, e era só isso
+	// que faltava para o wtmp_cleared parar de acusar a família RHEL inteira.
+	// Para "falta uma geração NO MEIO?" não servem: contador tem sucessor
+	// definido, data não. Sem este campo, a série datada entrava no cálculo de
+	// buraco como um monte de bases distintas com geração 0 e saía sem buraco
+	// nenhum — silêncio com cara de resposta.
+	Datada  bool  `json:"date_suffix,omitempty"`
 	Tamanho int64 `json:"size"`
 }
 
@@ -70,9 +82,10 @@ func collectLogs(f *Facts, e *env.Env) {
 			if err != nil || !fi.Mode().IsRegular() {
 				continue
 			}
-			base, ger := separaRotacao(ent)
+			base, ger, datada := separaRotacao(ent)
 			f.Logs = append(f.Logs, ArquivoDeLog{
-				Path: p, Base: dir + "/" + base, Geracao: ger, Tamanho: fi.Size(),
+				Path: p, Base: dir + "/" + base, Geracao: ger,
+				Datada: datada, Tamanho: fi.Size(),
 			})
 		}
 	}
@@ -121,20 +134,60 @@ func collectLogs(f *Facts, e *env.Env) {
 // nome do arquivo, não da realidade.
 const maxGeracoes = 400
 
-func separaRotacao(nome string) (string, int) {
+// separaDataExt reconhece o sufixo de DATA do logrotate.
+//
+// `dateext` produz `<base>-YYYYMMDD` e é o padrão de fábrica da família RHEL:
+// está no /etc/logrotate.conf do RHEL, Rocky, Alma, CentOS e Fedora. O parser
+// só entendia contador, então `wtmp-20260801` virava base própria com geração
+// zero — e a guarda que procura "tem rotacionado ao lado?" nunca casava. O
+// efeito era um CRITICAL irreversível de antiforense.wtmp_cleared em qualquer
+// jump host RHEL que rotacionasse o wtmp com sessão aberta, acusando o operador
+// de ter limpado o histórico de login. Reproduz sem root.
+//
+// A validação é estreita de propósito: oito dígitos, e uma data plausível. Um
+// `app-20250` ou um `backup-12345678` não viram rotação — inventar geração a
+// partir de qualquer número atrás de um traço trocaria um falso positivo por
+// outro.
+func separaDataExt(n string) (string, bool) {
+	i := strings.LastIndex(n, "-")
+	if i <= 0 || len(n)-i-1 != 8 {
+		return n, false
+	}
+	d := n[i+1:]
+	for j := 0; j < len(d); j++ {
+		if d[j] < '0' || d[j] > '9' {
+			return n, false
+		}
+	}
+	ano, _ := strconv.Atoi(d[:4])
+	mes, _ := strconv.Atoi(d[4:6])
+	dia, _ := strconv.Atoi(d[6:8])
+	if ano < 1990 || ano > 2200 || mes < 1 || mes > 12 || dia < 1 || dia > 31 {
+		return n, false
+	}
+	return n[:i], true
+}
+
+func separaRotacao(nome string) (string, int, bool) {
 	n := nome
 	for _, suf := range []string{".gz", ".xz", ".bz2", ".zst"} {
 		n = strings.TrimSuffix(n, suf)
 	}
+	if base, ok := separaDataExt(n); ok {
+		// Geração 1 é convenção: a série datada não tem ordinal, e o que os
+		// consumidores perguntam por este número é "existe rotacionado?" — que
+		// é verdade. Quem precisa da diferença lê Datada.
+		return base, 1, true
+	}
 	i := strings.LastIndex(n, ".")
 	if i <= 0 {
-		return n, 0
+		return n, 0, false
 	}
 	ger, err := strconv.Atoi(n[i+1:])
 	if err != nil || ger <= 0 {
-		return n, 0
+		return n, 0, false
 	}
-	return n[:i], ger
+	return n[:i], ger, false
 }
 
 // BuracosNaRotacao devolve as sequências com geração faltando NO MEIO.
@@ -146,6 +199,9 @@ func (f *Facts) BuracosNaRotacao() map[string][]int {
 	porBase := map[string][]int{}
 	for i := range f.Logs {
 		l := &f.Logs[i]
+		if l.Datada {
+			continue // ver SeriesDatadas
+		}
 		porBase[l.Base] = append(porBase[l.Base], l.Geracao)
 	}
 
@@ -180,5 +236,34 @@ func (f *Facts) BuracosNaRotacao() map[string][]int {
 			out[base] = faltam
 		}
 	}
+	return out
+}
+
+// SeriesDatadas devolve as bases cuja rotação usa SUFIXO DE DATA.
+//
+// Elas ficam fora do BuracosNaRotacao, e a razão é que o método não se aplica —
+// não que não haja o que achar. Um contador tem sucessor definido: entre o 1 e o
+// 3, o 2 existiu e sumiu. Uma data não tem: entre `secure-20260801` e
+// `secure-20260815` pode faltar uma semana apagada, ou o logrotate pode
+// simplesmente não ter rodado ali (é o que `minsize` faz, e é o padrão do wtmp
+// no RHEL). Derivar buraco de aritmética de datas trocaria um falso limpo por um
+// falso positivo, e num check de antiforense o falso positivo custa a confiança
+// no relatório inteiro.
+//
+// Então o que a ferramenta pode dizer com honestidade é: aqui eu não olhei por
+// este método. Quem consome isto declara lacuna — o silêncio anterior afirmava
+// cobertura completa sobre a família RHEL inteira, onde `dateext` é o padrão de
+// fábrica, e a deleção que é pega no Debian era invisível no Rocky.
+func (f *Facts) SeriesDatadas() []string {
+	visto := map[string]bool{}
+	var out []string
+	for i := range f.Logs {
+		if !f.Logs[i].Datada || visto[f.Logs[i].Base] {
+			continue
+		}
+		visto[f.Logs[i].Base] = true
+		out = append(out, f.Logs[i].Base)
+	}
+	sort.Strings(out)
 	return out
 }

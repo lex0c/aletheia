@@ -539,8 +539,8 @@ var nsDivergent = check.Check{
 		// namespace divergente" sem ter lido o do PID 1 seria inventar.
 		init1 := f.ProcessByPID(1)
 		if init1 == nil || len(init1.NS) == 0 {
-			r.Partial = []string{"os namespaces do PID 1 não puderam ser lidos: sem " +
-				"linha de base, divergência nenhuma pôde ser avaliada"}
+			r.Partial = append(r.Partial, "os namespaces do PID 1 não puderam ser lidos: sem "+
+				"linha de base, divergência nenhuma pôde ser avaliada")
 			return r
 		}
 

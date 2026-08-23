@@ -103,7 +103,7 @@ var revshell = check.Check{
 			}
 			r.Findings = append(r.Findings, fd)
 		}
-		r.Partial = partialForOrphanSockets(f)
+		r.Partial = append(r.Partial, partialForOrphanSockets(f)...)
 		return r
 	},
 }
@@ -212,7 +212,7 @@ var pivot = check.Check{
 			}
 			r.Findings = append(r.Findings, fd)
 		}
-		r.Partial = partialForOrphanSockets(f)
+		r.Partial = append(r.Partial, partialForOrphanSockets(f)...)
 		return r
 	},
 }

@@ -48,3 +48,47 @@ func TestAlvoDeShellNaoDevolveTokenFalso(t *testing.T) {
 		}
 	}
 }
+
+// Sair pelo TETO de wrappers é indeterminado, e indeterminado se DECLARA.
+//
+// O laço para em oito passos, e quem cai fora dele não resolveu o alvo. O
+// retorno era `("", false)` — vazio, e o `false` do AlvoIndeterminado significa
+// "alvo PROVADO". A ferramenta afirmava ter provado que a linha não executa
+// nada, sobre uma linha que executa.
+//
+// O estrago é dos dois lados e silencioso nos dois: `add("")` é descartado pelo
+// guarda de prefixo "/" em pkg.go, então candidatosDePropriedade nunca pergunta
+// quem entregou o binário; e o ramo `if ex.AlvoIndeterminado` de
+// checks/systemd.go, que existe para transformar isso em lacuna, não é tomado.
+// persist.unit_unowned é CRITICAL e nunca chega a avaliar o alvo.
+func TestTetoDeWrappersDeclaraIndeterminadoENaoAlvoVazio(t *testing.T) {
+	casos := []struct {
+		nome string
+		cmd  string
+	}{
+		{"oito wrappers encadeados",
+			"/usr/bin/env /usr/bin/env /usr/bin/env /usr/bin/env " +
+				"/usr/bin/env /usr/bin/env /usr/bin/env /usr/bin/env /usr/lib/systemd/.upd"},
+		{"wrapper que consome todos os tokens", "/usr/bin/sudo -u root"},
+	}
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			alvo, indet := AlvoEfetivoDeExec(c.cmd)
+			if alvo != "" {
+				t.Fatalf("alvo = %q — o caso mudou, o teste não vale mais", alvo)
+			}
+			if !indet {
+				t.Errorf("alvo vazio marcado como PROVADO: a linha executa algo e a "+
+					"ferramenta não soube dizer o quê, mas afirma ter provado que não "+
+					"há alvo. O binário sai da pergunta de propriedade sem lacuna. (%s)", c.cmd)
+			}
+		})
+	}
+	// Sete wrappers ainda resolvem: o teto é o limite, não o comportamento.
+	alvo, indet := AlvoEfetivoDeExec(
+		"/usr/bin/env /usr/bin/env /usr/bin/env /usr/bin/env " +
+			"/usr/bin/env /usr/bin/env /usr/bin/env /usr/lib/.backdoor")
+	if alvo != "/usr/lib/.backdoor" || indet {
+		t.Errorf("sete wrappers deviam resolver: alvo=%q indet=%v", alvo, indet)
+	}
+}

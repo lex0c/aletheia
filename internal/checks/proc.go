@@ -73,7 +73,7 @@ var memfdExec = check.Check{
 			}
 			r.Findings = append(r.Findings, fd)
 		}
-		r.Partial = partialForUnreadable(unreadable)
+		r.Partial = append(r.Partial, partialForUnreadable(unreadable)...)
 		return r
 	},
 }
@@ -133,7 +133,7 @@ var exeDeleted = check.Check{
 			}
 			r.Findings = append(r.Findings, fd)
 		}
-		r.Partial = partialForUnreadable(unreadable)
+		r.Partial = append(r.Partial, partialForUnreadable(unreadable)...)
 		return r
 	},
 }
@@ -203,7 +203,7 @@ var kthreadDisguise = check.Check{
 			}
 			r.Findings = append(r.Findings, fd)
 		}
-		r.Partial = partialForUnreadable(unreadable)
+		r.Partial = append(r.Partial, partialForUnreadable(unreadable)...)
 		return r
 	},
 }

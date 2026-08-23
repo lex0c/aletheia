@@ -86,7 +86,22 @@ func AlvoEfetivoDeExec(cmd string) (string, bool) {
 			return descascaAspaBorda(toks[0]), false
 		}
 	}
-	return "", false
+	// Sair do laço é INDETERMINADO, não "alvo provado vazio".
+	//
+	// Chega-se aqui de dois jeitos: oito wrappers encadeados sem alcançar o
+	// programa, ou um wrapper que consumiu todos os tokens restantes
+	// (`ExecStart=/usr/bin/sudo -u root`). Nos dois casos a linha EXECUTA
+	// alguma coisa e a ferramenta não conseguiu dizer o quê.
+	//
+	// Era `return "", false`, e o `false` ali é AlvoIndeterminado — ou seja,
+	// "alvo provado". A combinação afirmava ter provado que a linha não aponta
+	// para lugar nenhum, e isso apagava o binário da pergunta de propriedade nos
+	// dois lados: `add("")` cai fora pelo guarda de prefixo "/" em pkg.go, e o
+	// ramo `if ex.AlvoIndeterminado` de checks/systemd.go — que existe para
+	// declarar exatamente esta lacuna — era pulado. Um
+	// `ExecStart=/usr/bin/env … (×8) /usr/lib/systemd/.upd` saía do relatório em
+	// silêncio, com cobertura declarada completa.
+	return "", true
 }
 
 // alvoDeLinhaDeShell acha o primeiro PROGRAMA de uma linha de `sh -c`.

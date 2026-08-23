@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -469,8 +470,56 @@ func aoInterromper() {
 	go func() {
 		<-c
 		fmt.Fprint(os.Stderr, "\r\033[K\ninterrompido\n")
+		limparSaidaVazia()
 		os.Exit(130)
 	}()
+}
+
+// saidaVazia guarda o destino ABERTO que ainda não recebeu byte nenhum.
+//
+// O destino do --json e do --out é aberto ANTES da parte cara, com O_EXCL, para
+// que uma colisão de nome seja recusada antes de a coleta rodar e não depois. O
+// efeito colateral é que um Ctrl-C no meio da coleta deixa no disco um arquivo
+// de ZERO byte — e como o próximo O_EXCL recusa arquivo existente, a repetição
+// óbvia (Ctrl-C, rodar de novo) morria com exit 3 e forçava outro nome.
+//
+// Pior que o incômodo: um wrapper que faz `grep -c '"sev":"CRITICAL"' saida`
+// recebe 0 tanto da varredura limpa quanto da abortada.
+//
+// Então o arquivo é removido na saída por sinal, e SÓ enquanto está vazio: a
+// partir do primeiro byte escrito ele é resultado parcial, e apagar resultado
+// parcial de uma coleta que pode não se repetir seria o erro oposto.
+var saidaVazia struct {
+	mu   sync.Mutex
+	path string
+}
+
+func marcarSaidaVazia(path string) {
+	saidaVazia.mu.Lock()
+	saidaVazia.path = path
+	saidaVazia.mu.Unlock()
+}
+
+// saidaComecouAEscrever desarma a limpeza: daqui em diante há conteúdo.
+func saidaComecouAEscrever() {
+	saidaVazia.mu.Lock()
+	saidaVazia.path = ""
+	saidaVazia.mu.Unlock()
+}
+
+func limparSaidaVazia() {
+	saidaVazia.mu.Lock()
+	p := saidaVazia.path
+	saidaVazia.path = ""
+	saidaVazia.mu.Unlock()
+	if p == "" {
+		return
+	}
+	// Confere o tamanho em vez de confiar no flag: entre marcar e o sinal
+	// chegar, outra coisa pode ter escrito ali.
+	if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && fi.Size() == 0 {
+		os.Remove(p)
+	}
 }
 
 // relatarTempoDeColeta diz, no stderr, ONDE o tempo da coleta foi — mas só
@@ -540,6 +589,9 @@ func runWtf(args []string) int {
 	fs.Var(&ignore, "ignore", "excluir caminho da varredura de FS (repetível): --ignore /data/xmls")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
+		return 3
+	}
+	if recusaPosicional(fs, "wtf") {
 		return 3
 	}
 	if *root != "" {
@@ -641,6 +693,13 @@ func runScan(args []string, wtf bool) int {
 	fs.Var(&ignore, "ignore", "excluir caminho da varredura de FS (repetível): --ignore /data/xmls")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
+		return 3
+	}
+	nome := "scan"
+	if wtf {
+		nome = "wtf"
+	}
+	if recusaPosicional(fs, nome) {
 		return 3
 	}
 
@@ -760,9 +819,9 @@ func runScan(args []string, wtf bool) int {
 // aplicarJanela recorta o relatório e monta o que precisa ser DITO sobre o
 // recorte. Nada aqui é silencioso: o que saiu é contado por severidade, o que
 // não tinha data é contado à parte, e o âncora declara de onde veio.
-func aplicarJanela(r *check.Report, j check.Janela) *report.JanelaInfo {
+func aplicarJanela(r *check.Report, j check.Janela, agora time.Time) *report.JanelaInfo {
 	rec := r.Aplicar(j)
-	anc := r.DerivarAncora(j)
+	anc := r.DerivarAncora(j, agora)
 	if !j.Ativa && anc.Quando == "" {
 		return nil // sem janela e sem achado datável: não há o que declarar
 	}
@@ -874,6 +933,9 @@ func runBaseline(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 3
 	}
+	if recusaPosicional(fs, "baseline") {
+		return 3
+	}
 	if *root != "" {
 		if fi, err := os.Stat(*root); err != nil || !fi.IsDir() {
 			fmt.Fprintf(os.Stderr, "--root: %s não é um diretório acessível\n", *root)
@@ -946,7 +1008,11 @@ func abrirSaidaJSON(path string) (*os.File, error) {
 	case "-":
 		return os.Stdout, nil
 	}
-	return openJSONOut(path)
+	fh, err := openJSONOut(path)
+	if err == nil {
+		marcarSaidaVazia(path)
+	}
+	return fh, err
 }
 
 // writeJSONL escreve no destino JÁ ABERTO. Devolve o exit code final, que NUNCA
@@ -957,6 +1023,7 @@ func writeJSONL(fh *os.File, veredito int, r *check.Report, f *facts.Facts, e *e
 	if fh == nil {
 		return veredito
 	}
+	saidaComecouAEscrever()
 	err := report.JSONL(fh, r, f, e, bl, jn, an)
 	if fh != os.Stdout {
 		if cerr := fh.Close(); err == nil {
@@ -988,10 +1055,54 @@ func openJSONOut(path string) (*os.File, error) {
 				"%s é um arquivo existente. Esta ferramenta nunca sobrescreve arquivo no\n"+
 					"host sob investigação: escolha outro nome, ou use '-' para a saída padrão.", path)
 		}
-		// device, fifo ou socket: escreve sem criar e sem truncar
-		fh, err := os.OpenFile(path, os.O_WRONLY, 0)
+		// device, fifo ou socket: escreve sem criar e sem truncar.
+		//
+		// O que este ramo NÃO pode fazer é confiar no os.Stat acima. Stat SEGUE
+		// o link, então um `dump.json -> /dev/sda` plantado no diretório de
+		// incidente chegava aqui classificado como "device, uso legítimo", e o
+		// O_WRONLY seco gravava o dump por cima da tabela de partição do host
+		// investigado — com fsync e close bem-sucedidos, .sha256 escrito ao
+		// lado e exit 0 anunciando sucesso. A ferramenta cujo contrato é
+		// read-only destruía o disco que veio periciar.
+		//
+		// O_NOFOLLOW não serve como conserto: /dev/stdout É um symlink (para
+		// /proc/self/fd/1), e recusá-lo quebraria justamente o uso automatizado
+		// que este ramo existe para permitir. O que separa os dois casos não é
+		// haver link, é o TIPO no destino:
+		//
+		//	char device, fifo, socket   /dev/stdout, /dev/console, pipe nomeado:
+		//	                            legítimo, e escrever ali não destrói nada
+		//	block device                nenhum uso legítimo, e o estrago é o
+		//	                            disco do host sob investigação
+		//	regular                     recusado logo acima; reconferido aqui
+		//
+		// E a conferência é feita no DESCRITOR, não no caminho: entre o Stat e
+		// o Open o alvo pode ter sido trocado, e é um host possivelmente hostil
+		// que decide quando trocar.
+		//
+		// O O_NONBLOCK é a segunda metade: abrir FIFO para escrita BLOQUEIA até
+		// aparecer um leitor. Um `dump.json -> pipe` pendurava a ferramenta
+		// depois da coleta inteira, com o retrato só na memória — e o Ctrl-C
+		// levava tudo. Com O_NONBLOCK o mesmo caso vira ENXIO na hora, que é
+		// falha alta em vez de sumiço silencioso.
+		fh, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
 		if err != nil {
 			return nil, fmt.Errorf("não foi possível escrever %s: %v", path, err)
+		}
+		fi2, err := fh.Stat()
+		if err != nil {
+			fh.Close()
+			return nil, fmt.Errorf("não foi possível conferir %s: %v", path, err)
+		}
+		if motivo := tipoDeSaidaRecusado(fi2.Mode()); motivo != "" {
+			fh.Close()
+			return nil, fmt.Errorf("%s: %s", path, motivo)
+		}
+		// Tira o O_NONBLOCK: ele existia para a ABERTURA não pendurar, e mantê-lo
+		// faria as escritas seguintes devolverem EAGAIN parcial.
+		if err := semNonBlock(fh); err != nil {
+			fh.Close()
+			return nil, fmt.Errorf("não foi possível preparar %s: %v", path, err)
 		}
 		return fh, nil
 	}
@@ -1030,4 +1141,54 @@ func runChecks(args []string) int {
 	fmt.Printf("\n%d checks registrados. A coluna de falso positivo é o que o operador\n", len(all))
 	fmt.Println("lê ANTES de decidir se vale investigar um achado.")
 	return 0
+}
+
+// semNonBlock desliga o O_NONBLOCK de um descritor já aberto.
+//
+// A flag serve à ABERTURA — é ela que faz um FIFO sem leitor falhar com ENXIO
+// em vez de pendurar o processo para sempre. Depois disso ela atrapalha: numa
+// escrita grande, um descritor não bloqueante devolve EAGAIN e escreve pela
+// metade, e o dump sairia truncado sem ninguém dizer.
+func semNonBlock(fh *os.File) error {
+	fd := int(fh.Fd())
+	flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_GETFL, 0)
+	if errno != 0 {
+		return errno
+	}
+	if _, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd),
+		syscall.F_SETFL, flags&^syscall.O_NONBLOCK); errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+// tipoDeSaidaRecusado decide, pelo TIPO do destino já aberto, se escrever ali é
+// aceitável. String vazia = pode.
+//
+// A decisão mora numa função separada porque ela é a metade que precisa ser
+// testável: provar o ramo do device de bloco de ponta a ponta exigiria um
+// /dev/sda gravável, ou seja, root — e uma trava que só roda como root não roda.
+func tipoDeSaidaRecusado(m os.FileMode) string {
+	switch {
+	case m.IsRegular():
+		// Reconferido no DESCRITOR. O os.Stat de cima segue link e olha o
+		// caminho; entre ele e o open o alvo pode ter sido trocado, e quem
+		// escolhe a hora de trocar é um host possivelmente hostil.
+		return "virou um arquivo comum entre a conferência e a abertura. Esta " +
+			"ferramenta nunca sobrescreve arquivo no host sob investigação."
+	case m&os.ModeDevice != 0 && m&os.ModeCharDevice == 0:
+		// Device de BLOCO: nenhum uso legítimo, e o estrago é o disco do host
+		// sob investigação. Era o desfecho de um `dump.json -> /dev/sda`
+		// plantado no diretório de incidente — o Stat via "device", o ramo
+		// permissivo aceitava, e o dump ia por cima da tabela de partição com
+		// exit 0 anunciando sucesso.
+		return "é (ou aponta para) um DEVICE DE BLOCO. Escrever ali destruiria o " +
+			"conteúdo do disco do host investigado — recusado. Se o caminho é um " +
+			"link no diretório de incidente, ele não estava lá por acaso."
+	}
+	// char device, fifo e socket seguem permitidos: /dev/stdout, /dev/console e
+	// pipe nomeado são uso automatizado legítimo, e escrever neles não destrói
+	// nada. Note que /dev/stdout É um symlink — recusar link por princípio
+	// quebraria exatamente o caso que este ramo existe para atender.
+	return ""
 }

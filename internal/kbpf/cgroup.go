@@ -132,13 +132,35 @@ const maxProgsPorTipo = 64
 // AnexosDeCgroup consulta os programas ANEXADOS a um cgroup, por tipo. Erro num
 // tipo NÃO aborta os outros: um attach type que o kernel não conhece devolve
 // EINVAL, e isso é capacidade ausente daquele tipo, não falha do cgroup.
-func AnexosDeCgroup(cgroupFD int, tipos []uint32) (map[uint32][]uint32, map[uint32]error) {
-	porTipo := map[uint32][]uint32{}
-	erros := map[uint32]error{}
+//
+// O terceiro retorno, `semComando`, separa aquilo de uma coisa completamente
+// diferente com o mesmo errno: o BPF_PROG_QUERY (cmd 16) só existe a partir do
+// 4.15, e num kernel anterior o __sys_bpf cai no `default: -EINVAL` — quem não
+// existe é o COMANDO, não o ponto de anexação.
+//
+// A regra por tipo não distinguia os dois, e o desfecho era o pior possível:
+// num 4.13/4.14 os 28 tipos eram engolidos pelo `continue`, o mapa de erros
+// voltava vazio, e o coletor concluía que a árvore de cgroup tinha sido varrida
+// por inteiro. Nenhuma consulta havia sucedido. Com a cobertura declarada
+// completa, cobreFixacao passa a AUTORIZAR o kernel.bpf_unowned a acusar um
+// cgroup_skb — acusação construída sobre cegueira, e a ausência de lacuna
+// escondendo isso. Os dois lados do invariante quebravam de uma vez.
+//
+// O discriminador é grátis e não precisa perguntar a versão do kernel: num
+// kernel que TEM o comando, os tipos que ele conhece respondem com sucesso
+// (prog_cnt = 0 quando não há nada anexado), então só os tipos mais novos dão
+// EINVAL. Todos os tipos devolverem EINVAL só acontece quando o comando inteiro
+// não está lá — ou quando uma política de LSM/seccomp o rejeita por atacado,
+// que é lacuna do mesmo jeito.
+func AnexosDeCgroup(cgroupFD int, tipos []uint32) (porTipo map[uint32][]uint32, erros map[uint32]error, semComando bool) {
+	porTipo = map[uint32][]uint32{}
+	erros = map[uint32]error{}
+	ausentes := 0
 	for _, at := range tipos {
 		ids, err := queryUmTipo(cgroupFD, at)
 		if err != nil {
 			if errno, ok := err.(syscall.Errno); ok && (errno == syscall.EINVAL || errno == enotsupp) {
+				ausentes++
 				continue // este ponto não existe neste kernel: não é lacuna
 			}
 			erros[at] = err
@@ -148,7 +170,7 @@ func AnexosDeCgroup(cgroupFD int, tipos []uint32) (map[uint32][]uint32, map[uint
 			porTipo[at] = ids
 		}
 	}
-	return porTipo, erros
+	return porTipo, erros, len(tipos) > 0 && ausentes == len(tipos)
 }
 
 func queryUmTipo(fd int, attachType uint32) ([]uint32, error) {

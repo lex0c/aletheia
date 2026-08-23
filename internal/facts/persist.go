@@ -437,7 +437,7 @@ type ToolArtifact struct {
 }
 
 func collectToolArtifacts(f *Facts, e *env.Env) {
-	homes := homeDirs(e)
+	homes := homeDirs(f, e, "persist")
 	visto := map[string]bool{}
 	var negados []string
 
@@ -752,7 +752,7 @@ func collectUnits(f *Facts, e *env.Env) {
 	}
 
 	// Unit de usuário mora no home, fora das árvores acima (runbook §7.3).
-	homes := homeDirs(e)
+	homes := homeDirs(f, e, "persist")
 	if len(homes) == 0 {
 		f.denyPersist("unit", "/etc/passwd ilegível ou vazio: nenhum home foi "+
 			"vasculhado, e unit de usuário é um esconderijo comum")
@@ -2144,9 +2144,32 @@ func camposComAspas(s string) []string {
 
 // homeDirs devolve os diretórios pessoais, do passwd do ALVO — nunca do host
 // do analista.
-func homeDirs(e *env.Env) []string {
+//
+// A `chave` é a do coletor que PERGUNTA, e existe porque o silêncio aqui era o
+// falso "limpo" mais barato de provocar em toda a base.
+//
+// Era um `return nil` seco. homeDirs é metade das raízes de varrerCodigo e
+// alimenta também segredo, credencial, trust, ssh e startup — então um
+// /etc/passwd ilegível, ou acima do teto de 32 MiB do env.MaxLeitura, esvaziava
+// todos eles de uma vez sem que UM deles declarasse nada. Medido: a mesma
+// imagem com um webshell em /home/vitima sai `exit=2 RESULT: CRITICAL` com o
+// passwd normal e `exit=1 RESULT: INCOMPLETE — 0 achados` com 34 MB de
+// comentários no fim do passwd (a glibc ignora comentário; o host segue
+// funcionando). E o app.code_backdoor se declarava COMPLETO nas duas.
+//
+// A chave entra por parâmetro em vez de sair de uma constante porque é ela que
+// decide QUAL check degrada — a mesma razão que o comentário do rodarColetor dá
+// para separar chave de nome: "o coletor caiu" sem dizer qual manda o operador
+// procurar no lugar errado.
+func homeDirs(f *Facts, e *env.Env, chave string) []string {
 	b, err := e.ReadFile("/etc/passwd")
 	if err != nil {
+		if env.EhLacuna(err) {
+			f.partial(chave, "/etc/passwd não pôde ser lido ("+env.MotivoDoErro(err)+
+				"): os diretórios pessoais NÃO foram derivados, e tudo que esta "+
+				"varredura faria dentro deles ficou de fora — a ausência de achado "+
+				"em home nenhum NÃO pode ser afirmada")
+		}
 		return nil
 	}
 	seen := map[string]bool{}

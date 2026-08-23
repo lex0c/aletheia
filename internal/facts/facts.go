@@ -299,7 +299,29 @@ import (
 //	   etiqueta errada. Num dump v20 o campo vem vazio, e vazio ali significa
 //	   "a linha é do próprio gatilho" — que num dump antigo sem hooks de
 //	   include é verdade, mas passou a ser um fato de forma nova.
-const SchemaVersion = 21
+//	22 A rodada de conserto da revisão adversarial. Dois fatos novos e uma
+//	   semântica mudada, e os três mentem num dump v21 lido por este binário.
+//
+//	   ProgramaBPF.UIDDesconhecido  o created_by_uid entrou no bpf_prog_info no
+//	     4.14; num 4.13 a struct tem 40 bytes e para antes dele. O kbpf já media
+//	     quanto o kernel preencheu (TamInfo/SemDados) e ninguém lia, então o
+//	     zero de "não presente" era serializado e a evidência do
+//	     kernel.bpf_unowned — CRITICAL, irreversível — imprimia "carregado por
+//	     uid 0", atribuindo a carga ao ROOT. Num dump v21 o campo novo vem
+//	     `false`, que afirma "o kernel informou o autor" sobre um kernel que não
+//	     informou.
+//	   ArquivoDeLog.Datada  o sufixo de data do logrotate (`wtmp-20260801`, o padrão
+//	     `dateext` da família RHEL) passou a ser reconhecido como GERAÇÃO. Num
+//	     dump v21 aquele arquivo é uma base própria com geração 0, e é essa
+//	     forma que fazia o antiforense.wtmp_cleared disparar CRITICAL
+//	     irreversível em jump host RHEL saudável — e o log_rotation_gap não
+//	     achar buraco nenhum, estruturalmente, na família inteira.
+//	   ExecLine.AlvoIndeterminado  o teto de 8 wrappers devolvia `("", false)`,
+//	     e o false ali significa "alvo PROVADO": a ferramenta afirmava ter
+//	     provado que a linha não aponta para lugar nenhum. Hoje é `true`. Num
+//	     dump v21 aquelas linhas vêm marcadas como provadas, e o binário real
+//	     continua fora da pergunta de propriedade, sem lacuna.
+const SchemaVersion = 22
 
 // Facts é o retrato do host.
 type Facts struct {

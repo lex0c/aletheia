@@ -168,6 +168,29 @@ func coletaHooksDe(f *Facts, e *env.Env, dir, mecanismo string, recursivo bool) 
 // via install_items. Um payload referenciado aqui entra no initramfs e roda como
 // root no early boot, sem estar em nenhum hook.
 func coletaDracutConf(f *Facts, e *env.Env) {
+	// O arquivo PRINCIPAL, lido além dos fragmentos — a mesma forma que o
+	// /etc/apt/apt.conf já tinha ganhado ao lado do apt.conf.d, e pelo mesmo
+	// motivo: o dracut lê os dois, e install_items vale igual nos dois.
+	//
+	// Só os drop-ins eram lidos, e num Rocky 9 de fábrica o /etc/dracut.conf.d
+	// vem VAZIO enquanto o /etc/dracut.conf existe — ou seja, o único lugar que
+	// um admin (ou um atacante) normalmente edita era o que não era lido. Um
+	// install_items ali embute o arquivo na imagem e ele roda como root antes
+	// de a raiz pivotar, sem aparecer em hook nenhum.
+	for _, p := range []string{"/etc/dracut.conf"} {
+		b, err := e.ReadFile(p)
+		if err != nil {
+			if env.EhLacuna(err) {
+				f.denyPersist("initramfs", p+" não pôde ser lido ("+env.MotivoDoErro(err)+
+					"): os arquivos que ele manda EMBUTIR na imagem não foram avaliados")
+			}
+			continue
+		}
+		for _, alvo := range caminhosDeAtribuicaoShell(string(b), "install_items") {
+			f.Initramfs = append(f.Initramfs,
+				artefatoEmbutido(alvo, "dracut", "install_items em "+baseNome(p)))
+		}
+	}
 	for _, dir := range []string{"/etc/dracut.conf.d", "/usr/lib/dracut/dracut.conf.d"} {
 		nomes, err := e.ReadDirNamesErr(dir)
 		if env.EhLacuna(err) {

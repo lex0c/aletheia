@@ -33,7 +33,7 @@ import (
 // teste: daria uma sensação de cobertura que não existe.
 func TestImpressaoDoEsquema(t *testing.T) {
 	const (
-		esquemaEsperado = 21
+		esquemaEsperado = 22
 		// Atualizada sem subir o SchemaVersion, e a razão fica aqui porque a
 		// catraca manda escrevê-la.
 		//
@@ -68,7 +68,21 @@ func TestImpressaoDoEsquema(t *testing.T) {
 		// marcada como não lida. A subida faz o loader RECUSAR o dump antigo em
 		// vez de respondê-lo torto. É o mesmo "vazio ≠ ilegível" que o resto do
 		// Aletheia sustenta, agora atravessando a fronteira MCP.
-		impressaoGravada = "24f92bd07bb8ad4b"
+		// Sobe de novo (21→22), e desta vez a regra manda subir por DOIS
+		// campos, com o mesmo argumento nos dois: ambos são lidos por CHECK, e
+		// ambos vêm zerados num dump v21 afirmando o oposto do que a coleta
+		// nova sabe dizer.
+		//
+		// ProgramaBPF.UIDDesconhecido — lido por kernel.bpf_unowned, que é
+		// CRITICAL e irreversível. Zerado significa "o kernel informou o
+		// autor", e a evidência volta a imprimir "carregado por uid 0" sobre um
+		// 4.13, que nunca informou nada: dado inventado dentro de uma acusação.
+		//
+		// ArquivoDeLog.Datada — lido por antiforense.wtmp_cleared (a guarda que
+		// separa logrotate de antiforense) e por log_rotation_gap. Zerado
+		// significa "esta rotação é por contador", e é exatamente a leitura que
+		// fazia o wtmp_cleared acusar toda a família RHEL.
+		impressaoGravada = "8d04b0a63b336ebb"
 	)
 	if SchemaVersion != esquemaEsperado {
 		t.Fatalf("SchemaVersion=%d e este teste conhece o %d: atualize os dois "+

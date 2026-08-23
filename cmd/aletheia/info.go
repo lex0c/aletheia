@@ -43,10 +43,21 @@ func runInfo(args []string) int {
 		jsonOut = fs.String("json", "", "o mesmo dossiê em JSON ('-' = stdout)")
 	)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
-	if err := fs.Parse(args); err != nil {
+	// Em rodadas, e não fs.Parse direto: o `info` é o subcomando que MAIS
+	// convida a escrever o alvo antes das flags (`info process 812 --from R`),
+	// e o parser da stdlib para no 812 — descartando o --from em silêncio e
+	// respondendo sobre o host VIVO uma pergunta feita sobre o retrato.
+	rest, err := parseComPosicionais(fs, args)
+	if err != nil {
 		return 3
 	}
-	rest := fs.Args()
+	// Mais de dois posicionais é erro, não sobra a ignorar: `info file /a /b`
+	// respondia sobre /a e calava sobre /b, e quem pediu os dois lê a resposta
+	// como se ela cobrisse os dois.
+	if len(rest) > 2 {
+		fmt.Fprintf(os.Stderr, "info: argumento de sobra %q — este comando responde sobre UM alvo\n", rest[2])
+		return 3
+	}
 	if len(rest) == 0 {
 		fmt.Fprintln(os.Stderr, "info: diga sobre o quê — process, ip, port ou file")
 		fmt.Fprintln(os.Stderr, "  aletheia info process        censo: quem roda o quê, e contra que teto")

@@ -274,7 +274,7 @@ var gitRoots = []string{"/srv", "/opt", "/var/www", "/data", "/usr/share/nginx"}
 
 func collectGitHooks(f *Facts, e *env.Env) {
 	raizes := append([]string{}, gitRoots...)
-	raizes = append(raizes, homeDirs(e)...)
+	raizes = append(raizes, homeDirs(f, e, "trust")...)
 
 	vistos := 0
 	truncado := false
@@ -426,7 +426,7 @@ func collectConfiancaDeHost(f *Facts, e *env.Env) {
 			f.ConfiancaDeHost = append(f.ConfiancaDeHost, c)
 		}
 	}
-	for _, home := range homeDirs(e) {
+	for _, home := range homeDirs(f, e, "trust") {
 		conta := home[strings.LastIndexByte(home, '/')+1:]
 		for _, rel := range arquivosDeConfiancaDeHome {
 			p := home + "/" + rel

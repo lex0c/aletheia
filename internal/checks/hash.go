@@ -75,7 +75,7 @@ var arquivoDePacoteAlterado = check.Check{
 				ev = append(ev, "é um arquivo de CONFIGURAÇÃO que o pacote entrega "+
 					"para ser editado: divergir é o normal, e o que interessa é se "+
 					"quem editou foi o administrador")
-				if gatilhoDeExecucao(d.Path) {
+				if gatilhoDeExecucao(f, d.Path) {
 					sev = check.SevCritical
 					ev = append(ev, "MAS ele EXECUTA: acrescentar uma linha aqui é "+
 						"persistência que mantém o dono de pacote e passa por toda "+
@@ -358,11 +358,23 @@ func duracaoEmDias(h int) string {
 
 // gatilhoDeExecucao diz se o arquivo de configuração EXECUTA alguma coisa.
 // Modificar um deles é persistência que mantém o dono de pacote.
-func gatilhoDeExecucao(p string) bool {
+func gatilhoDeExecucao(f *facts.Facts, p string) bool {
+	// apt.conf.d é o único destes diretórios onde PRESENÇA não é execução: a
+	// maioria dos arquivos só ajusta opção. Promover a CRITICAL um config de
+	// opção modificado, dizendo "MAS ele EXECUTA", é falso exatamente no caso que
+	// o fato AptHooks passou a distinguir. Só executa quem define hook.
+	if strings.Contains(p, "/apt/apt.conf") {
+		for i := range f.Triggers {
+			if f.Triggers[i].File == p {
+				return len(f.Triggers[i].AptHooks) > 0
+			}
+		}
+		return false // não coletado como gatilho: nenhum hook conhecido
+	}
 	for _, d := range []string{
 		"/etc/init.d/", "/etc/pam.d/", "/etc/cron.", "/etc/profile.d/",
 		"/etc/update-motd.d/", "/etc/rc.local", "/etc/rc.d/",
-		"/etc/NetworkManager/dispatcher.d/", "/etc/apt/apt.conf.d/",
+		"/etc/NetworkManager/dispatcher.d/",
 	} {
 		if strings.HasPrefix(p, d) {
 			return true

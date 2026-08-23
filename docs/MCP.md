@@ -508,6 +508,27 @@ incidente aparecia **onze segundos antes** do implante.
 Depois da sessão não fica nada em disco nem processo órfão — apenas o login no
 `wtmp`.
 
+### 7.6 Config efetiva do apt (`#clear`)
+
+Os hooks de `apt.conf`/`apt.conf.d` são extraídos com um lexer próprio, sobre os
+bytes crus, resolvendo `#include`. Uma coisa fica declarada, não fingida
+resolvida: `#clear`. Um fragmento pode limpar um hook definido por outro, e
+resolver isso exigiria mesclar toda a config do apt na ordem de carga. Quando um
+`apt.conf` usa `#clear`, a coleta **declara a lacuna** (`collector_gaps`): o
+estado efetivo pode diferir do lexicamente declarado — um hook limpo alhures
+ainda pode aparecer como ativo. É o lado seguro para detecção (não esconde
+hook), com o custo honesto de um possível falso positivo declarado.
+
+### 7.7 Reconfirmação de socket oculto inconclusiva
+
+A comparação `/proc/net × netlink` reconfirma um candidato a socket oculto com
+quatro leituras, e só acusa se as quatro forem observadas. Quando uma falha — ou
+a 2ª enumeração netlink é truncada e o candidato pode estar além do teto —, o
+resultado é **inconclusivo**: `crossview.get` responde `not_compared` no eixo de
+sockets, com `inconclusive_candidates`, nunca `agree`. Houve uma discrepância que
+a coleta não fechou, e dizer "as tabelas concordam" seria transformar "não
+consegui confirmar" em "não havia nada".
+
 ---
 
 ## 8. Referência de flags

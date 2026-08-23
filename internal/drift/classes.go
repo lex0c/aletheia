@@ -1477,8 +1477,12 @@ var gatilhoDeExecucao = Classe{
 		out := make([]Entidade, 0, len(f.Triggers))
 		for i := range f.Triggers {
 			t := &f.Triggers[i]
+			// LinhasExecutaveis, não t.Lines: para apt.conf.d o que executa é o
+			// hook (AptHooks), e um hook adversário que muda entre dois retratos
+			// não aparece em Lines. Sem isto, o drift do gatilho é cego ao mesmo
+			// fato que subiu o SchemaVersion para existir.
 			var linhas []string
-			for _, l := range t.Lines {
+			for _, l := range t.LinhasExecutaveis() {
 				linhas = append(linhas, redact.Linha(l.Text))
 			}
 			conteudo := juntarSequencia(linhas)

@@ -467,10 +467,7 @@ var shellEnv = check.Check{
 // mesmo hook era visto por um check e invisível para o outro. Todo consumidor que
 // pergunta "o que este gatilho executa?" chama isto.
 func linhasExecutaveisDoTrigger(t *facts.Trigger) []facts.TriggerLine {
-	if t.Kind == "pkg_hook" && strings.Contains(t.File, "/apt/apt.conf.d/") {
-		return t.AptHooks
-	}
-	return t.Lines
+	return t.LinhasExecutaveis()
 }
 
 // triggerExec — runbook §7.7 e §7.12.

@@ -3,6 +3,7 @@ package facts
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/lex0c/aletheia/internal/env"
@@ -63,6 +64,18 @@ Unattended-Upgrade::Origins-Pattern {
 
 		{"lista de comandos no mesmo hook",
 			`DPkg::Pre-Install-Pkgs {"a"; "b";};`, []string{"a", "b"}},
+
+		// Caminho COMPLETO, não sufixo. Foo::Pre-Invoke termina em pre-invoke e o
+		// apt não o executa — só os subtrees DPkg:: e APT::Update:: são chamados.
+		{"escopo errado não é hook (Foo::Pre-Invoke)",
+			`Foo::Pre-Invoke {"/x";};`, nil},
+
+		{"APT::Update::Post-Invoke-Stats é hook real",
+			`APT::Update::Post-Invoke-Stats {"/stats";};`, []string{"/stats"}},
+
+		// Aninhamento profundo: APT { Update { Pre-Invoke {…} } } = apt::update::pre-invoke.
+		{"escopo aninhado profundo casa o caminho",
+			`APT { Update { Pre-Invoke { "/deep"; }; }; };`, []string{"/deep"}},
 	}
 	for _, c := range casos {
 		hooks := analisarAptHooks([]byte(c.conf))
@@ -129,5 +142,75 @@ func TestColetorExtraiHookEscondido(t *testing.T) {
 	}
 	if opts != nil && len(opts.AptHooks) != 0 {
 		t.Errorf("o apt.conf.d só de opção ganhou AptHooks: %v", opts.AptHooks)
+	}
+}
+
+// #include é diretiva do apt, não comentário: um hook escondido num arquivo
+// incluído deixa de ser falso negativo. E #clear é declarado como limite.
+func TestColetorResolveIncludeApt(t *testing.T) {
+	raiz := t.TempDir()
+	dir := filepath.Join(raiz, "etc/apt/apt.conf.d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(raiz, "opt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 99x inclui um arquivo fora de qualquer diretório de gatilho.
+	if err := os.WriteFile(filepath.Join(dir, "99x"),
+		[]byte("#include \"/opt/.apt-hidden\";\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(raiz, "opt/.apt-hidden"),
+		[]byte("DPkg::Pre-Invoke {\"/usr/local/bin/.implant\";};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	f := &Facts{}
+	collectTriggers(f, e)
+
+	var achou bool
+	for i := range f.Triggers {
+		if filepath.Base(f.Triggers[i].File) == "99x" {
+			for _, h := range f.Triggers[i].AptHooks {
+				if h.Text == "/usr/local/bin/.implant" {
+					achou = true
+				}
+			}
+		}
+	}
+	if !achou {
+		t.Errorf("o hook do arquivo INCLUÍDO não chegou em AptHooks: #include foi " +
+			"tratado como comentário, e o hook ficou invisível")
+	}
+}
+
+// #clear é declarado como limite honesto, não fingido resolvido.
+func TestClearApenasDeclaraLimite(t *testing.T) {
+	raiz := t.TempDir()
+	dir := filepath.Join(raiz, "etc/apt/apt.conf.d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	conf := "DPkg::Pre-Invoke {\"/x\";};\n#clear DPkg::Pre-Invoke;\n"
+	if err := os.WriteFile(filepath.Join(dir, "50c"), []byte(conf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	f := &Facts{}
+	collectTriggers(f, e)
+
+	var declarou bool
+	for _, gs := range f.Partial {
+		for _, g := range gs {
+			if strings.Contains(g, "#clear") {
+				declarou = true
+			}
+		}
+	}
+	if !declarou {
+		t.Error("o apt.conf usa #clear e o limite não foi declarado: o estado " +
+			"efetivo pode diferir e a coleta ficou calada sobre isso")
 	}
 }

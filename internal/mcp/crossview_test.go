@@ -583,3 +583,24 @@ func TestBPFTrampolineRefletidoNoEixo(t *testing.T) {
 			bpf["trust_breaking"])
 	}
 }
+
+// P1: candidato de socket INCONCLUSIVO não pode virar agree.
+//
+// O coletor achou um candidato a oculto e a reconfirmação de quatro leituras não
+// fechou (uma falhou, ou o 2º dump netlink foi truncado). SocketOcultos fica
+// vazio — não dá para acusar —, mas houve uma discrepância que ninguém resolveu.
+// Responder agree ali é transformar "não consegui confirmar" em "não havia nada".
+func TestSocketInconclusivoNaoEhAgree(t *testing.T) {
+	c := facts.CrossView{
+		SocketDiagLido: true, SocketProtos: protosCompared(),
+		SocketInconclusivos: 2,
+	}
+	e := eixoDeSockets(&c)
+	if e["state"] != "not_compared" {
+		t.Errorf("houve candidato inconclusivo e state=%v, queria not_compared: o "+
+			"coletor não fechou a discrepância e a tool disse que concordam", e["state"])
+	}
+	if e["inconclusive_candidates"] != 2 {
+		t.Errorf("inconclusive_candidates=%v, queria 2", e["inconclusive_candidates"])
+	}
+}

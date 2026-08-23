@@ -178,6 +178,12 @@ type CrossView struct {
 	// SocketOcultos são os que o netlink entrega e /proc/net não — já
 	// reconfirmados contra a corrida de socket recém-nascido.
 	SocketOcultos []SocketOculto `json:"sockets_hidden,omitempty"`
+	// SocketInconclusivos conta os candidatos a oculto que a reconfirmação NAO
+	// resolveu — uma das quatro leituras falhou, ou a 2a enumeracao netlink foi
+	// truncada e o candidato pode estar alem do teto. E o estado que o coletor
+	// ja declarava por Partial, promovido a CAMPO para a tool nao responder
+	// "as tabelas concordam" onde houve discrepancia que ninguem fechou.
+	SocketInconclusivos int `json:"sockets_inconclusive,omitempty"`
 
 	// A TERCEIRA interface: os módulos que o ftrace conhece por terem função
 	// rastreável. Independente das outras duas — o registro do ftrace só é

@@ -138,16 +138,18 @@ func TestClassificarOcultoExigeAsQuatroTestemunhas(t *testing.T) {
 // A corrida: um socket que reapareceu em /proc nasceu no intervalo; um que
 // sumiu do netlink fechou. Nenhum dos dois é oculto.
 func TestClassificarOcultoDescartaCorrida(t *testing.T) {
-	obs := observacao{procOK1: true, procOK2: true, diagOK1: true, diagOK2: true}
+	// Enumeração COMPLETA nas duas passadas: só aí "sumiu" significa "fechou".
+	obs := observacao{procOK1: true, procOK2: true, diagOK1: true, diagOK2: true,
+		diagCompleto2: true}
 	nasceu := obs
 	nasceu.emProc2, nasceu.emDiag2 = true, true // reapareceu em /proc
 	if classificarOculto(nasceu) != ocultoCorrida {
 		t.Error("socket que reapareceu em /proc é recém-nascido, não oculto")
 	}
 	morreu := obs
-	morreu.emProc2, morreu.emDiag2 = false, false // sumiu do netlink
+	morreu.emProc2, morreu.emDiag2 = false, false // sumiu de uma enumeração completa
 	if classificarOculto(morreu) != ocultoCorrida {
-		t.Error("socket que sumiu do netlink fechou, não é oculto")
+		t.Error("socket que sumiu do netlink COMPLETO fechou, não é oculto")
 	}
 }
 
@@ -194,5 +196,27 @@ func TestProcNetLidoTrataAusenciaComoVazio(t *testing.T) {
 	}
 	if procNetLido(syscall.EIO) {
 		t.Error("EIO é LACUNA")
+	}
+}
+
+// A 2ª enumeração netlink truncada NÃO pode descartar um candidato oculto como
+// corrida: ele pode ter ficado além do teto, e "não olhei até ele" não é "ele
+// morreu". Sem isto, o próprio limite da coleta produzia falso negativo num
+// kernelBreaker.
+func TestOcultoNaoDescartadoPorTruncagemDa2aPassada(t *testing.T) {
+	// Quatro leituras observadas, candidato ausente do 2º netlink, MAS o 2º
+	// netlink foi truncado para o protocolo: inconclusivo, nunca corrida.
+	o := observacao{
+		procOK1: true, procOK2: true, diagOK1: true, diagOK2: true,
+		emProc2: false, emDiag2: false, diagCompleto2: false,
+	}
+	if got := classificarOculto(o); got != ocultoInconclusivo {
+		t.Errorf("candidato ausente de uma 2ª enumeração TRUNCADA classificado como "+
+			"%v, queria inconclusivo — o teto da ferramenta virou 'socket morreu'", got)
+	}
+	// Mesmo caso, mas a 2ª enumeração foi COMPLETA: aí sim é corrida (fechou).
+	o.diagCompleto2 = true
+	if got := classificarOculto(o); got != ocultoCorrida {
+		t.Errorf("candidato ausente de enumeração COMPLETA devia ser corrida, veio %v", got)
 	}
 }

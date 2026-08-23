@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
 )
@@ -66,5 +67,40 @@ func TestHookEscondidoChegaAoTriggerExec(t *testing.T) {
 		t.Errorf("persist.trigger_exec NÃO viu o `curl … | sh` do hook escondido: "+
 			"o consumidor lê Trigger.Lines em vez de AptHooks, e o hook não está "+
 			"em Lines. Achados: %d", len(r.Findings))
+	}
+}
+
+// integrity.pkg_file_modified não pode promover um apt.conf de OPÇÃO a CRITICAL.
+//
+// O check rebaixa config a WARN e só volta a CRITICAL se o arquivo EXECUTA. Antes,
+// gatilhoDeExecucao dava execução a QUALQUER arquivo em apt.conf.d por prefixo —
+// então um 50unattended-upgrades modificado (só opção) saía CRITICAL com a
+// evidência "MAS ele EXECUTA", que é falsa. Agora consulta o fato: só com hook.
+func TestPkgFileModifiedApenasOpcaoNaoEhCritico(t *testing.T) {
+	soOpcao := facts.Trigger{File: "/etc/apt/apt.conf.d/50unattended-upgrades",
+		Kind: "pkg_hook"} // sem AptHooks
+	comHook := facts.Trigger{File: "/etc/apt/apt.conf.d/99hook", Kind: "pkg_hook",
+		AptHooks: []facts.TriggerLine{{N: 1, Text: "/usr/local/bin/x"}}}
+	f := &facts.Facts{
+		Triggers: []facts.Trigger{soOpcao, comHook},
+		HashDiff: []facts.HashDivergente{
+			{Path: soOpcao.File, Pacote: "unattended-upgrades", Config: true},
+			{Path: comHook.File, Pacote: "custom", Config: true},
+		},
+	}
+	r := arquivoDePacoteAlterado.Run(arquivoDePacoteAlterado, f, testEnv())
+
+	sevPorArquivo := map[string]check.Severity{}
+	for _, fd := range r.Findings {
+		sevPorArquivo[fd.Subject] = fd.Sev
+	}
+	if sevPorArquivo[soOpcao.File] != check.SevWarn {
+		t.Errorf("config de OPÇÃO modificado saiu %v, queria WARN — o prefixo de "+
+			"diretório voltou a dar execução a quem não executa",
+			sevPorArquivo[soOpcao.File])
+	}
+	if sevPorArquivo[comHook.File] != check.SevCritical {
+		t.Errorf("config COM hook modificado saiu %v, queria CRITICAL",
+			sevPorArquivo[comHook.File])
 	}
 }

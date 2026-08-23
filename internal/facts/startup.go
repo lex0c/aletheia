@@ -64,6 +64,28 @@ type Trigger struct {
 	EscapeN int `json:"escape_line,omitempty"`
 }
 
+// LinhasExecutaveis devolve o que um gatilho EXECUTA, na representacao certa
+// por tipo. Para apt.conf.d é AptHooks — o fato semantico do lexer do apt, imune
+// ao descarte de linha-# do parser generico. Para o resto, Lines.
+//
+// Mora no FATO, e nao num check, porque é semantica do gatilho: todo consumidor
+// que pergunta "o que este gatilho executa?" — persist.trigger_exec,
+// integrity.timestomp e o DRIFT — precisa da mesma resposta, ou um hook escondido
+// fica visivel para um e invisivel para outro.
+func (t *Trigger) LinhasExecutaveis() []TriggerLine {
+	if t.Kind == "pkg_hook" && ehArquivoApt(t.File) {
+		return t.AptHooks
+	}
+	return t.Lines
+}
+
+// ehArquivoApt reconhece os arquivos de configuração do apt cujos hooks o lexer
+// dedicado analisa — o principal /etc/apt/apt.conf e os fragmentos de
+// apt.conf.d. Central para os consumidores não divergirem no recorte.
+func ehArquivoApt(p string) bool {
+	return strings.Contains(p, "/apt/apt.conf")
+}
+
 // TriggerLine é uma linha executável, com o que decide se ela é suspeita.
 type TriggerLine struct {
 	N    int    `json:"n"`
@@ -82,6 +104,9 @@ type TriggerLine struct {
 
 // gatilhosDeSistema: caminho fixo, alcance de todo mundo.
 var gatilhosDeSistema = []struct{ path, kind, when string }{
+	// O arquivo PRINCIPAL do apt, lido além dos fragmentos de apt.conf.d. Um
+	// DPkg::Pre-Invoke aqui é executado igual, e ficava fora da coleta.
+	{"/etc/apt/apt.conf", "pkg_hook", "a cada operação do gerenciador de pacotes"},
 	{"/etc/profile", "shell", "shell de LOGIN, para todo usuário"},
 	{"/etc/bash.bashrc", "shell", "shell INTERATIVO, para todo usuário — roda a cada login SSH"},
 	{"/etc/zsh/zshenv", "shell", "SEMPRE em zsh, inclusive shell não interativo"},
@@ -174,7 +199,7 @@ func collectTriggers(f *Facts, e *env.Env) {
 		}
 	}
 	for _, g := range gatilhosDeSistema {
-		if t, ok := lerTrigger(e, g.path, g.kind, g.when, ""); ok {
+		if t, ok := lerTrigger(f, e, g.path, g.kind, g.when, ""); ok {
 			registrar(t, g.when)
 			continue
 		}
@@ -195,7 +220,7 @@ func collectTriggers(f *Facts, e *env.Env) {
 			if e.IsDir(p) {
 				continue
 			}
-			if t, ok := lerTrigger(e, p, g.kind, g.when, ""); ok {
+			if t, ok := lerTrigger(f, e, p, g.kind, g.when, ""); ok {
 				registrar(t, g.when)
 			}
 		}
@@ -216,7 +241,7 @@ func collectTriggers(f *Facts, e *env.Env) {
 		u := home[strings.LastIndexByte(home, '/')+1:]
 		for _, g := range gatilhosDeHome {
 			p := home + "/" + g.nome
-			t, ok := lerTrigger(e, p, "shell", g.when, u)
+			t, ok := lerTrigger(f, e, p, "shell", g.when, u)
 			if !ok {
 				if _, negado := lookup(e, p); negado {
 					negados = append(negados, p)
@@ -262,7 +287,7 @@ func procurarPHP(f *Facts, e *env.Env, dir string, prof int) {
 		if !strings.HasSuffix(n, ".ini") {
 			continue
 		}
-		if t, ok := lerTrigger(e, p, "php",
+		if t, ok := lerTrigger(f, e, p, "php",
 			"antes de CADA requisição, em qualquer rota", ""); ok {
 			if t.Ilegvel {
 				f.denyPersist("startup", p+" existe e não pôde ser LIDO: o "+
@@ -276,7 +301,7 @@ func procurarPHP(f *Facts, e *env.Env, dir string, prof int) {
 // lerTrigger extrai as linhas EXECUTÁVEIS. Comentário e atribuição simples
 // ficam de fora — guardar o arquivo inteiro carregaria ruído, e o que os checks
 // avaliam é o que roda.
-func lerTrigger(e *env.Env, path, kind, when, user string) (Trigger, bool) {
+func lerTrigger(f *Facts, e *env.Env, path, kind, when, user string) (Trigger, bool) {
 	fi, err := e.Lstat(path)
 	if err != nil {
 		return Trigger{}, false
@@ -304,8 +329,8 @@ func lerTrigger(e *env.Env, path, kind, when, user string) (Trigger, bool) {
 	// apt.conf.d ganha extração SEMÂNTICA dos hooks, sobre os bytes crus e com o
 	// lexer do apt — antes de o parser genérico de linhas descartar informação
 	// que a gramática do apt ainda usaria. Ver analisarAptHooks.
-	if kind == "pkg_hook" && strings.Contains(path, "/apt/apt.conf.d/") {
-		t.AptHooks = analisarAptHooks(b)
+	if kind == "pkg_hook" && ehArquivoApt(path) {
+		t.AptHooks = resolverAptHooks(f, e, path, b, map[string]bool{path: true}, 0)
 	}
 	linhas := strings.Split(string(b), "\n")
 	ultimaComConteudo := 0

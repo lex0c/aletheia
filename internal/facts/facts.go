@@ -284,7 +284,15 @@ import (
 //	   "nenhum hook" sobre um arquivo que pode ter um — então o número sobe e o
 //	   Carregar recusa o v18 em vez de responder ausência sobre o que não foi
 //	   extraído.
-const SchemaVersion = 19
+//	20 CrossView.SocketInconclusivos: os candidatos a socket oculto que a
+//	   reconfirmacao NAO fechou. O coletor ja o sabia (Partial), mas o estado
+//	   nao viajava — e crossview.get, vendo SocketOcultos vazio e os quatro
+//	   protocolos comparados, respondia agree onde tinha havido uma
+//	   discrepancia que ninguem resolveu. Num dump v19 o campo vem zerado, e
+//	   zero ali afirma "nenhum inconclusivo" sobre uma coleta que pode ter
+//	   tido — entao o numero sobe e o Carregar recusa o v19. Junto, a 2a
+//	   enumeracao netlink truncada deixou de descartar candidato como corrida.
+const SchemaVersion = 20
 
 // Facts é o retrato do host.
 type Facts struct {

@@ -125,6 +125,7 @@ var toolCrossView = Ferramenta{
     "description":"o que uma testemunha viu e a outra negou. Pequeno por natureza: é o achado. Cortado no teto quando patologicamente grande"},
    "divergences_total":{"type":"integer","description":"o total real de divergencias, mesmo quando a lista foi cortada"},
    "divergences_truncated":{"type":"boolean","description":"true quando divergences traz menos que divergences_total"},
+   "inconclusive_candidates":{"type":"integer","description":"sockets: candidatos a oculto que a reconfirmacao nao resolveu — o eixo é not_compared, nao agree"},
    "note":{"type":"string","description":"o que a comparacao deste eixo NAO cobre. Leia antes de tratar 'agree' como varredura completa"},
    "meaning":{"type":"string"}}}}}}`, false),
 	Rodar: func(s *Servidor, args json.RawMessage) (any, *ErroRPC) {
@@ -417,6 +418,16 @@ func eixoDeSockets(c *facts.CrossView) map[string]any {
 		e["state"] = "not_compared"
 		e["meaning"] = "a resposta do netlink foi CORTADA: a parte não lida não " +
 			"foi comparada com nada"
+	case c.SocketInconclusivos > 0:
+		// O coletor ACHOU candidato a socket oculto e a reconfirmação de quatro
+		// leituras não fechou (uma falhou, ou a 2ª enumeração foi truncada). Havia
+		// uma discrepância que ninguém resolveu: dizer "as tabelas concordam" aqui
+		// seria transformar "não consegui confirmar" em "não havia nada".
+		e["state"] = "not_compared"
+		e["inconclusive_candidates"] = c.SocketInconclusivos
+		e["meaning"] = "houve candidato a socket oculto que a reconfirmação NÃO " +
+			"resolveu (uma das quatro leituras falhou, ou o 2º dump netlink foi " +
+			"truncado): a discrepância existe e ficou em aberto — não é concordância"
 	case len(naoComparados) > 0:
 		// Qualquer protocolo NÃO confrontado leva o eixo a not_compared, não a
 		// um "agree com nota". udp_diag costuma não estar carregado, e o netlink

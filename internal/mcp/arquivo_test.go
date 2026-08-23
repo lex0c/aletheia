@@ -400,7 +400,9 @@ func TestConsentimentoChegaAoEnviron(t *testing.T) {
 	const chave, valor = "ALETHEIA_SEGREDO_DE_TESTE", "hunter2-nao-esta-na-allowlist"
 
 	iniciar := func() *exec.Cmd {
-		cmd := exec.Command("sleep", "30")
+		// 600, não 30: sob carga as DUAS capturas completas passam de 30s, e o
+		// apoio morreria no meio. É a fragilidade que já mordeu antes.
+		cmd := exec.Command("sleep", "600")
 		cmd.Env = append(os.Environ(), chave+"="+valor)
 		if err := cmd.Start(); err != nil {
 			t.Skipf("sem como criar processo de apoio: %v", err)
@@ -446,6 +448,13 @@ func TestConsentimentoChegaAoEnviron(t *testing.T) {
 		p := &r.Fatos.Processes[i]
 		if p.PID != alvo.Process.Pid {
 			continue
+		}
+		if !p.EnvLido {
+			// A leitura de /proc/<pid>/environ falhou nesta captura — comum sob
+			// carga pesada. Sem ela, EnvKeys vazio não é bug, é lacuna: não se
+			// afirma nada sobre a chave. É o mesmo "não olhei ≠ não há".
+			t.Skipf("environ do apoio não foi lido nesta captura (%s): sem a "+
+				"leitura não há o que afirmar sobre a chave", p.EnvErro)
 		}
 		if v, tem := p.Env[chave]; tem {
 			t.Errorf("sem --allow-secrets o valor NÃO pode entrar no Facts: %s=%q",

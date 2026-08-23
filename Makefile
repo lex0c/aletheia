@@ -29,7 +29,7 @@ GOFLAGS := -trimpath
 # LD_PRELOAD e a binário de sistema trojanizado (SPEC 4).
 export CGO_ENABLED = 0
 
-.PHONY: all build helper vm-image test race race-unit lint verify clean dist binarios repro repro-confere scenarios scenarios-container images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix vm-matrix arches
+.PHONY: all build helper vm-image test race race-unit lint verify clean dist binarios repro repro-confere scenarios scenarios-container images fixtures vm-kernels vm-ftrace-proof vm-socket-proof matrix vm-matrix arches fuzz test-386
 
 all: verify
 
@@ -87,6 +87,34 @@ race:
 race-unit: export CGO_ENABLED = 1
 race-unit:
 	go test -race -count=1 ./internal/... ./cmd/...
+
+# fuzz procura o que ninguém imaginou no CODEC, que é escrito à mão.
+#
+# A lista de entradas hostis de transporte_test.go é a que o autor pensou: frame
+# acima do teto, id de tipo inválido, batch, _meta malformado. Ela vale, e não
+# cobre a classe inteira — num parser que fica atrás de um servidor que pode
+# rodar como root, o que interessa é o caso que não ocorreu a ninguém.
+#
+# O corpus de semente roda no `make test` normal (go test executa os f.Add sem
+# -fuzz). Este alvo é a busca de verdade, com orçamento: 60s por alvo já
+# produziu 4 milhões de execuções por alvo nesta máquina.
+#
+# FUZZTIME sobrescreve: `make fuzz FUZZTIME=10m` antes de tag.
+FUZZTIME ?= 60s
+fuzz:
+	go test ./internal/mcp/ -run FuzzDecodificar -fuzz FuzzDecodificar -fuzztime $(FUZZTIME)
+	go test ./internal/mcp/ -run FuzzLeitor     -fuzz FuzzLeitor     -fuzztime $(FUZZTIME)
+
+# test-386 RODA a suíte em 32 bits, e não só compila.
+#
+# `arches` faz vet e build cruzados, o que pega tipo divergente e nada mais. Em
+# i386 o Timespec do syscall é int32, o int é de 32 bits, e a comparação de
+# tempo e de tamanho de arquivo passa por eles — a família file.* nasceu inteira
+# depois desse alvo existir, e nunca tinha sido EXECUTADA ali.
+#
+# Roda sem qemu: o binário de 32 bits executa direto num host x86-64.
+test-386:
+	GOOS=linux GOARCH=386 go test -count=1 ./internal/... ./cmd/...
 
 lint:
 	gofmt -l . | tee /dev/stderr | grep -q . && { echo "arquivos não formatados"; exit 1; } || true

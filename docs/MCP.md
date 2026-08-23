@@ -508,16 +508,26 @@ incidente aparecia **onze segundos antes** do implante.
 Depois da sessão não fica nada em disco nem processo órfão — apenas o login no
 `wtmp`.
 
-### 7.6 Config efetiva do apt (`#clear`)
+### 7.6 Config efetiva do apt
 
 Os hooks de `apt.conf`/`apt.conf.d` são extraídos com um lexer próprio, sobre os
-bytes crus, resolvendo `#include`. Uma coisa fica declarada, não fingida
-resolvida: `#clear`. Um fragmento pode limpar um hook definido por outro, e
-resolver isso exigiria mesclar toda a config do apt na ordem de carga. Quando um
-`apt.conf` usa `#clear`, a coleta **declara a lacuna** (`collector_gaps`): o
-estado efetivo pode diferir do lexicamente declarado — um hook limpo alhures
-ainda pode aparecer como ativo. É o lado seguro para detecção (não esconde
-hook), com o custo honesto de um possível falso positivo declarado.
+bytes crus, na gramática do apt. O que ele resolve:
+
+- o arquivo principal `/etc/apt/apt.conf`, além dos fragmentos;
+- `#include` de arquivo **e de diretório** (o hook incluído carrega a própria
+  origem: a evidência aponta para o arquivo do payload, não para quem o incluiu);
+- o ponto de hook pelo **caminho completo** — `DPkg::Pre-Invoke` e o item nomeado
+  `DPkg::Pre-Invoke::x` executam; `Foo::Pre-Invoke` não;
+- a regra de seleção de fragmentos do apt (`Dir::Etc::Parts`): um `99x.bak` ou
+  `99x.disabled` que o apt ignora **não** vira gatilho ativo.
+
+Uma coisa fica **declarada**, não fingida resolvida: `#clear`. Um fragmento pode
+limpar um hook definido por outro, e resolver isso exigiria mesclar toda a config
+na ordem de carga. Quando um `apt.conf` usa `#clear`, a coleta declara a lacuna
+sob a fonte **`apt`** (não `startup`, para não cegar o drift de `profile.d` e
+companhia): o estado efetivo pode diferir — um hook limpo alhures ainda pode
+aparecer como ativo. É o lado seguro para detecção, com o custo de um possível
+falso positivo declarado.
 
 ### 7.7 Reconfirmação de socket oculto inconclusiva
 

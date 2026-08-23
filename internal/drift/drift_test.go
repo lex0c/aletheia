@@ -1078,3 +1078,38 @@ func TestDriftDoGatilhoVeOHookDoApt(t *testing.T) {
 			"Lines em vez de AptHooks: %+v", d.Mudancas)
 	}
 }
+
+// Um #clear no apt.conf.d NÃO pode cegar o drift de /etc/profile.d.
+//
+// O #clear declara lacuna sobre a config EFETIVA do apt — mas é semântica local
+// do apt. Se ele for para a fonte "startup", contamina todo trigger não-git:
+// profile.d, rc.local, PAM, cron. Um atacante removeria /etc/profile.d/x e
+// plantaria um apt.conf.d/99noise com `#clear Foo::Unrelated;`, e a remoção do
+// profile.d seria suprimida. A fonte "apt" isola a incerteza.
+func TestClearDoAptNaoCegaProfileD(t *testing.T) {
+	prof := func(cmd string) facts.Trigger {
+		return facts.Trigger{File: "/etc/profile.d/x.sh", Kind: "shell",
+			When: "login", Lines: []facts.TriggerLine{{N: 1, Text: cmd}}}
+	}
+	// ANTES: profile.d/x existe. DEPOIS: some. E o DEPOIS tem um apt com #clear,
+	// que declara lacuna "apt" — mas não pode afetar a fonte "startup".
+	antes := &facts.Facts{Triggers: []facts.Trigger{prof("export PATH=/opt/bin:$PATH")}}
+	depois := &facts.Facts{
+		Triggers: []facts.Trigger{{File: "/etc/apt/apt.conf.d/99noise", Kind: "pkg_hook",
+			When: "a cada operação do gerenciador de pacotes"}},
+		Partial: map[string][]string{"apt": {"/etc/apt/apt.conf.d/99noise usa #clear ..."}},
+	}
+	d := Comparar(lado(antes, tudoVisivel), lado(depois, tudoVisivel))
+
+	var sumiu bool
+	for _, m := range d.Mudancas {
+		if m.Tipo == "startup.trigger" && m.Kind == Sumiu &&
+			strings.Contains(strings.Join(m.Alvos, " "), "profile.d/x.sh") {
+			sumiu = true
+		}
+	}
+	if !sumiu {
+		t.Fatalf("a remoção de /etc/profile.d/x.sh foi suprimida por um #clear do "+
+			"apt: a lacuna 'apt' contaminou a fonte 'startup'. Mudanças: %+v", d.Mudancas)
+	}
+}

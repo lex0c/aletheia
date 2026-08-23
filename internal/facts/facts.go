@@ -292,7 +292,14 @@ import (
 //	   zero ali afirma "nenhum inconclusivo" sobre uma coleta que pode ter
 //	   tido — entao o numero sobe e o Carregar recusa o v19. Junto, a 2a
 //	   enumeracao netlink truncada deixou de descartar candidato como corrida.
-const SchemaVersion = 20
+//	21 TriggerLine.File: a ORIGEM de uma linha de gatilho, quando ela não vem do
+//	   próprio arquivo — um hook de apt trazido por #include mora noutro
+//	   arquivo. A evidência do persist.trigger_exec passou a apontar para a
+//	   origem: apontar 99x quando o payload está em /opt/.apt-hidden é
+//	   etiqueta errada. Num dump v20 o campo vem vazio, e vazio ali significa
+//	   "a linha é do próprio gatilho" — que num dump antigo sem hooks de
+//	   include é verdade, mas passou a ser um fato de forma nova.
+const SchemaVersion = 21
 
 // Facts é o retrato do host.
 type Facts struct {

@@ -76,6 +76,17 @@ Unattended-Upgrade::Origins-Pattern {
 		// Aninhamento profundo: APT { Update { Pre-Invoke {…} } } = apt::update::pre-invoke.
 		{"escopo aninhado profundo casa o caminho",
 			`APT { Update { Pre-Invoke { "/deep"; }; }; };`, []string{"/deep"}},
+
+		// Item NOMEADO na lista: RunScripts executa o valor de cada filho, então
+		// DPkg::Pre-Invoke::backdoor é hook. Forma escalar e forma de bloco.
+		{"item nomeado escalar é hook",
+			`DPkg::Pre-Invoke::backdoor "/usr/local/bin/.x";`,
+			[]string{"/usr/local/bin/.x"}},
+		{"item nomeado em bloco é hook",
+			`DPkg::Post-Invoke::b { "/y"; };`, []string{"/y"}},
+		// Mas o escopo errado com filho continua NÃO sendo hook.
+		{"escopo errado com filho não é hook",
+			`Foo::Pre-Invoke::backdoor "/x";`, nil},
 	}
 	for _, c := range casos {
 		hooks := analisarAptHooks([]byte(c.conf))
@@ -201,16 +212,66 @@ func TestClearApenasDeclaraLimite(t *testing.T) {
 	f := &Facts{}
 	collectTriggers(f, e)
 
-	var declarou bool
-	for _, gs := range f.Partial {
-		for _, g := range gs {
-			if strings.Contains(g, "#clear") {
-				declarou = true
-			}
+	// A chave TEM de ser "apt", não "startup": sob "startup" a lacuna contamina
+	// a fonte de drift inteira (profile.d, rc.local, PAM…) — o poison do P1.
+	var naApt, naStartup bool
+	for _, g := range f.Partial["apt"] {
+		if strings.Contains(g, "#clear") {
+			naApt = true
 		}
 	}
-	if !declarou {
-		t.Error("o apt.conf usa #clear e o limite não foi declarado: o estado " +
-			"efetivo pode diferir e a coleta ficou calada sobre isso")
+	for _, g := range f.Partial["startup"] {
+		if strings.Contains(g, "#clear") {
+			naStartup = true
+		}
+	}
+	if !naApt {
+		t.Error("o apt.conf usa #clear e o limite não foi declarado sob a chave " +
+			"'apt': ou não foi declarado, ou foi para 'startup' e vai poluir a " +
+			"fonte de drift inteira")
+	}
+	if naStartup {
+		t.Error("o #clear foi declarado sob 'startup': contamina o drift de " +
+			"profile.d/rc.local/PAM, que não têm nada com a config do apt")
+	}
+}
+
+// O apt não carrega qualquer arquivo de apt.conf.d — só nome válido, sem
+// extensão ou .conf. Um 99implant.bak com hook NÃO executa, e não pode virar
+// gatilho ativo (falso positivo determinístico, potencialmente CRITICAL).
+func TestColetorFiltraFragmentosQueOAptIgnora(t *testing.T) {
+	raiz := t.TempDir()
+	dir := filepath.Join(raiz, "etc/apt/apt.conf.d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hook := "DPkg::Pre-Invoke {\"/x\";};\n"
+	arquivos := map[string]bool{ // nome -> apt carrega?
+		"99good":        true,
+		"99good.conf":   true,
+		"50unatt-upgr":  true,
+		"99implant.bak": false,
+		"99x.disabled":  false,
+		"99x~":          false,
+		"99x.dpkg-old":  false,
+		"99@x":          false,
+	}
+	for n := range arquivos {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(hook), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	f := &Facts{}
+	collectTriggers(f, e)
+
+	virouGatilho := map[string]bool{}
+	for i := range f.Triggers {
+		virouGatilho[filepath.Base(f.Triggers[i].File)] = true
+	}
+	for n, deveCarregar := range arquivos {
+		if virouGatilho[n] != deveCarregar {
+			t.Errorf("%s: virou gatilho=%v, apt carrega=%v", n, virouGatilho[n], deveCarregar)
+		}
 	}
 }

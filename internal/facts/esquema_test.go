@@ -33,7 +33,7 @@ import (
 // teste: daria uma sensação de cobertura que não existe.
 func TestImpressaoDoEsquema(t *testing.T) {
 	const (
-		esquemaEsperado = 20
+		esquemaEsperado = 21
 		// Atualizada sem subir o SchemaVersion, e a razão fica aqui porque a
 		// catraca manda escrevê-la.
 		//
@@ -68,7 +68,7 @@ func TestImpressaoDoEsquema(t *testing.T) {
 		// marcada como não lida. A subida faz o loader RECUSAR o dump antigo em
 		// vez de respondê-lo torto. É o mesmo "vazio ≠ ilegível" que o resto do
 		// Aletheia sustenta, agora atravessando a fronteira MCP.
-		impressaoGravada = "e436adca5e5b310b"
+		impressaoGravada = "24f92bd07bb8ad4b"
 	)
 	if SchemaVersion != esquemaEsperado {
 		t.Fatalf("SchemaVersion=%d e este teste conhece o %d: atualize os dois "+

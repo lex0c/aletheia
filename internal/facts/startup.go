@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,15 +74,32 @@ type Trigger struct {
 // integrity.timestomp e o DRIFT — precisa da mesma resposta, ou um hook escondido
 // fica visivel para um e invisivel para outro.
 func (t *Trigger) LinhasExecutaveis() []TriggerLine {
-	if t.Kind == "pkg_hook" && ehArquivoApt(t.File) {
+	if t.EhApt() {
 		return t.AptHooks
 	}
 	return t.Lines
 }
 
+// EhApt diz se este gatilho é um arquivo de configuração do apt, cujos hooks têm
+// coleta e observabilidade próprias — inclusive uma FONTE de drift separada, para
+// um #clear local não cegar a comparação de /etc/profile.d e companhia.
+func (t *Trigger) EhApt() bool {
+	return t.Kind == "pkg_hook" && ehArquivoApt(t.File)
+}
+
 // ehArquivoApt reconhece os arquivos de configuração do apt cujos hooks o lexer
 // dedicado analisa — o principal /etc/apt/apt.conf e os fragmentos de
 // apt.conf.d. Central para os consumidores não divergirem no recorte.
+// nomeValidoAptParts reproduz a regra de Dir::Etc::Parts do apt: um fragmento é
+// carregado só se o nome não tem extensão ou termina em .conf, e é feito apenas
+// de [A-Za-z0-9_-]. .bak, .disabled, ~, .dpkg-*, @ e afins ficam de fora — o apt
+// os ignora, e um hook neles NÃO executa.
+func nomeValidoAptParts(n string) bool {
+	return reAptParts.MatchString(n)
+}
+
+var reAptParts = regexp.MustCompile(`^[A-Za-z0-9_-]+(\.conf)?$`)
+
 func ehArquivoApt(p string) bool {
 	return strings.Contains(p, "/apt/apt.conf")
 }
@@ -90,6 +108,11 @@ func ehArquivoApt(p string) bool {
 type TriggerLine struct {
 	N    int    `json:"n"`
 	Text string `json:"text" redact:"linha"`
+
+	// File é a ORIGEM da linha quando ela não vem do próprio gatilho — um hook
+	// trazido por #include mora noutro arquivo, e a evidência (e a data) têm de
+	// apontar para ELE, não para quem incluiu. Vazio = o arquivo do gatilho.
+	File string `json:"file,omitempty"`
 
 	// Added marca a linha que NÃO existe no /etc/skel correspondente. É o
 	// baseline de graça da §7.6: o esqueleto é a versão que a distribuição
@@ -218,6 +241,15 @@ func collectTriggers(f *Facts, e *env.Env) {
 		for _, n := range nomes {
 			p := g.dir + "/" + n
 			if e.IsDir(p) {
+				continue
+			}
+			// apt.conf.d NÃO carrega qualquer arquivo: o apt aplica a regra de
+			// Dir::Etc::Parts e só lê nome válido sem extensão ou com .conf. Um
+			// 99implant.bak ou 99x.disabled é IGNORADO pelo gerenciador, e tratá-lo
+			// como gatilho "a cada operação do apt" seria afirmar execução sobre um
+			// arquivo que o apt nunca roda — falso positivo determinístico.
+			if g.kind == "pkg_hook" && strings.Contains(g.dir, "/apt/apt.conf.d") &&
+				!nomeValidoAptParts(n) {
 				continue
 			}
 			if t, ok := lerTrigger(f, e, p, g.kind, g.when, ""); ok {

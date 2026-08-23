@@ -549,10 +549,17 @@ var triggerExec = check.Check{
 						continue
 					}
 				}
+				// A ORIGEM da linha, não o gatilho: um hook de apt trazido por #include
+				// mora noutro arquivo, e apontar 99x quando o payload está em
+				// /opt/.apt-hidden é evidência com etiqueta errada.
+				arquivo := t.File
+				if ln.File != "" {
+					arquivo = ln.File
+				}
 				ev := []string{
 					ln.Text,
 					motivo,
-					"arquivo: " + t.File + ":" + strconv.Itoa(ln.N),
+					"arquivo: " + arquivo + ":" + strconv.Itoa(ln.N),
 					"QUANDO roda: " + t.When,
 				}
 				if t.Kind == "rc" && !t.Exec {
@@ -576,6 +583,10 @@ var triggerExec = check.Check{
 		}
 		r.Partial = append(r.Partial, f.PersistDenied["startup"]...)
 		r.Partial = append(r.Partial, f.PersistDenied["githook"]...)
+		// A resolução da config do apt (#clear, #include ilegível) é lacuna DESTE
+		// check: um hook não resolvido pode não ter sido enumerado, e a completude
+		// tem de cair em vez de certificar "nenhum hook a mais".
+		r.Partial = append(r.Partial, f.Partial["apt"]...)
 		return r
 	},
 }

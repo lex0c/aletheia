@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/lex0c/aletheia/internal/env"
@@ -18,6 +19,21 @@ var hookPointsApt = map[string]bool{
 	"apt::update::post-invoke":         true,
 	"apt::update::post-invoke-success": true,
 	"apt::update::post-invoke-stats":   true,
+}
+
+// ehHookApt diz se um caminho de config é executado pelo apt. RunScripts pega a
+// ÁRVORE do hook e executa o valor de cada FILHO, então um item nomeado —
+// `DPkg::Pre-Invoke::backdoor "/x"` — é executado igual. A regra é "é o ponto de
+// hook, ou está SOB ele", sem voltar ao erro de casar qualquer coisa terminada
+// em pre-invoke: `Foo::Pre-Invoke::x` não bate porque não começa com um ponto
+// conhecido.
+func ehHookApt(caminho string) bool {
+	for h := range hookPointsApt {
+		if caminho == h || strings.HasPrefix(caminho, h+"::") {
+			return true
+		}
+	}
+	return false
 }
 
 // analisarAptHooks extrai os hooks ATIVOS de um apt.conf — as diretivas que o
@@ -70,7 +86,7 @@ func hooksDeTokens(toks []aptToken) []TriggerLine {
 		}
 		caminho := caminhoApt(escopo, tk.text)
 		if j < len(toks) && toks[j].text == "{" {
-			if hookPointsApt[caminho] {
+			if ehHookApt(caminho) {
 				cmds, ate := comandosDoHook(toks, j)
 				out = append(out, cmdsOuPlaceholder(cmds, tk, caminho)...)
 				i = ate
@@ -82,7 +98,7 @@ func hooksDeTokens(toks []aptToken) []TriggerLine {
 			continue
 		}
 		// Forma escalar: DPkg::Pre-Invoke "cmd";
-		if hookPointsApt[caminho] {
+		if ehHookApt(caminho) {
 			cmds, ate := comandosDoHook(toks, i+1)
 			out = append(out, cmdsOuPlaceholder(cmds, tk, caminho)...)
 			i = ate
@@ -313,28 +329,56 @@ func resolverAptHooks(f *Facts, e *env.Env, path string, raw []byte, vistos map[
 	hooks := hooksDeTokens(toks)
 	includes, clears := diretivasApt(toks)
 	if len(clears) > 0 {
-		f.partial("startup", path+" usa #clear: um hook removido por este ou por "+
+		f.partial("apt", path+" usa #clear: um hook removido por este ou por "+
 			"outro fragmento pode ainda aparecer como ATIVO — o estado efetivo da "+
 			"config do apt não foi resolvido")
 	}
 	if prof >= maxIncludeApt {
-		f.partial("startup", path+" excedeu a profundidade de #include: parte da "+
+		f.partial("apt", path+" excedeu a profundidade de #include: parte da "+
 			"config do apt NÃO foi avaliada")
 		return hooks
 	}
 	for _, inc := range includes {
 		alvo := caminhoDeInclude(path, inc)
-		if vistos[alvo] {
+		// #include de DIRETÓRIO: o apt carrega o diretório inteiro. Lê cada
+		// arquivo com nome válido, em ordem estável.
+		if strings.HasSuffix(inc, "/") || e.IsDir(alvo) {
+			nomes, derr := e.ReadDirNamesErr(alvo)
+			if derr != nil {
+				f.partial("apt", path+" faz #include do diretório "+alvo+" e ele não "+
+					"pôde ser listado: os hooks incluídos NÃO foram avaliados")
+				continue
+			}
+			sort.Strings(nomes)
+			for _, n := range nomes {
+				hooks = append(hooks, incluirArquivoApt(f, e, strings.TrimRight(alvo, "/")+"/"+n, vistos, prof)...)
+			}
 			continue
 		}
-		vistos[alvo] = true
-		b, err := e.ReadFile(alvo)
-		if err != nil {
-			f.partial("startup", path+" faz #include de "+alvo+" e ele não pôde "+
-				"ser lido: os hooks incluídos NÃO foram avaliados")
-			continue
+		hooks = append(hooks, incluirArquivoApt(f, e, alvo, vistos, prof)...)
+	}
+	return hooks
+}
+
+// incluirArquivoApt resolve UM arquivo incluído, marcando a ORIGEM em cada hook —
+// o comando pode morar num arquivo diferente do que fez o #include, e a evidência
+// precisa apontar o certo.
+func incluirArquivoApt(f *Facts, e *env.Env, alvo string, vistos map[string]bool, prof int) []TriggerLine {
+	if vistos[alvo] {
+		return nil
+	}
+	vistos[alvo] = true
+	b, err := e.ReadFile(alvo)
+	if err != nil {
+		f.partial("apt", "#include de "+alvo+" não pôde ser lido: os hooks "+
+			"incluídos NÃO foram avaliados")
+		return nil
+	}
+	hooks := resolverAptHooks(f, e, alvo, b, vistos, prof+1)
+	for i := range hooks {
+		if hooks[i].File == "" {
+			hooks[i].File = alvo
 		}
-		hooks = append(hooks, resolverAptHooks(f, e, alvo, b, vistos, prof+1)...)
 	}
 	return hooks
 }

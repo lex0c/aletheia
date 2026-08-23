@@ -78,6 +78,20 @@ type Dump struct {
 type Redacao struct {
 	Aplicada bool `json:"applied"`
 	Versao   int  `json:"version"`
+	// Dispensada é o operador tendo escrito --allow-secrets: a redação NÃO foi
+	// aplicada, e não foi por acidente nem por versão antiga.
+	//
+	// Ela existe porque "não aplicada" e "dispensada" levam a leituras opostas.
+	// Sem carimbo, um artefato cru se apresenta como RedacaoAusente — que quer
+	// dizer "este arquivo não prova ter sido redigido; desconfie da
+	// procedência". Um artefato deliberadamente cru é o contrário disso: a
+	// procedência é conhecida, e o conteúdo é cru DE PROPÓSITO, e quem o recebe
+	// precisa saber que está segurando segredo em claro.
+	//
+	// O campo é aditivo e falha seguro nos dois sentidos: um dump antigo não o
+	// tem e continua sendo lido como estava, e um binário antigo lendo um dump
+	// novo o ignora e vê RedacaoAusente — que é a leitura conservadora.
+	Dispensada bool `json:"waived,omitempty"`
 }
 
 // RedacaoVersao é a versão da POLÍTICA de redação que este binário aplica.
@@ -104,11 +118,18 @@ const (
 	// O dump é de uma versão mais nova, e a política aplicada nele pode não ser
 	// a que este binário assumiria.
 	RedacaoDesconhecida EstadoDaRedacao = "unknown_version"
+	// RedacaoDispensada: o operador escreveu --allow-secrets, e a redação NÃO
+	// foi aplicada de propósito. O artefato carrega segredo em CLARO — argv
+	// inteiro, environ inteiro, linha de cron com token — e quem o recebe
+	// precisa tratá-lo como o material sensível que ele é.
+	RedacaoDispensada EstadoDaRedacao = "waived"
 )
 
 // Estado devolve o que o artefato prova sobre a própria redação.
 func (r Redacao) Estado() EstadoDaRedacao {
 	switch {
+	case r.Dispensada:
+		return RedacaoDispensada
 	case !r.Aplicada:
 		return RedacaoAusente
 	case r.Versao == RedacaoVersao:
@@ -162,6 +183,24 @@ type Ambiente struct {
 // julgar linhagem —, e o que sai para o disco é a versão que pode virar
 // fixture, anexo de ticket e arquivo em repositório (SPEC 5.4).
 func De(e *env.Env, f *facts.Facts) *Dump {
+	// A REDAÇÃO É DISPENSADA PELA MESMA FLAG QUE MANDOU COLETAR O SEGREDO.
+	//
+	// e.Segredos é o --allow-secrets do servidor MCP, e ele governa as duas
+	// metades: readEnviron guarda todos os valores, e aqui a redação não roda.
+	// Separar as duas produziria meia-medida — um Facts com segredo que a
+	// escrita apaga, ou um artefato carimbado como cru sem o segredo que ele
+	// promete.
+	//
+	// O caminho do `collect` nunca liga essa flag: dump em disco sai redigido,
+	// sempre.
+	if e != nil && e.Segredos {
+		return &Dump{
+			Schema:   Schema,
+			Redacao:  Redacao{Dispensada: true, Versao: RedacaoVersao},
+			Ambiente: ambienteDe(e),
+			Facts:    f,
+		}
+	}
 	return &Dump{
 		Schema:   Schema,
 		Redacao:  Redacao{Aplicada: true, Versao: RedacaoVersao},

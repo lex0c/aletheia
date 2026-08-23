@@ -158,7 +158,19 @@ func (e *Env) ReadFile(p string) ([]byte, error) {
 // Quem decide o tipo do objeto é quem escreve no disco do alvo, então a decisão
 // tem que ser tomada DEPOIS de abrir, sobre o descritor.
 func (e *Env) abrirSemTocarAtime(p string) (*os.File, error) {
-	const flags = os.O_RDONLY | syscall.O_NONBLOCK
+	return e.abrirComExtras(p, 0)
+}
+
+// abrirComExtras é o abrirSemTocarAtime com flags a mais.
+//
+// As flags eram `const` dentro dele, e a leitura direcionada do perfil completo
+// precisa de O_NOFOLLOW. Um segundo abridor copiado seria a segunda
+// implementação da mesma fronteira — a raiz travada, o O_NOATIME que degrada em
+// silêncio quando não se é dono, o O_NONBLOCK que impede o fifo de prender a
+// varredura para sempre. Duas cópias disso divergem, e a que diverge é sempre a
+// que ninguém está olhando.
+func (e *Env) abrirComExtras(p string, extras int) (*os.File, error) {
+	flags := os.O_RDONLY | syscall.O_NONBLOCK | extras
 	if err := e.raizIndisponivel(); err != nil {
 		return nil, err
 	}

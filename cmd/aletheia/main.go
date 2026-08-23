@@ -225,6 +225,20 @@ MCP — a pergunta que a IA faz DE VOLTA
   --audit-log F grava a trilha de invocações também em F. Ela sempre sai no
                 stderr; arquivo só quando pedido, porque preserve continua
                 sendo o único comando que escreve por padrão
+  --profile full
+                destrava LER O HOST por um caminho que o modelo escolhe:
+                file.read, file.hash, file.xattrs, file.capabilities. Só em
+                --live/--root — um dump não carrega conteúdo de arquivo.
+                Estas tools NÃO respondem sobre um retrato: elas leem AGORA, e
+                o envelope delas diz isso em vez de fingir procedência
+  --allow-secrets
+                destrava os bytes CRUS saírem daqui: file.read, file.xattrs e
+                process.environ. Exige --profile full. Também manda a COLETA
+                guardar o valor de toda variável de ambiente, e o retrato sai
+                carimbado "redaction: waived" — ele carrega segredo em claro.
+                A trava importa porque o Aletheia não tem egress, mas o cliente
+                MCP quase certamente manda o resultado a um modelo remoto, e
+                essa metade não está sob controle desta ferramenta
   --capture-budget D
                 orçamento COOPERATIVO de leitura do host, acumulado pela sessão
                 inteira (padrão 10m). Ele faz duas coisas: recusa admitir uma

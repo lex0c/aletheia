@@ -27,5 +27,13 @@ func catalogo() []Ferramenta {
 		toolNetIP,
 		toolNetPort,
 		toolFileInspect,
+
+		// A entrega 3: inspeção direcionada. Elas leem o host AGORA e não
+		// respondem sobre retrato nenhum — o envelope delas diz isso.
+		toolFileRead,
+		toolFileHash,
+		toolFileXattrs,
+		toolFileCapabilities,
+		toolProcessEnviron,
 	}
 }

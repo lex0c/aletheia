@@ -273,6 +273,22 @@ type Env struct {
 	// todo coletor.
 	Progress ProgressSink
 
+	// Segredos é o operador tendo dito --allow-secrets, e ele atravessa a coleta
+	// inteira porque as DUAS metades dependem dele.
+	//
+	// A primeira é o que se COLETA: readEnviron guarda só os valores de uma
+	// allowlist, e o resto sai como nome sem valor. A segunda é o que se
+	// ESCREVE: dump.De redige argv, cron, unit e gatilho ao montar o artefato.
+	//
+	// Um dos dois sozinho é meia-medida perigosa. Coletar o environ inteiro e
+	// então redigi-lo gastaria a leitura para jogar fora; pular a redação sobre
+	// um Facts que já nasceu sem os valores entregaria um artefato marcado como
+	// cru e sem o segredo que ele promete. Uma flag, as duas metades.
+	//
+	// O padrão é false, e nenhum caminho de CLI o liga a não ser o mcp com
+	// --profile full --allow-secrets: `collect` nunca escreve dump cru em disco.
+	Segredos bool
+
 	// selado marca o ambiente RECONSTRUÍDO — o que dump.Env() devolve. Ele
 	// descreve as condições de uma coleta que já terminou, então todo acesso a
 	// filesystem por ele é recusado com ErrSelado. Ver raizIndisponivel.

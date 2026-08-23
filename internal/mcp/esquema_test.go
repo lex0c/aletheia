@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/lex0c/aletheia/internal/dump"
+	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
 )
 
@@ -253,6 +254,50 @@ func TestOutputSchemaTambemValeEmModoLive(t *testing.T) {
 	validarRegistry(t, s, argsDeTeste(t, s))
 }
 
+// E o perfil COMPLETO, que é onde vive a família file.* — a entrega 3.
+//
+// Sem este servidor, os schemas das cinco tools novas nunca seriam validados: os
+// dois testes acima montam perfil padrão, onde elas nem entram no registry. Uma
+// catraca que não alcança o código novo é uma catraca que aprova por omissão.
+func TestOutputSchemaValeNoPerfilCompleto(t *testing.T) {
+	s := servidorCompleto(t)
+	// Dois completos: snapshot.compare exige os dois, e a captura da própria
+	// tool no registry consome a terceira vaga.
+	capturar(t, s, "complete")
+	capturar(t, s, "complete")
+	validarRegistry(t, s, argsDeTeste(t, s))
+}
+
+// servidorCompleto monta o servidor da entrega 3 com um alvo de verdade em
+// disco: as tools de arquivo abrem descritor, e um caminho inventado só
+// exercitaria o caminho de erro.
+func servidorCompleto(t *testing.T) *Servidor {
+	t.Helper()
+	raiz := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(raiz, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(raiz, "etc/alvo.conf"),
+		[]byte("token=hunter2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := NovoAcervo()
+	a.Teto = 3
+	pol := Policy{Modo: ModoLive, Perfil: PerfilCompleto, PermitirSegredos: true}
+	s := NovoServidor(pol, a, "teste", nil, func() (*env.Env, error) {
+		e := env.Probe(env.Options{Version: "teste"})
+		e.Segredos = true
+		return e, nil
+	})
+	t.Cleanup(func() {
+		for _, r := range a.Todos() {
+			_ = a.Liberar(r.ID)
+		}
+	})
+	t.Setenv("ALETHEIA_ALVO_DE_TESTE", filepath.Join(raiz, "etc/alvo.conf"))
+	return s
+}
+
 func validarRegistry(t *testing.T, s *Servidor, args map[string]string) {
 	t.Helper()
 	for _, f := range s.ativas {
@@ -301,6 +346,16 @@ func argsDeTeste(t *testing.T, s *Servidor) map[string]string {
 		// snapshot.capture cunha um retrato de verdade — por isso o teto do
 		// acervo precisa de uma vaga a mais que o número de capturas do teste.
 		"snapshot.capture": `{"scope":"volatile"}`,
+
+		// A família file.* lê o host AGORA. O alvo é um arquivo que existe em
+		// qualquer Linux e que este processo consegue abrir.
+		"file.read":         `{"path":"/etc/hostname"}`,
+		"file.hash":         `{"path":"/etc/hostname"}`,
+		"file.xattrs":       `{"path":"/etc/hostname"}`,
+		"file.capabilities": `{"path":"/etc/hostname"}`,
+	}
+	if _, tem := s.porNome["process.environ"]; tem {
+		args["process.environ"] = fmt.Sprintf(`{"pid":%d}`, os.Getpid())
 	}
 
 	if _, tem := s.porNome["finding.get"]; tem {

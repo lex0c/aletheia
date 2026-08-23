@@ -150,11 +150,11 @@ func writeFile(path, content string) error {
 // defeito original, e igualmente inútil.
 func TestReadProcessSeparaSumidoDeIlegivel(t *testing.T) {
 	// PID que não pode existir: acima de qualquer pid_max praticado.
-	if _, got := readProcess(1 << 30); got != readGone {
+	if _, got := readProcess(1<<30, false); got != readGone {
 		t.Errorf("PID inexistente devolveu %v, quer readGone", got)
 	}
 	// O próprio processo é sempre legível.
-	if _, got := readProcess(os.Getpid()); got != readOK {
+	if _, got := readProcess(os.Getpid(), false); got != readOK {
 		t.Errorf("o próprio PID devolveu %v, quer readOK", got)
 	}
 }
@@ -189,7 +189,7 @@ func TestPanicNoColetorNaoDerrubaOProcesso(t *testing.T) {
 			t.Fatalf("o panic escapou do guarda: %v", r)
 		}
 	}()
-	if _, out, _ := readProcessGuarded(-1); out == readOK {
+	if _, out, _ := readProcessGuarded(-1, false); out == readOK {
 		t.Error("PID inválido não pode sair como leitura bem-sucedida")
 	}
 }

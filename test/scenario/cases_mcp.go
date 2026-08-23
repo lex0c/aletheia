@@ -638,4 +638,111 @@ func init() {
 		},
 		Exit: 0,
 	})
+
+	// ------------------------------------------------------ entrega 3: full
+	//
+	// M14 prova a fiação da CLI, que nenhum unitário alcança: --profile full e
+	// --allow-secrets saem das flags, viram Policy, e a Policy tem de chegar aos
+	// DOIS lugares — o registry, que decide quais tools existem, e o Env da
+	// aquisição, que decide se o valor do environ entra no Facts.
+	//
+	// A segunda metade é a que passa despercebida. Uma mutação que zerava
+	// e.Segredos na aquisição deixava a tool no registry e a coleta descartando
+	// o valor: a resposta viria com a allowlist e forma de resposta completa.
+	Register(Scenario{
+		ID:     "M14-mcp-perfil-completo-le-o-host",
+		Desc:   "--profile full --allow-secrets: leitura direcionada, cadeia de symlink como evidência, e environ sem redação",
+		Images: []string{"debian:12"},
+		Cmd:    "mcp",
+		Plant: `mkdir -p /alvo/etc /alvo/tmp
+		printf 'DB_PASSWORD=hunter2\nAWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI\n' > /alvo/etc/segredos.env
+		chmod 600 /alvo/etc/segredos.env
+		# o link do MEIO: nenhum kernel acima do piso desta ferramenta o bloqueia
+		ln -s ../etc /alvo/tmp/mau
+		ln -s ../etc/segredos.env /alvo/tmp/atalho
+		mkfifo /alvo/tmp/cano
+		sleep 0.2`,
+		Args: []string{"--root", "/alvo", "--profile", "full", "--allow-secrets", "--allow-root"},
+		MCP: []Chamada{
+			{
+				// As duas flags destravam conjuntos DIFERENTES, e o de dentro é
+				// o que emite byte do alvo.
+				Espera: []string{
+					`"file.read"`, `"file.hash"`, `"file.xattrs"`, `"file.capabilities"`,
+				},
+				ProibeTool: []string{
+					// Continua não existindo tool de execução, nem no perfil
+					// completo. É a fronteira que este servidor inteiro defende.
+					"exec", "shell", "run", "write", "file.write", "process.kill",
+					// E numa imagem não há processo: environ não se aplica.
+					"process.environ",
+				},
+			},
+			{
+				Tool: "file.read",
+				Args: `{"path":"/etc/segredos.env"}`,
+				Campos: map[string]string{
+					"data.encoding": "utf8",
+					"read.source":   "image",
+				},
+				Espera: []string{
+					// O conteúdo chega CRU: é isso que --allow-secrets significa.
+					"DB_PASSWORD=hunter2",
+					// E o envelope diz que isto NÃO é um retrato.
+					"NÃO faz parte de nenhum retrato",
+				},
+				Proibe: []string{
+					// Sem provenance: ela afirmaria cobertura e veredito que
+					// ninguém calculou sobre uma leitura que não é snapshot.
+					`"provenance"`,
+				},
+			},
+			{
+				// O SYMLINK DO MEIO. O_NOFOLLOW não o alcança, e openat2 com
+				// RESOLVE_NO_SYMLINKS exigiria Linux 5.6 contra o piso de 3.2.
+				// A defesa é contar: a cadeia e o inode dizem qual arquivo foi
+				// realmente aberto.
+				Tool:   "file.read",
+				Args:   `{"path":"/tmp/mau/segredos.env"}`,
+				Espera: []string{"/tmp/mau -> ../etc", `"resolved_path":"/etc/segredos.env"`},
+			},
+			{
+				// O último componente é link: RECUSA, e a recusa é resposta.
+				Tool:       "file.read",
+				Args:       `{"path":"/tmp/atalho"}`,
+				ErroDeTool: true,
+				Espera:     []string{"symlink", "follow_symlinks"},
+			},
+			{
+				// O fifo plantado num caminho que a ferramenta sempre lê é o
+				// truque clássico: sem O_NONBLOCK e sem fstat no descritor, o
+				// open prende a varredura para sempre.
+				Tool:       "file.read",
+				Args:       `{"path":"/tmp/cano"}`,
+				ErroDeTool: true,
+				Espera:     []string{"fifo"},
+			},
+			{
+				Tool:   "file.hash",
+				Args:   `{"path":"/etc/segredos.env"}`,
+				Espera: []string{`"sha256"`},
+				Proibe: []string{
+					// file.hash NÃO emite byte do conteúdo: é o que permite
+					// identificar um binário sem autorizar que ele vá inteiro
+					// para um modelo remoto.
+					"DB_PASSWORD", "hunter2",
+				},
+			},
+			{
+				// A procedência do RETRATO diz que a redação foi dispensada —
+				// "não aplicada" e "dispensada" levam a leituras opostas.
+				Tool: "snapshot.capture",
+				Args: `{"scope":"complete"}`,
+				Campos: map[string]string{
+					"provenance.redaction": "waived",
+				},
+			},
+		},
+		Exit: 0,
+	})
 }

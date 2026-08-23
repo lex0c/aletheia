@@ -32,11 +32,22 @@ func TestVarrerPorSinalAchaOQueNaoEstaNaListagem(t *testing.T) {
 	}()
 	alvo := cmd.Process.Pid
 
+	// O TETO DA FUNÇÃO ENTRA NA EXPECTATIVA, e a razão é de host, não de
+	// desenho: varrerPorSinal grampeia o limite em pidMaxLimite, e num host de
+	// uptime longo o pid corrente chega a menos de um sondaBloco do teto —
+	// aqui, 4.134.053 num pid_max de 4.194.304. Aí `alvo + sondaBloco` passa do
+	// teto, a varredura para no teto (certo) e a expectativa crua falha.
+	//
+	// Era um teste que ficava vermelho conforme o uptime da máquina, o que é a
+	// pior forma de teste frágil: ele não falha em quem escreveu a mudança,
+	// falha em quem estiver com a máquina ligada há mais tempo.
 	limite := alvo + sondaBloco
+	esperado := min(limite, pidMaxLimite)
 	cand, ate := varrerPorSinal(limite, map[int]bool{}, time.Now().Add(time.Minute))
 
-	if ate != limite {
-		t.Errorf("varreu até %d, queria %d: sem corte, o alcance é a faixa inteira", ate, limite)
+	if ate != esperado {
+		t.Errorf("varreu até %d, queria %d: sem corte, o alcance é a faixa inteira "+
+			"(limite pedido %d, teto da função %d)", ate, esperado, limite, pidMaxLimite)
 	}
 	if _, ok := cand[alvo]; !ok {
 		t.Errorf("o pid %d existe e não estava na listagem, e a varredura não o "+

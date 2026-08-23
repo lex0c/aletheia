@@ -307,7 +307,7 @@ func collectProcesses(f *Facts, e *env.Env) {
 				if i >= len(pids) {
 					return
 				}
-				slots[i].p, slots[i].outcome, slots[i].panicked = readProcessGuarded(pids[i])
+				slots[i].p, slots[i].outcome, slots[i].panicked = readProcessGuarded(pids[i], e.Segredos)
 			}
 		}()
 	}
@@ -491,17 +491,17 @@ const (
 //
 // É a mesma correção que o runGuarded fez para os checks, no lugar onde a
 // paralelização a desfez.
-func readProcessGuarded(pid int) (p *Process, out readOutcome, panicked string) {
+func readProcessGuarded(pid int, segredos bool) (p *Process, out readOutcome, panicked string) {
 	defer func() {
 		if r := recover(); r != nil {
 			p, out, panicked = nil, readDenied, fmt.Sprint(r)
 		}
 	}()
-	p, out = readProcess(pid)
+	p, out = readProcess(pid, segredos)
 	return p, out, ""
 }
 
-func readProcess(pid int) (*Process, readOutcome) {
+func readProcess(pid int, segredos bool) (*Process, readOutcome) {
 	p := &Process{PID: pid, NS: map[string]string{}}
 
 	st, err := readTrimErr(procPath(pid, "stat"))
@@ -544,7 +544,7 @@ func readProcess(pid int) (*Process, readOutcome) {
 	readExe(p)
 	readCwd(p)
 	readCmdline(p)
-	readEnviron(p)
+	readEnviron(p, segredos)
 	readCgroup(p)
 	readNS(p)
 	readFDs(p)
@@ -742,7 +742,7 @@ func reconfirmCmdline(f *Facts) {
 	}
 }
 
-func readEnviron(p *Process) {
+func readEnviron(p *Process, segredos bool) {
 	kv, cortado, _ := readNULTrunc(procPath(p.PID, "environ"))
 	if cortado {
 		p.Truncated = append(p.Truncated, "o ambiente passa de "+
@@ -759,7 +759,11 @@ func readEnviron(p *Process) {
 			continue
 		}
 		p.EnvKeys = append(p.EnvKeys, k)
-		if envAllowed(k) {
+		// segredos é o --allow-secrets do servidor MCP, e ele só chega aqui
+		// depois de o operador ter escrito a flag. Sem ele, o valor de tudo que
+		// não está na allowlist NÃO é lido para dentro do Facts — a chave fica,
+		// o valor não. Ver env.Env.Segredos.
+		if segredos || envAllowed(k) {
 			p.Env[k] = v
 		}
 	}

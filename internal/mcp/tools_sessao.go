@@ -273,7 +273,7 @@ var toolStatus = Ferramenta{
  "redaction":{"type":"array","description":"o que cada retrato PROVA sobre a propria redacao, lido do carimbo do artefato — nunca o que este servidor afirma. Ausente fora do modo snapshot, onde os retratos nascem de captura e nao de arquivo.",
   "items":{"type":"object","properties":{
    "snapshot_id":{"type":"string"},
-   "redaction":{"type":"string","enum":["applied","absent","unknown_version"]}}}},
+   "redaction":{"type":"string","enum":["applied","absent","unknown_version","waived"]}}}},
  "redaction_note":{"type":"string"},
  "snapshots":{"type":"array","items":{"type":"object"}},
  "unavailable_tools":{"type":"array","items":{"type":"object",

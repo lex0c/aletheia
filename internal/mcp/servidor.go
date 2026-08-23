@@ -324,7 +324,20 @@ func (s *Servidor) selar(era Era, cacheavel bool, corpo map[string]any) json.Raw
 			corpo["cacheScope"] = "private"
 		}
 	}
-	b, err := json.Marshal(corpo)
+	// O MESMO ENCODER DO FRAME, e não o padrão.
+	//
+	// json.Marshal escapa <, > e & como \u003c, \u003e e \u0026 — herança de
+	// quem embute JSON em HTML. O frame já é escrito sem isso (ver
+	// semEscapeHTML), mas o corpo entrava aqui como RawMessage já escapada, e o
+	// encoder de fora não desfaz.
+	//
+	// O custo é duplo e medido. Uma linha de evidência de shell real —
+	// `sh -c '… | sh > /dev/null 2>&1 && rm -f $0'` — inflou 27% em bytes, que
+	// saem do mesmo teto de frame que a paginação respeita. E o modelo, que lê
+	// content.text, recebia `2\u003e\u00261 \u0026\u0026` onde a evidência
+	// diz `2>&1 &&`: redirecionamento e encadeamento são justamente o que se
+	// procura numa linha de comando.
+	b, err := semEscapeHTML(corpo)
 	if err != nil {
 		return json.RawMessage(`{}`)
 	}
@@ -466,7 +479,10 @@ func (s *Servidor) chamarTool(r *Requisicao) (map[string]any, string, *ErroRPC) 
 		// malformado. Aquilo o modelo não pode consertar.
 		return resultadoDeFalha(f.Nome, er), alvo, nil
 	}
-	b, err := json.Marshal(saida)
+	// semEscapeHTML aqui também: content.text é a carga que o cliente sem
+	// suporte a outputSchema mostra ao modelo, e é onde o escape dói mais —
+	// dentro de uma string JSON ele vira \\u003e, com duas barras.
+	b, err := semEscapeHTML(saida)
 	if err != nil {
 		return nil, alvo, erro(CodInternalError, "falha ao serializar o resultado")
 	}
@@ -516,7 +532,7 @@ func resultadoDeFalha(tool string, er *ErroRPC) map[string]any {
 	if er.Data != nil {
 		corpo["details"] = er.Data
 	}
-	b, _ := json.Marshal(corpo)
+	b, _ := semEscapeHTML(corpo)
 	return map[string]any{
 		"content":           []map[string]any{{"type": "text", "text": string(b)}},
 		"structuredContent": corpo,

@@ -42,6 +42,12 @@ func TestEnvSeladoRecusaTodoAcessoAFilesystem(t *testing.T) {
 		// de quatro estados existe exatamente para essa diferença.
 		"EstadoDeMontagem": "indeterminada",
 
+		// A leitura direcionada do perfil completo. Ela abre DESCRITOR, e é o
+		// acessor mais poderoso do pacote: um ambiente selado descreve uma
+		// coleta encerrada, e abrir arquivo por ele leria o host de agora.
+		"AbrirParaInspecao": "recusa",
+		"CadeiaDeLinks":     "recusa",
+
 		// Path monta string para EXIBIÇÃO e nunca toca o filesystem — o próprio
 		// comentário dele diz para não usá-lo para abrir nada.
 		"Path": "nao_le",
@@ -63,7 +69,14 @@ func TestEnvSeladoRecusaTodoAcessoAFilesystem(t *testing.T) {
 
 	for i := 0; i < tipo.NumMethod(); i++ {
 		m := tipo.Method(i)
-		if m.Type.NumIn() != 2 || m.Type.In(1) != vazio {
+		// O critério é "o PRIMEIRO argumento é um caminho", e não "recebe
+		// exatamente um argumento".
+		//
+		// A versão anterior exigia aridade 2 e por isso não enxergava
+		// AbrirParaInspecao(p string, seguirLink bool) — o acessor mais
+		// perigoso do pacote, que abre descritor. Um portão que não alcança o
+		// acessor mais poderoso é decoração no lugar exato onde não podia ser.
+		if m.Type.NumIn() < 2 || m.Type.In(1) != vazio || m.Type.IsVariadic() {
 			continue
 		}
 		vistos[m.Name] = true
@@ -78,7 +91,13 @@ func TestEnvSeladoRecusaTodoAcessoAFilesystem(t *testing.T) {
 			continue
 		}
 
-		saidas := m.Func.Call([]reflect.Value{reflect.ValueOf(e), reflect.ValueOf("/etc/hostname")})
+		// Os argumentos além do caminho vão no zero: eles são opções, e o que
+		// se mede aqui é se o ACESSO acontece.
+		entradas := []reflect.Value{reflect.ValueOf(e), reflect.ValueOf("/etc/hostname")}
+		for k := 2; k < m.Type.NumIn(); k++ {
+			entradas = append(entradas, reflect.New(m.Type.In(k)).Elem())
+		}
+		saidas := m.Func.Call(entradas)
 		conferir(t, m.Name, quer, saidas)
 	}
 

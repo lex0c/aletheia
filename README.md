@@ -848,11 +848,58 @@ Liberar não devolve orçamento — memória volta, trabalho já feito não —,
 o que resta é publicado em `session.status` antes de ser batido, para o modelo
 não precisar gastar uma captura inteira para aprender que não podia.
 
+### `--profile full` e `--allow-secrets`
+
+São **dois** portões, e destravam coisas diferentes:
+
+```text
+--profile full     LER O HOST por um caminho que o modelo escolhe
+--allow-secrets    os bytes CRUS saírem deste processo
+```
+
+`file.hash` e `file.capabilities` pedem só o primeiro: elas leem o arquivo e
+devolvem um resumo — um sha256, uma lista de capabilities — que não carrega
+segredo. `file.read`, `file.xattrs` e `process.environ` pedem os dois, porque
+devolvem os bytes. A separação existe para o operador poder dizer "identifique
+este binário" sem dizer "mande o /etc/shadow para um modelo remoto".
+
+**Esta família não responde sobre um retrato.** Um dump não carrega conteúdo de
+arquivo — nunca carregou, e não deve carregar —, então a única forma de
+responder "o que tem dentro disto" é abrir o arquivo agora. Elas não fingem: o
+envelope delas não tem `provenance`, tem `read`, com o instante da leitura e um
+aviso em prosa de que o conteúdo **não é contemporâneo de nenhum snapshot**.
+
+**O symlink do meio, declarado em vez de fingido.** `follow_symlinks:false`
+recusa quando o último componente é link. Ele **não** protege os componentes do
+meio: com `/tmp/mau -> /etc`, ler `/tmp/mau/shadow` abre o `/etc/shadow` de
+verdade — medido, nos dois modos. `openat2(RESOLVE_NO_SYMLINKS)` resolveria e
+exige Linux 5.6, contra o piso de 3.2 que esta ferramenta declara. Então em vez
+de uma trava que o kernel-piso não sustenta, toda resposta traz `link_chain`,
+`resolved_path`, `dev` e `inode`: o risco vira **evidência**, que é o que quem
+investiga precisa de qualquer forma.
+
+Em modo `--root` há uma garantia a mais: a raiz travada recusa link de alvo
+absoluto, que sairia da imagem para o filesystem de quem investiga.
+
+`process.environ` responde sobre um **retrato**, e exige um capturado com a
+redação dispensada. Um retrato normal guarda o nome de toda variável e o valor
+só de uma allowlist; responder ali devolveria a allowlist com forma de resposta
+completa, e a ausência de credencial se leria como prova de que não havia
+nenhuma. A recusa é melhor que a meia-resposta.
+
+O artefato de uma captura com `--allow-secrets` sai carimbado `redaction:
+waived` — que é diferente de `absent`. "Ausente" quer dizer "este arquivo não
+prova ter sido redigido, desconfie da procedência"; "dispensada" quer dizer "a
+procedência é conhecida e isto aqui é segredo em claro".
+
+Em modo snapshot as duas flags continuam **recusadas com o motivo**: sobre um
+artefato não há o que ler nem o que destravar.
+
 ### O que ainda não existe
 
-`--profile full` — leitura de conteúdo de arquivo e environ sem redação — é a
-entrega seguinte, e por isso é **recusado**: ele não destrava tool nenhuma
-hoje, e uma flag de segurança sem efeito é pior que flag nenhuma.
+Re-aquisição direcionada — `process.refresh`, `bpf.inspect`, `ftrace.inspect` —
+tem escopo e preço próprios: decompor `internal/facts`, subir para
+`SchemaVersion` 18 por causa de `boot_id`/`starttime`, e regenerar toda fixture.
 
 Em modo snapshot, `--allow-secrets` e `--profile full` são **recusados com o
 motivo**, e não ignorados: o dump já saiu do host redigido, então não há o que

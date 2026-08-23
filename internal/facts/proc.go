@@ -76,8 +76,30 @@ type Process struct {
 	Argv         []string `json:"argv,omitempty" redact:"cmdline"`
 	CmdlineEmpty bool     `json:"cmdline_empty,omitempty"`
 
-	// EnvKeys tem TODAS as chaves; Env só os valores da allowlist (SPEC 5.4).
-	EnvKeys []string          `json:"env_keys,omitempty"`
+	// EnvKeys tem as chaves OBSERVADAS; Env só os valores da allowlist
+	// (SPEC 5.4) — ou todos, quando o operador dispensou a redação.
+	EnvKeys []string `json:"env_keys,omitempty"`
+
+	// EnvLido separa "o ambiente está vazio" de "não consegui ler o ambiente".
+	//
+	// readNULTrunc devolve erro em EACCES, EIO e ESRCH, e ele era descartado:
+	// o processo saía com Env e EnvKeys nulos, indistinguível de um processo
+	// que de fato não tem variável nenhuma — coisa que praticamente não existe.
+	// É "não observei" virando "não havia nada", no fato que sustenta a tool
+	// mais sensível do perfil completo.
+	//
+	// O campo é POSITIVO (lido, e não "falhou") de propósito: o zero value de um
+	// Facts montado à mão em teste é `false`, e o lado seguro é o que não
+	// afirma leitura.
+	EnvLido bool `json:"env_read,omitempty"`
+	// EnvCortado diz que o ambiente passou do teto e as variáveis seguintes NÃO
+	// foram examinadas. Separado de Truncated porque a decisão de recusar uma
+	// resposta completa não pode depender de procurar uma palavra numa lista de
+	// frases em português.
+	EnvCortado bool `json:"env_truncated,omitempty"`
+	// EnvErro é a evidência de POR QUE a leitura falhou. Nunca controle de
+	// fluxo: quem decide é EnvLido.
+	EnvErro string            `json:"env_error,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 
 	CapEff    uint64 `json:"cap_eff"`
@@ -743,7 +765,17 @@ func reconfirmCmdline(f *Facts) {
 }
 
 func readEnviron(p *Process, segredos bool) {
-	kv, cortado, _ := readNULTrunc(procPath(p.PID, "environ"))
+	kv, cortado, err := readNULTrunc(procPath(p.PID, "environ"))
+	if err != nil {
+		// LACUNA, e não ambiente vazio. O erro era descartado aqui, e o
+		// processo saía com Env nulo — o que uma tool lê como "não há variável
+		// nenhuma", que é a leitura mais tranquilizadora possível de uma
+		// leitura que não aconteceu.
+		p.EnvErro = motivoDeLeitura(err)
+		return
+	}
+	p.EnvLido = true
+	p.EnvCortado = cortado
 	if cortado {
 		p.Truncated = append(p.Truncated, "o ambiente passa de "+
 			strconv.Itoa(maxNUL>>20)+" MB e foi CORTADO: as variáveis "+
@@ -768,6 +800,19 @@ func readEnviron(p *Process, segredos bool) {
 		}
 	}
 	sort.Strings(p.EnvKeys)
+}
+
+// motivoDeLeitura traduz o errno para o operador. É EVIDÊNCIA, e nunca controle
+// de fluxo: quem decide se houve leitura é EnvLido.
+func motivoDeLeitura(err error) string {
+	switch {
+	case os.IsNotExist(err):
+		return "o processo terminou entre a listagem e a leitura"
+	case os.IsPermission(err):
+		return "sem permissão para ler o ambiente deste processo: ele é de outro " +
+			"uid, e falta CAP_SYS_PTRACE ou root"
+	}
+	return "falha ao ler o ambiente: " + err.Error()
 }
 
 // readLimites lê o teto de processos do /proc/<pid>/limits.

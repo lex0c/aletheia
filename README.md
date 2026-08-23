@@ -869,17 +869,28 @@ responder "o que tem dentro disto" é abrir o arquivo agora. Elas não fingem: o
 envelope delas não tem `provenance`, tem `read`, com o instante da leitura e um
 aviso em prosa de que o conteúdo **não é contemporâneo de nenhum snapshot**.
 
-**O symlink do meio, declarado em vez de fingido.** `follow_symlinks:false`
-recusa quando o último componente é link. Ele **não** protege os componentes do
-meio: com `/tmp/mau -> /etc`, ler `/tmp/mau/shadow` abre o `/etc/shadow` de
-verdade — medido, nos dois modos. `openat2(RESOLVE_NO_SYMLINKS)` resolveria e
-exige Linux 5.6, contra o piso de 3.2 que esta ferramenta declara. Então em vez
-de uma trava que o kernel-piso não sustenta, toda resposta traz `link_chain`,
-`resolved_path`, `dev` e `inode`: o risco vira **evidência**, que é o que quem
-investiga precisa de qualquer forma.
+**O symlink, fechado em vez de contado.** Com `follow_symlinks:false` — o
+padrão — **nenhum** componente do caminho é atravessado, nem o final nem os do
+meio: o caminho é percorrido componente a componente por descritor, e um link em
+qualquer posição encerra a caminhada. É mais forte do que um `open` comum dá,
+porque o `O_NOFOLLOW` do kernel protege só o último componente. A resposta diz
+`path_binding: exact`, e isso é **fato**: o arquivo aberto está no caminho
+pedido.
 
-Em modo `--root` há uma garantia a mais: a raiz travada recusa link de alvo
-absoluto, que sairia da imagem para o filesystem de quem investiga.
+Com `follow_symlinks:true` a resolução volta a ser do kernel, e aí `link_chain` e
+`resolved_path` são **observação** — lidas num segundo passo, que num host
+comprometido pode descrever uma resolução diferente da que abriu o arquivo. Ali
+`path_binding` diz `followed`, e o que continua valendo como fato são `dev` e
+`inode`.
+
+O percurso usa `O_PATH`, então **o driver de um device node nunca é acordado**:
+um `/dev/qualquer-coisa` plantado num caminho de aparência banal é identificado e
+recusado sem que o `open()` dele rode. A recusa carrega a identidade — "isto é um
+chardev, dev tal, inode tal" é o que quem investiga queria saber.
+
+`file.hash` confere a estabilidade: um segundo `fstat` no mesmo descritor depois
+do hash, e `stable: false` quando tamanho ou mtime mudaram no meio. Um digest de
+mistura temporal não deve ser comparado contra IOC.
 
 `process.environ` responde sobre um **retrato**, e exige um capturado com a
 redação dispensada. Um retrato normal guarda o nome de toda variável e o valor
@@ -892,8 +903,42 @@ waived` — que é diferente de `absent`. "Ausente" quer dizer "este arquivo nã
 prova ter sido redigido, desconfie da procedência"; "dispensada" quer dizer "a
 procedência é conhecida e isto aqui é segredo em claro".
 
-Em modo snapshot as duas flags continuam **recusadas com o motivo**: sobre um
-artefato não há o que ler nem o que destravar.
+### O carimbo é procedência; a redação de ingresso é a garantia
+
+Um dump **não é autenticado** — o envelope diz isso em `authenticated: false` —,
+então o carimbo dele é um campo que quem escreveu o arquivo escolheu. Usá-lo
+como barreira seria confiar no alvo.
+
+Por isso o servidor **re-redige no ingresso**, sempre, independentemente do que o
+artefato afirme sobre si. A operação é idempotente (medido, byte a byte), então
+um dump honesto atravessa sem perder evidência; um que minta sai redigido. Custo
+medido: 53 ms num dump de 1,7 MB com 317 processos, uma vez na carga.
+
+A procedência publica os dois, porque respondem perguntas diferentes:
+
+```text
+redaction            o que o ARTEFATO afirma sobre si     (procedência)
+redaction_enforced   o que ESTE servidor fez antes de servir   (garantia)
+```
+
+`aletheia mcp --snapshot x.json --allow-secrets` dispensa a imposição — "sirva o
+que estiver cru aí dentro". Ela não promete recuperar o que já saiu redigido do
+host, e não exige `--profile full`: sobre um artefato não há tool de leitura a
+destravar, e o que ela governa é o ingresso.
+
+`--snapshot --profile full` continua **recusado com o motivo**: um dump não
+carrega conteúdo de arquivo.
+
+### A trilha diz o que foi acessado
+
+Toda tool que emite dado cru projeta seu alvo para a auditoria — caminho, janela,
+pid. Nunca conteúdo, nunca valor de variável: a trilha sai em stderr e em
+arquivo, e transformá-la num segundo canal do mesmo segredo desfaria o portão que
+ela existe para auditar.
+
+```json
+{"seq":1,"method":"tools/call","target":"file.read /etc/shadow offset=0 length=4096"}
+```
 
 ### O que ainda não existe
 

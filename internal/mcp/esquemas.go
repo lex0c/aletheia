@@ -34,7 +34,7 @@ func esquemaEnvelope(dados string, comVeredito bool) json.RawMessage {
 "properties":{
  "provenance":{"type":"object",
   "description":"De onde veio este fato e em que condições. Vem INTEIRA do artefato, nunca da máquina onde o servidor roda.",
-  "required":["snapshot_id","source","scope","redaction","sidecar","authenticated"],
+  "required":["snapshot_id","source","scope","redaction","redaction_enforced","sidecar","authenticated"],
   "properties":{
    "snapshot_id":{"type":"string"},
    "source":{"type":"string","enum":["live","image"],"description":"o que o RETRATO descreve; um dump coletado com --root responde image"},
@@ -47,6 +47,8 @@ func esquemaEnvelope(dados string, comVeredito bool) json.RawMessage {
    "caps":{"type":"array","items":{"type":"string"},"description":"o que a COLETA conseguiu; o que falta explica a cobertura"},
    "redaction":{"type":"string","enum":["applied","absent","unknown_version","waived"],
     "description":"o que o ARTEFATO prova sobre a propria redacao — nao o que o servidor afirma. applied: o carimbo esta no arquivo, e toda superficie textual passou pela redacao na origem, entao a AUSENCIA de segredo aqui nao prova que nao havia nenhum. absent: o arquivo NAO prova ter sido redigido — trate o conteudo como possivelmente em claro e desconfie da procedencia. unknown_version: carimbo de uma politica que este binario nao conhece. waived: o operador escreveu --allow-secrets e a redacao NAO foi aplicada de proposito — este retrato carrega SEGREDO EM CLARO, e tudo que sair dele deve ser tratado como material sensivel."},
+   "redaction_enforced":{"type":"string","enum":["enforced","waived"],
+    "description":"O QUE ESTE SERVIDOR GARANTE, e é o unico campo de redacao que vale como garantia. enforced: os dados servidos passaram pela redacao DESTE binario antes de sair daqui, independentemente do que o artefato afirmasse sobre si. waived: o operador escreveu --allow-secrets e autorizou servir o que estiver ali — pode haver segredo em claro. Compare com o campo redaction, que é PROCEDENCIA: um dump nao é autenticado, e aquele carimbo é um campo que quem escreveu o arquivo escolheu."},
    "sidecar":{"type":"string","enum":["sidecar_matches","sidecar_absent","sidecar_mismatch","sidecar_not_applicable"],
     "description":"o que o arquivo .sha256 ao lado respondeu. sidecar_mismatch: o dump MUDOU depois de coletado, e o que sair daqui descreve outro artefato. sidecar_absent e ausencia de verificacao, nao verificacao. sidecar_not_applicable: este retrato nasceu de uma CAPTURA ao vivo e nunca virou bytes em disco — nao ha artefato a conferir, e por isso nao ha como reproduzir esta resposta depois. NAO é autenticacao: quem altera o dump altera o sidecar, porque os dois saem do mesmo host."},
    "authenticated":{"type":"boolean","description":"sempre false: nada neste artefato prova ORIGEM. A cadeia de custodia de verdade é o numero que o operador registrou fora do host."}}},

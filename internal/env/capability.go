@@ -1,6 +1,7 @@
 package env
 
 import (
+	"fmt"
 	"os"
 	"sort"
 	"strconv"
@@ -142,21 +143,66 @@ func le32(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
 }
 
-// CapabilityDoFD lê o `security.capability` de um descritor já aberto e
+// EstadoDaCapability é a resposta de CapabilityDoFD, e são QUATRO.
+//
+// Colapsá-los num booleano é o erro que esta ferramenta inteira combate. A
+// primeira versão devolvia `(c, bool)`, e ali ENODATA — "não tem capability",
+// que é resposta — saía igual a EPERM e EIO — "não consegui olhar", que é
+// lacuna. Um arquivo com cap_setuid+ep num diretório ilegível respondia
+// "não tem", e ninguém veria a retenção de privilégio.
+type EstadoDaCapability string
+
+const (
+	// CapabilityAusente: o xattr não está lá. É RESPOSTA — o arquivo não
+	// carrega capability nenhuma.
+	CapabilityAusente EstadoDaCapability = "absent"
+	// CapabilityPresente: lida e decodificada.
+	CapabilityPresente EstadoDaCapability = "present"
+	// CapabilitySemSuporte: o filesystem não guarda xattr. Também é resposta,
+	// e diferente de ausente: aqui a pergunta não se aplica.
+	CapabilitySemSuporte EstadoDaCapability = "unsupported"
+	// CapabilityIlegivel: o atributo pode existir e NÃO foi possível ler.
+	// LACUNA.
+	CapabilityIlegivel EstadoDaCapability = "unreadable"
+	// CapabilityIndecifravel: o atributo existe e este binário não sabe
+	// interpretá-lo — formato de um kernel mais novo, ou lixo plantado. Também
+	// é lacuna, e de um tipo que merece olhar: quem planta xattr malformado
+	// costuma estar contando com quem o descarta em silêncio.
+	CapabilityIndecifravel EstadoDaCapability = "undecodable"
+)
+
+// CapabilityDoFD lê o security.capability de um descritor já aberto e
 // identificado.
-func CapabilityDoFD(fh *os.File) (CapabilidadeDeArquivo, bool) {
-	buf := make([]byte, 32)
+//
+// O erro devolvido é EVIDÊNCIA para quem lê o relatório; quem decide o
+// significado é o estado.
+func CapabilityDoFD(fh *os.File) (CapabilidadeDeArquivo, EstadoDaCapability, error) {
+	buf := make([]byte, 64)
 	nb, err := syscall.BytePtrFromString("security.capability")
 	if err != nil {
-		return CapabilidadeDeArquivo{}, false
+		return CapabilidadeDeArquivo{}, CapabilityIlegivel, err
 	}
 	n, _, errno := syscall.Syscall6(syscall.SYS_FGETXATTR, fh.Fd(),
 		uintptr(unsafe.Pointer(nb)), uintptr(unsafe.Pointer(&buf[0])),
 		uintptr(len(buf)), 0, 0)
-	if errno != 0 {
-		return CapabilidadeDeArquivo{}, false
+	switch errno {
+	case 0:
+	case syscall.ENODATA:
+		return CapabilidadeDeArquivo{}, CapabilityAusente, nil
+	// ENOTSUP e EOPNOTSUPP são o MESMO número no Linux; listar os dois nem
+	// compila.
+	case syscall.ENOTSUP:
+		return CapabilidadeDeArquivo{}, CapabilitySemSuporte, nil
+	default:
+		return CapabilidadeDeArquivo{}, CapabilityIlegivel, errno
 	}
-	return DecodificarCapability(buf[:n])
+	c, ok := DecodificarCapability(buf[:n])
+	if !ok {
+		return CapabilidadeDeArquivo{}, CapabilityIndecifravel,
+			fmt.Errorf("security.capability tem %d bytes e este binário não "+
+				"reconhece o formato", n)
+	}
+	return c, CapabilityPresente, nil
 }
 
 // TodasAsCapabilities é a tabela inteira, para quem precisa validar entrada.

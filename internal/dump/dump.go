@@ -255,6 +255,18 @@ func ambienteDe(e *env.Env) Ambiente {
 // que publicar credencial num artefato que vai para ticket, repositório e para
 // dentro de um modelo remoto. Os campos não exportados ficam para trás, e é o
 // que se quer: nada deles é serializado.
+// Redigir aplica a política deste binário a uma cópia do Facts.
+//
+// Ela é exportada porque a redação tem DOIS papéis, e o servidor MCP precisa do
+// segundo. No `collect` ela é procedência: o carimbo conta o que aconteceu com
+// o artefato. No MCP ela precisa ser ENFORCEMENT: um dump não é autenticado, e
+// o carimbo é um campo que quem escreveu o arquivo escolheu. Confiar nele para
+// decidir o que sai daqui é confiar no alvo.
+//
+// A operação é idempotente — medido, byte a byte estável a partir da primeira
+// passada —, então re-aplicá-la sobre um artefato honesto não custa evidência.
+func Redigir(f *facts.Facts) *facts.Facts { return redigir(f) }
+
 func redigir(f *facts.Facts) *facts.Facts {
 	if f == nil {
 		return nil

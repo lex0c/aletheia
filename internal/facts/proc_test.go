@@ -193,3 +193,42 @@ func TestPanicNoColetorNaoDerrubaOProcesso(t *testing.T) {
 		t.Error("PID inválido não pode sair como leitura bem-sucedida")
 	}
 }
+
+// "NÃO CONSEGUI LER" NÃO É "AMBIENTE VAZIO".
+//
+// readEnviron descartava o erro de /proc/<pid>/environ com `_`, e um EACCES ou
+// um processo que terminou saíam como Env nulo — indistinguível de um processo
+// sem variável nenhuma, coisa que praticamente não existe fora de thread de
+// kernel.
+//
+// É o fato que sustenta process.environ, a tool mais sensível do perfil
+// completo do servidor MCP: ali um objeto vazio se lê como "não havia
+// credencial nenhuma".
+func TestEnvironDistingueLacunaDeAmbienteVazio(t *testing.T) {
+	// 1. O próprio processo: leitura bem-sucedida.
+	meu := &Process{PID: os.Getpid()}
+	readEnviron(meu, false)
+	if !meu.EnvLido {
+		t.Fatal("a leitura do próprio ambiente falhou: o teste não mede nada")
+	}
+	if meu.EnvErro != "" {
+		t.Errorf("leitura ok e com erro registrado: %q", meu.EnvErro)
+	}
+	if len(meu.EnvKeys) == 0 {
+		t.Error("nenhuma chave observada no próprio processo")
+	}
+
+	// 2. Um pid que não existe: LACUNA, e o motivo dito.
+	morto := &Process{PID: 1 << 30}
+	readEnviron(morto, false)
+	if morto.EnvLido {
+		t.Fatal("um pid inexistente não pode sair como ambiente LIDO")
+	}
+	if morto.EnvErro == "" {
+		t.Error("a lacuna precisa carregar o motivo: sem ele, quem lê o relatório " +
+			"não distingue permissão negada de processo que terminou")
+	}
+	if len(morto.Env) != 0 || len(morto.EnvKeys) != 0 {
+		t.Errorf("uma leitura que falhou não pode produzir chave: %v", morto.EnvKeys)
+	}
+}

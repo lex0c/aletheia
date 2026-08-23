@@ -83,6 +83,26 @@ type Ferramenta struct {
 	// é inválido e quebra o teste de catálogo. Ver projecao.go.
 	Dados ClasseDeDados
 
+	// Alvo projeta os argumentos para a TRILHA DE AUDITORIA.
+	//
+	// A trilha registrava só o nome da tool mais o snapshot_id, e para o perfil
+	// completo isso não responde a pergunta que o operador faz depois do
+	// incidente: o que exatamente o agente acessou? Duas chamadas —
+	//
+	//	file.read {"path":"/etc/shadow"}
+	//	file.read {"path":"/root/.ssh/id_ed25519"}
+	//
+	// — saíam idênticas no log. Num modo que permite a uma IA ler credencial
+	// como root, a trilha precisa distinguir.
+	//
+	// A projeção é POR TOOL e devolve só IDENTIFICAÇÃO: caminho, pid, offset.
+	// Nunca conteúdo, nunca valor de variável, nunca bytes lidos — a trilha vai
+	// para stderr e para um arquivo, e transformá-la num segundo canal de
+	// vazamento desfaria o portão que ela existe para auditar.
+	//
+	// nil = a tool não acrescenta nada além do nome e do snapshot.
+	Alvo func(args json.RawMessage) string
+
 	Rodar func(s *Servidor, args json.RawMessage) (any, *ErroRPC)
 }
 

@@ -57,8 +57,8 @@ type Identidade struct {
 }
 
 // ErrEhLink é a recusa de seguir um symlink quando o chamador não pediu.
-var ErrEhLink = errors.New("o caminho é um symlink e follow_symlinks é false: " +
-	"NÃO foi seguido")
+var ErrEhLink = errors.New("algum componente do caminho é um symlink e " +
+	"follow_symlinks é false: NENHUM link foi atravessado")
 
 // MaxLeituraDirecionada é o teto de UMA chamada de leitura direcionada.
 //
@@ -83,6 +83,31 @@ func (e *Env) AbrirParaInspecao(p string, seguirLink bool) (*os.File, Identidade
 	if seguirLink {
 		extra = 0
 	}
+	// SEM SEGUIR LINK, O CAMINHO É PERCORRIDO POR DESCRITOR.
+	//
+	// É a diferença entre observar e garantir. A versão anterior resolvia a
+	// cadeia com uma série de Lstat e DEPOIS abria o caminho de novo: duas
+	// resoluções independentes, e entre elas cabia a troca de um link. A
+	// resposta trazia a identidade real do fd — isso estava certo —, mas
+	// afirmava junto uma link_chain e um resolved_path que podiam pertencer a
+	// outra resolução. Num host comprometido, que é o threat model, a cadeia é
+	// justamente a defesa escolhida.
+	//
+	// Agora cada componente é aberto com openat + O_NOFOLLOW a partir do
+	// descritor do anterior. Nenhum symlink é atravessado, em nenhuma posição —
+	// nem o final nem os do meio. É o que openat2(RESOLVE_NO_SYMLINKS) faria, e
+	// funciona no piso de kernel que esta ferramenta declara, porque openat com
+	// O_NOFOLLOW é de sempre.
+	//
+	// A garantia que sai daqui é MAIS FORTE que a anterior, e mais forte que a
+	// do kernel para um open comum: com follow_symlinks:false, o arquivo aberto
+	// está exatamente no caminho pedido. A cadeia vazia deixa de ser "não vi
+	// link" e passa a ser "não há link", e resolved_path deixa de ser
+	// observação e vira o próprio caminho.
+	if !seguirLink {
+		return e.abrirPorDescritor(p)
+	}
+
 	// O os.Root NÃO honra O_NOFOLLOW, e isto foi medido: com a raiz travada, um
 	// `/tmp/atalho -> ../etc/shadow` abriu o shadow com follow_symlinks:false.
 	// Ele resolve os componentes por conta própria — é assim que garante que
@@ -98,11 +123,6 @@ func (e *Env) AbrirParaInspecao(p string, seguirLink bool) (*os.File, Identidade
 	// Prometer O_NOFOLLOW aqui e não entregá-lo seria pior que não oferecer a
 	// opção: quem lê "não segui link" concluiria que o caminho pedido é o
 	// caminho lido.
-	if !seguirLink && e.root != nil {
-		if fi, err := e.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			return nil, identidadeDe(fi), ErrEhLink
-		}
-	}
 	fh, err := e.abrirComExtras(p, extra)
 	if err != nil {
 		// ELOOP com O_NOFOLLOW significa "o componente final É um link", e não
@@ -236,7 +256,7 @@ func listarXattr(fh *os.File) ([]string, error) {
 			continue
 		}
 		if errno != 0 {
-			if errno == syscall.ENOTSUP || errno == syscall.EOPNOTSUPP {
+			if errno == syscall.ENOTSUP {
 				return nil, nil // filesystem sem xattr: ausência, não falha
 			}
 			return nil, errno
@@ -354,4 +374,141 @@ func (e *Env) CadeiaDeLinks(p string) (cadeia []string, resolvido string, err er
 	// distintos, que é o que o kernel também recusa.
 	return append(cadeia, "cadeia longa demais: parei em "+strconv.Itoa(maxSaltos)+
 		" saltos, que é o mesmo teto do kernel"), atual, nil
+}
+
+// oPath é O_PATH. O Go não o exporta em syscall, e o valor é 010000000 no
+// asm-generic do kernel — o mesmo em x86, arm, arm64 e mips. Um teste o
+// verifica em tempo de execução em vez de confiar: ele abre um diretório com a
+// flag e exige que a LEITURA falhe, que é a propriedade que importa.
+const oPath = 0x200000
+
+// abrirPorDescritor percorre o caminho componente a componente, sem atravessar
+// symlink nenhum, e sem ACORDAR driver de dispositivo.
+//
+// Cada componente é aberto com O_PATH: o kernel devolve uma referência ao
+// objeto e NÃO chama o open() do driver. É isso que separa "descobri que era um
+// device node" de "abri um device node para descobrir". Num host comprometido
+// com root — que é o threat model desta entrega — um caminho de aparência banal
+// pode ser um /dev/qualquer-coisa que faz algo ao ser aberto.
+//
+// O symlink é detectado pelo TIPO no fstat, e não por errno: O_PATH com
+// O_NOFOLLOW devolve um descritor para o PRÓPRIO link, em vez de ELOOP. Medido.
+//
+// Só depois de provado regular o arquivo é reaberto para leitura, por
+// /proc/self/fd/N — que reabre o MESMO inode, sem uma segunda resolução de
+// caminho. A raiz do percurso é "/" no host vivo e a raiz da imagem em modo
+// image; como nenhum link é atravessado e validarCaminho já recusou caminho não
+// normalizado — logo, sem ".." —, a contenção é por construção.
+func (e *Env) abrirPorDescritor(p string) (*os.File, Identidade, error) {
+	if err := e.raizIndisponivel(); err != nil {
+		return nil, Identidade{}, err
+	}
+	raiz := "/"
+	if e.Root != "" {
+		raiz = e.Root
+	}
+	// A raiz é aberta SEGUINDO link de propósito: ela é o caminho que o
+	// OPERADOR deu na linha de comando, não um componente que o alvo escolheu.
+	dirfd, err := syscall.Open(raiz,
+		syscall.O_RDONLY|oPath|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, Identidade{}, &os.PathError{Op: "open", Path: raiz, Err: err}
+	}
+	defer syscall.Close(dirfd)
+
+	partes := strings.Split(strings.Trim(path.Clean("/"+p), "/"), "/")
+	atual := dirfd
+	fechar := func() {
+		if atual != dirfd {
+			syscall.Close(atual)
+		}
+	}
+	for i, parte := range partes {
+		if parte == "" {
+			continue
+		}
+		fd, err := syscall.Openat(atual, parte,
+			syscall.O_RDONLY|oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+		if err != nil {
+			fechar()
+			return nil, Identidade{}, &os.PathError{Op: "openat", Path: parte, Err: err}
+		}
+		fechar()
+		atual = fd
+
+		var st syscall.Stat_t
+		if err := syscall.Fstat(atual, &st); err != nil {
+			syscall.Close(atual)
+			return nil, Identidade{}, err
+		}
+		id := identidadeDeStat(&st)
+
+		// Um link em QUALQUER posição encerra o percurso. Não é erro do kernel:
+		// é a decisão desta função, e é mais forte do que um open comum daria.
+		if st.Mode&syscall.S_IFMT == syscall.S_IFLNK {
+			syscall.Close(atual)
+			return nil, id, ErrEhLink
+		}
+		if i < len(partes)-1 {
+			if st.Mode&syscall.S_IFMT != syscall.S_IFDIR {
+				syscall.Close(atual)
+				return nil, id, &os.PathError{
+					Op: "openat", Path: parte, Err: syscall.ENOTDIR}
+			}
+			continue
+		}
+		if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+			syscall.Close(atual)
+			// A identidade sai completa mesmo na recusa: "isto é um device
+			// node, dev tal, inode tal" é o que quem investiga queria saber.
+			return nil, id, ErrNaoEhArquivo
+		}
+		fh, err := reabrirParaLeitura(atual)
+		syscall.Close(atual)
+		if err != nil {
+			return nil, id, err
+		}
+		return fh, id, nil
+	}
+	// Só "/" sobrou depois do Clean, e "/" não é arquivo comum.
+	return nil, Identidade{Tipo: "dir"}, ErrNaoEhArquivo
+}
+
+// reabrirParaLeitura converte o descritor O_PATH num descritor de leitura.
+//
+// Por /proc/self/fd/N, que reabre o MESMO inode — não é uma segunda resolução
+// do caminho, e por isso não reabre a janela que o percurso fechou.
+func reabrirParaLeitura(fd int) (*os.File, error) {
+	return os.OpenFile("/proc/self/fd/"+strconv.Itoa(fd),
+		os.O_RDONLY|syscall.O_NONBLOCK, 0)
+}
+
+func identidadeDeStat(st *syscall.Stat_t) Identidade {
+	id := Identidade{
+		Dev: uint64(st.Dev), Inode: uint64(st.Ino),
+		Modo:  fmt.Sprintf("%04o", os.FileMode(st.Mode).Perm()),
+		Nlink: uint64(st.Nlink), UID: st.Uid, GID: st.Gid,
+		Tamanho:  st.Size,
+		MtimeUTC: time.Unix(int64(st.Mtim.Sec), int64(st.Mtim.Nsec)).UTC().Format(time.RFC3339),
+		CtimeUTC: time.Unix(int64(st.Ctim.Sec), int64(st.Ctim.Nsec)).UTC().Format(time.RFC3339),
+	}
+	switch st.Mode & syscall.S_IFMT {
+	case syscall.S_IFREG:
+		id.Tipo = "regular"
+	case syscall.S_IFLNK:
+		id.Tipo = "symlink"
+	case syscall.S_IFDIR:
+		id.Tipo = "dir"
+	case syscall.S_IFIFO:
+		id.Tipo = "fifo"
+	case syscall.S_IFSOCK:
+		id.Tipo = "socket"
+	case syscall.S_IFCHR:
+		id.Tipo = "chardev"
+	case syscall.S_IFBLK:
+		id.Tipo = "blockdev"
+	default:
+		id.Tipo = "other"
+	}
+	return id
 }

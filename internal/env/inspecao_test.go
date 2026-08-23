@@ -69,44 +69,77 @@ func TestImagemRecusaLinkQueSaiDaRaiz(t *testing.T) {
 	}
 }
 
-// O_NOFOLLOW SÓ PROTEGE O ÚLTIMO COMPONENTE, e a cadeia é o que sobra.
+// SEM SEGUIR LINK, NENHUM COMPONENTE É ATRAVESSADO — nem o do meio.
 //
-// Medido, não suposto: com `/tmp/mau -> /etc`, abrir `/tmp/mau/shadow` com
-// O_NOFOLLOW abre o /etc/shadow de verdade. openat2 com RESOLVE_NO_SYMLINKS
-// resolveria e exige Linux 5.6, contra o piso de 3.2 que esta ferramenta
-// declara sustentar.
+// A versão anterior deste teste media o contrário, e estava certa sobre o
+// kernel: O_NOFOLLOW protege só o componente FINAL, e `/tmp/mau/segredos.env`
+// com `/tmp/mau -> ../etc` abria o arquivo real. A defesa era CONTAR — devolver
+// a cadeia e o inode.
 //
-// Fingir a trava seria pior que não tê-la: quem lê "follow_symlinks: false"
-// concluiria que o caminho pedido é o caminho lido. A cadeia diz que não.
-func TestNoFollowProtegeSoOFinalEACadeiaConta(t *testing.T) {
+// Contar tinha um furo: a cadeia saía de uma série de Lstat e o arquivo saía de
+// um open SEPARADO, duas resoluções independentes do mesmo caminho. Entre elas
+// cabia a troca de um link, e a resposta afirmaria uma cadeia que pertencia a
+// outra resolução — justamente no host comprometido, que é o threat model.
+//
+// Agora o caminho é percorrido componente a componente por DESCRITOR, e nenhum
+// link é atravessado em posição nenhuma. É o que openat2(RESOLVE_NO_SYMLINKS)
+// faria, sem exigir Linux 5.6.
+func TestSemSeguirLinkNenhumComponenteEhAtravessado(t *testing.T) {
 	e, _ := raizDeInspecao(t)
 
-	// 1. O último componente é link: RECUSADO, e a recusa é resposta.
+	// 1. O último componente é link: recusado, como antes.
 	if _, _, err := e.AbrirParaInspecao("/tmp/atalho", false); !errors.Is(err, ErrEhLink) {
-		t.Errorf("symlink final sem follow: err=%v, queria ErrEhLink", err)
+		t.Errorf("symlink final: err=%v, queria ErrEhLink", err)
 	}
 
-	// 2. O componente do MEIO é link: abre, e abre OUTRO arquivo.
-	fh, id, err := e.AbrirParaInspecao("/tmp/mau/shadow", false)
+	// 2. O componente do MEIO também. O kernel abriria; este percurso não.
+	if _, _, err := e.AbrirParaInspecao("/tmp/mau/shadow", false); !errors.Is(err, ErrEhLink) {
+		t.Fatalf("o link do MEIO foi atravessado: err=%v.\n"+
+			"Com follow_symlinks:false o arquivo aberto tem de estar exatamente "+
+			"no caminho pedido — senão a resposta descreve outro arquivo.", err)
+	}
+
+	// 3. E o caminho sem link nenhum continua abrindo.
+	fh, id, err := e.AbrirParaInspecao("/etc/shadow", false)
 	if err != nil {
-		t.Fatalf("o kernel abre isto e o teste precisa medir o que ele abriu: %v", err)
+		t.Fatalf("caminho sem link: %v", err)
+	}
+	fh.Close()
+	if id.Inode == 0 {
+		t.Error("a identidade não veio")
+	}
+}
+
+// COM follow_symlinks:true a travessia acontece, e a cadeia a descreve.
+//
+// Aqui a cadeia é observação, e não garantia — quem chamou pediu para seguir. O
+// que continua sendo FATO é dev e inode: a identidade do descritor que foi
+// realmente aberto.
+func TestSeguindoLinkAIdentidadeEhDoAlvo(t *testing.T) {
+	e, _ := raizDeInspecao(t)
+
+	fh, id, err := e.AbrirParaInspecao("/tmp/mau/shadow", true)
+	if err != nil {
+		t.Fatalf("com follow tinha de abrir: %v", err)
 	}
 	fh.Close()
 
-	// 3. E a identidade prova QUAL arquivo foi aberto.
-	_, idReal, err := e.AbrirParaInspecao("/etc/shadow", false)
+	fh2, idReal, err := e.AbrirParaInspecao("/etc/shadow", false)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fh2.Close()
 	if id.Inode != idReal.Inode || id.Dev != idReal.Dev {
-		t.Fatalf("a inspeção de /tmp/mau/shadow devia ter aberto o mesmo inode "+
-			"de /etc/shadow: %d vs %d", id.Inode, idReal.Inode)
+		t.Fatalf("seguindo o link, a identidade tem de ser a do ALVO: %d vs %d",
+			id.Inode, idReal.Inode)
 	}
 
-	// 4. A CADEIA é o que transforma isso em evidência em vez de surpresa.
-	cadeia, resolvido, _ := e.CadeiaDeLinks("/tmp/mau/shadow")
+	cadeia, resolvido, err := e.CadeiaDeLinks("/tmp/mau/shadow")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resolvido != "/etc/shadow" {
-		t.Errorf("resolvido=%q, queria /etc/shadow", resolvido)
+		t.Errorf("resolvido=%q", resolvido)
 	}
 	if len(cadeia) != 1 || !strings.Contains(cadeia[0], "/tmp/mau -> ../etc") {
 		t.Errorf("a cadeia precisa NOMEAR o link atravessado: %v", cadeia)
@@ -255,5 +288,73 @@ func TestSemRaizOKernelRecusaOLinkFinal(t *testing.T) {
 	defer fh.Close()
 	if id.Tipo != "regular" || id.Tamanho != 8 {
 		t.Errorf("a identidade é do ALVO aberto, não do link: %+v", id)
+	}
+}
+
+// O_PATH FAZ O QUE ESTE CÓDIGO ACHA QUE FAZ.
+//
+// A constante não é exportada pelo syscall do Go e está escrita à mão aqui —
+// 010000000, o valor do asm-generic. Um número de kernel escrito à mão merece
+// prova, e a propriedade que importa não é o número: é que o descritor
+// resultante NÃO seja legível, porque é isso que garante que o open() do driver
+// não foi chamado.
+func TestOPathAbreSemPermitirLeitura(t *testing.T) {
+	// O alvo é um ARQUIVO COMUM, e não um diretório: ler um diretório falha de
+	// qualquer jeito, e um teste sobre "/" passaria mesmo com oPath = 0. A
+	// primeira versão deste teste fazia exatamente isso, e a mutação que zerava
+	// a constante passou limpa.
+	alvo := filepath.Join(t.TempDir(), "comum.txt")
+	if err := os.WriteFile(alvo, []byte("conteudo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := syscall.Open(alvo, syscall.O_RDONLY|oPath|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("O_PATH não abriu um arquivo comum: a constante 0x%x não é "+
+			"O_PATH neste kernel/arquitetura (%v)", oPath, err)
+	}
+	defer syscall.Close(fd)
+
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		t.Fatalf("fstat num descritor O_PATH tem de funcionar: %v", err)
+	}
+	b := make([]byte, 1)
+	if n, err := syscall.Read(fd, b); err == nil {
+		t.Fatalf("o descritor de um arquivo comum é LEGÍVEL (%d byte): isto não "+
+			"é O_PATH, e o open do driver de um device node estaria sendo "+
+			"chamado antes da recusa", n)
+	}
+}
+
+// O DEVICE NODE É RECUSADO SEM QUE O DRIVER SEJA ACORDADO.
+//
+// A recusa acontecia depois do open: para fifo o O_NONBLOCK resolvia, mas para
+// um device node o callback de open do driver já tinha rodado. Num host
+// comprometido com root — o threat model desta entrega — um caminho de
+// aparência banal pode ser um /dev/qualquer-coisa que faz algo ao ser aberto.
+//
+// A recusa continua carregando a identidade: "isto é um chardev, dev tal, inode
+// tal" é exatamente o que quem investiga queria saber.
+func TestDeviceNodeEhRecusadoComIdentidade(t *testing.T) {
+	e := &Env{Source: SourceLive, Caps: CapFilesystem, CapReason: map[string]string{}}
+
+	for _, c := range []struct{ p, tipo string }{
+		{"/dev/zero", "chardev"},
+		{"/dev/null", "chardev"},
+	} {
+		if _, err := os.Stat(c.p); err != nil {
+			continue
+		}
+		_, id, err := e.AbrirParaInspecao(c.p, false)
+		if !errors.Is(err, ErrNaoEhArquivo) {
+			t.Errorf("%s: err=%v, queria ErrNaoEhArquivo", c.p, err)
+			continue
+		}
+		if id.Tipo != c.tipo {
+			t.Errorf("%s: a recusa precisa DIZER o que era: tipo=%q", c.p, id.Tipo)
+		}
+		if id.Inode == 0 {
+			t.Errorf("%s: a recusa jogou fora a identidade", c.p)
+		}
 	}
 }

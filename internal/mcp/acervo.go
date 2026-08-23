@@ -50,6 +50,21 @@ type Retrato struct {
 	// afirma cadeia de custódia inteira.
 	Soma EstadoDaSoma
 
+	// Redigido é o que ESTE servidor garante sobre os dados servidos, e é
+	// diferente do carimbo do artefato.
+	//
+	//	Dump.Redacao   PROCEDÊNCIA: o que o arquivo AFIRMA sobre si. Um dump não
+	//	               é autenticado — o próprio envelope diz isso —, então este
+	//	               campo é escolha de quem escreveu o arquivo.
+	//	Redigido       ENFORCEMENT: o que este binário fez com os dados antes de
+	//	               servi-los. É afirmação do servidor, não do alvo.
+	//
+	// Confundir os dois era um contorno de --allow-secrets: bastava um artefato
+	// dizer que não foi redigido (ou mentir que foi, carregando texto cru) para
+	// as tools declaradas DadosRedigidosNaOrigem servirem segredo sem
+	// consentimento nenhum.
+	Redigido bool
+
 	// O relatório é memoizado porque o retrato é IMUTÁVEL: rodar o catálogo
 	// inteiro sobre os mesmos fatos com o mesmo ambiente é determinístico, e
 	// quatro tools precisam dele (findings.list, finding.get, coverage.get,
@@ -124,7 +139,12 @@ func (r *Retrato) Escopo() Escopo {
 
 // Procedencia é a deste retrato, já montada.
 func (r *Retrato) Procedencia() Procedencia {
-	return ProcedenciaDeDump(r.ID, r.Dump, r.Soma.String(), string(r.Escopo()))
+	p := ProcedenciaDeDump(r.ID, r.Dump, r.Soma.String(), string(r.Escopo()))
+	p.RedacaoImposta = ImposicaoDispensada
+	if r.Redigido {
+		p.RedacaoImposta = ImposicaoAplicada
+	}
+	return p
 }
 
 // EstadoDaSoma é a resposta do sidecar .sha256.
@@ -202,6 +222,10 @@ type Acervo struct {
 	// o modo snapshot: ali o operador declarou os arquivos no lançamento, e
 	// limitar o que ele mesmo pediu não protege ninguém.
 	Teto int
+
+	// ServirCru desliga a redação de INGRESSO. Ver o comentário sobre ela em
+	// Carregar. Zero value = false = impõe, que é o lado seguro.
+	ServirCru bool
 }
 
 func NovoAcervo() *Acervo { return &Acervo{por: map[string]*Retrato{}} }
@@ -235,6 +259,21 @@ var ErrRetratoDesconhecido = errors.New("snapshot_id desconhecido neste servidor
 //	não vaza       o caminho no disco do analista (/home/ana/casos/acme-2026/…)
 //	               não tem por que chegar ao modelo, e o rótulo legível sai do
 //	               PRÓPRIO dump: o host e a data da coleta
+// ServirCru é o operador tendo dito --allow-secrets em modo snapshot: o artefato
+// é servido COMO ESTÁ, sem a redação de ingresso.
+//
+// O zero value é false, e é o lado seguro — um Acervo construído sem pensar
+// impõe a redação.
+//
+// Sem este eixo, --allow-secrets era contornável pela porta do snapshot: o
+// portão de DadosCrus classifica a TOOL, e o carimbo do artefato classifica o
+// ARTEFATO, mas nada obrigava o segundo a ser verdade. Um dump com
+// `"redaction":{"applied":false}` — ou um que simplesmente MINTA `true` e
+// carregue texto cru — era servido pelas tools declaradas
+// DadosRedigidosNaOrigem, sem consentimento nenhum. O próprio envelope deste
+// servidor diz que o artefato NÃO é autenticado; usá-lo como barreira de
+// segurança contradiz isso.
+
 func (a *Acervo) Carregar(caminho string) (*Retrato, error) {
 	if caminho == "-" {
 		// A entrada padrão é o CANAL DO PROTOCOLO. Ler o dump dali comeria as
@@ -260,6 +299,14 @@ func (a *Acervo) Carregar(caminho string) (*Retrato, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A REDAÇÃO DE INGRESSO. Ela roda ANTES do índice, porque produz outro
+	// Facts — indexar o que vai ser descartado é trabalho jogado fora.
+	redigido := true
+	if a.ServirCru {
+		redigido = false
+	} else {
+		d.Facts = dump.Redigir(d.Facts)
+	}
 	// Sem o índice, ProcessByPID e a busca por inode voltam a ser lineares
 	// dentro de laços sobre processos — e todo dossiê de alvo passa por elas.
 	d.Facts.Index()
@@ -270,7 +317,8 @@ func (a *Acervo) Carregar(caminho string) (*Retrato, error) {
 		Digest: digest,
 		Rotulo: rotuloDe(d),
 		Dump:   d, Env: e, Fatos: d.Facts, Fonte: fonte,
-		Soma: conferirSidecar(caminho, digest),
+		Soma:     conferirSidecar(caminho, digest),
+		Redigido: redigido,
 	}
 
 	a.mu.Lock()
@@ -420,6 +468,9 @@ func (a *Acervo) Capturar(e *env.Env, escopo Escopo) (*Retrato, error) {
 		ID: id, Rotulo: rotuloDe(d),
 		Dump: d, Env: congelado, Fatos: d.Facts, Fonte: fonte,
 		Soma: SomaNaoSeAplica,
+		// A captura passou por dump.De, que redige a menos que o operador tenha
+		// dispensado — e é a MESMA flag que mandou a coleta guardar os valores.
+		Redigido: !e.Segredos,
 	}
 
 	a.mu.Lock()

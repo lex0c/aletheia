@@ -100,11 +100,30 @@ type Procedencia struct {
 	// "não existe" de "nem foi coletado".
 	Escopo string `json:"scope"`
 
+	// RedacaoImposta é o que ESTE servidor garante, e Redacao é o que o
+	// ARTEFATO afirma. Os dois viajam porque respondem perguntas diferentes:
+	// "de onde isto veio e em que condições" e "o que saiu daqui".
+	//
+	// O segundo é o único que vale como garantia: um dump não é autenticado, e
+	// o carimbo dele é um campo que quem escreveu o arquivo escolheu.
+	RedacaoImposta string `json:"redaction_enforced"`
+
 	// Autenticado é sempre false, e está escrito para não deixar dúvida: nada
 	// neste artefato prova origem. Ele existe para o dia em que existir
 	// assinatura — e, até lá, para impedir a leitura otimista de `sidecar`.
 	Autenticado bool `json:"authenticated"`
 }
+
+// Os dois valores de RedacaoImposta.
+const (
+	// ImposicaoAplicada: este binário passou os dados servidos pela redação
+	// dele, independentemente do que o artefato afirmasse. É a garantia forte, e
+	// é o padrão.
+	ImposicaoAplicada = "enforced"
+	// ImposicaoDispensada: o operador autorizou servir o que estiver ali. Os
+	// dados podem conter segredo em claro.
+	ImposicaoDispensada = "waived"
+)
 
 // ProcedenciaDeDump monta a procedência a partir do artefato.
 func ProcedenciaDeDump(id string, d *dump.Dump, sidecar, escopo string) Procedencia {

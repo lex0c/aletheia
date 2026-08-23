@@ -230,7 +230,10 @@ MCP — a pergunta que a IA faz DE VOLTA
                 file.read, file.hash, file.xattrs, file.capabilities. Só em
                 --live/--root — um dump não carrega conteúdo de arquivo.
                 Estas tools NÃO respondem sobre um retrato: elas leem AGORA, e
-                o envelope delas diz isso em vez de fingir procedência
+                o envelope delas diz isso em vez de fingir procedência. Por
+                padrão NENHUM symlink é atravessado, em posição nenhuma do
+                caminho, e o percurso usa O_PATH — device node é identificado
+                sem o driver ser acordado
   --allow-secrets
                 destrava os bytes CRUS saírem daqui: file.read, file.xattrs e
                 process.environ. Exige --profile full. Também manda a COLETA
@@ -238,7 +241,11 @@ MCP — a pergunta que a IA faz DE VOLTA
                 carimbado "redaction: waived" — ele carrega segredo em claro.
                 A trava importa porque o Aletheia não tem egress, mas o cliente
                 MCP quase certamente manda o resultado a um modelo remoto, e
-                essa metade não está sob controle desta ferramenta
+                essa metade não está sob controle desta ferramenta.
+                Em --snapshot ela tem outro sentido: o servidor RE-REDIGE todo
+                artefato no ingresso, porque o carimbo de um dump não
+                autenticado é procedência e não barreira; a flag dispensa essa
+                imposição, sem prometer recuperar o que já saiu redigido
   --capture-budget D
                 orçamento COOPERATIVO de leitura do host, acumulado pela sessão
                 inteira (padrão 10m). Ele faz duas coisas: recusa admitir uma

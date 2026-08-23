@@ -117,6 +117,14 @@ func runMCP(args []string) int {
 	}
 
 	acervo := mcp.NovoAcervo()
+	// A REDAÇÃO DE INGRESSO é imposta por padrão, e só o operador a dispensa.
+	//
+	// O carimbo do artefato é procedência, não barreira: quem escreve o arquivo
+	// escolhe o que ele diz. Sem esta linha, um dump que se declarasse não
+	// redigido — ou que mentisse que foi, carregando texto cru — era servido
+	// pelas tools comuns sem consentimento nenhum, contornando o --allow-secrets
+	// pela porta do --snapshot.
+	acervo.ServirCru = pol.PermitirSegredos
 	// TETO DE RETRATOS VIVOS. Cada um segura os fatos INTEIROS na memória de um
 	// processo que roda no host investigado, e a ferramenta promete passar pouco
 	// recurso ali. Em modo snapshot não há teto: o operador declarou os arquivos
@@ -302,17 +310,20 @@ func policyDeFlags(retratos caminhos, vivo bool, raiz, perfil string,
 	// para aprender o que a primeira mensagem já podia dizer: em snapshot
 	// NENHUMA das duas significa coisa alguma, porque o artefato não carrega
 	// nem segredo nem conteúdo de arquivo.
-	if pol.Modo == mcp.ModoSnapshot && permitirSeg {
-		fmt.Fprintln(os.Stderr,
-			"mcp --snapshot --allow-secrets: recusado, e o motivo importa.\n\n"+
-				"O dump JÁ foi redigido na origem: argv, linha de cron, variável de crontab\n"+
-				"e ExecStart saíram do host mascarados, e o environ já sai do coletor só com\n"+
-				"os NOMES das variáveis mais uma allowlist de valores. Não há o que\n"+
-				"destravar aqui — o segredo não está no arquivo.\n\n"+
-				"Ignorar a flag em silêncio seria pior: você leria a ausência de segredo no\n"+
-				"resultado como prova de que não havia nenhum.")
-		return pol, 3
-	}
+	// --snapshot --allow-secrets DEIXOU DE SER RECUSA, e virou consentimento.
+	//
+	// A recusa dizia "o dump já foi redigido na origem, não há o que
+	// destravar". Aquilo tratava o CARIMBO do artefato como fato — e um dump
+	// não é autenticado. O próprio envelope deste servidor diz isso.
+	//
+	// A propriedade nova é outra: o servidor RE-REDIGE no ingresso, sempre,
+	// independentemente do que o arquivo afirme sobre si. A flag agora autoriza
+	// pular essa imposição, e ela não promete recuperar segredo nenhum: o que
+	// saiu redigido do host continua redigido. Ela diz "sirva o que estiver
+	// cru aí dentro".
+	//
+	// Não exige --profile full porque não há tool de leitura a destravar sobre
+	// um artefato; o que ela governa aqui é o INGRESSO, não a superfície.
 	if pol.Modo == mcp.ModoSnapshot && pol.Perfil == mcp.PerfilCompleto {
 		fmt.Fprintln(os.Stderr,
 			"mcp --snapshot --profile full: recusado, e o motivo importa.\n\n"+
@@ -324,9 +335,10 @@ func policyDeFlags(retratos caminhos, vivo bool, raiz, perfil string,
 		return pol, 3
 	}
 
-	// --allow-secrets SEM --profile full não significa nada: quem serve dado
-	// cru é a classe DadosCrus, e ela mora atrás do perfil.
-	if permitirSeg && pol.Perfil != mcp.PerfilCompleto {
+	// Nos modos de AQUISIÇÃO, --allow-secrets sem --profile full não significa
+	// nada: quem serve dado cru ali é a classe DadosCrus, e ela mora atrás do
+	// perfil. Em snapshot ela governa o ingresso e vale sozinha.
+	if permitirSeg && pol.Modo != mcp.ModoSnapshot && pol.Perfil != mcp.PerfilCompleto {
 		fmt.Fprintln(os.Stderr,
 			"mcp --allow-secrets exige --profile full.\n\n"+
 				"O perfil é que destrava LER O HOST por caminho; --allow-secrets é que\n"+

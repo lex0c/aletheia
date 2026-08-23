@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -156,7 +157,20 @@ func TestLeituraDizQualArquivoFoiRealmenteAberto(t *testing.T) {
 		t.Error("caminho sem link não pode inventar cadeia")
 	}
 
-	pelaCadeia, er := rodarTool(t, s, "file.read", `{"path":"/tmp/mau/segredos.env"}`)
+	if dd["path_binding"] != "exact" {
+		t.Errorf("sem seguir link, o vínculo é EXATO: %v", dd["path_binding"])
+	}
+
+	// O link do MEIO é recusado por padrão: nenhum componente é atravessado.
+	if _, er := rodarTool(t, s, "file.read", `{"path":"/tmp/mau/segredos.env"}`); er == nil {
+		t.Fatal("com follow_symlinks:false nenhum componente pode ser atravessado, " +
+			"nem os do meio — senão o arquivo lido não está no caminho pedido")
+	}
+
+	// E seguindo, a cadeia descreve o percurso — como OBSERVAÇÃO, com o inode
+	// como fato.
+	pelaCadeia, er := rodarTool(t, s, "file.read",
+		`{"path":"/tmp/mau/segredos.env","follow_symlinks":true}`)
 	if er != nil {
 		t.Fatalf("pelo link intermediário: %v", er)
 	}
@@ -164,6 +178,9 @@ func TestLeituraDizQualArquivoFoiRealmenteAberto(t *testing.T) {
 	if pd["inode"] != dd["inode"] {
 		t.Fatalf("o link do meio devia levar ao MESMO inode: %v vs %v",
 			pd["inode"], dd["inode"])
+	}
+	if pd["path_binding"] != "followed" {
+		t.Errorf("seguindo link, o vínculo NÃO é exato: %v", pd["path_binding"])
 	}
 	cadeia, _ := pd["link_chain"].([]any)
 	if len(cadeia) != 1 || !strings.Contains(cadeia[0].(string), "/tmp/mau -> ../etc") {
@@ -404,8 +421,8 @@ func TestConsentimentoChegaAoEnviron(t *testing.T) {
 			"ausência de credencial nela se leria como prova de que não havia "+
 			"nenhuma.", chave, amb[chave])
 	}
-	if len(amb) < int(d["keys_total"].(float64)) {
-		t.Errorf("faltam valores: %d de %v chaves", len(amb), d["keys_total"])
+	if len(amb) < int(d["keys_observed"].(float64)) {
+		t.Errorf("faltam valores: %d de %v chaves", len(amb), d["keys_observed"])
 	}
 
 	// E o outro lado: SEM consentimento, o valor não entra no Facts. É o que
@@ -439,4 +456,171 @@ func TestConsentimentoChegaAoEnviron(t *testing.T) {
 		return
 	}
 	t.Fatalf("o processo de apoio %d não apareceu na captura", alvo.Process.Pid)
+}
+
+// TODA TOOL QUE EMITE DADO CRU DIZ NA TRILHA O QUE ACESSOU.
+//
+// A trilha registrava nome da tool + snapshot_id, e para o perfil completo isso
+// não responde a pergunta que o operador faz depois do incidente. Duas chamadas
+// de file.read — uma no /etc/shadow, outra no id_ed25519 — saíam idênticas.
+//
+// A catraca é sobre a CLASSE, e não sobre as tools de hoje: uma tool nova que
+// declare DadosCrus e esqueça a projeção falha aqui. É onde a regra pertence —
+// quem emite segredo é quem precisa dizer de onde ele veio.
+func TestToolQueEmiteDadoCruProjetaOAlvoDaAuditoria(t *testing.T) {
+	amostras := map[string]string{
+		"file.read":       `{"path":"/etc/shadow","offset":4096,"length":512}`,
+		"file.xattrs":     `{"path":"/usr/bin/passwd"}`,
+		"process.environ": `{"pid":812}`,
+	}
+	cruas := 0
+	for _, f := range catalogo() {
+		if f.Dados != DadosCrus {
+			continue
+		}
+		cruas++
+		if f.Alvo == nil {
+			t.Errorf("%s emite texto do host SEM redação e não projeta alvo para "+
+				"a trilha: depois do incidente o operador não consegue responder "+
+				"o que o agente acessou", f.Nome)
+			continue
+		}
+		amostra, ok := amostras[f.Nome]
+		if !ok {
+			t.Errorf("%s declara DadosCrus e não está na tabela deste teste: "+
+				"sem argumento, ninguém confere se a projeção identifica algo", f.Nome)
+			continue
+		}
+		got := f.Alvo(json.RawMessage(amostra))
+		if got == "" {
+			t.Errorf("%s: a projeção devolveu vazio para %s", f.Nome, amostra)
+		}
+	}
+	if cruas == 0 {
+		t.Fatal("nenhuma tool declara DadosCrus: a catraca virou decoração")
+	}
+
+	// E o que a projeção NÃO pode carregar: conteúdo. A trilha vai para stderr
+	// e para arquivo, e transformá-la num segundo canal do mesmo segredo
+	// desfaria o portão que ela existe para auditar.
+	f := porNomeDoCatalogo(t, "file.read")
+	if got := f.Alvo(json.RawMessage(`{"path":"/etc/shadow","offset":4096,"length":512}`)); got !=
+		"/etc/shadow offset=4096 length=512" {
+		t.Errorf("projeção de file.read: %q", got)
+	}
+
+	// Caminho absurdamente longo é TRUNCADO: quem sofre com uma linha de log de
+	// quatro mil bytes é quem precisa lê-la depois.
+	longo := `{"path":"/` + strings.Repeat("a", 4000) + `"}`
+	if got := f.Alvo(json.RawMessage(longo)); len(got) > 400 {
+		t.Errorf("a projeção não truncou: %d bytes", len(got))
+	}
+}
+
+func porNomeDoCatalogo(t *testing.T, nome string) Ferramenta {
+	t.Helper()
+	for _, f := range catalogo() {
+		if f.Nome == nome {
+			return f
+		}
+	}
+	t.Fatalf("%s não está no catálogo", nome)
+	return Ferramenta{}
+}
+
+// has_capability SÓ APARECE QUANDO ALGUÉM OLHOU.
+//
+// A API devolvia (capability, bool), e ali ENODATA — "o arquivo não carrega
+// capability", que é resposta — saía igual a EPERM e EIO — "não consegui
+// olhar", que é lacuna. Um binário com cap_setuid+ep num diretório ilegível
+// respondia "não tem", e a retenção de privilégio sumia da evidência.
+//
+// A descrição da tool ainda prometia um campo read_error que não existia no
+// schema: a documentação afirmava a distinção que o código não fazia.
+func TestCapabilityNaoColapsaLacunaEmAusencia(t *testing.T) {
+	casos := []struct {
+		estado    env.EstadoDaCapability
+		temCampo  bool
+		valor     bool
+		temErro   bool
+		explicado string
+	}{
+		{env.CapabilityPresente, true, true, false, "lida"},
+		{env.CapabilityAusente, true, false, false, "o xattr não está lá"},
+		{env.CapabilitySemSuporte, true, false, false, "o filesystem não guarda xattr"},
+		{env.CapabilityIlegivel, false, false, true, "não foi possível ler"},
+		{env.CapabilityIndecifravel, false, false, true, "formato desconhecido"},
+	}
+	for _, c := range casos {
+		bloco := map[string]any{}
+		preencherCapability(bloco, env.CapabilidadeDeArquivo{Efetivo: true},
+			c.estado, errors.New("motivo"))
+
+		if bloco["capability_state"] != string(c.estado) {
+			t.Errorf("%s: capability_state=%v", c.estado, bloco["capability_state"])
+		}
+		got, tem := bloco["has_capability"]
+		if tem != c.temCampo {
+			t.Errorf("%s (%s): has_capability presente=%v, queria %v — nas duas "+
+				"lacunas ele tem de SUMIR, para que false nunca signifique "+
+				"'não olhei'", c.estado, c.explicado, tem, c.temCampo)
+			continue
+		}
+		if tem && got != c.valor {
+			t.Errorf("%s: has_capability=%v, queria %v", c.estado, got, c.valor)
+		}
+		if _, temErro := bloco["read_error"]; temErro != c.temErro {
+			t.Errorf("%s: read_error presente=%v, queria %v — a tool PROMETE esse "+
+				"campo na descrição", c.estado, temErro, c.temErro)
+		}
+	}
+}
+
+// process.environ RECUSA quando a coleta não conseguiu ler o ambiente.
+//
+// O coletor descartava o erro de /proc/<pid>/environ, e um EACCES saía como
+// Env nulo — que a tool respondia como objeto vazio. Ambiente vazio
+// praticamente não existe fora de thread de kernel, e o vazio ali se leria como
+// "não havia credencial nenhuma": a leitura mais tranquilizadora possível de
+// algo que ninguém leu.
+func TestEnvironRecusaQuandoNaoFoiLido(t *testing.T) {
+	s := servidorVivoCompleto(t)
+	capturar(t, s, "complete")
+	r := s.acervo.Todos()[0]
+
+	// O processo de teste é o próprio, que a captura leu com sucesso.
+	alvo := -1
+	for i := range r.Fatos.Processes {
+		if r.Fatos.Processes[i].PID == os.Getpid() {
+			alvo = i
+		}
+	}
+	if alvo < 0 {
+		t.Skip("o próprio processo não apareceu na captura")
+	}
+	pid := r.Fatos.Processes[alvo].PID
+
+	// Antes: responde.
+	if _, er := rodarTool(t, s, "process.environ",
+		fmt.Sprintf(`{"pid":%d}`, pid)); er != nil {
+		t.Fatalf("com o ambiente lido, tem de responder: %v", er)
+	}
+
+	// Agora com a leitura marcada como NÃO realizada — que é o estado que um
+	// EACCES produz.
+	r.Fatos.Processes[alvo].EnvLido = false
+	r.Fatos.Processes[alvo].EnvErro = "sem permissão para ler o ambiente"
+
+	_, er := rodarTool(t, s, "process.environ", fmt.Sprintf(`{"pid":%d}`, pid))
+	if er == nil {
+		t.Fatal("o ambiente não foi lido e a tool respondeu: um objeto vazio ali " +
+			"se lê como 'não havia variável nenhuma'")
+	}
+	if !strings.Contains(er.Message, "LACUNA") {
+		t.Errorf("a recusa precisa dizer que é lacuna: %s", er.Message)
+	}
+	d, _ := er.Data.(map[string]any)
+	if d["reason"] == nil || !strings.Contains(d["reason"].(string), "permissão") {
+		t.Errorf("a recusa precisa carregar o motivo: %v", er.Data)
+	}
 }

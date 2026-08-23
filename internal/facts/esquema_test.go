@@ -33,8 +33,24 @@ import (
 // teste: daria uma sensação de cobertura que não existe.
 func TestImpressaoDoEsquema(t *testing.T) {
 	const (
-		esquemaEsperado  = 17
-		impressaoGravada = "c5efae975104c557"
+		esquemaEsperado = 17
+		// Atualizada sem subir o SchemaVersion, e a razão fica aqui porque a
+		// catraca manda escrevê-la.
+		//
+		// Process.EnvLido/EnvCortado/EnvErro separam "o ambiente está vazio" de
+		// "não consegui ler o ambiente". Num dump v17 anterior a eles, EnvLido
+		// sai false — e a pergunta da regra é se esse vazio significa algo para
+		// algum CHECK. Não significa: nenhum check lê os três.
+		//
+		// O único consumidor é a tool process.environ, e ela não alcança dump
+		// nenhum: exige --profile full, que é recusado em modo snapshot, e
+		// declara fonte live. Os retratos que ela vê nascem de snapshot.capture,
+		// deste binário.
+		//
+		// E o valor padrão é o CONSERVADOR: false faz a tool recusar responder,
+		// não afirmar ambiente vazio. Um dump velho produziria recusa, que é
+		// lacuna declarada — nunca a leitura tranquilizadora.
+		impressaoGravada = "46c215cb6dba9134"
 	)
 	if SchemaVersion != esquemaEsperado {
 		t.Fatalf("SchemaVersion=%d e este teste conhece o %d: atualize os dois "+

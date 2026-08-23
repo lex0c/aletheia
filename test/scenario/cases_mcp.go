@@ -682,8 +682,9 @@ func init() {
 				Tool: "file.read",
 				Args: `{"path":"/etc/segredos.env"}`,
 				Campos: map[string]string{
-					"data.encoding": "utf8",
-					"read.source":   "image",
+					"data.encoding":     "utf8",
+					"read.source":       "image",
+					"data.path_binding": "exact",
 				},
 				Espera: []string{
 					// O conteúdo chega CRU: é isso que --allow-secrets significa.
@@ -695,16 +696,38 @@ func init() {
 					// Sem provenance: ela afirmaria cobertura e veredito que
 					// ninguém calculou sobre uma leitura que não é snapshot.
 					`"provenance"`,
+					// E sem o caminho da ESTAÇÃO de quem investiga: /alvo é
+					// organização do caso, não evidência do host.
+					`"root"`,
 				},
 			},
 			{
-				// O SYMLINK DO MEIO. O_NOFOLLOW não o alcança, e openat2 com
-				// RESOLVE_NO_SYMLINKS exigiria Linux 5.6 contra o piso de 3.2.
-				// A defesa é contar: a cadeia e o inode dizem qual arquivo foi
-				// realmente aberto.
-				Tool:   "file.read",
-				Args:   `{"path":"/tmp/mau/segredos.env"}`,
-				Espera: []string{"/tmp/mau -> ../etc", `"resolved_path":"/etc/segredos.env"`},
+				// O SYMLINK DO MEIO é RECUSADO por padrão.
+				//
+				// O_NOFOLLOW do kernel não o alcança — ele protege só o último
+				// componente —, e openat2 com RESOLVE_NO_SYMLINKS exigiria Linux
+				// 5.6 contra o piso de 3.2. A garantia vem do percurso por
+				// descritor: cada componente é aberto com O_PATH a partir do
+				// anterior, e um link em qualquer posição encerra a caminhada.
+				//
+				// É mais forte do que um open comum dá, e é o que permite
+				// path_binding dizer "exact" em vez de publicar uma cadeia que
+				// foi observada numa resolução DIFERENTE da que abriu o arquivo.
+				Tool:       "file.read",
+				Args:       `{"path":"/tmp/mau/segredos.env"}`,
+				ErroDeTool: true,
+				Espera:     []string{"NENHUM link é atravessado", "/tmp/mau -> ../etc"},
+			},
+			{
+				// E seguindo, a leitura acontece — com a cadeia publicada como
+				// OBSERVAÇÃO, não como garantia.
+				Tool: "file.read",
+				Args: `{"path":"/tmp/mau/segredos.env","follow_symlinks":true}`,
+				Campos: map[string]string{
+					"data.path_binding":  "followed",
+					"data.resolved_path": "/etc/segredos.env",
+				},
+				Espera: []string{"/tmp/mau -> ../etc", "DB_PASSWORD=hunter2"},
 			},
 			{
 				// O último componente é link: RECUSA, e a recusa é resposta.

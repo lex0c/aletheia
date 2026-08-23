@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -51,7 +52,11 @@ import (
 type Leitura struct {
 	QuandoUTC string `json:"at"`
 	Fonte     string `json:"source"`
-	Raiz      string `json:"root,omitempty"`
+	// A raiz da imagem NÃO viaja. Ela é caminho da estação de quem investiga —
+	// `/mnt/incidentes/cliente-X/vm-23` conta o nome do cliente e a organização
+	// do caso —, e nada disso é evidência do alvo. `source: image` já diz o que
+	// o modelo precisa saber. O caminho continua no stderr e na auditoria, que
+	// são locais.
 	// Nota é a diferença entre esta resposta e todas as outras, dita em prosa
 	// porque é isso que o modelo lê.
 	Nota string `json:"note"`
@@ -74,7 +79,6 @@ func envelopeDeLeitura(e *env.Env, dados any) EnvelopeDeLeitura {
 	l := Leitura{
 		QuandoUTC: time.Now().UTC().Format(time.RFC3339),
 		Fonte:     e.Source.String(),
-		Raiz:      e.Root,
 		Nota:      notaDeLeitura,
 	}
 	return EnvelopeDeLeitura{Leitura: l, Confianca: ConfiancaDoHost(), Dados: dados}
@@ -91,7 +95,6 @@ func esquemaLeitura(dados string) json.RawMessage {
   "properties":{
    "at":{"type":"string"},
    "source":{"type":"string","enum":["live","image"]},
-   "root":{"type":"string"},
    "note":{"type":"string"}}},
  "trust":` + esquemaConfianca + `,
  "data":` + dados + `}}`)
@@ -100,9 +103,11 @@ func esquemaLeitura(dados string) json.RawMessage {
 // esquemaIdentidade é o bloco que TODA resposta desta família carrega.
 const esquemaIdentidade = `
  "path":{"type":"string","description":"o caminho PEDIDO, ecoado"},
- "resolved_path":{"type":"string","description":"onde ele resolve depois de atravessar os links"},
+ "path_binding":{"type":"string","enum":["exact","followed"],
+  "description":"O QUE A RESPOSTA PODE AFIRMAR SOBRE O CAMINHO. exact: o arquivo foi aberto percorrendo componente a componente por descritor, sem atravessar symlink NENHUM — nem no final nem no meio. O caminho pedido É o caminho lido, e isso é fato. followed: voce pediu follow_symlinks:true, a resolucao foi do kernel, e link_chain foi lida numa segunda passada — ela descreve o que havia um instante antes do open, e num host comprometido alguem pode ter trocado um link no meio. Ali o que vale como fato sao dev e inode."},
+ "resolved_path":{"type":"string","description":"onde o caminho resolve. Com path_binding exact é o proprio caminho pedido; com followed é observacao"},
  "link_chain":{"type":"array","items":{"type":"string"},
-  "description":"os symlinks ATRAVESSADOS, na forma 'componente -> alvo'. Lista nao vazia significa que o caminho pedido NAO é o arquivo lido — leia dev e inode antes de concluir qualquer coisa sobre o caminho."},
+  "description":"os symlinks atravessados, na forma 'componente -> alvo'. So aparece com path_binding followed — com exact nao ha link nenhum a listar, por construcao."},
  "dev":{"type":"integer"},"inode":{"type":"integer"},
  "mode":{"type":"string"},"type":{"type":"string"},
  "nlink":{"type":"integer","description":"quantos NOMES apontam para este inode. Maior que 1 num arquivo de sistema é hardlink, e hardlink é persistencia que apagar o caminho conhecido nao remove"},
@@ -118,7 +123,7 @@ type alvoDeArquivo struct {
 func entradaDeArquivo(extra string) json.RawMessage {
 	props := `"path":{"type":"string","description":"caminho ABSOLUTO no host (ou dentro da imagem, em modo image)"},
 "follow_symlinks":{"type":"boolean","default":false,
- "description":"false (padrao) recusa quando o ULTIMO componente é symlink, e a recusa é RESPOSTA: 'isto é um link' costuma ser o que se queria saber. ATENCAO: isto nao protege os componentes do MEIO — /tmp/mau/x com /tmp/mau -> /etc abre o /etc/x de verdade, e nenhum kernel acima do piso desta ferramenta oferece trava para isso. Por isso a resposta sempre traz link_chain, dev e inode: o risco vira EVIDENCIA em vez de promessa falsa."}`
+ "description":"false (padrao) recusa se QUALQUER componente do caminho for symlink — o final e os do meio. O caminho é percorrido componente a componente por descritor, entao a garantia é estrutural: o arquivo aberto esta exatamente no caminho pedido. A recusa é RESPOSTA, e link_chain no erro diz onde esta o link. true segue os links; ali a resposta traz link_chain e resolved_path como OBSERVACAO, e o que vale como fato sao dev e inode."}`
 	if extra != "" {
 		props += ",\n" + extra
 	}
@@ -169,10 +174,12 @@ func abrirAlvo(e *env.Env, a alvoDeArquivo) (*os.File, map[string]any, *ErroRPC)
 	if er := validarCaminho(a.Caminho); er != nil {
 		return nil, nil, er
 	}
-	cadeia, resolvido, errCadeia := e.CadeiaDeLinks(a.Caminho)
-
 	fh, id, err := e.AbrirParaInspecao(a.Caminho, a.Seguir)
 	if err != nil {
+		// Na RECUSA a cadeia é calculada para explicar ONDE está o link. Ela é
+		// observação, e a decisão já foi tomada pelo percurso por descritor —
+		// então não há o que uma corrida aqui possa afrouxar.
+		cadeia, resolvido, _ := e.CadeiaDeLinks(a.Caminho)
 		return nil, nil, erroDeAbertura(a, id, cadeia, resolvido, err)
 	}
 	bloco := map[string]any{
@@ -181,7 +188,25 @@ func abrirAlvo(e *env.Env, a alvoDeArquivo) (*os.File, map[string]any, *ErroRPC)
 		"uid": id.UID, "gid": id.GID, "size": id.Tamanho,
 		"mtime": id.MtimeUTC, "ctime": id.CtimeUTC,
 	}
-	if errCadeia == nil {
+	// path_binding é o que a resposta PODE afirmar sobre o caminho.
+	//
+	// Com follow_symlinks:false o arquivo foi aberto percorrendo componente a
+	// componente por descritor, sem atravessar link nenhum: o caminho pedido é o
+	// caminho lido, e isso é FATO, não observação. resolved_path é ele mesmo, e
+	// link_chain nem existe — não há link a listar.
+	//
+	// Com follow:true a resolução foi do kernel, e a cadeia é lida DEPOIS, por
+	// uma segunda passada de Lstat. Ela descreve o que havia ali um instante
+	// antes; num host comprometido, alguém pode ter trocado um link no meio. Por
+	// isso ela é publicada como OBSERVAÇÃO, e o que continua valendo como fato
+	// são dev e inode — a identidade do descritor que foi realmente aberto.
+	if !a.Seguir {
+		bloco["path_binding"] = "exact"
+		bloco["resolved_path"] = a.Caminho
+		return fh, bloco, nil
+	}
+	bloco["path_binding"] = "followed"
+	if cadeia, resolvido, err := e.CadeiaDeLinks(a.Caminho); err == nil {
 		bloco["resolved_path"] = resolvido
 		if len(cadeia) > 0 {
 			bloco["link_chain"] = cadeia
@@ -212,9 +237,12 @@ func erroDeAbertura(a alvoDeArquivo, id env.Identidade, cadeia []string,
 	switch {
 	case errors.Is(err, env.ErrEhLink):
 		return erroComDados(CodInvalidParams,
-			"o último componente de "+a.Caminho+" é um symlink, e follow_symlinks "+
-				"é false. Isto é RESPOSTA, não falha: link_chain diz para onde ele "+
-				"aponta. Repita com follow_symlinks:true se quiser o alvo.", dados)
+			"algum componente de "+a.Caminho+" é um symlink, e follow_symlinks é "+
+				"false. Isto é RESPOSTA, não falha: com o padrão, NENHUM link é "+
+				"atravessado — nem o final nem os do meio —, e link_chain diz onde "+
+				"ele está e para onde aponta. Repita com follow_symlinks:true se "+
+				"quiser seguir, sabendo que ali a cadeia vira observação e o que "+
+				"vale como fato são dev e inode.", dados)
 	case errors.Is(err, env.ErrNaoEhArquivo):
 		return erroComDados(CodInvalidParams,
 			a.Caminho+" não é arquivo comum (é "+id.Tipo+"): abrir fifo, socket ou "+
@@ -260,6 +288,31 @@ func validarCaminho(p string) *ErroRPC {
 	return nil
 }
 
+// alvoDeAuditoria projeta o caminho e a decisão de symlink para a trilha.
+//
+// Só IDENTIFICAÇÃO. O caminho é o que o operador precisa para responder "o que
+// o agente acessou"; o conteúdo lido jamais entra aqui — a trilha sai em stderr
+// e num arquivo, e registrar bytes ali abriria um segundo canal para o mesmo
+// segredo que o portão existe para governar.
+//
+// O caminho vem do MODELO, e não do host — mas passou pelo mesmo validarCaminho
+// que recusa byte de controle antes de qualquer coisa. Ainda assim ele é
+// truncado: um caminho de quatro mil bytes numa linha de log é um problema de
+// quem lê o log.
+func alvoDeAuditoria(args json.RawMessage) string {
+	var a alvoDeArquivo
+	if json.Unmarshal(args, &a) != nil || a.Caminho == "" {
+		return ""
+	}
+	if len(a.Caminho) > 256 {
+		a.Caminho = a.Caminho[:256] + "…"
+	}
+	if a.Seguir {
+		return a.Caminho + " follow=true"
+	}
+	return a.Caminho
+}
+
 // ------------------------------------------------------------ file.read
 
 // SomenteLeitura sim, idempotente NÃO — e a diferença é do que se mede.
@@ -274,6 +327,23 @@ func validarCaminho(p string) *ErroRPC {
 // Estas não.
 var toolFileRead = Ferramenta{
 	Anotacoes: Anotacoes{SomenteLeitura: true},
+	// A janela entra na trilha: é ela que distingue "leu o começo do shadow" de
+	// "paginou o arquivo inteiro".
+	Alvo: func(args json.RawMessage) string {
+		var a struct {
+			alvoDeArquivo
+			Offset int64 `json:"offset,omitempty"`
+			Tam    int64 `json:"length,omitempty"`
+		}
+		if json.Unmarshal(args, &a) != nil {
+			return ""
+		}
+		base := alvoDeAuditoria(args)
+		if base == "" {
+			return ""
+		}
+		return fmt.Sprintf("%s offset=%d length=%d", base, a.Offset, a.Tam)
+	},
 	// CRUA: são os bytes do arquivo, sem redação nenhuma. É o que exige as duas
 	// flags, e é o motivo de esta tool existir só na entrega 3.
 	Dados:     DadosCrus,
@@ -283,7 +353,10 @@ var toolFileRead = Ferramenta{
 	Titulo:    "Ler uma janela de um arquivo, AGORA",
 	Descricao: "Lê até 64 KiB de um arquivo do host, no instante da chamada, e " +
 		"devolve junto a identidade do que foi EFETIVAMENTE aberto: dev, inode, " +
-		"modo, nlink e a cadeia de symlinks atravessada.\n\n" +
+		"modo e nlink.\n\n" +
+		"Por padrão NENHUM symlink é atravessado, em posição nenhuma do caminho: " +
+		"o arquivo aberto está exatamente onde você pediu, e path_binding diz " +
+		"exact. Isso é garantia estrutural, não observação.\n\n" +
 		"Não responde sobre um retrato — um dump não carrega conteúdo de arquivo. " +
 		"Leia o bloco read: o conteúdo é de AGORA, e não é contemporâneo de nenhum " +
 		"snapshot.\n\n" +
@@ -312,6 +385,21 @@ var toolFileRead = Ferramenta{
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
+		// O RUNTIME RECUSA O QUE O SCHEMA PROÍBE.
+		//
+		// LerJanela reduz silenciosamente o que passa do teto, e para o resto do
+		// MCP essa é a regra errada: "pergunta errada vira erro, não outra
+		// pergunta". Um length de 1 MiB atendido com 64 KiB e truncated:true faz
+		// o modelo pensar que o arquivo tem mais de 1 MiB.
+		if a.Tam < 0 || a.Tam > env.MaxLeituraDirecionada {
+			return nil, erro(CodInvalidParams, fmt.Sprintf(
+				"length precisa ficar entre 1 e %d: %d seria atendido com uma janela "+
+					"menor, e a resposta pareceria dizer que o arquivo tem mais do que "+
+					"tem. Pagine com offset.", env.MaxLeituraDirecionada, a.Tam))
+		}
+		if a.Offset < 0 {
+			return nil, erro(CodInvalidParams, "offset não pode ser negativo")
+		}
 		return leituraAoVivo(s, func(e *env.Env) (any, *ErroRPC) {
 			fh, bloco, er := abrirAlvo(e, a.alvoDeArquivo)
 			if er != nil {
@@ -338,6 +426,12 @@ var toolFileRead = Ferramenta{
 
 // ------------------------------------------------------------ file.hash
 
+// Os tetos AGREGADOS de file.xattrs. Ver o comentário no handler.
+const (
+	maxXattrsPorResposta = 64
+	maxBytesDeXattr      = 256 << 10
+)
+
 // MaxHash é o teto do que se hashea numa chamada.
 //
 // Um hash de arquivo truncado é um hash ERRADO — pior que nenhum, porque parece
@@ -347,6 +441,7 @@ const MaxHash = 512 << 20
 
 var toolFileHash = Ferramenta{
 	Anotacoes: Anotacoes{SomenteLeitura: true},
+	Alvo:      alvoDeAuditoria,
 	// NÃO é crua: sai um hash e a identidade do inode. Nenhum byte do conteúdo
 	// atravessa. É o que permite identificar um binário sem autorizar que o
 	// /etc/shadow vá para um modelo remoto.
@@ -359,14 +454,18 @@ var toolFileHash = Ferramenta{
 		"e a cadeia de symlinks. Nenhum byte do conteúdo sai daqui — é o que " +
 		"permite identificar um binário sem autorizar que o conteúdo dele vá para " +
 		"um modelo remoto.\n\n" +
+		"O campo stable diz se o arquivo mudou ENQUANTO era lido: com false o " +
+		"digest é de uma mistura temporal e não vale comparação nenhuma.\n\n" +
 		"Serve para comparar contra um IOC, contra o hash do pacote, ou contra o " +
 		"mesmo arquivo em outra máquina. Não responde sobre um retrato: leia o " +
 		"bloco read.",
 	Entrada: entradaDeArquivo(""),
-	Saida: esquemaLeitura(`{"type":"object","required":["path","sha256"],
+	Saida: esquemaLeitura(`{"type":"object","required":["path","sha256","stable"],
 "properties":{` + esquemaIdentidade + `,
  "sha256":{"type":"string"},
- "bytes_hashed":{"type":"integer"}}}`),
+ "bytes_hashed":{"type":"integer"},
+ "stable":{"type":"boolean","description":"false significa que o arquivo MUDOU enquanto era lido: tamanho ou mtime diferem entre o fstat de antes e o de depois, no mesmo descritor. O digest é entao de uma MISTURA temporal — bytes do conteudo velho com bytes do novo — e NAO deve ser comparado contra IOC nem contra hash de pacote. Repita a chamada."},
+ "size_after":{"type":"integer"},"mtime_after":{"type":"string"}}}`),
 	Rodar: func(s *Servidor, args json.RawMessage) (any, *ErroRPC) {
 		var a alvoDeArquivo
 		if er := decodificarArgs(args, &a); er != nil {
@@ -396,8 +495,30 @@ var toolFileHash = Ferramenta{
 					"o arquivo cresceu acima do teto durante a leitura: o hash "+
 						"seria de um conteúdo que já não existe")
 			}
+			// A ESTABILIDADE É CONFERIDA, e não assumida.
+			//
+			// A identidade sai de um fstat ANTES e os bytes são lidos DEPOIS.
+			// Uma reescrita no meio do io.Copy produz o digest de uma mistura
+			// temporal — bytes do conteúdo antigo com bytes do novo — que sai
+			// daqui com cara de sha256 do arquivo, e alguém o compara contra um
+			// IOC. Num host comprometido essa reescrita é o cenário, não o
+			// acidente.
+			//
+			// O segundo fstat é no MESMO descritor, então ele não é uma segunda
+			// resolução de caminho: ele responde sobre o objeto que foi lido.
+			depois, err := fh.Stat()
+			if err != nil {
+				return nil, erro(CodInvalidParams, a.Caminho+": "+limparErro(err.Error()))
+			}
+			estavel := depois.Size() == bloco["size"] &&
+				depois.ModTime().UTC().Format(time.RFC3339) == bloco["mtime"]
 			bloco["sha256"] = hex.EncodeToString(h.Sum(nil))
 			bloco["bytes_hashed"] = n
+			bloco["stable"] = estavel
+			if !estavel {
+				bloco["size_after"] = depois.Size()
+				bloco["mtime_after"] = depois.ModTime().UTC().Format(time.RFC3339)
+			}
 			return envelopeDeLeitura(e, bloco), nil
 		})
 	},
@@ -407,6 +528,7 @@ var toolFileHash = Ferramenta{
 
 var toolFileXattrs = Ferramenta{
 	Anotacoes: Anotacoes{SomenteLeitura: true},
+	Alvo:      alvoDeAuditoria,
 	// CRUA: o valor de um xattr é byte arbitrário escolhido por quem escreveu o
 	// arquivo. `user.qualquer.coisa` guarda o que o dono quiser, inclusive
 	// credencial.
@@ -421,8 +543,11 @@ var toolFileXattrs = Ferramenta{
 		"e os user.* que qualquer dono pode escrever com o conteúdo que quiser.\n\n" +
 		"Os valores são bytes do ALVO, sem redação. Não responde sobre um retrato.",
 	Entrada: entradaDeArquivo(""),
-	Saida: esquemaLeitura(`{"type":"object","required":["path","xattrs"],
+	Saida: esquemaLeitura(`{"type":"object","required":["path","xattrs","xattrs_total","truncated"],
 "properties":{` + esquemaIdentidade + `,
+ "xattrs_total":{"type":"integer","description":"quantos atributos o arquivo TEM. Maior que o tamanho de xattrs significa que a resposta foi cortada — veja truncated"},
+ "truncated":{"type":"boolean"},
+ "truncation_reason":{"type":"string"},
  "xattrs":{"type":"array","items":{"type":"object",
   "required":["name","size"],
   "properties":{
@@ -446,8 +571,25 @@ var toolFileXattrs = Ferramenta{
 			if err != nil {
 				return nil, erro(CodInvalidParams, a.Caminho+": "+limparErro(err.Error()))
 			}
+			// TETO AGREGADO, e não só por atributo.
+			//
+			// Cada valor cabe em 64 KiB e a lista de nomes cresce até 1 MiB —
+			// mas nada limitava a SOMA, e todos os valores eram retidos antes de
+			// o teto de frame entrar em ação. Um arquivo com centenas de xattr
+			// grandes montava a resposta inteira na memória deste processo, que
+			// roda no host investigado.
+			//
+			// A truncagem é SEMÂNTICA e DECLARADA: some o valor, nunca os bytes
+			// no meio de um JSON.
+			var soma int
+			cortados := 0
 			lista := make([]map[string]any, 0, len(xs))
 			for _, x := range xs {
+				if len(lista) >= maxXattrsPorResposta || soma+x.Tamanho > maxBytesDeXattr {
+					cortados++
+					continue
+				}
+				soma += x.Tamanho
 				it := map[string]any{"name": x.Nome, "size": x.Tamanho}
 				if x.Tamanho >= 0 {
 					if utf8.Valid(x.Valor) {
@@ -460,6 +602,15 @@ var toolFileXattrs = Ferramenta{
 				lista = append(lista, it)
 			}
 			bloco["xattrs"] = lista
+			bloco["xattrs_total"] = len(xs)
+			bloco["truncated"] = cortados > 0
+			if cortados > 0 {
+				bloco["truncation_reason"] = fmt.Sprintf(
+					"%d atributo(s) não foram devolvidos: o teto agregado desta "+
+						"resposta é %d atributos ou %d bytes de valor. A ausência "+
+						"deles aqui NÃO prova que não existem — xattrs_total diz "+
+						"quantos havia.", cortados, maxXattrsPorResposta, maxBytesDeXattr)
+			}
 			return envelopeDeLeitura(e, bloco), nil
 		})
 	},
@@ -469,6 +620,7 @@ var toolFileXattrs = Ferramenta{
 
 var toolFileCapabilities = Ferramenta{
 	Anotacoes: Anotacoes{SomenteLeitura: true},
+	Alvo:      alvoDeAuditoria,
 	// NÃO é crua: sai a lista de NOMES de um conjunto enumerado pelo kernel,
 	// decodificada por este binário. Não há byte do alvo passando.
 	Dados:     DadosRedigidosNaOrigem,
@@ -483,12 +635,17 @@ var toolFileCapabilities = Ferramenta{
 		"O campo effective é a diferença entre um programa que PODE elevar e um que " +
 		"JÁ eleva na execução: com ele a capability sobe ativa e o binário não " +
 		"precisa nem pedir.\n\n" +
-		"Ausência de capability é resposta; falha de leitura é lacuna, e as duas " +
-		"são distinguidas no campo read_error.",
+		"Ausência de capability é RESPOSTA; falha de leitura é LACUNA. As duas " +
+		"são distinguidas em capability_state, que tem quatro valores — e nos " +
+		"dois de lacuna o campo has_capability nem aparece, para que 'false' " +
+		"nunca signifique 'não olhei'.",
 	Entrada: entradaDeArquivo(""),
-	Saida: esquemaLeitura(`{"type":"object","required":["path","has_capability"],
+	Saida: esquemaLeitura(`{"type":"object","required":["path","capability_state"],
 "properties":{` + esquemaIdentidade + `,
- "has_capability":{"type":"boolean","description":"false significa que o xattr NAO esta la — o arquivo nao carrega capability nenhuma"},
+ "capability_state":{"type":"string","enum":["present","absent","unsupported","unreadable","undecodable"],
+  "description":"QUATRO respostas e nao duas. present: lida. absent: o xattr nao esta la — o arquivo nao carrega capability. unsupported: o filesystem nao guarda xattr, e a pergunta nao se aplica. unreadable: o atributo pode existir e NAO foi possivel ler — LACUNA, veja read_error. undecodable: existe e este binario nao reconhece o formato (kernel mais novo, ou lixo plantado por quem conta com quem descarta em silencio)."},
+ "has_capability":{"type":"boolean","description":"AUSENTE nos dois estados de lacuna, de proposito: false so aparece quando alguem olhou"},
+ "read_error":{"type":"string","description":"por que a leitura falhou. Evidencia, nao controle: quem decide o significado é capability_state"},
  "permitted":{"type":"array","items":{"type":"string"}},
  "inheritable":{"type":"array","items":{"type":"string"}},
  "effective":{"type":"boolean","description":"true: a capability sobe ATIVA na execucao. false: o binario precisa pedir"},
@@ -506,20 +663,46 @@ var toolFileCapabilities = Ferramenta{
 			}
 			defer fh.Close()
 
-			c, ok := env.CapabilityDoFD(fh)
-			bloco["has_capability"] = ok
-			if ok {
-				bloco["permitted"] = c.Permitidas
-				bloco["inheritable"] = c.Herdaveis
-				bloco["effective"] = c.Efetivo
-				bloco["version"] = c.Versao
-				if c.RootID != 0 {
-					bloco["root_id"] = c.RootID
-				}
-			}
+			c, estado, err := env.CapabilityDoFD(fh)
+			preencherCapability(bloco, c, estado, err)
 			return envelopeDeLeitura(e, bloco), nil
 		})
 	},
+}
+
+// preencherCapability é a tradução de ESTADO para campo, e ela é uma função
+// própria para poder ser exercitada nos cinco estados.
+//
+// A regra que ela existe para manter: has_capability só aparece quando alguém
+// OLHOU. Nas duas lacunas o campo some, para que `false` nunca signifique "não
+// consegui ler" — que é o colapso que a versão anterior fazia, devolvendo
+// "não tem capability" para EPERM e EIO.
+func preencherCapability(bloco map[string]any, c env.CapabilidadeDeArquivo,
+	estado env.EstadoDaCapability, err error) {
+
+	bloco["capability_state"] = string(estado)
+	switch estado {
+	case env.CapabilityPresente:
+		bloco["has_capability"] = true
+		bloco["permitted"] = c.Permitidas
+		bloco["inheritable"] = c.Herdaveis
+		bloco["effective"] = c.Efetivo
+		bloco["version"] = c.Versao
+		if c.RootID != 0 {
+			bloco["root_id"] = c.RootID
+		}
+	case env.CapabilityAusente, env.CapabilitySemSuporte:
+		bloco["has_capability"] = false
+	default:
+		bloco["read_error"] = motivoOuPadrao(erroTexto(err))
+	}
+}
+
+func erroTexto(err error) string {
+	if err == nil {
+		return ""
+	}
+	return limparErro(err.Error())
 }
 
 // ------------------------------------------------------- process.environ
@@ -532,6 +715,17 @@ func (r *Retrato) SemRedacao() bool {
 
 var toolProcessEnviron = Ferramenta{
 	Anotacoes: SomenteLeitura,
+	// O PID, porque o snapshot_id sozinho não distingue de qual processo o
+	// ambiente completo — credencial inclusive — foi lido.
+	Alvo: func(args json.RawMessage) string {
+		var a struct {
+			PID int `json:"pid"`
+		}
+		if json.Unmarshal(args, &a) != nil || a.PID <= 0 {
+			return ""
+		}
+		return "pid=" + strconv.Itoa(a.PID)
+	},
 	Dados:     DadosCrus,
 	PerfilMin: PerfilCompleto,
 	Fontes:    env.SourceLive,
@@ -540,9 +734,13 @@ var toolProcessEnviron = Ferramenta{
 	Descricao: "Devolve todas as variáveis de ambiente do processo, com valor. " +
 		"É onde moram credencial de banco, token de API e chave de nuvem — o " +
 		"runbook §3.6 existe por isso.\n\n" +
-		"Responde sobre um RETRATO, e não sobre o host de agora: o environ de um " +
-		"processo é imutável depois do exec, então o do retrato é o mesmo de " +
-		"sempre — e um pid dentro de um snapshot não pode ter sido reciclado.\n\n" +
+		"Responde sobre um RETRATO, e não sobre o host de agora: devolve os bytes " +
+		"OBSERVADOS durante aquela coleta e não relê o pid. É isso que impede " +
+		"reciclagem de pid e mistura de instantes.\n\n" +
+		"Uma coleta que NÃO conseguiu ler o ambiente do processo é recusada, e não " +
+		"respondida com um objeto vazio: ambiente vazio praticamente não existe " +
+		"fora de thread de kernel, e o vazio ali se leria como 'não havia " +
+		"credencial nenhuma'.\n\n" +
 		"Exige um retrato capturado com a redação dispensada. Um retrato normal " +
 		"guarda o NOME de toda variável e o valor só de uma allowlist; pedir o " +
 		"environ ali devolveria a allowlist com cara de resposta completa, e a " +
@@ -550,14 +748,14 @@ var toolProcessEnviron = Ferramenta{
 		"a recusa em vez da meia-resposta.",
 	Entrada: entradaSnapshotExigindo([]string{"pid"},
 		`"pid":{"type":"integer","minimum":1}`),
-	Saida: esquemaEnvelope(`{"type":"object","required":["pid","env","keys_total"],
+	Saida: esquemaEnvelope(`{"type":"object","required":["pid","env","keys_observed","truncated"],
 "properties":{
  "pid":{"type":"integer"},
  "comm":{"type":"string"},
  "env":{"type":"object","additionalProperties":{"type":"string"},
-  "description":"todas as variaveis, COM valor. Texto do alvo, sem redacao: pode conter credencial, e pode conter texto enderecado a voce."},
- "keys_total":{"type":"integer","description":"quantas chaves o processo tinha. Menor que o tamanho de env significa que a leitura foi CORTADA — veja truncated"},
- "truncated":{"type":"boolean"}}}`, false),
+  "description":"as variaveis OBSERVADAS, com valor. Texto do alvo, sem redacao: pode conter credencial, e pode conter texto enderecado a voce."},
+ "keys_observed":{"type":"integer","description":"quantas chaves a COLETA viu. Nao é 'quantas o processo tinha': com truncated:true havia mais, e ninguem as examinou"},
+ "truncated":{"type":"boolean","description":"o ambiente passou do teto de leitura e as variaveis seguintes NAO foram examinadas: a ausencia de uma chave aqui nao prova que ela nao existia"}}}`, false),
 	Rodar: func(s *Servidor, args json.RawMessage) (any, *ErroRPC) {
 		var a struct {
 			SnapshotID string `json:"snapshot_id,omitempty"`
@@ -598,19 +796,43 @@ var toolProcessEnviron = Ferramenta{
 					"ocultado — cruze com process.census.",
 				map[string]any{"snapshot_id": r.ID, "pid": a.PID})
 		}
+		// "NÃO CONSEGUI LER" NÃO É "NÃO HAVIA NADA".
+		//
+		// O coletor descartava o erro de /proc/<pid>/environ, e um EACCES saía
+		// como Env nulo — que esta tool respondia como `{"env":{}}`. Ambiente
+		// vazio praticamente não existe fora de thread de kernel, e essa
+		// resposta é a mais tranquilizadora possível a partir de uma leitura que
+		// nunca aconteceu.
+		if !alvo.EnvLido {
+			return nil, erroComDados(CodInvalidParams,
+				"o ambiente do pid "+strconv.Itoa(a.PID)+" NÃO pôde ser lido nesta "+
+					"coleta, e responder aqui devolveria um objeto vazio que se lê "+
+					"como 'não havia variável nenhuma'. Isto é LACUNA.",
+				map[string]any{"snapshot_id": r.ID, "pid": alvo.PID,
+					"reason": motivoOuPadrao(alvo.EnvErro)})
+		}
 		amb := map[string]string{}
 		for k, v := range alvo.Env {
 			amb[k] = v
 		}
-		cortado := false
-		for _, t := range alvo.Truncated {
-			if strings.Contains(t, "ambiente") {
-				cortado = true
-			}
-		}
 		return envelopar(r, ObservabilidadeDeFatos(r.Fatos), map[string]any{
 			"pid": alvo.PID, "comm": alvo.Comm, "env": amb,
-			"keys_total": len(alvo.EnvKeys), "truncated": cortado,
+			// OBSERVADAS, e não "total": com a leitura cortada, o que veio é o
+			// que coube, e chamá-lo de total afirmaria que não havia mais.
+			"keys_observed": len(alvo.EnvKeys),
+			// O corte vem de um CAMPO, e não de procurar a palavra "ambiente"
+			// numa lista de frases em português: decisão de controle não pode
+			// depender da prosa de uma mensagem.
+			"truncated": alvo.EnvCortado,
 		}), nil
 	},
+}
+
+// motivoOuPadrao nunca devolve vazio: "não sei por quê" é uma resposta, e
+// omitir o campo faria o cliente achar que a chave não se aplica.
+func motivoOuPadrao(s string) string {
+	if s == "" {
+		return "a coleta não registrou o motivo"
+	}
+	return s
 }

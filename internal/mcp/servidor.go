@@ -449,6 +449,11 @@ func (s *Servidor) chamarTool(r *Requisicao) (map[string]any, string, *ErroRPC) 
 		alvo += " " + quais.SnapshotID
 	}
 	f, ok := s.porNome[p.Name]
+	if ok && f.Alvo != nil {
+		if detalhe := f.Alvo(p.Arguments); detalhe != "" {
+			alvo += " " + detalhe
+		}
+	}
 	if !ok {
 		// METHOD NOT FOUND, e não permission denied.
 		//

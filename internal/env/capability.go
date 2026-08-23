@@ -82,6 +82,21 @@ const (
 	capMaskVersao  = 0xFF000000
 )
 
+// Os layouts CONHECIDOS, e o tamanho de cada um.
+//
+// O decoder aceitava qualquer buffer com 12 bytes ou mais e devolvia a revisão
+// crua — um xattr dizendo `revision 99` com 24 bytes saía como present,
+// version=99. Em host vivo o kernel controla a interface e isso é difícil; numa
+// imagem forense, ou num filesystem corrompido, não é.
+//
+// Um formato que este binário não reconhece é LACUNA — existe e não sei ler —,
+// não resposta. Ver EstadoDaCapability.
+var tamanhoPorRevisao = map[int]int{
+	1: 12, // VFS_CAP_REVISION_1
+	2: 20, // VFS_CAP_REVISION_2
+	3: 24, // VFS_CAP_REVISION_3, com rootid
+}
+
 // DecodificarCapability lê o buffer do xattr `security.capability`.
 //
 // Um decodificador só, para os dois caminhos de aquisição: o coletor de SUID
@@ -93,6 +108,11 @@ func DecodificarCapability(buf []byte) (CapabilidadeDeArquivo, bool) {
 		return CapabilidadeDeArquivo{}, false
 	}
 	magic := le32(buf[0:])
+	rev := int((magic & capMaskVersao) >> 24)
+	esperado, conhecida := tamanhoPorRevisao[rev]
+	if !conhecida || len(buf) != esperado {
+		return CapabilidadeDeArquivo{}, false
+	}
 	perm := uint64(le32(buf[4:]))
 	herd := uint64(le32(buf[8:]))
 	if len(buf) >= 20 {
@@ -103,7 +123,7 @@ func DecodificarCapability(buf []byte) (CapabilidadeDeArquivo, bool) {
 		Permitidas: NomesDeCapability(perm),
 		Herdaveis:  NomesDeCapability(herd),
 		Efetivo:    magic&capFlagEfetivo != 0,
-		Versao:     int((magic & capMaskVersao) >> 24),
+		Versao:     rev,
 	}
 	if len(buf) >= 24 {
 		c.RootID = le32(buf[20:])

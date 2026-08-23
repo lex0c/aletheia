@@ -50,7 +50,15 @@ import (
 
 // Leitura é a procedência de uma leitura AO VIVO.
 type Leitura struct {
-	QuandoUTC string `json:"at"`
+	// DOIS instantes, e não um.
+	//
+	// Havia só `at`, carimbado quando o envelope era montado — depois da
+	// leitura. Para file.read isso é indistinguível; para um file.hash de
+	// centenas de megabytes, o intervalo é o que importa: o digest descreve o
+	// arquivo ALGUM ponto entre os dois, e o campo `stable` diz se a janela
+	// conteve alguma mudança.
+	InicioUTC string `json:"started_at"`
+	FimUTC    string `json:"finished_at"`
 	Fonte     string `json:"source"`
 	// A raiz da imagem NÃO viaja. Ela é caminho da estação de quem investiga —
 	// `/mnt/incidentes/cliente-X/vm-23` conta o nome do cliente e a organização
@@ -63,7 +71,7 @@ type Leitura struct {
 }
 
 const notaDeLeitura = "esta resposta NÃO faz parte de nenhum retrato: ela é uma " +
-	"leitura do host feita AGORA, no instante em at. As demais tools respondem " +
+	"leitura do host feita AGORA, entre started_at e finished_at. As demais tools respondem " +
 	"sobre um snapshot congelado. Não trate os dois como contemporâneos — o " +
 	"arquivo pode ter mudado depois do retrato, e o processo do retrato pode já " +
 	"não existir."
@@ -75,9 +83,10 @@ type EnvelopeDeLeitura struct {
 	Dados     any       `json:"data"`
 }
 
-func envelopeDeLeitura(e *env.Env, dados any) EnvelopeDeLeitura {
+func envelopeDeLeitura(e *env.Env, inicio time.Time, dados any) EnvelopeDeLeitura {
 	l := Leitura{
-		QuandoUTC: time.Now().UTC().Format(time.RFC3339),
+		InicioUTC: inicio.UTC().Format(time.RFC3339Nano),
+		FimUTC:    time.Now().UTC().Format(time.RFC3339Nano),
 		Fonte:     e.Source.String(),
 		Nota:      notaDeLeitura,
 	}
@@ -90,10 +99,11 @@ func esquemaLeitura(dados string) json.RawMessage {
 "type":"object",
 "required":["read","trust","data"],
 "properties":{
- "read":{"type":"object","required":["at","source","note"],
-  "description":"QUANDO esta leitura aconteceu. Nao ha snapshot_id porque nao ha retrato: um dump nao carrega conteudo de arquivo.",
+ "read":{"type":"object","required":["started_at","finished_at","source","note"],
+  "description":"QUANDO esta leitura aconteceu, e nao ha snapshot_id porque nao ha retrato: um dump nao carrega conteudo de arquivo. Sao DOIS instantes porque uma leitura leva tempo — um file.hash de centenas de megabytes descreve o arquivo em algum ponto entre eles, e o campo stable diz se a janela conteve alguma mudanca.",
   "properties":{
-   "at":{"type":"string"},
+   "started_at":{"type":"string"},
+   "finished_at":{"type":"string"},
    "source":{"type":"string","enum":["live","image"]},
    "note":{"type":"string"}}},
  "trust":` + esquemaConfianca + `,
@@ -142,7 +152,7 @@ func entradaDeArquivo(extra string) json.RawMessage {
 // E a leitura é COBRADA do orçamento de coleta, pelo mesmo motivo que a
 // captura: é trabalho no host investigado, e um modelo em laço de paginação
 // (offset += 65536) faz muitas.
-func leituraAoVivo(s *Servidor, fn func(*env.Env) (any, *ErroRPC)) (any, *ErroRPC) {
+func leituraAoVivo(s *Servidor, fn func(*env.Env, time.Time) (any, *ErroRPC)) (any, *ErroRPC) {
 	if s.adquirir == nil {
 		return nil, erro(CodInternalError, "este servidor não tem aquisição")
 	}
@@ -165,14 +175,21 @@ func leituraAoVivo(s *Servidor, fn func(*env.Env) (any, *ErroRPC)) (any, *ErroRP
 		e.Close()
 		s.cobrarColeta(time.Since(inicio))
 	}()
-	return fn(e)
+	return fn(e, inicio)
 }
 
 // abrirAlvo é o caminho comum das quatro: valida, abre, identifica, e monta o
 // bloco que todas devolvem.
 func abrirAlvo(e *env.Env, a alvoDeArquivo) (*os.File, map[string]any, *ErroRPC) {
+	fh, bloco, _, er := abrirAlvoComID(e, a)
+	return fh, bloco, er
+}
+
+// abrirAlvoComID é o abrirAlvo que também devolve a identidade CRUA, para quem
+// precisa compará-la depois — hoje, file.hash.
+func abrirAlvoComID(e *env.Env, a alvoDeArquivo) (*os.File, map[string]any, env.Identidade, *ErroRPC) {
 	if er := validarCaminho(a.Caminho); er != nil {
-		return nil, nil, er
+		return nil, nil, env.Identidade{}, er
 	}
 	fh, id, err := e.AbrirParaInspecao(a.Caminho, a.Seguir)
 	if err != nil {
@@ -180,7 +197,7 @@ func abrirAlvo(e *env.Env, a alvoDeArquivo) (*os.File, map[string]any, *ErroRPC)
 		// observação, e a decisão já foi tomada pelo percurso por descritor —
 		// então não há o que uma corrida aqui possa afrouxar.
 		cadeia, resolvido, _ := e.CadeiaDeLinks(a.Caminho)
-		return nil, nil, erroDeAbertura(a, id, cadeia, resolvido, err)
+		return nil, nil, id, erroDeAbertura(a, id, cadeia, resolvido, err)
 	}
 	bloco := map[string]any{
 		"path": a.Caminho, "dev": id.Dev, "inode": id.Inode,
@@ -203,7 +220,7 @@ func abrirAlvo(e *env.Env, a alvoDeArquivo) (*os.File, map[string]any, *ErroRPC)
 	if !a.Seguir {
 		bloco["path_binding"] = "exact"
 		bloco["resolved_path"] = a.Caminho
-		return fh, bloco, nil
+		return fh, bloco, id, nil
 	}
 	bloco["path_binding"] = "followed"
 	if cadeia, resolvido, err := e.CadeiaDeLinks(a.Caminho); err == nil {
@@ -212,7 +229,7 @@ func abrirAlvo(e *env.Env, a alvoDeArquivo) (*os.File, map[string]any, *ErroRPC)
 			bloco["link_chain"] = cadeia
 		}
 	}
-	return fh, bloco, nil
+	return fh, bloco, id, nil
 }
 
 // erroDeAbertura transforma a recusa em RESPOSTA, com a evidência junto.
@@ -337,8 +354,8 @@ var toolFileRead = Ferramenta{
 	Alvo: func(args json.RawMessage) string {
 		var a struct {
 			alvoDeArquivo
-			Offset int64 `json:"offset,omitempty"`
-			Tam    int64 `json:"length,omitempty"`
+			Offset int64  `json:"offset,omitempty"`
+			Tam    *int64 `json:"length,omitempty"`
 		}
 		if json.Unmarshal(args, &a) != nil {
 			return ""
@@ -347,7 +364,14 @@ var toolFileRead = Ferramenta{
 		if base == "" {
 			return ""
 		}
-		return fmt.Sprintf("%s offset=%d length=%d", base, a.Offset, a.Tam)
+		// A janela EFETIVA, e não o argumento cru: com length omitido a trilha
+		// registrava `length=0` para uma leitura de 64 KiB, e uma trilha que
+		// conta outra coisa do que aconteceu é pior que nenhuma.
+		janela := int64(env.MaxLeituraDirecionada)
+		if a.Tam != nil {
+			janela = *a.Tam
+		}
+		return fmt.Sprintf("%s offset=%d length=%d", base, a.Offset, janela)
 	},
 	// CRUA: são os bytes do arquivo, sem redação nenhuma. É o que exige as duas
 	// flags, e é o motivo de esta tool existir só na entrega 3.
@@ -380,13 +404,20 @@ var toolFileRead = Ferramenta{
  "encoding":{"type":"string","enum":["utf8","base64"],
   "description":"base64 quando a janela nao é UTF-8 valido — binario, ou um corte no meio de um caractere multibyte"},
  "offset":{"type":"integer"},
+ "length":{"type":"integer","description":"a janela EFETIVAMENTE pedida: 65536 quando o argumento foi omitido. É o mesmo numero que a trilha de auditoria registra"},
  "bytes_read":{"type":"integer"},
  "truncated":{"type":"boolean","description":"ha mais depois desta janela: repita com offset maior"}}}`),
 	Rodar: func(s *Servidor, args json.RawMessage) (any, *ErroRPC) {
 		var a struct {
 			alvoDeArquivo
 			Offset int64 `json:"offset,omitempty"`
-			Tam    int64 `json:"length,omitempty"`
+			// PONTEIRO, para distinguir AUSENTE de zero.
+			//
+			// Com int64 os dois viravam 0, e o runtime aceitava `length: 0` — que
+			// o schema proíbe (minimum: 1) — e o traduzia silenciosamente para o
+			// teto. A auditoria registrava `length=0` para uma leitura de 64 KiB:
+			// a trilha contava outra coisa do que aconteceu.
+			Tam *int64 `json:"length,omitempty"`
 		}
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
@@ -397,27 +428,33 @@ var toolFileRead = Ferramenta{
 		// MCP essa é a regra errada: "pergunta errada vira erro, não outra
 		// pergunta". Um length de 1 MiB atendido com 64 KiB e truncated:true faz
 		// o modelo pensar que o arquivo tem mais de 1 MiB.
-		if a.Tam < 0 || a.Tam > env.MaxLeituraDirecionada {
-			return nil, erro(CodInvalidParams, fmt.Sprintf(
-				"length precisa ficar entre 1 e %d: %d seria atendido com uma janela "+
-					"menor, e a resposta pareceria dizer que o arquivo tem mais do que "+
-					"tem. Pagine com offset.", env.MaxLeituraDirecionada, a.Tam))
+		janela := int64(env.MaxLeituraDirecionada)
+		if a.Tam != nil {
+			if *a.Tam < 1 || *a.Tam > env.MaxLeituraDirecionada {
+				return nil, erro(CodInvalidParams, fmt.Sprintf(
+					"length precisa ficar entre 1 e %d, e veio %d. Um valor fora da "+
+						"faixa atendido com outra janela faria a resposta parecer dizer "+
+						"que o arquivo tem mais do que tem. Pagine com offset.",
+					env.MaxLeituraDirecionada, *a.Tam))
+			}
+			janela = *a.Tam
 		}
 		if a.Offset < 0 {
 			return nil, erro(CodInvalidParams, "offset não pode ser negativo")
 		}
-		return leituraAoVivo(s, func(e *env.Env) (any, *ErroRPC) {
+		return leituraAoVivo(s, func(e *env.Env, inicio time.Time) (any, *ErroRPC) {
 			fh, bloco, er := abrirAlvo(e, a.alvoDeArquivo)
 			if er != nil {
 				return nil, er
 			}
 			defer fh.Close()
 
-			b, mais, err := env.LerJanela(fh, a.Offset, a.Tam)
+			b, mais, err := env.LerJanela(fh, a.Offset, janela)
 			if err != nil {
 				return nil, erro(CodInvalidParams, a.Caminho+": "+limparErro(err.Error()))
 			}
 			bloco["offset"], bloco["bytes_read"] = a.Offset, len(b)
+			bloco["length"] = janela
 			bloco["truncated"] = mais
 			if utf8.Valid(b) {
 				bloco["content"], bloco["encoding"] = string(b), "utf8"
@@ -425,7 +462,7 @@ var toolFileRead = Ferramenta{
 				bloco["content"] = base64.StdEncoding.EncodeToString(b)
 				bloco["encoding"] = "base64"
 			}
-			return envelopeDeLeitura(e, bloco), nil
+			return envelopeDeLeitura(e, inicio, bloco), nil
 		})
 	},
 }
@@ -470,15 +507,15 @@ var toolFileHash = Ferramenta{
 "properties":{` + esquemaIdentidade + `,
  "sha256":{"type":"string"},
  "bytes_hashed":{"type":"integer"},
- "stable":{"type":"boolean","description":"false significa que o arquivo MUDOU enquanto era lido: tamanho ou mtime diferem entre o fstat de antes e o de depois, no mesmo descritor. O digest é entao de uma MISTURA temporal — bytes do conteudo velho com bytes do novo — e NAO deve ser comparado contra IOC nem contra hash de pacote. Repita a chamada."},
- "size_after":{"type":"integer"},"mtime_after":{"type":"string"}}}`),
+ "stable":{"type":"boolean","description":"false significa que o arquivo MUDOU enquanto era lido: tamanho, mtime ou CTIME diferem entre o fstat de antes e o de depois, no mesmo descritor, em nanossegundo. O ctime entra porque quem escreve o arquivo pode restaurar o mtime com utimes e nao pode restaurar o ctime. Com false o digest é de uma MISTURA temporal — bytes do conteudo velho com bytes do novo — e NAO deve ser comparado contra IOC nem contra hash de pacote. Repita a chamada."},
+ "size_after":{"type":"integer"},"mtime_after":{"type":"string"},"ctime_after":{"type":"string"}}}`),
 	Rodar: func(s *Servidor, args json.RawMessage) (any, *ErroRPC) {
 		var a alvoDeArquivo
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
-		return leituraAoVivo(s, func(e *env.Env) (any, *ErroRPC) {
-			fh, bloco, er := abrirAlvo(e, a)
+		return leituraAoVivo(s, func(e *env.Env, inicio time.Time) (any, *ErroRPC) {
+			fh, bloco, antes, er := abrirAlvoComID(e, a)
 			if er != nil {
 				return nil, er
 			}
@@ -512,20 +549,28 @@ var toolFileHash = Ferramenta{
 			//
 			// O segundo fstat é no MESMO descritor, então ele não é uma segunda
 			// resolução de caminho: ele responde sobre o objeto que foi lido.
-			depois, err := fh.Stat()
+			fi, err := fh.Stat()
 			if err != nil {
 				return nil, erro(CodInvalidParams, a.Caminho+": "+limparErro(err.Error()))
 			}
-			estavel := depois.Size() == bloco["size"] &&
-				depois.ModTime().UTC().Format(time.RFC3339) == bloco["mtime"]
+			// A comparação é de IDENTIDADE CRUA, não das strings do envelope.
+			//
+			// Os campos formatados perdiam a fração de segundo, e duas leituras
+			// a 300ms de distância — o intervalo em que uma reescrita cabe —
+			// saíam com o mesmo texto. E não olhavam ctime: quem escreve o
+			// arquivo pode RESTAURAR o mtime com utimes, e não pode restaurar o
+			// ctime. Num host comprometido isso deixa de ser hipótese.
+			depois := env.IdentidadeDe(fi)
+			estavel := antes.MesmoEstado(depois)
 			bloco["sha256"] = hex.EncodeToString(h.Sum(nil))
 			bloco["bytes_hashed"] = n
 			bloco["stable"] = estavel
 			if !estavel {
-				bloco["size_after"] = depois.Size()
-				bloco["mtime_after"] = depois.ModTime().UTC().Format(time.RFC3339)
+				bloco["size_after"] = depois.Tamanho
+				bloco["mtime_after"] = depois.MtimeUTC
+				bloco["ctime_after"] = depois.CtimeUTC
 			}
-			return envelopeDeLeitura(e, bloco), nil
+			return envelopeDeLeitura(e, inicio, bloco), nil
 		})
 	},
 }
@@ -566,42 +611,20 @@ var toolFileXattrs = Ferramenta{
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
-		return leituraAoVivo(s, func(e *env.Env) (any, *ErroRPC) {
+		return leituraAoVivo(s, func(e *env.Env, inicio time.Time) (any, *ErroRPC) {
 			fh, bloco, er := abrirAlvo(e, a)
 			if er != nil {
 				return nil, er
 			}
 			defer fh.Close()
 
-			xs, err := env.XattrsDoFD(fh)
+			xs, total, cortado, err := env.XattrsDoFD(fh,
+				maxXattrsPorResposta, maxBytesDeXattr)
 			if err != nil {
 				return nil, erro(CodInvalidParams, a.Caminho+": "+limparErro(err.Error()))
 			}
-			// TETO AGREGADO, e não só por atributo.
-			//
-			// Cada valor cabe em 64 KiB e a lista de nomes cresce até 1 MiB —
-			// mas nada limitava a SOMA, e todos os valores eram retidos antes de
-			// o teto de frame entrar em ação. Um arquivo com centenas de xattr
-			// grandes montava a resposta inteira na memória deste processo, que
-			// roda no host investigado.
-			//
-			// A truncagem é SEMÂNTICA e DECLARADA: some o valor, nunca os bytes
-			// no meio de um JSON.
-			var soma int
-			cortados := 0
 			lista := make([]map[string]any, 0, len(xs))
 			for _, x := range xs {
-				// O Tamanho de um atributo ILEGÍVEL é -1, e somá-lo devolvia
-				// orçamento em vez de gastá-lo. Sentinela não entra em conta.
-				custo := x.Tamanho
-				if custo < 0 {
-					custo = 0
-				}
-				if len(lista) >= maxXattrsPorResposta || soma+custo > maxBytesDeXattr {
-					cortados++
-					continue
-				}
-				soma += custo
 				it := map[string]any{"name": x.Nome, "size": x.Tamanho}
 				if x.Tamanho >= 0 {
 					if utf8.Valid(x.Valor) {
@@ -614,16 +637,19 @@ var toolFileXattrs = Ferramenta{
 				lista = append(lista, it)
 			}
 			bloco["xattrs"] = lista
-			bloco["xattrs_total"] = len(xs)
-			bloco["truncated"] = cortados > 0
-			if cortados > 0 {
+			bloco["xattrs_total"] = total
+			bloco["truncated"] = cortado
+			if cortado {
 				bloco["truncation_reason"] = fmt.Sprintf(
-					"%d atributo(s) não foram devolvidos: o teto agregado desta "+
-						"resposta é %d atributos ou %d bytes de valor. A ausência "+
-						"deles aqui NÃO prova que não existem — xattrs_total diz "+
-						"quantos havia.", cortados, maxXattrsPorResposta, maxBytesDeXattr)
+					"a leitura PAROU no orçamento desta resposta: %d atributos ou "+
+						"%d bytes de valor. O orçamento é da aquisição, e não do "+
+						"corte no fim — contra um host que escolhe quantos xattr "+
+						"plantar, ler tudo para depois cortar protegeria o JSON e "+
+						"não a memória deste processo. xattrs_total diz quantos "+
+						"existem: a ausência de um aqui NÃO prova que ele não existe.",
+					maxXattrsPorResposta, maxBytesDeXattr)
 			}
-			return envelopeDeLeitura(e, bloco), nil
+			return envelopeDeLeitura(e, inicio, bloco), nil
 		})
 	},
 }
@@ -648,14 +674,14 @@ var toolFileCapabilities = Ferramenta{
 		"JÁ eleva na execução: com ele a capability sobe ativa e o binário não " +
 		"precisa nem pedir.\n\n" +
 		"Ausência de capability é RESPOSTA; falha de leitura é LACUNA. As duas " +
-		"são distinguidas em capability_state, que tem quatro valores — e nos " +
+		"são distinguidas em capability_state, que tem cinco valores — e nos " +
 		"dois de lacuna o campo has_capability nem aparece, para que 'false' " +
 		"nunca signifique 'não olhei'.",
 	Entrada: entradaDeArquivo(""),
 	Saida: esquemaLeitura(`{"type":"object","required":["path","capability_state"],
 "properties":{` + esquemaIdentidade + `,
  "capability_state":{"type":"string","enum":["present","absent","unsupported","unreadable","undecodable"],
-  "description":"QUATRO respostas e nao duas. present: lida. absent: o xattr nao esta la — o arquivo nao carrega capability. unsupported: o filesystem nao guarda xattr, e a pergunta nao se aplica. unreadable: o atributo pode existir e NAO foi possivel ler — LACUNA, veja read_error. undecodable: existe e este binario nao reconhece o formato (kernel mais novo, ou lixo plantado por quem conta com quem descarta em silencio)."},
+  "description":"CINCO respostas e nao duas. present: lida. absent: o xattr nao esta la — o arquivo nao carrega capability. unsupported: o filesystem nao guarda xattr, e a pergunta nao se aplica. unreadable: o atributo pode existir e NAO foi possivel ler — LACUNA, veja read_error. undecodable: existe e este binario nao reconhece o formato (kernel mais novo, ou lixo plantado por quem conta com quem descarta em silencio)."},
  "has_capability":{"type":"boolean","description":"AUSENTE nos dois estados de lacuna, de proposito: false so aparece quando alguem olhou"},
  "read_error":{"type":"string","description":"por que a leitura falhou. Evidencia, nao controle: quem decide o significado é capability_state"},
  "permitted":{"type":"array","items":{"type":"string"}},
@@ -668,7 +694,7 @@ var toolFileCapabilities = Ferramenta{
 		if er := decodificarArgs(args, &a); er != nil {
 			return nil, er
 		}
-		return leituraAoVivo(s, func(e *env.Env) (any, *ErroRPC) {
+		return leituraAoVivo(s, func(e *env.Env, inicio time.Time) (any, *ErroRPC) {
 			fh, bloco, er := abrirAlvo(e, a)
 			if er != nil {
 				return nil, er
@@ -677,7 +703,7 @@ var toolFileCapabilities = Ferramenta{
 
 			c, estado, err := env.CapabilityDoFD(fh)
 			preencherCapability(bloco, c, estado, err)
-			return envelopeDeLeitura(e, bloco), nil
+			return envelopeDeLeitura(e, inicio, bloco), nil
 		})
 	},
 }

@@ -39,7 +39,7 @@ func runMCP(args []string) int {
 		raiz         = fs.String("root", "", "adquirir de uma imagem montada em PATH")
 		perfil       = fs.String("profile", "standard", "standard | full")
 		permitirRoot = fs.Bool("allow-root", false, "autorizar a execução como root")
-		permitirSeg  = fs.Bool("allow-secrets", false, "desligar a redação (exige --profile full)")
+		permitirSeg  = fs.Bool("allow-secrets", false, "autorizar bytes crus a sair (exige --profile full, exceto em --snapshot)")
 		auditoria    = fs.String("audit-log", "", "gravar a trilha de auditoria em FILE além do stderr")
 		orcamento    = fs.Duration("capture-budget", mcp.OrcamentoDeColetaPadrao,
 			"tempo total de leitura do host que esta sessão pode gastar em snapshot.capture")

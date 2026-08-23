@@ -886,8 +886,16 @@ este binário" sem dizer "mande o /etc/shadow para um modelo remoto".
 **Esta família não responde sobre um retrato.** Um dump não carrega conteúdo de
 arquivo — nunca carregou, e não deve carregar —, então a única forma de
 responder "o que tem dentro disto" é abrir o arquivo agora. Elas não fingem: o
-envelope delas não tem `provenance`, tem `read`, com o instante da leitura e um
-aviso em prosa de que o conteúdo **não é contemporâneo de nenhum snapshot**.
+envelope delas não tem `provenance`, tem `read`, com `started_at`/`finished_at`
+e um aviso em prosa de que o conteúdo **não é contemporâneo de nenhum
+snapshot**. São dois instantes porque a leitura leva tempo: um `file.hash` de
+centenas de megabytes descreve o arquivo em algum ponto entre eles, e `stable`
+diz se a janela conteve alguma mudança.
+
+**A recusa também sai marcada.** Um erro de tool carrega texto do alvo — o
+`link_chain` de um symlink cujo alvo é o nome que o invasor escolheu —, e por
+isso ele leva `trust` como qualquer resposta de sucesso. Marcar demais custa
+precisão; deixar texto adversário passar sem marca custa a fronteira inteira.
 
 **O symlink, fechado em vez de contado.** Com `follow_symlinks:false` — o
 padrão — **nenhum** componente do caminho é atravessado, nem o final nem os do
@@ -909,8 +917,10 @@ recusado sem que o `open()` dele rode. A recusa carrega a identidade — "isto �
 chardev, dev tal, inode tal" é o que quem investiga queria saber.
 
 `file.hash` confere a estabilidade: um segundo `fstat` no mesmo descritor depois
-do hash, e `stable: false` quando tamanho ou mtime mudaram no meio. Um digest de
-mistura temporal não deve ser comparado contra IOC.
+do hash, comparando tamanho, mtime **e ctime** em nanossegundo. O ctime é o que
+fecha o caso interessante — quem escreve o arquivo pode restaurar o mtime com
+`utimes`, e não pode restaurar o ctime. Com `stable: false` o digest é de uma
+mistura temporal e não vale comparação contra IOC.
 
 **Ler não apaga evidência.** As leituras usam `O_NOATIME` — degradando quando o
 processo não é dono do arquivo nem tem `CAP_FOWNER` —, porque *quando um arquivo

@@ -54,6 +54,27 @@ type Identidade struct {
 	Tamanho  int64  `json:"size"`
 	MtimeUTC string `json:"mtime"`
 	CtimeUTC string `json:"ctime"`
+
+	// Mtim e Ctim são os timestamps CRUS, em nanossegundos, e não viajam no
+	// protocolo: eles existem para COMPARAÇÃO.
+	//
+	// Os campos formatados perdem a fração de segundo, e comparar as strings
+	// deles fazia duas leituras a 300ms de distância parecerem o mesmo estado —
+	// que é exatamente o intervalo em que uma reescrita acontece.
+	Mtim, Ctim syscall.Timespec `json:"-"`
+}
+
+// MesmoEstado diz se dois olhares para o MESMO descritor descrevem o mesmo
+// arquivo.
+//
+// Tamanho, mtime E ctime, em nanossegundo. O ctime é o que fecha o caso
+// interessante: um processo que escreve o arquivo pode RESTAURAR o mtime — é
+// uma chamada de utimes —, e não pode restaurar o ctime, que o kernel atualiza
+// em toda mudança de inode. Num host comprometido isso deixa de ser hipótese.
+func (i Identidade) MesmoEstado(o Identidade) bool {
+	return i.Tamanho == o.Tamanho &&
+		i.Mtim.Sec == o.Mtim.Sec && i.Mtim.Nsec == o.Mtim.Nsec &&
+		i.Ctim.Sec == o.Ctim.Sec && i.Ctim.Nsec == o.Ctim.Nsec
 }
 
 // ErrEhLink é a recusa de seguir um symlink quando o chamador não pediu.
@@ -152,6 +173,11 @@ func (e *Env) AbrirParaInspecao(p string, seguirLink bool) (*os.File, Identidade
 // partir do Stat_t cru, e as duas já divergiam na forma de derivar o Tipo — a
 // primeira por os.FileMode, a segunda por S_IFMT. Duas implementações da mesma
 // tradução divergem, e a que diverge é a que ninguém está olhando.
+// IdentidadeDe é a versão exportada: quem já tem um FileInfo do MESMO descritor
+// consegue montar a identidade sem reabrir nada. É o que file.hash usa para o
+// segundo olhar.
+func IdentidadeDe(fi os.FileInfo) Identidade { return identidadeDe(fi) }
+
 func identidadeDe(fi os.FileInfo) Identidade {
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
 		return identidadeDeStat(st)
@@ -202,29 +228,75 @@ type Xattr struct {
 // e o teto do kernel costuma ser 64 KiB por atributo.
 const MaxXattr = 64 << 10
 
-// XattrsDoFD lista e lê os atributos estendidos do DESCRITOR.
+// XattrsDoFD lista e lê os atributos estendidos do DESCRITOR, dentro de um
+// ORÇAMENTO.
 //
 // Por fd, e não por caminho: o coletor de SUID lê `security.capability` por
 // caminho, e ali a raiz travada do modo image não intercepta — um link dentro
 // da imagem sai para o filesystem do analista. Num fd já aberto e identificado
 // não sobra caminho a resolver.
-func XattrsDoFD(fh *os.File) ([]Xattr, error) {
+//
+// # O orçamento é da AQUISIÇÃO, e não da resposta
+//
+// A tool tinha um teto agregado e o aplicava DEPOIS: esta função lia e retinha
+// todos os valores, e só então a resposta era cortada. Contra um host que
+// escolhe quantos xattr plantar — e o threat model é esse —, o teto protegia o
+// tamanho do JSON e não a memória do processo, que roda na máquina investigada.
+//
+// Agora ele para de LER ao esgotar. `total` conta o que existe, para a resposta
+// poder dizer quantos ficaram de fora: a ausência de um atributo na lista nunca
+// prova que ele não existe.
+func XattrsDoFD(fh *os.File, maxAttrs int, maxBytes int) (xs []Xattr, total int, cortado bool, err error) {
 	nomes, err := listarXattr(fh)
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
-	out := make([]Xattr, 0, len(nomes))
+	total = len(nomes)
+	var soma int
 	for _, n := range nomes {
-		v, err := lerXattr(fh, n)
+		if len(xs) >= maxAttrs || soma >= maxBytes {
+			cortado = true
+			break
+		}
+		tam, err := tamanhoDeXattr(fh, n)
 		if err != nil {
 			// Um atributo ilegível é LACUNA, e não motivo para descartar os
 			// outros: o tamanho negativo diz que ele existe e não foi lido.
-			out = append(out, Xattr{Nome: n, Tamanho: -1})
+			xs = append(xs, Xattr{Nome: n, Tamanho: -1})
 			continue
 		}
-		out = append(out, Xattr{Nome: n, Tamanho: len(v), Valor: v})
+		if tam > MaxXattr || soma+tam > maxBytes {
+			cortado = true
+			continue
+		}
+		v, err := lerXattr(fh, n, tam)
+		if err != nil {
+			xs = append(xs, Xattr{Nome: n, Tamanho: -1})
+			continue
+		}
+		soma += len(v)
+		xs = append(xs, Xattr{Nome: n, Tamanho: len(v), Valor: v})
 	}
-	return out, nil
+	return xs, total, cortado, nil
+}
+
+// tamanhoDeXattr pergunta o tamanho ANTES de alocar.
+//
+// fgetxattr com tamanho zero devolve o comprimento sem copiar nada. Sem isso, o
+// buffer era sempre de 64 KiB e o `buf[:n]` devolvido mantinha o array inteiro
+// vivo: um atributo de dez bytes custava 64 KiB de memória retida, no processo
+// que roda no host investigado.
+func tamanhoDeXattr(fh *os.File, nome string) (int, error) {
+	nb, err := syscall.BytePtrFromString(nome)
+	if err != nil {
+		return 0, err
+	}
+	n, _, errno := syscall.Syscall6(syscall.SYS_FGETXATTR, fh.Fd(),
+		uintptr(unsafe.Pointer(nb)), 0, 0, 0, 0)
+	if errno != 0 {
+		return 0, errno
+	}
+	return int(n), nil
 }
 
 func listarXattr(fh *os.File) ([]string, error) {
@@ -246,12 +318,16 @@ func listarXattr(fh *os.File) ([]string, error) {
 	}
 }
 
-func lerXattr(fh *os.File, nome string) ([]byte, error) {
+func lerXattr(fh *os.File, nome string, tam int) ([]byte, error) {
 	nb, err := syscall.BytePtrFromString(nome)
 	if err != nil {
 		return nil, err
 	}
-	buf := make([]byte, MaxXattr)
+	if tam <= 0 {
+		return nil, nil
+	}
+	// O buffer tem o tamanho do DADO, e não o teto. Ver tamanhoDeXattr.
+	buf := make([]byte, tam)
 	n, _, errno := syscall.Syscall6(syscall.SYS_FGETXATTR, fh.Fd(),
 		uintptr(unsafe.Pointer(nb)), uintptr(unsafe.Pointer(&buf[0])),
 		uintptr(len(buf)), 0, 0)
@@ -542,9 +618,14 @@ func identidadeDeStat(st *syscall.Stat_t) Identidade {
 		// identidade.
 		Modo:  fmt.Sprintf("%04o", st.Mode&0o7777),
 		Nlink: uint64(st.Nlink), UID: st.Uid, GID: st.Gid,
-		Tamanho:  st.Size,
-		MtimeUTC: time.Unix(int64(st.Mtim.Sec), int64(st.Mtim.Nsec)).UTC().Format(time.RFC3339),
-		CtimeUTC: time.Unix(int64(st.Ctim.Sec), int64(st.Ctim.Nsec)).UTC().Format(time.RFC3339),
+		Tamanho: st.Size,
+		// RFC3339Nano, e não RFC3339: um timestamp que descarta a fração em
+		// silêncio esconde exatamente a janela em que uma reescrita cabe. Na
+		// análise de linha do tempo, que é o ofício desta ferramenta, a fração
+		// é o que ordena dois eventos do mesmo segundo.
+		MtimeUTC: time.Unix(int64(st.Mtim.Sec), int64(st.Mtim.Nsec)).UTC().Format(time.RFC3339Nano),
+		CtimeUTC: time.Unix(int64(st.Ctim.Sec), int64(st.Ctim.Nsec)).UTC().Format(time.RFC3339Nano),
+		Mtim:     st.Mtim, Ctim: st.Ctim,
 	}
 	switch st.Mode & syscall.S_IFMT {
 	case syscall.S_IFREG:

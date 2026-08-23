@@ -2,6 +2,7 @@ package env
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -244,7 +245,7 @@ func TestXattrsSaemDoDescritor(t *testing.T) {
 	}
 	defer fh.Close()
 
-	xs, err := XattrsDoFD(fh)
+	xs, _, _, err := XattrsDoFD(fh, 64, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,5 +511,127 @@ func TestReaberturaSemProcRecusaArquivoTrocado(t *testing.T) {
 			"descreveria a identidade de um objeto e o conteúdo de outro", b[:n])
 	} else if !strings.Contains(err.Error(), "TROCADO") {
 		t.Errorf("a recusa precisa dizer o que houve: %v", err)
+	}
+}
+
+// O ORÇAMENTO DE XATTR É DA AQUISIÇÃO.
+//
+// O teto existia na tool e era aplicado DEPOIS: esta função lia e retinha todos
+// os valores, e só então a resposta era cortada. Contra um host que escolhe
+// quantos xattr plantar — e o threat model é esse —, aquilo protegia o tamanho
+// do JSON e não a memória do processo, que roda na máquina investigada.
+func TestXattrsParamDeLerAoEsgotarOOrcamento(t *testing.T) {
+	dir := t.TempDir()
+	alvo := filepath.Join(dir, "muitos")
+	if err := os.WriteFile(alvo, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const plantados = 40
+	valor := make([]byte, 1024)
+	for i := range valor {
+		valor[i] = 'A'
+	}
+	for i := 0; i < plantados; i++ {
+		nome := fmt.Sprintf("user.a%02d", i)
+		if err := syscall.Setxattr(alvo, nome, valor, 0); err != nil {
+			t.Skipf("filesystem sem xattr de usuário: %v", err)
+		}
+	}
+
+	e := &Env{Source: SourceLive, Caps: CapFilesystem, CapReason: map[string]string{}}
+	fh, _, err := e.AbrirParaInspecao(alvo, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fh.Close()
+
+	// Teto de 5 atributos: tem de PARAR em 5, e dizer que existem 40.
+	xs, total, cortado, err := XattrsDoFD(fh, 5, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(xs) > 5 {
+		t.Errorf("leu %d atributos com teto de 5: o orçamento não está na "+
+			"aquisição", len(xs))
+	}
+	if total < plantados {
+		t.Errorf("total=%d, plantei %d: sem o total, a ausência de um atributo "+
+			"na lista se leria como 'ele não existe'", total, plantados)
+	}
+	if !cortado {
+		t.Error("cortou e não declarou")
+	}
+
+	// Teto de BYTES: 3 KiB só cabem três valores de 1 KiB.
+	xs, _, cortado, err = XattrsDoFD(fh, 1000, 3*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var soma int
+	for _, x := range xs {
+		if x.Tamanho > 0 {
+			soma += x.Tamanho
+		}
+	}
+	if soma > 4*1024 {
+		t.Errorf("reteve %d bytes com teto de %d", soma, 3*1024)
+	}
+	if !cortado {
+		t.Error("cortou por bytes e não declarou")
+	}
+
+	// E o buffer tem o tamanho do DADO: um valor de 1 KiB não pode reter os
+	// 64 KiB do teto por atributo.
+	for _, x := range xs {
+		if x.Tamanho > 0 && cap(x.Valor) > 4*1024 {
+			t.Errorf("%s: valor de %d bytes com backing array de %d — o buffer "+
+				"era sempre do tamanho do TETO, e o buf[:n] mantinha o array "+
+				"inteiro vivo", x.Nome, x.Tamanho, cap(x.Valor))
+			break
+		}
+	}
+}
+
+// O DECODER DE CAPABILITY RECUSA REVISÃO QUE NÃO CONHECE.
+//
+// Ele aceitava qualquer buffer com 12 bytes ou mais e devolvia a revisão crua —
+// um xattr dizendo `revision 99` com 24 bytes saía como present, version=99. Em
+// host vivo o kernel controla a interface e isso é difícil; numa imagem
+// forense, ou num filesystem corrompido, não é.
+//
+// Um formato que este binário não reconhece é LACUNA — "existe e não sei ler" —
+// e não resposta. É a mesma distinção dos quatro estados, aplicada um nível
+// abaixo.
+func TestCapabilityRecusaRevisaoDesconhecida(t *testing.T) {
+	montar := func(rev uint32, tam int) []byte {
+		b := make([]byte, tam)
+		magic := rev<<24 | 0x000001 // com o bit efetivo
+		b[0], b[1], b[2], b[3] = byte(magic), byte(magic>>8), byte(magic>>16), byte(magic>>24)
+		b[4] = 0x80 // CAP_SETUID (bit 7)
+		return b
+	}
+	casos := []struct {
+		nome   string
+		buf    []byte
+		aceita bool
+	}{
+		{"revisão 1, 12 bytes", montar(1, 12), true},
+		{"revisão 2, 20 bytes", montar(2, 20), true},
+		{"revisão 3, 24 bytes", montar(3, 24), true},
+		{"revisão 99", montar(99, 24), false},
+		{"revisão 0", montar(0, 12), false},
+		{"revisão 2 com tamanho de 3", montar(2, 24), false},
+		{"revisão 3 truncada", montar(3, 20), false},
+		{"curto demais", montar(1, 8), false},
+	}
+	for _, c := range casos {
+		got, ok := DecodificarCapability(c.buf)
+		if ok != c.aceita {
+			t.Errorf("%s: aceitou=%v, queria %v (decodificou %v)",
+				c.nome, ok, c.aceita, got.Permitidas)
+		}
+		if ok && got.Versao == 0 {
+			t.Errorf("%s: aceitou e não registrou a revisão", c.nome)
+		}
 	}
 }

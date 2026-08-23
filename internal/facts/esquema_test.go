@@ -59,7 +59,7 @@ func TestImpressaoDoEsquema(t *testing.T) {
 		// Subida de novo, e desta vez o SchemaVersion SOBE junto (17→18). O
 		// CrossView passou a carregar o estado de LEITURA de cada testemunha —
 		// ProcListLida/N, ModProcLido, ModSysLido, ModFtraceLido,
-		// SocketDiagProtos, SocketProcProtos. Diferente do EnvBruto acima, aqui a
+		// SocketProtos. Diferente do EnvBruto acima, aqui a
 		// regra do SchemaVersion MANDA subir: o consumidor é crossview.get, e ao
 		// contrário de process.environ ele ALCANÇA dump (fonte live servida em
 		// modo snapshot). Um dump v17, lido por este binário sem a subida, traria
@@ -68,7 +68,7 @@ func TestImpressaoDoEsquema(t *testing.T) {
 		// marcada como não lida. A subida faz o loader RECUSAR o dump antigo em
 		// vez de respondê-lo torto. É o mesmo "vazio ≠ ilegível" que o resto do
 		// Aletheia sustenta, agora atravessando a fronteira MCP.
-		impressaoGravada = "c80be7c607311f84"
+		impressaoGravada = "6d91749355746100"
 	)
 	if SchemaVersion != esquemaEsperado {
 		t.Fatalf("SchemaVersion=%d e este teste conhece o %d: atualize os dois "+

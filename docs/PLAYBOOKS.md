@@ -916,6 +916,7 @@ mesmo dado, e é a divergência entre elas que o denuncia:
 | `sockets` | `/proc/net` × `NETLINK_INET_DIAG` | há conexão que a tabela de texto nega |
 | `modules` | `/proc/modules` × `/sys/module` | um módulo se desencadeou de uma lista e ficou na outra |
 | `modules_ftrace` | registro do ftrace × `/proc/modules` | o kernel guarda função rastreável de um módulo que diz não ter carregado — o registro só é limpo no descarregamento real |
+| `bpf` | enumeração do kernel × referências vivas (fd/pin/link) | um programa eBPF é citado por referência viva e a enumeração do kernel não o devolve — o modo mais forte de ocultação de kernel |
 
 Cada eixo tem **três** estados, e o terceiro é o que decide a pergunta:
 
@@ -932,6 +933,23 @@ Cada eixo tem **três** estados, e o terceiro é o que decide a pergunta:
 significam o oposto: no primeiro caso duas testemunhas se confirmaram, no
 segundo só uma falou. Ler `not_compared` como "nada oculto" é a conclusão errada
 mais fácil de tirar desta ferramenta, e é por isso que o estado é explícito.
+
+**`state` é observação; `trust_breaking` é interpretação.** Cada eixo carrega os
+dois. `state: disagree` diz que as testemunhas divergem — mas nem toda
+divergência desqualifica o kernel. Uma contagem de threads que oscila, ou um PID
+visto só por sondagem, é ruído com corrida residual: o motor a emite como `WARN`,
+e o eixo sai `disagree` com `trust_breaking: false`. Só um `CRITICAL` da classe
+quebra-confiança (um PID oculto confirmado por PPID, um socket que o netlink
+entrega e o `/proc/net` nega, um id de eBPF oculto) sobe `trust_breaking: true` —
+e é ele, não o `state`, que decide o valor das ausências. `trust_breaking` deriva
+do mesmo `Report` que `trust_broken`; a tool nunca recalcula o veredito.
+
+O eixo `sockets` merece atenção: o confronto é **por protocolo**, e a testemunha
+`/proc/net` publica o estado de cada um em `protocols`. `agree` exige os quatro
+inet (`tcp`, `tcp6`, `udp`, `udp6`) em `compared`. Se `udp_diag` não está
+carregado, o netlink pula UDP para não autocarregá-lo, e o eixo responde
+`not_compared` com `udp: diag_skipped` — porque um backdoor de UDP escondido de
+um `/proc/net/udp` nunca confrontado passaria por baixo de um `agree` de TCP.
 
 O alcance faz parte da afirmação. `"reach": 65536` num host com `pid_max`
 4194304 quer dizer que 98% da faixa de PID não foi sondada — a resposta diz isso

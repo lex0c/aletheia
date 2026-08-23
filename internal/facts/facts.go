@@ -256,6 +256,24 @@ import (
 //	   guardar só o valor efetivo por arquivo. Num dump v16 ela traz todas as
 //	   atribuições, e comparar as duas versões acusaria remoção onde houve
 //	   apenas uma linha sombreada que deixou de ser guardada.
+//	18 O CrossView passou a carregar o estado de LEITURA de cada testemunha, e
+//	   essa observabilidade não é lida por check nenhum — é lida pela tool
+//	   crossview.get, que AO CONTRÁRIO de process.environ alcança dump (fonte
+//	   live servida em modo snapshot). Num dump v17 esses bits vêm falsos, e
+//	   falso ali é "não lido": a tool renderizaria not_compared para uma
+//	   comparação que aconteceu, ou agree com uma testemunha marcada não lida.
+//	   Por isso o número sobe e o Carregar recusa o v17 em vez de respondê-lo
+//	   torto.
+//
+//	   ProcListLida/ProcListN  o sucesso e a contagem do readdir de /proc, a
+//	     testemunha de BASE da comparação de processos — PidsListados é json:"-"
+//	     e não viajava.
+//	   ModProcLido/ModSysLido/ModFtraceLido  okProc/errSys/achou dos coletores:
+//	     fonte lida com zero módulos ≠ fonte ilegível.
+//	   SocketProtos  o estado por protocolo inet (compared|proc_unreadable|
+//	     diag_skipped). A contagem "3 de 4" não dizia QUAL faltou, e o netlink
+//	     pula o protocolo sem handler de diag para não autocarregar — "2 de 2"
+//	     virava agree com udp/udp6 nunca olhados.
 const SchemaVersion = 18
 
 // Facts é o retrato do host.

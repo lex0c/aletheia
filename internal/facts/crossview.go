@@ -154,14 +154,23 @@ type CrossView struct {
 	SocketDiag     int  `json:"sockets_netlink,omitempty"`
 	SocketProc     int  `json:"sockets_proc,omitempty"`
 	SocketDiagLido bool `json:"socket_netlink_read,omitempty"`
-	// A comparação de sockets é POR PROTOCOLO, e a leitura de /proc/net pode
-	// falhar em uns e não em outros. SocketDiagProtos é quantos protocolos o
-	// netlink devolveu; SocketProcProtos é em quantos DELES o /proc/net também
-	// foi lido. Quando o segundo é menor, houve comparação parcial — e quando é
-	// zero, o netlink falou mas o /proc/net não foi confrontado em nenhum
-	// protocolo, o que não é concordância nenhuma.
-	SocketDiagProtos int `json:"socket_diag_protos,omitempty"`
-	SocketProcProtos int `json:"socket_proc_protos,omitempty"`
+	// A comparação de sockets é POR PROTOCOLO, e o estado de CADA um viaja —
+	// não uma contagem que some qual protocolo ficou de fora.
+	//
+	// A cardinalidade mentia por dois caminhos. "3 de 4 protocolos comparados"
+	// não diz QUAL não foi, e um socket escondido do /proc/net/udp6 passa se udp6
+	// foi o que faltou. Pior: o netlink PULA o protocolo cujo handler de
+	// diagnóstico não está carregado, para não autocarregá-lo — então udp/udp6
+	// podem nem entrar no denominador, e "2 de 2" viraria agree com metade da
+	// superfície de socket sem ninguém ter olhado. O estado por protocolo é a
+	// observabilidade por FONTE que o resto do Aletheia já faz.
+	//
+	//	compared         netlink consultou E /proc/net leu: as duas visões
+	//	                 se confrontaram
+	//	proc_unreadable  netlink consultou, /proc/net deu EACCES: não confrontado
+	//	diag_skipped     netlink NÃO consultou (handler de diag ausente, pulado
+	//	                 para não autocarregar): o protocolo existe e não foi visto
+	SocketProtos map[string]string `json:"socket_protocols,omitempty"`
 	// SocketDiagMotivo é por que a segunda visão não existiu, quando não
 	// existiu. É a frase que vai para o rodapé.
 	SocketDiagMotivo  string `json:"socket_netlink_reason,omitempty"`

@@ -27,12 +27,12 @@ func TestTestemunhaAusenteNaoViraConcordancia(t *testing.T) {
 		{"netlink não respondeu",
 			facts.CrossView{SocketProc: 12, SocketDiagLido: false}, eixoDeSockets},
 		{"netlink respondeu CORTADO",
-			facts.CrossView{SocketProc: 12, SocketDiag: 12, SocketDiagProtos: 4,
-				SocketProcProtos: 4, SocketDiagLido: true, SocketDiagCortado: true},
+			facts.CrossView{SocketProc: 12, SocketDiag: 12, SocketProtos: protosCompared(),
+				SocketDiagLido: true, SocketDiagCortado: true},
 			eixoDeSockets},
 		{"netlink leu, /proc/net não foi lido em protocolo nenhum",
-			facts.CrossView{SocketDiagLido: true, SocketDiagProtos: 4,
-				SocketProcProtos: 0}, eixoDeSockets},
+			facts.CrossView{SocketDiagLido: true, SocketProtos: protosProcIlegivel()},
+			eixoDeSockets},
 		{"readdir de /proc não foi lido",
 			facts.CrossView{ProbeAte: 4194304}, porCrossView(eixoDeProcessos)},
 		{"listagem lida, mas nenhuma sondagem rodou",
@@ -102,8 +102,8 @@ func TestReadStateEhFatoNaoCardinalidade(t *testing.T) {
 func TestCampoReadDaTestemunhaEhHonesto(t *testing.T) {
 	// sockets: netlink leu, /proc/net não foi lido em protocolo nenhum. A
 	// testemunha /proc/net tem de dizer read=false.
-	so := eixoDeSockets(&facts.CrossView{SocketDiagLido: true, SocketDiagProtos: 4,
-		SocketProcProtos: 0})
+	so := eixoDeSockets(&facts.CrossView{SocketDiagLido: true,
+		SocketProtos: protosProcIlegivel()})
 	procNet := so["witnesses"].([]map[string]any)[0]
 	if procNet["read"] != false {
 		t.Errorf("/proc/net não foi lido em protocolo nenhum e a testemunha diz "+
@@ -210,7 +210,7 @@ func TestDivergenciaLegitimaDeContagemEhExplicada(t *testing.T) {
 func TestAchadoSobreviveALacuna(t *testing.T) {
 	c := facts.CrossView{
 		SocketProc: 3, SocketDiag: 4, SocketDiagLido: true,
-		SocketDiagProtos: 4, SocketProcProtos: 4, SocketDiagCortado: true,
+		SocketProtos: protosCompared(), SocketDiagCortado: true,
 		SocketOcultos: []facts.SocketOculto{{}},
 	}
 	e := eixoDeSockets(&c)
@@ -248,8 +248,8 @@ func TestAlcanceParcialApareceNaFrase(t *testing.T) {
 // carrega o número real.
 func TestDivergenciaGrandeEhCortadaComTotal(t *testing.T) {
 	muitos := make([]facts.SocketOculto, maxDivergencias+50)
-	c := facts.CrossView{SocketDiagLido: true, SocketDiagProtos: 4,
-		SocketProcProtos: 4, SocketOcultos: muitos}
+	c := facts.CrossView{SocketDiagLido: true, SocketProtos: protosCompared(),
+		SocketOcultos: muitos}
 	e := eixoDeSockets(&c)
 	if e["divergences_total"] != maxDivergencias+50 {
 		t.Errorf("divergences_total=%v, queria %d — o número real sumiu no corte",
@@ -295,7 +295,7 @@ func TestTrustBrokenVemDoMotorNaoDosEixos(t *testing.T) {
 		ModProcLido: true, ModSysLido: true,
 		ModProc: []string{"a"}, ModSys: []string{"a"},
 		ModFtraceLido:  true,
-		SocketDiagLido: true, SocketDiagProtos: 4, SocketProcProtos: 4,
+		SocketDiagLido: true, SocketProtos: protosCompared(),
 	}
 	// O ÚNICO defeito: um id de eBPF oculto, confirmado. Faz cross.bpf_hidden
 	// disparar CRITICAL, e é kernelBreaker. fatosDeTeste tem Source live, que é
@@ -354,6 +354,139 @@ func TestEixoBPF(t *testing.T) {
 		f := &facts.Facts{BPF: c.bpf}
 		if s := eixoDeBPF(f)["state"]; s != c.quero {
 			t.Errorf("%s: state=%v, queria %v", c.nome, s, c.quero)
+		}
+	}
+}
+
+// protosCompared é o estado de sockets em que os quatro protocolos inet foram
+// confrontados — o único que sustenta agree.
+func protosCompared() map[string]string {
+	return map[string]string{"tcp": "compared", "tcp6": "compared",
+		"udp": "compared", "udp6": "compared"}
+}
+
+// protosProcIlegivel: netlink leu, /proc/net deu EACCES em todos — nenhum
+// protocolo confrontado.
+func protosProcIlegivel() map[string]string {
+	return map[string]string{"tcp": "proc_unreadable", "tcp6": "proc_unreadable",
+		"udp": "proc_unreadable", "udp6": "proc_unreadable"}
+}
+
+// P1: COBERTURA PARCIAL DE SOCKETS NÃO VIRA agree.
+//
+// O confronto é por protocolo. Se um protocolo não foi confrontado — /proc/net
+// ilegível nele, ou o netlink o pulou para não autocarregar o handler de diag —
+// então "nenhum socket oculto" naquele protocolo é a ausência de uma
+// comparação, não o resultado dela. O caso comum é udp_diag não estar carregado:
+// tcp/tcp6 comparam, udp/udp6 são pulados, e o eixo NÃO pode dizer agree com
+// metade da superfície de socket sem ninguém ter olhado.
+func TestCoberturaParcialDeSocketsNaoEhAgree(t *testing.T) {
+	casos := []struct {
+		nome   string
+		protos map[string]string
+	}{
+		{"udp/udp6 pulados (udp_diag não carregado)", map[string]string{
+			"tcp": "compared", "tcp6": "compared",
+			"udp": "diag_skipped", "udp6": "diag_skipped"}},
+		{"udp6 com /proc/net ilegível", map[string]string{
+			"tcp": "compared", "tcp6": "compared",
+			"udp": "compared", "udp6": "proc_unreadable"}},
+	}
+	for _, c := range casos {
+		e := eixoDeSockets(&facts.CrossView{SocketDiagLido: true, SocketProtos: c.protos})
+		if e["state"] != "not_compared" {
+			t.Errorf("%s: state=%v, queria not_compared.\n"+
+				"Um protocolo não confrontado não pode virar agree — um socket "+
+				"escondido dele passaria despercebido.", c.nome, e["state"])
+		}
+	}
+	// E os quatro comparados É agree.
+	full := eixoDeSockets(&facts.CrossView{SocketDiagLido: true, SocketProtos: protosCompared()})
+	if full["state"] != "agree" {
+		t.Errorf("quatro protocolos comparados e sem divergência: state=%v, queria agree",
+			full["state"])
+	}
+}
+
+// P1: state É OBSERVAÇÃO, trust_breaking É INTERPRETAÇÃO DO MOTOR.
+//
+// Uma divergência WARN — thread_count com corrida residual, ou hidden_pid visto
+// só por sondagem — deixa o eixo em disagree SEM quebrar a confiança do kernel.
+// O motor não lista essas em KernelTrustBroken; só um CRITICAL kernelBreaker
+// entra. A tool tem de espelhar isso: disagree com trust_breaking=false, e a
+// mensagem top-level não pode dizer "nada contradiz o kernel" ao lado de um eixo
+// em disagree.
+func TestDisagreeFracoNaoQuebraConfianca(t *testing.T) {
+	f := fatosDeTeste()
+	f.Cross = facts.CrossView{
+		ProcListLida: true, ProcListN: 2,
+		ProbeAte: 4194304, ProbeProcfsAte: 4194304, PidMax: 4194304,
+		ModProcLido: true, ModSysLido: true, ModProc: []string{"a"}, ModSys: []string{"a"},
+		ModFtraceLido:  true,
+		SocketDiagLido: true, SocketProtos: protosCompared(),
+		// Uma divergência de contagem de threads: WARN, não kernelBreaker.
+		Threads: []facts.ThreadDiff{{PID: 4242, Status: 8, Task: 7}},
+	}
+	s, r := servidorDeTeste(t, f)
+	if len(r.Relatorio().KernelTrustBroken) != 0 {
+		t.Fatal("thread_count não deveria quebrar a confiança do kernel — o " +
+			"cenário não isola o que promete")
+	}
+
+	m := chamar(t, s, "crossview.get", "{}")
+	data := m["data"].(map[string]any)
+	if data["trust_broken"] != false {
+		t.Errorf("trust_broken=%v: uma divergência WARN não desqualifica o kernel",
+			data["trust_broken"])
+	}
+	var proc map[string]any
+	for _, ax := range data["axes"].([]any) {
+		a := ax.(map[string]any)
+		if a["axis"] == "processes" {
+			proc = a
+		}
+	}
+	if proc["state"] != "disagree" {
+		t.Fatalf("processes state=%v, esperava disagree (há ThreadDiff)", proc["state"])
+	}
+	if proc["trust_breaking"] != false {
+		t.Errorf("processes disagree mas trust_breaking=%v — uma divergência de "+
+			"observação WARN virou quebra de confiança", proc["trust_breaking"])
+	}
+	// E a mensagem top-level não pode afirmar que nada contradiz o kernel.
+	if msg, _ := data["meaning"].(string); strings.Contains(msg, "nada aqui contradiz o kernel") {
+		t.Errorf("há eixo em disagree e a mensagem diz 'nada contradiz o kernel': "+
+			"mistura observação com interpretação\nmeaning=%q", msg)
+	}
+}
+
+// O outro lado: um hidden_pid CRITICAL por PPID SOBE trust_breaking no eixo.
+func TestDisagreeForteQuebraConfianca(t *testing.T) {
+	f := fatosDeTeste()
+	f.Cross = facts.CrossView{
+		ProcListLida: true, ProcListN: 2,
+		ProbeAte: 4194304, ProbeProcfsAte: 4194304, PidMax: 4194304,
+		ModProcLido: true, ModSysLido: true, ModProc: []string{"a"}, ModSys: []string{"a"},
+		ModFtraceLido:  true,
+		SocketDiagLido: true, SocketProtos: protosCompared(),
+		// PID oculto detectado por PPID — a via que o motor sobe a CRITICAL.
+		Hidden: []facts.HiddenPid{{PID: 31337, Como: "ppid", Comm: "x"}},
+	}
+	s, r := servidorDeTeste(t, f)
+	if len(r.Relatorio().KernelTrustBroken) == 0 {
+		t.Skip("hidden_pid por ppid não quebrou a confiança neste ambiente — " +
+			"o check tem reconfirmação que pode não disparar com fato sintético")
+	}
+	m := chamar(t, s, "crossview.get", "{}")
+	data := m["data"].(map[string]any)
+	if data["trust_broken"] != true {
+		t.Fatalf("trust_broken=%v com KernelTrustBroken != []", data["trust_broken"])
+	}
+	for _, ax := range data["axes"].([]any) {
+		a := ax.(map[string]any)
+		if a["axis"] == "processes" && a["trust_breaking"] != true {
+			t.Errorf("hidden_pid CRITICAL e processes.trust_breaking=%v",
+				a["trust_breaking"])
 		}
 	}
 }

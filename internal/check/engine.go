@@ -404,6 +404,19 @@ func (r *Report) applyTrustDowngrade() {
 // que mente sobre a lista de PIDs também serve o VFS: o `openat` que lê
 // /etc/crontab passa por ele. O único modo que sobrevive é o de imagem
 // montada, onde o kernel é o do analista (§35.6).
+// MensagemDeQuebraDeKernel devolve a frase que um check kernelBreaker publica em
+// KernelTrustBroken ao disparar CRITICAL, e se o ID é de fato kernelBreaker.
+//
+// Existe para quem TRANSPORTA KernelTrustBroken por outra interface — a tool
+// crossview.get — e precisa atribuir a quebra ao EIXO certo. A pergunta "este
+// eixo quebrou a confiança?" tem de ser respondida pela MESMA lista que o motor
+// publicou, testando se a frase deste breaker está nela; recompor a decisão a
+// partir dos fatos seria a segunda contabilidade que o resto do projeto evita.
+func MensagemDeQuebraDeKernel(id string) (string, bool) {
+	m, ok := kernelBreakers[id]
+	return m, ok
+}
+
 func (r *Report) invalidarAusencias(fonte env.Source, completos []Check) {
 	var motivos []string
 	for _, f := range r.Findings {

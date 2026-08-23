@@ -3,7 +3,9 @@ package mcp
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 
+	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
 )
@@ -73,12 +75,13 @@ var toolCrossView = Ferramenta{
 	EscopoMin: EscopoCompleto,
 	Nome:      "crossview.get",
 	Titulo:    "O kernel concorda consigo mesmo?",
-	Descricao: "Compara as visões INDEPENDENTES que o kernel dá de si em quatro " +
+	Descricao: "Compara as visões INDEPENDENTES que o kernel dá de si em cinco " +
 		"pares de testemunhas: processos (listagem de /proc contra sondagem por " +
 		"sinal), sockets (/proc/net contra NETLINK_INET_DIAG), módulos " +
-		"(/proc/modules contra /sys/module) e módulos pelo ftrace (o registro de " +
+		"(/proc/modules contra /sys/module), módulos pelo ftrace (o registro de " +
 		"funções rastreáveis contra /proc/modules — o par que pega o módulo que " +
-		"se DESENCADEIA das listas).\n\n" +
+		"se DESENCADEIA das listas) e eBPF (enumeração do kernel contra as " +
+		"referências vivas por fd/pin/link).\n\n" +
 		"Leia ANTES de concluir qualquer coisa a partir de uma ausência. Quando " +
 		"duas visões do MESMO kernel discordam, o kernel mentiu para uma delas — " +
 		"e a partir daí nenhum 'não encontrei' deste host vale como prova. Os " +
@@ -88,7 +91,12 @@ var toolCrossView = Ferramenta{
 		"indisponível é a mesma frase de 'nenhum socket oculto' com as duas " +
 		"visões batendo, e as conclusões são opostas.\n\n" +
 		"O ALCANCE vem junto: 'nenhum PID oculto até 4.194.304' e 'até 65.536' " +
-		"são afirmações diferentes.",
+		"são afirmações diferentes.\n\n" +
+		"state é OBSERVAÇÃO (as testemunhas discordam?); trust_breaking é " +
+		"INTERPRETAÇÃO do motor (a discordância é forte o bastante para " +
+		"desqualificar o kernel?). Uma contagem de threads que oscila fica em " +
+		"disagree com trust_breaking=false. Confie em trust_broken/trust_breaking " +
+		"para decidir o valor das ausências, não no state sozinho.",
 	Entrada: entradaSnapshot(""),
 	Saida: esquemaEnvelope(`{"type":"object","required":["trust_broken","axes"],
 "properties":{
@@ -100,7 +108,8 @@ var toolCrossView = Ferramenta{
   "properties":{
    "axis":{"type":"string","enum":["processes","sockets","modules","modules_ftrace","bpf"]},
    "state":{"type":"string","enum":["agree","disagree","not_compared"],
-    "description":"agree: as duas testemunhas olharam e concordam. disagree: olharam e DISCORDAM. not_compared: uma testemunha necessaria nao respondeu, e aqui 'nada oculto' nao significa nada"},
+    "description":"OBSERVACAO, nao veredito. agree: as testemunhas olharam e batem. disagree: olharam e DIVERGEM — sozinho NAO prova que o kernel mentiu, uma divergencia pode ser corrida residual (WARN). not_compared: uma testemunha necessaria nao respondeu, e aqui 'nada oculto' nao significa nada"},
+   "trust_breaking":{"type":"boolean","description":"INTERPRETACAO do motor: esta divergencia foi forte o bastante (finding CRITICAL kernelBreaker) para desqualificar o kernel? Vem da mesma fonte que trust_broken. disagree com trust_breaking=false é ruido com corrida, nao ocultacao"},
    "witnesses":{"type":"array","items":{"type":"object",
     "properties":{
      "name":{"type":"string"},
@@ -108,8 +117,7 @@ var toolCrossView = Ferramenta{
      "reach":{"type":"integer","description":"ate onde ela olhou, quando o alcance é limitado"},
      "read":{"type":"boolean","description":"se esta testemunha foi de fato lida — FATO coletado, nao inferido por count>0: fonte lida com zero é diferente de fonte ilegivel"},
      "truncated":{"type":"boolean"},
-     "protocols_compared":{"type":"integer","description":"sockets: em quantos protocolos /proc/net foi confrontado com o netlink"},
-     "protocols_total":{"type":"integer","description":"sockets: quantos protocolos o netlink devolveu"},
+     "protocols":{"type":"object","description":"sockets/proc-net: estado por protocolo inet — compared | proc_unreadable | diag_skipped. agree exige os quatro compared","additionalProperties":{"type":"string"}},
      "reason":{"type":"string","description":"por que ela nao respondeu, quando nao respondeu"}}}},
    "divergences":{"type":"array","items":{"type":"object"},
     "description":"o que uma testemunha viu e a outra negou. Pequeno por natureza: é o achado. Cortado no teto quando patologicamente grande"},
@@ -154,12 +162,65 @@ var toolCrossView = Ferramenta{
 			eixoDeFtrace(c),
 			eixoDeBPF(r.Fatos),
 		}
+
+		// trust_breaking separa OBSERVAÇÃO de INTERPRETAÇÃO, por eixo.
+		//
+		// state é a relação entre as testemunhas: elas discordam ou não. Mas nem
+		// toda discordância desqualifica o kernel — o motor sabe disso e a tool
+		// tem de respeitar. cross.thread_count é WARN (resta uma corrida em
+		// processo que encolhe sem parar), e um hidden_pid achado só por sondagem
+		// também é WARN; só a via por PPID, que mata a corrida, sobe a CRITICAL.
+		// Um eixo pode então estar em disagree com o kernel intacto.
+		//
+		// trust_breaking é a conclusão do MOTOR, não um recálculo: testa se a
+		// frase deste breaker está em KernelTrustBroken, a lista que o motor já
+		// publicou (e que só é populada com finding CRITICAL e fonte live). O
+		// mapa eixo→ID é roteamento da decisão, não a decisão.
+		quebras := map[string]bool{}
+		for _, m := range rel.KernelTrustBroken {
+			quebras[m] = true
+		}
+		breakerDoEixo := map[string]string{
+			"processes": "cross.hidden_pid", "sockets": "cross.socket_view",
+			"modules": "cross.module_view", "modules_ftrace": "cross.module_view",
+			"bpf": "cross.bpf_hidden",
+		}
+		algumDisagreeFraco := false
+		for _, e := range eixos {
+			// trust_breaking exige que o eixo tenha OBSERVADO a divergência (state
+			// disagree) E que ela seja a que quebrou a confiança. Sem o primeiro,
+			// um cross.module_view que disparou pela via do ftrace marcaria também
+			// o eixo de módulos /proc×/sys que CONCORDOU — os dois compartilham o
+			// ID do breaker. A quebra é do eixo que a viu.
+			ehDisagree := e["state"] == "disagree"
+			quebrou := false
+			if msg, ok := check.MensagemDeQuebraDeKernel(breakerDoEixo[e["axis"].(string)]); ok {
+				quebrou = quebras[msg]
+			}
+			tb := ehDisagree && quebrou
+			e["trust_breaking"] = tb
+			if ehDisagree && !tb {
+				algumDisagreeFraco = true
+			}
+		}
+
 		dados := map[string]any{
 			"trust_broken": quebrada,
 			"axes":         eixos,
 			"meaning": "as comparações concordaram, ou não puderam ser feitas: " +
 				"nada aqui contradiz o kernel. Isso NÃO é prova de host limpo — é " +
 				"a ausência de uma contradição específica.",
+		}
+		if !quebrada && algumDisagreeFraco {
+			// Há divergência de OBSERVAÇÃO, mas nenhuma forte o bastante para
+			// desqualificar o kernel. Dizer "nada contradiz o kernel" ao lado de
+			// um eixo em disagree seria misturar as duas semânticas.
+			dados["meaning"] = "algum eixo tem divergência de observação, mas " +
+				"nenhuma forte o bastante para desqualificar o kernel (nenhum " +
+				"quebra-confiança CRITICAL). Leia trust_breaking por eixo: uma " +
+				"contagem de threads que oscila, ou um pid visto só por sondagem, " +
+				"é ruído com corrida residual — não prova de ocultação. As " +
+				"ausências deste host ainda valem."
 		}
 		if quebrada {
 			// A LISTA autoritativa do que quebrou, verbatim do motor. Ela também
@@ -291,17 +352,13 @@ func eixoDeSockets(c *facts.CrossView) map[string]any {
 	if c.SocketDiagMotivo != "" {
 		netlink["reason"] = c.SocketDiagMotivo
 	}
-	// A comparação de sockets é POR PROTOCOLO. /proc/net não é uma leitura só:
-	// read reflete se ELE foi lido em ao menos um dos protocolos que o netlink
-	// devolveu, não um `true` fixo — antes a testemunha se declarava lida mesmo
-	// quando /proc/net/tcp deu EACCES e só udp foi comparado.
+	// O confronto é por protocolo, então a testemunha /proc/net carrega o estado
+	// de cada um em vez de um read agregado que esconde qual protocolo faltou.
+	comparados, naoComparados := particionaProtocolos(c.SocketProtos)
 	procNet := map[string]any{
 		"name": "/proc/net", "count": c.SocketProc,
-		"read": c.SocketProcProtos > 0,
-	}
-	if c.SocketDiagProtos > 0 {
-		procNet["protocols_compared"] = c.SocketProcProtos
-		procNet["protocols_total"] = c.SocketDiagProtos
+		"read":      len(comparados) > 0,
+		"protocols": c.SocketProtos,
 	}
 	e := map[string]any{
 		"axis": "sockets",
@@ -328,24 +385,50 @@ func eixoDeSockets(c *facts.CrossView) map[string]any {
 		e["state"] = "not_compared"
 		e["meaning"] = "a resposta do netlink foi CORTADA: a parte não lida não " +
 			"foi comparada com nada"
-	case c.SocketProcProtos == 0:
-		// O netlink falou, mas /proc/net não foi lido em NENHUM dos protocolos
-		// que ele devolveu: não houve confronto. "Nenhum socket oculto" aqui é a
-		// ausência de uma comparação, não o resultado dela.
+	case len(naoComparados) > 0:
+		// Qualquer protocolo NÃO confrontado leva o eixo a not_compared, não a
+		// um "agree com nota". udp_diag costuma não estar carregado, e o netlink
+		// pula udp/udp6 para não autocarregar — dois protocolos inteiros sem
+		// olhar. Chamar isso de "agree" esconderia um backdoor de UDP atrás de um
+		// /proc/net/udp que ninguém confrontou. O que foi comparado concorda; o
+		// que não foi, não foi.
 		e["state"] = "not_compared"
-		e["meaning"] = "o netlink respondeu, mas /proc/net não pôde ser lido em " +
-			"nenhum dos protocolos comparados: não houve confronto"
+		e["meaning"] = "nem todos os protocolos foram confrontados — " +
+			descreveProtocolosPendentes(c.SocketProtos) + ". O que foi comparado " +
+			"concorda, mas um socket escondido de um protocolo não confrontado " +
+			"passaria despercebido"
 	default:
 		e["state"] = "agree"
-		e["meaning"] = "as duas tabelas de conexão mostram o mesmo conjunto"
-		if c.SocketProcProtos < c.SocketDiagProtos {
-			e["meaning"] = "as tabelas concordam nos protocolos confrontados, mas " +
-				"nem todos foram: /proc/net foi lido em " +
-				strconv.Itoa(c.SocketProcProtos) + " de " +
-				strconv.Itoa(c.SocketDiagProtos) + " protocolos"
-		}
+		e["meaning"] = "as duas tabelas de conexão mostram o mesmo conjunto nos " +
+			"quatro protocolos inet"
 	}
 	return e
+}
+
+// particionaProtocolos separa os protocolos confrontados dos que não foram.
+func particionaProtocolos(m map[string]string) (comparados, naoComparados []string) {
+	for proto, estado := range m {
+		if estado == "compared" {
+			comparados = append(comparados, proto)
+		} else {
+			naoComparados = append(naoComparados, proto)
+		}
+	}
+	return
+}
+
+// descreveProtocolosPendentes lista, em ordem estável, o que faltou e por quê.
+func descreveProtocolosPendentes(m map[string]string) string {
+	var partes []string
+	for _, proto := range []string{"tcp", "tcp6", "udp", "udp6"} {
+		switch m[proto] {
+		case "diag_skipped":
+			partes = append(partes, proto+" não consultado (handler de diagnóstico ausente; pular evita autocarregar)")
+		case "proc_unreadable":
+			partes = append(partes, proto+" com /proc/net ilegível")
+		}
+	}
+	return strings.Join(partes, "; ")
 }
 
 func eixoDeModulos(c *facts.CrossView) map[string]any {
@@ -482,8 +565,11 @@ func eixoDeBPF(f *facts.Facts) map[string]any {
 		"axis": "bpf",
 		"witnesses": []map[string]any{
 			enumeracao,
-			{"name": "referência direta (fd/pin/link → idr_find)",
-				"read": b.Enumerado},
+			// Sem campo read: b.Enumerado prova que a ENUMERAÇÃO rodou, não que
+			// toda superfície capaz de citar um id — fd, pin, link — foi
+			// completamente observada. Publicar read=Enumerado aqui afirmaria o
+			// que o fato não sustenta. O confronto vive na divergência confirmada.
+			{"name": "referência direta (fd/pin/link → idr_find)"},
 		},
 		"note": "este eixo cobre a rota de ENUMERAÇÃO. A segunda rota do " +
 			"bpf_hidden — trampolim de ftrace sem programa que o explique — é " +

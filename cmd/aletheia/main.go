@@ -209,6 +209,16 @@ MCP — a pergunta que a IA faz DE VOLTA
   endereçado ao modelo —, e por isso ele chega sempre marcado como não confiável,
   nunca no nome nem na descrição de uma tool.
 
+  Remoto, sem agente: o transporte é stdio, então o canal é o ssh que já
+  existe. -T é OBRIGATÓRIO — com pty o stdout vem com a própria requisição
+  ecoada e com CRLF, e o framing quebra:
+
+      ssh -T host 'sudo -n /opt/aletheia mcp --live --allow-root'
+
+  Sem sudo ele sobe como uid comum e DECLARA o que não alcança. A cadeia de
+  acesso da própria investigação aparece no retrato: compare horários antes de
+  atribuir a conta de IR ao invasor.
+
   --snapshot F  o retrato a servir (REPETÍVEL). Tudo que este processo poderá
                 abrir é fixado aqui: nenhuma tool aceita caminho de arquivo, ou
                 o modelo ganharia leitura arbitrária na estação de quem investiga
@@ -269,9 +279,6 @@ MCP — a pergunta que a IA faz DE VOLTA
   code: uma lista de achados vazia com INCOMPLETE significa "não consegui
   olhar", e sem esses dois campos ela chegaria ao modelo como "host limpo".
 
-  --profile full ainda não destrava tool nenhuma (leitura de conteúdo de arquivo
-  e environ sem redação são a entrega seguinte), e por isso é RECUSADO: flag de
-  segurança sem efeito é pior que flag nenhuma.
 
 FLAGS DE collect E analyze
   collect --out F [--root PATH] [--ignore PATH] [--all-fs]   escreve o dump ("-" = stdout)

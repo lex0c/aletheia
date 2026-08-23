@@ -758,6 +758,80 @@ allowlist é `mcp__aletheia__findings_list`, e não `...findings.list` — o nom
 protocolo continua com ponto, e só a permissão muda de forma. Autorizar com o
 nome errado falha em silêncio: o modelo vê as tools e não consegue chamá-las.
 
+### Investigação remota ao vivo, sem agente residente
+
+Os MCPs de segurança que existem falam com a **API central de um produto**: o
+cliente roda na estação, autentica numa nuvem, e a nuvem fala com um agente que
+já estava instalado no endpoint. O Aletheia não tem nuvem, não tem servidor, não
+tem console e não tem agente — então o canal remoto é o que já existe em
+qualquer host Linux:
+
+```text
+ESTAÇÃO LIMPA                          HOST SUSPEITO
+
+cliente MCP
+    │ stdio
+    ▼
+   ssh ────────────────────────────────►  sshd
+                                            │
+                                            ▼
+                                       aletheia mcp --live
+                                            │
+                                    /proc · /sys · FS · netlink
+```
+
+Não há porta escutando, não há credencial de API, não há dado saindo para
+lugar nenhum além do cliente que o operador escolheu. O `.mcp.json` é o mesmo de
+sempre, com `ssh` no lugar do binário:
+
+```json
+{ "mcpServers": {
+    "alvo": {
+      "command": "ssh",
+      "args": ["-T", "-i", "/casos/chave", "ir@10.0.0.7",
+               "sudo -n /opt/aletheia mcp --live --allow-root"] } } }
+```
+
+**O `-T` não é estilo — é obrigatório.** Sem ele o `ssh` aloca um pty, e um pty
+faz três coisas que quebram o transporte, todas medidas: ecoa a entrada de volta
+no stdout (o cliente lê a *própria requisição* como se fosse resposta), traduz
+`\n` em `\r\n` (o framing do JSON-RPC deixa de fechar), e o processo remoto
+não termina quando o cliente fecha. Com `-T`, a mesma sessão devolveu 118 KB
+sem um único `\r`.
+
+O banner do `sshd` e o `motd` **não** poluem o stdout: eles saem por stderr, no
+mesmo canal em que o servidor escreve o diagnóstico e a trilha de auditoria — o
+que dá ao operador um log local da investigação, do lado limpo.
+
+**Três modos de privilégio**, e os três são legíveis:
+
+```sh
+# 1. completo — exige NOPASSWD para o binário, e nada mais
+ssh -T host 'sudo -n /opt/aletheia mcp --live --allow-root'
+
+# 2. sem NOPASSWD: falha na hora, com o motivo, e stdout vazio
+#    "sudo: a password is required"
+
+# 3. sem sudo nenhum — sobe como uid comum, elevated:false, e DECLARA
+#    as 5 tools que ficaram indisponíveis
+ssh -T host '/opt/aletheia mcp --live'
+```
+
+O terceiro é útil de verdade: uma investigação sem privilégio que diz, em
+`session.status`, exatamente o que deixou de alcançar.
+
+**A investigação aparece no próprio retrato, e isso é uma propriedade, não um
+defeito.** Rodando dentro do host, a cadeia de acesso — `sshd`, o shell, o
+próprio `aletheia` — vira processo no censo, e a sessão SSH vira uma conexão
+cujo dono a coleta não consegue ler. A conta e a regra de `sudoers` que você
+criou para o caso também são encontradas pela varredura. Num teste real o modelo
+apontou os dois: marcou os pids da própria cadeia como `/proc` ilegível, e avisou
+que a conta de IR era **onze segundos anterior** ao implante e provavelmente do
+respondente, não do invasor. Compare os horários antes de atribuir.
+
+O que fica no host suspeito: **nada em disco e nenhum processo órfão** — só o
+login no `wtmp`, como qualquer `ssh`.
+
 ### O que o agente pode perguntar
 
 | Tool | Responde |

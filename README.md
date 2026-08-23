@@ -742,6 +742,22 @@ canal do protocolo. E `euid` não é a história toda — `session.status` repor
 também as capabilities efetivas, porque um `uid=1000` com `CAP_DAC_READ_SEARCH`
 lê `/etc/shadow` e não é "não privilegiado".
 
+### Ligando num cliente
+
+O transporte é stdio, então basta apontar o comando:
+
+```json
+{ "mcpServers": {
+    "aletheia": { "command": "/caminho/aletheia",
+                  "args": ["mcp", "--snapshot", "/casos/vm-23.json"] } } }
+```
+
+Um detalhe que só aparece com cliente de verdade: **alguns clientes normalizam o
+ponto do nome da tool para underscore** na hora de autorizar. No Claude Code, a
+allowlist é `mcp__aletheia__findings_list`, e não `...findings.list` — o nome no
+protocolo continua com ponto, e só a permissão muda de forma. Autorizar com o
+nome errado falha em silêncio: o modelo vê as tools e não consegue chamá-las.
+
 ### O que o agente pode perguntar
 
 | Tool | Responde |

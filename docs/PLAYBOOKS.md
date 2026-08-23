@@ -935,21 +935,32 @@ segundo só uma falou. Ler `not_compared` como "nada oculto" é a conclusão err
 mais fácil de tirar desta ferramenta, e é por isso que o estado é explícito.
 
 **`state` é observação; `trust_breaking` é interpretação.** Cada eixo carrega os
-dois. `state: disagree` diz que as testemunhas divergem — mas nem toda
-divergência desqualifica o kernel. Uma contagem de threads que oscila, ou um PID
-visto só por sondagem, é ruído com corrida residual: o motor a emite como `WARN`,
-e o eixo sai `disagree` com `trust_breaking: false`. Só um `CRITICAL` da classe
-quebra-confiança (um PID oculto confirmado por PPID, um socket que o netlink
-entrega e o `/proc/net` nega, um id de eBPF oculto) sobe `trust_breaking: true` —
-e é ele, não o `state`, que decide o valor das ausências. `trust_breaking` deriva
-do mesmo `Report` que `trust_broken`; a tool nunca recalcula o veredito.
+dois. `state: disagree` diz que as testemunhas divergem — evidência real, que o
+motor emite como finding e manda investigar. `trust_breaking` diz se essa
+divergência atingiu o limiar para **desqualificar globalmente** o kernel: um PID
+oculto confirmado por PPID, um socket que o netlink entrega e o `/proc/net` nega,
+um id de eBPF oculto (todos `CRITICAL` da classe quebra-confiança) sobem
+`trust_breaking: true`. Uma contagem de threads que oscila, ou um PID visto só por
+sondagem, fica `disagree` com `trust_breaking: false`.
+
+`trust_breaking: false` **não é absolvição.** Não quer dizer falso positivo — o
+check ainda gerou finding — nem que a evidência seja ruído; quer dizer só que ela
+sozinha não invalida *todas* as ausências do host. E `trust_broken: false` não
+torna as ausências automaticamente válidas: uma ausência pode seguir inválida por
+lacuna de coleta, protocolo não confrontado ou check que não rodou — é
+`observability`, por fonte, que responde isso. `trust_breaking` decide se o
+*kernel* foi desqualificado; deriva do mesmo `Report` que `trust_broken`, e a
+tool nunca recalcula o veredito.
 
 O eixo `sockets` merece atenção: o confronto é **por protocolo**, e a testemunha
-`/proc/net` publica o estado de cada um em `protocols`. `agree` exige os quatro
-inet (`tcp`, `tcp6`, `udp`, `udp6`) em `compared`. Se `udp_diag` não está
-carregado, o netlink pula UDP para não autocarregá-lo, e o eixo responde
-`not_compared` com `udp: diag_skipped` — porque um backdoor de UDP escondido de
-um `/proc/net/udp` nunca confrontado passaria por baixo de um `agree` de TCP.
+`/proc/net` publica o estado de cada um em `protocols` — `compared`,
+`proc_unreadable` (netlink leu, `/proc/net` não), `diag_skipped` (handler de
+diagnóstico ausente, pulado para não autocarregar) ou `diag_failed` (netlink
+tentou e falhou). `agree` exige os quatro inet (`tcp`, `tcp6`, `udp`, `udp6`) em
+`compared`; qualquer outro estado, ou um protocolo ausente do mapa, leva a
+`not_compared`. Se `udp_diag` não está carregado, o netlink pula UDP, e o eixo
+responde `not_compared` — porque um backdoor de UDP escondido de um
+`/proc/net/udp` nunca confrontado passaria por baixo de um `agree` de TCP.
 
 O alcance faz parte da afirmação. `"reach": 65536` num host com `pid_max`
 4194304 quer dizer que 98% da faixa de PID não foi sondada — a resposta diz isso

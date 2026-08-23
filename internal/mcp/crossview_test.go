@@ -474,8 +474,13 @@ func TestDisagreeForteQuebraConfianca(t *testing.T) {
 	}
 	s, r := servidorDeTeste(t, f)
 	if len(r.Relatorio().KernelTrustBroken) == 0 {
-		t.Skip("hidden_pid por ppid não quebrou a confiança neste ambiente — " +
-			"o check tem reconfirmação que pode não disparar com fato sintético")
+		// t.Fatal, não t.Skip: a via ppid é CRITICAL DETERMINÍSTICO no check
+		// (viaPPID → SevCritical, sem gate de reconfirmação — a reconfirmação
+		// mora no coletor, antes do fato existir). Se isto zerar, cross.hidden_pid
+		// saiu de kernelBreakers, e é exatamente a regressão que este teste existe
+		// para pegar — pular aqui a esconderia.
+		t.Fatal("HiddenPid por ppid não quebrou a confiança: cross.hidden_pid " +
+			"deixou de ser kernelBreaker, ou o ppid deixou de ser CRITICAL")
 	}
 	m := chamar(t, s, "crossview.get", "{}")
 	data := m["data"].(map[string]any)
@@ -487,6 +492,46 @@ func TestDisagreeForteQuebraConfianca(t *testing.T) {
 		if a["axis"] == "processes" && a["trust_breaking"] != true {
 			t.Errorf("hidden_pid CRITICAL e processes.trust_breaking=%v",
 				a["trust_breaking"])
+		}
+	}
+}
+
+// P1: BPF com enumeração TRUNCADA não vira agree.
+//
+// A truncagem significa enumeração incompleta: um id citado por referência viva
+// pode ter ficado depois do teto, e o coletor se recusa a chamá-lo de oculto
+// (Ocultos=nil, lacuna). "agree" ali afirmaria um confronto completo que a
+// truncagem impediu — a mesma inversão que o socket cortado já evita.
+func TestBPFTruncadoNaoEhAgree(t *testing.T) {
+	f := &facts.Facts{BPF: facts.BPF{Enumerado: true, ProgramasCortado: true}}
+	if s := eixoDeBPF(f)["state"]; s != "not_compared" {
+		t.Errorf("enumeração de eBPF truncada e state=%v, queria not_compared: "+
+			"um id além do teto não distingue oculto de não-enumerado", s)
+	}
+}
+
+// P2: SocketProtos ausente ou incompleto FALHA FECHADO.
+//
+// A partição corre sobre os quatro protocolos fixos, não sobre as chaves que o
+// mapa por acaso tem. Um SocketProtos nil — dump adulterado, ou de versão que
+// não o preenchia — não pode virar "zero pendentes → agree": fonte que não
+// afirmou o estado do protocolo é protocolo NÃO confrontado.
+func TestSocketProtosAusenteFalhaFechado(t *testing.T) {
+	casos := []struct {
+		nome   string
+		protos map[string]string
+	}{
+		{"nil", nil},
+		{"incompleto (só tcp)", map[string]string{"tcp": "compared"}},
+		{"estado desconhecido", map[string]string{
+			"tcp": "compared", "tcp6": "compared",
+			"udp": "compared", "udp6": "??"}},
+	}
+	for _, c := range casos {
+		e := eixoDeSockets(&facts.CrossView{SocketDiagLido: true, SocketProtos: c.protos})
+		if e["state"] != "not_compared" {
+			t.Errorf("%s: state=%v, queria not_compared — mapa incompleto virou "+
+				"agree por falhar aberto", c.nome, e["state"])
 		}
 	}
 }

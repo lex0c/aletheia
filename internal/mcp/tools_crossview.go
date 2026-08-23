@@ -93,10 +93,12 @@ var toolCrossView = Ferramenta{
 		"O ALCANCE vem junto: 'nenhum PID oculto até 4.194.304' e 'até 65.536' " +
 		"são afirmações diferentes.\n\n" +
 		"state é OBSERVAÇÃO (as testemunhas discordam?); trust_breaking é " +
-		"INTERPRETAÇÃO do motor (a discordância é forte o bastante para " +
-		"desqualificar o kernel?). Uma contagem de threads que oscila fica em " +
-		"disagree com trust_breaking=false. Confie em trust_broken/trust_breaking " +
-		"para decidir o valor das ausências, não no state sozinho.",
+		"INTERPRETAÇÃO do motor (a discordância atingiu o limiar para desqualificar " +
+		"GLOBALMENTE o kernel?). Uma contagem de threads que oscila fica em " +
+		"disagree com trust_breaking=false — e isso não é absolvição: o check ainda " +
+		"emitiu finding. trust_breaking decide se o KERNEL foi desqualificado; o " +
+		"valor de uma ausência específica ainda depende de observability (lacuna, " +
+		"protocolo não confrontado, check não rodado).",
 	Entrada: entradaSnapshot(""),
 	Saida: esquemaEnvelope(`{"type":"object","required":["trust_broken","axes"],
 "properties":{
@@ -104,12 +106,12 @@ var toolCrossView = Ferramenta{
  "breakers":{"type":"array","items":{"type":"string"},"description":"presente quando trust_broken: a lista AUTORITATIVA do que quebrou, verbatim do motor (o mesmo que observability.kernel_trust_broken). Um quebra-confiança que nenhum eixo explique aparece AQUI mesmo assim"},
  "meaning":{"type":"string","description":"o que este estado significa para o resto da investigacao, em prosa"},
  "axes":{"type":"array","items":{"type":"object",
-  "required":["axis","state","meaning"],
+  "required":["axis","state","trust_breaking","meaning"],
   "properties":{
    "axis":{"type":"string","enum":["processes","sockets","modules","modules_ftrace","bpf"]},
    "state":{"type":"string","enum":["agree","disagree","not_compared"],
-    "description":"OBSERVACAO, nao veredito. agree: as testemunhas olharam e batem. disagree: olharam e DIVERGEM — sozinho NAO prova que o kernel mentiu, uma divergencia pode ser corrida residual (WARN). not_compared: uma testemunha necessaria nao respondeu, e aqui 'nada oculto' nao significa nada"},
-   "trust_breaking":{"type":"boolean","description":"INTERPRETACAO do motor: esta divergencia foi forte o bastante (finding CRITICAL kernelBreaker) para desqualificar o kernel? Vem da mesma fonte que trust_broken. disagree com trust_breaking=false é ruido com corrida, nao ocultacao"},
+    "description":"OBSERVACAO, nao veredito. agree: as testemunhas olharam e batem. disagree: olharam e DIVERGEM — evidencia real, mas o PESO dela é trust_breaking, nao o state. not_compared: uma testemunha necessaria nao respondeu, e aqui 'nada oculto' nao significa nada"},
+   "trust_breaking":{"type":"boolean","description":"INTERPRETACAO do motor: esta divergencia atingiu o limiar (finding CRITICAL kernelBreaker) para desqualificar GLOBALMENTE o kernel? Vem da mesma fonte que trust_broken. false NAO é absolvicao: o check ainda emitiu finding e mandou investigar — pode ser corrida residual OU sinal real ainda inconclusivo. So diz que esta evidencia sozinha nao invalida TODAS as ausencias do host"},
    "witnesses":{"type":"array","items":{"type":"object",
     "properties":{
      "name":{"type":"string"},
@@ -117,7 +119,7 @@ var toolCrossView = Ferramenta{
      "reach":{"type":"integer","description":"ate onde ela olhou, quando o alcance é limitado"},
      "read":{"type":"boolean","description":"se esta testemunha foi de fato lida — FATO coletado, nao inferido por count>0: fonte lida com zero é diferente de fonte ilegivel"},
      "truncated":{"type":"boolean"},
-     "protocols":{"type":"object","description":"sockets/proc-net: estado por protocolo inet — compared | proc_unreadable | diag_skipped. agree exige os quatro compared","additionalProperties":{"type":"string"}},
+     "protocols":{"type":"object","description":"sockets/proc-net: estado por protocolo inet — compared | proc_unreadable | diag_skipped (handler ausente, pulado p/ nao autocarregar) | diag_failed (consultado e deu erro). agree exige os quatro compared","additionalProperties":{"type":"string"}},
      "reason":{"type":"string","description":"por que ela nao respondeu, quando nao respondeu"}}}},
    "divergences":{"type":"array","items":{"type":"object"},
     "description":"o que uma testemunha viu e a outra negou. Pequeno por natureza: é o achado. Cortado no teto quando patologicamente grande"},
@@ -215,12 +217,14 @@ var toolCrossView = Ferramenta{
 			// Há divergência de OBSERVAÇÃO, mas nenhuma forte o bastante para
 			// desqualificar o kernel. Dizer "nada contradiz o kernel" ao lado de
 			// um eixo em disagree seria misturar as duas semânticas.
-			dados["meaning"] = "algum eixo tem divergência de observação, mas " +
-				"nenhuma forte o bastante para desqualificar o kernel (nenhum " +
-				"quebra-confiança CRITICAL). Leia trust_breaking por eixo: uma " +
-				"contagem de threads que oscila, ou um pid visto só por sondagem, " +
-				"é ruído com corrida residual — não prova de ocultação. As " +
-				"ausências deste host ainda valem."
+			dados["meaning"] = "algum eixo DIVERGE, mas nenhuma divergência " +
+				"atingiu o limiar para invalidar GLOBALMENTE a confiança no kernel " +
+				"(nenhum quebra-confiança CRITICAL). Isso NÃO absolve o host: cada " +
+				"divergência é evidência real que o motor mandou investigar, e uma " +
+				"ausência pode seguir inválida por lacuna de coleta, protocolo não " +
+				"confrontado ou check não rodado — consulte observability por fonte " +
+				"antes de concluir ausência. trust_breaking=false é 'não desqualifica " +
+				"o kernel todo', não 'está limpo'."
 		}
 		if quebrada {
 			// A LISTA autoritativa do que quebrou, verbatim do motor. Ela também
@@ -405,10 +409,19 @@ func eixoDeSockets(c *facts.CrossView) map[string]any {
 	return e
 }
 
-// particionaProtocolos separa os protocolos confrontados dos que não foram.
+// protocolosInet são os quatro que a comparação SEMPRE espera. A partição corre
+// sobre esta lista fixa, não sobre as chaves que o mapa por acaso tem: um
+// SocketProtos nil ou incompleto — dump adulterado ou de versão que não os
+// preenchia — não pode virar "zero pendentes → agree". Fonte que não afirmou o
+// estado do protocolo é protocolo NÃO confrontado.
+var protocolosInet = []string{"tcp", "tcp6", "udp", "udp6"}
+
+// particionaProtocolos separa os confrontados dos que não foram, fail-closed:
+// só "compared" conta como confrontado, e o que falta no mapa ou traz estado
+// desconhecido entra em naoComparados.
 func particionaProtocolos(m map[string]string) (comparados, naoComparados []string) {
-	for proto, estado := range m {
-		if estado == "compared" {
+	for _, proto := range protocolosInet {
+		if m[proto] == "compared" {
 			comparados = append(comparados, proto)
 		} else {
 			naoComparados = append(naoComparados, proto)
@@ -420,12 +433,18 @@ func particionaProtocolos(m map[string]string) (comparados, naoComparados []stri
 // descreveProtocolosPendentes lista, em ordem estável, o que faltou e por quê.
 func descreveProtocolosPendentes(m map[string]string) string {
 	var partes []string
-	for _, proto := range []string{"tcp", "tcp6", "udp", "udp6"} {
+	for _, proto := range protocolosInet {
 		switch m[proto] {
+		case "compared":
+			// confrontado, não é pendente
 		case "diag_skipped":
 			partes = append(partes, proto+" não consultado (handler de diagnóstico ausente; pular evita autocarregar)")
+		case "diag_failed":
+			partes = append(partes, proto+" consultado por netlink e FALHOU")
 		case "proc_unreadable":
 			partes = append(partes, proto+" com /proc/net ilegível")
+		default:
+			partes = append(partes, proto+" sem estado de leitura no retrato (não confrontado)")
 		}
 	}
 	return strings.Join(partes, "; ")
@@ -593,6 +612,16 @@ func eixoDeBPF(f *facts.Facts) map[string]any {
 		e["state"] = "not_compared"
 		e["meaning"] = "a enumeração de eBPF não rodou — normalmente falta " +
 			"CAP_BPF/root —, então não houve contra o que conferir as referências"
+	case b.ProgramasCortado:
+		// A enumeração foi CORTADA: um id citado e não listado pode ter ficado
+		// depois do teto, e o coletor se recusa a chamá-lo de oculto (Ocultos
+		// fica nil, lacuna declarada). "agree" aqui afirmaria uma comparação
+		// completa que a truncagem impediu — a mesma inversão que o socket
+		// cortado já evita.
+		e["state"] = "not_compared"
+		e["meaning"] = "a enumeração de programas eBPF foi TRUNCADA: um id citado " +
+			"por referência viva pode ter ficado além do teto, e não dá para " +
+			"distinguir oculto de não-enumerado. Não houve confronto completo"
 	case len(b.Ocultos) > 0 && !b.OcultosConfirmados:
 		// Mesma prudência do check: id citado e não listado sem a confirmação de
 		// duas passadas é inconclusivo — dump anterior à correção do truncamento,

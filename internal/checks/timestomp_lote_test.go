@@ -135,3 +135,67 @@ func TestPkgHookSoTemPoderSeRodaComando(t *testing.T) {
 			len(r2.Findings))
 	}
 }
+
+// O comentário do apt tem três formas, e um exemplo de hook comentado NÃO
+// executa. O parser de Trigger só descarta a linha que começa com #; o // no
+// meio e o bloco /* … */ multi-linha ficam, e a config padrão do apt traz
+// exemplos de hook comentados nas três formas. Casar dentro deles fabricaria um
+// CRITICAL de timestomp sobre configuração inerte.
+func TestPkgHookIgnoraComentarioDeBloco(t *testing.T) {
+	ts := func(p string) facts.Timestomp {
+		return facts.Timestomp{Path: p, ModUTC: "2022-01-01T00:00:00Z",
+			MetaUTC: "2026-08-23T16:00:31Z", DeltaH: 40000, Cluster: 1}
+	}
+	casos := []struct {
+		nome    string
+		linhas  []string
+		querAch bool
+	}{
+		{"hook dentro de bloco /* */ multi-linha", []string{
+			"/*", `DPkg::Pre-Install-Pkgs {"/usr/local/bin/x";};`, "*/"}, false},
+		{"hook comentado com // no meio", []string{
+			`Foo "bar";  // DPkg::Pre-Invoke {"/x";};`}, false},
+		{"hook comentado com # no meio", []string{
+			`Foo "bar";  # APT::Update::Post-Invoke {"/x";};`}, false},
+		{"hook REAL com comentário depois", []string{
+			`DPkg::Pre-Invoke {"/usr/local/bin/real";};  // roda mesmo`}, true},
+	}
+	for _, c := range casos {
+		var lns []facts.TriggerLine
+		for i, txt := range c.linhas {
+			lns = append(lns, facts.TriggerLine{N: i + 1, Text: txt})
+		}
+		trig := facts.Trigger{File: "/etc/apt/apt.conf.d/99x", Kind: "pkg_hook",
+			When: "a cada operação do gerenciador de pacotes", Lines: lns}
+		f := &facts.Facts{Timestomps: []facts.Timestomp{ts(trig.File)},
+			Triggers: []facts.Trigger{trig}}
+		r := dataFalsificada.Run(dataFalsificada, f, testEnv())
+		tem := len(r.Findings) > 0 && r.Findings[0].Sev == check.SevCritical
+		if tem != c.querAch {
+			t.Errorf("%s: CRITICAL=%v, queria %v", c.nome, tem, c.querAch)
+		}
+	}
+}
+
+// dnf/yum plugin config compartilha o kind pkg_hook mas não tem gramática de
+// hook do apt: dar poder a ele pela gramática errada seria falso sinal. O
+// arquivo de config só liga um plugin cujo código mora noutro lugar.
+func TestPkgHookForaDoAptNaoTemPoder(t *testing.T) {
+	trig := facts.Trigger{File: "/etc/dnf/plugins/evil.conf", Kind: "pkg_hook",
+		When: "a cada operação do gerenciador de pacotes",
+		Lines: []facts.TriggerLine{
+			{N: 1, Text: "[main]"},
+			// Linha ATIVA (sem comentário) contendo a string: só o escopo por
+			// caminho — não é apt.conf.d — impede o match. Sem o guard, a
+			// gramática do apt casaria aqui e promoveria um config inerte.
+			{N: 2, Text: "post-invoke=/usr/local/bin/x"}}}
+	f := &facts.Facts{
+		Timestomps: []facts.Timestomp{{Path: trig.File, ModUTC: "2022-01-01T00:00:00Z",
+			MetaUTC: "2026-08-23T16:00:31Z", DeltaH: 40000, Cluster: 1}},
+		Triggers: []facts.Trigger{trig}}
+	r := dataFalsificada.Run(dataFalsificada, f, testEnv())
+	if len(r.Findings) != 0 {
+		t.Errorf("config de plugin dnf virou achado de timestomp (%d): a gramática "+
+			"do apt foi aplicada fora do apt.conf.d", len(r.Findings))
+	}
+}

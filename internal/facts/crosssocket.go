@@ -163,18 +163,23 @@ func collectCrossSockets(f *Facts, e *env.Env) {
 	}
 
 	// O estado de CADA um dos quatro protocolos inet, para a tool não inferir
-	// "comparado" por cardinalidade. diagOK1 é quem o netlink consultou; procOK1
-	// é quem o /proc/net leu. Quem não está em diagOK1 foi PULADO para não
-	// autocarregar o handler de diagnóstico — o protocolo existe e ninguém olhou.
+	// "comparado" por cardinalidade. diagOK1 é quem o netlink consultou com
+	// SUCESSO; procOK1 é quem o /proc/net leu. Quem não está em diagOK1 ou foi
+	// PULADO (handler de diag ausente, para não autocarregar) ou foi TENTADO e
+	// FALHOU — e as duas causas não são a mesma coisa. seguros diz qual: um
+	// protocolo seguro que não entrou em diagOK1 foi consultado e deu erro.
 	f.Cross.SocketProtos = map[string]string{}
 	for _, proto := range []string{"tcp", "tcp6", "udp", "udp6"} {
 		switch {
-		case !diagOK1[proto]:
-			f.Cross.SocketProtos[proto] = "diag_skipped"
-		case !procOK1[proto]:
-			f.Cross.SocketProtos[proto] = "proc_unreadable"
-		default:
+		case diagOK1[proto] && procOK1[proto]:
 			f.Cross.SocketProtos[proto] = "compared"
+		case diagOK1[proto]:
+			f.Cross.SocketProtos[proto] = "proc_unreadable"
+		case seguros[proto]:
+			// Handler carregado, netlink tentou e falhou: não é o skip de autoload.
+			f.Cross.SocketProtos[proto] = "diag_failed"
+		default:
+			f.Cross.SocketProtos[proto] = "diag_skipped"
 		}
 	}
 

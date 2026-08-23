@@ -757,11 +757,22 @@ lê `/etc/shadow` e não é "não privilegiado".
 | `net.census` / `net.ip` / `net.port` | o que o host expõe, e com quem fala |
 | `file.inspect` | de onde veio um arquivo e quem manda executá-lo |
 | `snapshot.compare` | o que mudou entre dois retratos |
-| `snapshot.capture` / `snapshot.release` | só em `--live`/`--root`: as duas únicas tools que leem o host |
+| `snapshot.capture` / `snapshot.release` | só em `--live`/`--root`: cunham e descartam retratos |
+| `file.hash` / `file.capabilities` | só em `--profile full`: identificam um arquivo do host AGORA, sem devolver bytes dele |
+| `file.read` / `file.xattrs` | `--profile full --allow-secrets`: os bytes crus, e os atributos estendidos |
+| `process.environ` | idem: o ambiente COMPLETO de um processo do retrato |
+
+As tools que **leem o host** são `snapshot.capture` e a família `file.*`; todas
+as demais respondem sobre um retrato já congelado. `session.status` publica o
+orçamento de coleta que as duas famílias compartilham.
 
 Toda resposta carrega a **procedência** do retrato, e ela afirma só o que o
 artefato PROVA:
 
+* `redaction_enforced` — o que **este servidor** fez com os dados antes de
+  servi-los. É a única afirmação de redação que vale como garantia: um dump não
+  é autenticado, e o carimbo dele é um campo que quem escreveu o arquivo
+  escolheu. Ver *O carimbo é procedência*, abaixo.
 * `redaction` — o dump traz um carimbo de que passou pela redação, e em que
   versão da política. `absent` significa que ele **não prova** ter sido
   redigido: trate o conteúdo como possivelmente em claro e desconfie da origem
@@ -776,9 +787,18 @@ artefato PROVA:
   do mesmo host e viajam juntos. A cadeia de custódia de verdade é o número que
   o operador registrou fora do host.
 
-Nenhuma tool aceita **caminho de arquivo**: tudo que o processo pode abrir é
-fixado pelo operador no lançamento. Uma tool que recebesse pathname daria ao
-modelo leitura arbitrária na estação de quem investiga, e não no alvo.
+No perfil padrão, nenhuma tool aceita **caminho de arquivo**: tudo que o
+processo pode abrir é fixado pelo operador no lançamento. Uma tool que recebesse
+pathname daria ao modelo leitura arbitrária na estação de quem investiga, e não
+no alvo — é por isso que `snapshot.compare` recebe dois `snapshot_id`, e nunca
+dois caminhos.
+
+`--profile full` é exatamente o operador **suspendendo essa regra**, e é a razão
+de o perfil existir como flag separada: ali a família `file.*` recebe caminho, e
+o modelo escolhe o que ler. A leitura é do host investigado — em `--root`, da
+imagem montada, e a raiz travada recusa link que aponte para fora dela —, é
+cobrada do orçamento de coleta, e cada janela vai para a trilha de auditoria com
+o caminho. Ver *`--profile full` e `--allow-secrets`*, abaixo.
 
 E não existe `finding.create`. Achado é conclusão do motor, com falso positivo
 declarado; o que o modelo produz é **hipótese**, e uma boa hipótese cita os
@@ -793,7 +813,7 @@ dele:
 sudo -n aletheia mcp --live --allow-root
 ```
 
-Duas tools leem o host — `snapshot.capture` e `snapshot.release` — e todo o
+No perfil padrão, uma única tool lê o host — `snapshot.capture` — e todo o
 resto continua respondendo sobre um **retrato**. É o que impede uma
 investigação de trinta chamadas de misturar quatro instantes diferentes, e de
 perguntar sobre um pid que já morreu ou foi reciclado.
@@ -891,6 +911,23 @@ chardev, dev tal, inode tal" é o que quem investiga queria saber.
 `file.hash` confere a estabilidade: um segundo `fstat` no mesmo descritor depois
 do hash, e `stable: false` quando tamanho ou mtime mudaram no meio. Um digest de
 mistura temporal não deve ser comparado contra IOC.
+
+**Ler não apaga evidência.** As leituras usam `O_NOATIME` — degradando quando o
+processo não é dono do arquivo nem tem `CAP_FOWNER` —, porque *quando um arquivo
+foi lido pela última vez* é fato sobre o host investigado, e é o que responde
+"este backdoor chegou a rodar?". O `mode` devolvido carrega **setuid, setgid e
+sticky**, não só os nove bits de permissão: `4755` é o achado, e `0755` seria uma
+falsa tranquilidade vinda da tool que promete dizer o que o objeto é.
+
+**Ausência e lacuna continuam separadas nesta família.** `file.capabilities`
+responde em quatro estados — `present`, `absent`, `unsupported`, `unreadable`,
+`undecodable` — e o campo `has_capability` só aparece quando alguém *olhou*: um
+binário com `cap_setuid+ep` num diretório ilegível não pode sair como "não tem".
+`process.environ` **recusa** quando a coleta não conseguiu ler o ambiente, em vez
+de devolver `{}` — ambiente vazio praticamente não existe fora de thread de
+kernel, e o vazio ali se leria como "não havia credencial nenhuma". E o campo é
+`keys_observed`, não "total": com a leitura cortada, chamá-lo de total afirmaria
+que não havia mais.
 
 `process.environ` responde sobre um **retrato**, e exige um capturado com a
 redação dispensada. Um retrato normal guarda o nome de toda variável e o valor

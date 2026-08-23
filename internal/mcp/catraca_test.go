@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -1205,4 +1206,61 @@ func recorte(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// TODA TOOL DO CATÁLOGO É NOMEADA NO README.
+//
+// A tabela do README é o que alguém lê para saber o que pedir a este servidor, e
+// ela envelheceu em silêncio: a entrega 3 acrescentou cinco tools e a tabela
+// continuou listando as de antes. Pior, ela ainda afirmava que
+// `snapshot.capture` e `snapshot.release` eram "as duas únicas tools que leem o
+// host" — o que a família file.* tornou falso.
+//
+// Documentação que descreve outra versão do produto engana quem consulta. É a
+// mesma regra que docs/SCENARIOS.md já tem, e o mesmo padrão que
+// internal/checks usa contra o runbook: quando existe uma lista em prosa e uma
+// no código, alguém precisa comparar as duas.
+func TestTodaToolAparecerNoREADME(t *testing.T) {
+	const caminho = "../../README.md"
+	b, err := os.ReadFile(caminho)
+	if err != nil {
+		t.Skipf("README indisponível: %v", err)
+	}
+
+	// A TABELA, e não a prosa.
+	//
+	// A prosa nomeia coisas para dizer que elas NÃO existem — "não existe
+	// `finding.create`", "`process.refresh` é escopo separado" —, e a primeira
+	// versão deste teste acusou as duas. A promessa ao leitor é a linha de
+	// tabela: é dela que sai o que pedir.
+	naTabela := map[string]bool{}
+	nome := regexp.MustCompile("`([a-z]+\\.[a-z_]+)`")
+	for _, ln := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(ln, "| `") {
+			continue
+		}
+		for _, m := range nome.FindAllStringSubmatch(ln, -1) {
+			naTabela[m[1]] = true
+		}
+	}
+	if len(naTabela) == 0 {
+		t.Fatal("nenhuma linha de tabela de tool no README: ou ela sumiu, ou " +
+			"este teste deixou de saber onde procurar")
+	}
+
+	temNoCatalogo := map[string]bool{}
+	for _, f := range catalogo() {
+		temNoCatalogo[f.Nome] = true
+		if !naTabela[f.Nome] {
+			t.Errorf("a tool %q existe e não está na tabela do README: quem a lê "+
+				"para saber o que pedir não vai descobri-la", f.Nome)
+		}
+	}
+	// E o contrário, que é o erro mais caro: uma linha que promete uma tool
+	// removida. Quem tentar usá-la recebe method-not-found.
+	for n := range naTabela {
+		if !temNoCatalogo[n] {
+			t.Errorf("a tabela do README promete %q e o catálogo não a tem", n)
+		}
+	}
 }

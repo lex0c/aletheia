@@ -285,6 +285,19 @@ func main() {
 		put32(v[12:], uint32(perm>>32))
 		die(syscall.Setxattr(os.Args[2], "security.capability", v, 0))
 
+	case "setxattr":
+		// helper setxattr /caminho nome valor
+		//
+		// Existe pelo mesmo motivo do setcap acima: a imagem de teste não traz o
+		// `attr`, e o contêiner de cenário roda com --network=none, então
+		// instalá-lo é impossível por construção.
+		//
+		// O valor de um xattr é byte ARBITRÁRIO escolhido por quem é dono do
+		// arquivo, e é por isso que ele é um canal de injeção: `user.qualquer`
+		// guarda o que o invasor quiser, e um `ls -l` não mostra nada.
+		need(5)
+		die(syscall.Setxattr(os.Args[2], os.Args[3], []byte(os.Args[4]), 0))
+
 	case "immutable":
 		// helper immutable /caminho
 		//

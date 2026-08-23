@@ -3,7 +3,7 @@
 GERADO de `internal/checks` e `test/scenario`. Não edite à mão:
 `go test ./test/scenario -run TestDocumentoDeCenarios -update`.
 
-128 checks, 234 cenários.
+128 checks, 235 cenários.
 
 Um **check** é uma pergunta que a ferramenta faz ao host. Um **cenário** é um
 host montado de propósito — em contêiner, imagem ou microVM — que prova a
@@ -351,6 +351,7 @@ contêiner não alcança — hidepid, sysctl, módulo, cgroup, eBPF.
 | `M12-mcp-live-recusa-root-sem-consentimento` | live | aquisição ao vivo como root e sem --allow-root: o servidor recusa subir |
 | `M13-mcp-imagem-montada-adquire-e-recusa-o-que-nao-existe` | live | aquisição sobre --root: escopo completo, achado de persistência, e nenhuma tool de processo ou rede |
 | `M14-mcp-perfil-completo-le-o-host` | live | --profile full --allow-secrets: leitura direcionada, cadeia de symlink como evidência, e environ sem redação |
+| `M15-mcp-injecao-pelos-canais-do-perfil-completo` | live | conteúdo de arquivo, xattr, environ e alvo de symlink: os quatro chegam marcados, e nenhum toca a superfície de ferramentas |
 | `M2-conteudo-de-imagem-executado-fora` | vm | o MESMO binário, com o cgroup do host: alguém rodou fora do contêiner |
 | `M2-mcp-o-veredito-acompanha-o-implante` | live | execução fileless plantada: a MESMA consulta que sai vazia no host limpo traz o crítico aqui |
 | `M3-mapeamento-apagado` | live | biblioteca mapeada EXECUTÁVEL e apagada: o exe principal fica íntegro, a lib some do disco |

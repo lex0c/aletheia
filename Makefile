@@ -99,11 +99,17 @@ race-unit:
 # -fuzz). Este alvo é a busca de verdade, com orçamento: 60s por alvo já
 # produziu 4 milhões de execuções por alvo nesta máquina.
 #
+# O terceiro alvo é o parser de DUMP, e ele é o mais exposto dos três: o modelo
+# de ameaça do --snapshot diz que o artefato NÃO é autenticado, e quem o escreveu
+# escolhe o que ele diz. A redação de ingresso do MCP é uma caminhada REFLEXIVA
+# sobre essa estrutura, e ela acontece antes de qualquer check rodar.
+#
 # FUZZTIME sobrescreve: `make fuzz FUZZTIME=10m` antes de tag.
 FUZZTIME ?= 60s
 fuzz:
-	go test ./internal/mcp/ -run FuzzDecodificar -fuzz FuzzDecodificar -fuzztime $(FUZZTIME)
-	go test ./internal/mcp/ -run FuzzLeitor     -fuzz FuzzLeitor     -fuzztime $(FUZZTIME)
+	go test ./internal/mcp/  -run FuzzDecodificar -fuzz FuzzDecodificar -fuzztime $(FUZZTIME)
+	go test ./internal/mcp/  -run FuzzLeitor      -fuzz FuzzLeitor      -fuzztime $(FUZZTIME)
+	go test ./internal/dump/ -run FuzzCarregar    -fuzz FuzzCarregar    -fuzztime $(FUZZTIME)
 
 # test-386 RODA a suíte em 32 bits, e não só compila.
 #

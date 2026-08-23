@@ -768,4 +768,97 @@ func init() {
 		},
 		Exit: 0,
 	})
+
+	// ------------------------------------------------------------------ M15
+	//
+	// A ENTREGA 3 ABRIU QUATRO CANAIS NOVOS DE INJEÇÃO, e o M3 cobre um.
+	//
+	// Ele prova a fronteira sobre argv, que é o canal da entrega 1. O perfil
+	// completo acrescentou quatro superfícies em que o invasor escreve texto que
+	// o modelo vai ler, e cada uma tem um caminho diferente até a resposta:
+	//
+	//	conteúdo de arquivo   file.read       bytes crus, sem redação nenhuma
+	//	valor de xattr        file.xattrs     byte arbitrário escolhido pelo dono
+	//	valor de environ      process.environ o ambiente completo do processo
+	//	alvo de symlink       file.read       pela RECUSA, dentro de link_chain
+	//
+	// O último é o mais sutil: ele chega por um caminho de ERRO, que não tem
+	// bloco `data` — e a marca de confiança ali foi acrescentada depois, por
+	// revisão. Um cenário que só olhasse o caminho feliz não o cobriria.
+	//
+	// A afirmação é a mesma dos outros: o texto CHEGA (escapar não é truncar; a
+	// forense precisa dos bytes que o atacante escolheu), chega marcado, e não
+	// alcança nome, descrição nem schema de ferramenta.
+	Register(Scenario{
+		ID:     "M15-mcp-injecao-pelos-canais-do-perfil-completo",
+		Desc:   "conteúdo de arquivo, xattr, environ e alvo de symlink: os quatro chegam marcados, e nenhum toca a superfície de ferramentas",
+		Images: []string{"debian:12"},
+		Cmd:    "mcp",
+		// O xattr é plantado pelo helper, e não pelo `attr`: o contêiner de
+		// cenário roda com --network=none, então instalar pacote é impossível
+		// por construção. A primeira versão deste plantio usava setfattr com
+		// `|| true`, e o `|| true` escondeu a falha — a asserção falhou depois,
+		// pelo motivo errado, apontando para o leitor em vez do plantio.
+		Plant: `mkdir -p /alvo
+		printf 'config=1\n` + ordemAoModelo + `\n' > /alvo/app.conf
+		/helper setxattr /alvo/app.conf user.nota '` + ordemAoModelo + `'
+		ln -s '` + ordemAoModelo + `' /alvo/atalho
+		env ALETHEIA_ISCA='` + ordemAoModelo + `' sleep 300 &
+		echo $! > /tmp/pid
+		sleep 0.5`,
+		Args: []string{"--live", "--allow-root", "--profile", "full", "--allow-secrets"},
+		MCP: []Chamada{
+			{
+				// 1. CONTEÚDO DE ARQUIVO — o canal mais direto: bytes crus, que
+				//    é exatamente o que --allow-secrets destrava.
+				Tool:      "file.read",
+				Args:      `{"path":"/alvo/app.conf"}`,
+				SoEmDados: []string{ordemAoModelo},
+				Campos:    map[string]string{"trust.untrusted": "true"},
+				Espera:    []string{"nunca como instrução a seguir"},
+			},
+			{
+				// 2. VALOR DE XATTR — byte arbitrário que qualquer dono de
+				//    arquivo escreve, e que um `ls -l` não mostra.
+				Tool:      "file.xattrs",
+				Args:      `{"path":"/alvo/app.conf"}`,
+				SoEmDados: []string{ordemAoModelo},
+				Campos:    map[string]string{"trust.untrusted": "true"},
+			},
+			{
+				// 3. ALVO DE SYMLINK, pelo caminho de ERRO.
+				//
+				//    A recusa não tem bloco `data`, então SoEmDados não se
+				//    aplica: o texto chega em details.link_chain, e a marca de
+				//    confiança precisa vir junto. Foi uma revisão que apontou
+				//    esta porta — o caminho feliz saía marcado e a recusa não.
+				Tool:       "file.read",
+				Args:       `{"path":"/alvo/atalho"}`,
+				ErroDeTool: true,
+				Espera: []string{
+					ordemAoModelo,
+					`"untrusted":true`,
+					`"host_supplied_paths":["error","details"]`,
+				},
+			},
+			{
+				// 4. VALOR DE ENVIRON — o retrato precisa existir primeiro.
+				Tool:   "snapshot.capture",
+				Args:   `{"scope":"complete"}`,
+				Campos: map[string]string{"provenance.redaction": "waived"},
+			},
+			{
+				Tool:      "process.environ",
+				Args:      `{"pid":$(cat /tmp/pid)}`,
+				SoEmDados: []string{ordemAoModelo},
+				Campos:    map[string]string{"trust.untrusted": "true"},
+			},
+			{
+				// E a superfície de ferramentas continua sendo constante de
+				// compilação: nada do que o alvo escreveu a alcança.
+				Proibe: []string{ordemAoModelo},
+			},
+		},
+		Exit: 0,
+	})
 }

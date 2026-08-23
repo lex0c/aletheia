@@ -232,3 +232,65 @@ func TestEnvironDistingueLacunaDeAmbienteVazio(t *testing.T) {
 		t.Errorf("uma leitura que falhou não pode produzir chave: %v", morto.EnvKeys)
 	}
 }
+
+// A REPRESENTAÇÃO FIEL SÓ EXISTE SOB CONSENTIMENTO, E EXISTE INTEIRA.
+//
+// EnvBruto guarda as entradas como o kernel as expôs — ordem, duplicatas e
+// entradas sem sinal de igual. Ela carrega VALOR, então gravá-la sem
+// --allow-secrets seria o vazamento que a allowlist existe para evitar.
+//
+// As duas metades importam: sem o campo, process.environ volta a responder pela
+// projeção, que colapsa chave repetida e perde a ordem — e é a ordem que decide
+// qual ocorrência de LD_PRELOAD o ld.so honrou.
+func TestEnvBrutoSoComConsentimentoEFiel(t *testing.T) {
+	// 1. SEM consentimento: nem uma entrada crua entra no Facts.
+	semSegredo := &Process{PID: os.Getpid()}
+	readEnviron(semSegredo, false)
+	if !semSegredo.EnvLido {
+		t.Fatal("a leitura do próprio ambiente falhou: o teste não mede nada")
+	}
+	if len(semSegredo.EnvBruto) != 0 {
+		t.Errorf("sem --allow-secrets o Facts guardou %d entradas CRUAS: elas "+
+			"carregam valor, e é isso que a allowlist evita",
+			len(semSegredo.EnvBruto))
+	}
+	if len(semSegredo.EnvKeys) == 0 {
+		t.Error("as CHAVES continuam sendo registradas mesmo sem consentimento")
+	}
+
+	// 2. COM consentimento: uma entrada crua por variável observada, e cada uma
+	//    reconstrói exatamente a chave que a projeção registrou.
+	comSegredo := &Process{PID: os.Getpid()}
+	readEnviron(comSegredo, true)
+	if len(comSegredo.EnvBruto) == 0 {
+		t.Fatal("com --allow-secrets a representação fiel tem de existir: sem " +
+			"ela, process.environ responde pela projeção, que perde ordem e " +
+			"duplicata")
+	}
+	if len(comSegredo.EnvBruto) < len(comSegredo.EnvKeys) {
+		t.Errorf("%d entradas cruas para %d chaves: a representação fiel tem de "+
+			"ter ao menos uma por chave — ela é que guarda as duplicatas",
+			len(comSegredo.EnvBruto), len(comSegredo.EnvKeys))
+	}
+	// E as entradas batem com o mapa: a projeção sai delas, não de outro lugar.
+	for _, cru := range comSegredo.EnvBruto {
+		k, v, ok := strings.Cut(string(cru), "=")
+		if !ok {
+			continue
+		}
+		if got, tem := comSegredo.Env[k]; tem && got != v {
+			// Divergir aqui é legítimo SÓ com duplicata: o mapa guarda a
+			// última. Confere se há outra entrada com a mesma chave.
+			n := 0
+			for _, o := range comSegredo.EnvBruto {
+				if kk, _, ok := strings.Cut(string(o), "="); ok && kk == k {
+					n++
+				}
+			}
+			if n < 2 {
+				t.Errorf("%s: entrada crua diz %q e o mapa diz %q, sem duplicata "+
+					"que explique", k, v, got)
+			}
+		}
+	}
+}

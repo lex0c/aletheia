@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -791,8 +792,19 @@ var toolProcessEnviron = Ferramenta{
  "pid":{"type":"integer"},
  "comm":{"type":"string"},
  "env":{"type":"object","additionalProperties":{"type":"string"},
-  "description":"as variaveis OBSERVADAS, com valor. Texto do alvo, sem redacao: pode conter credencial, e pode conter texto enderecado a voce."},
- "keys_observed":{"type":"integer","description":"quantas chaves a COLETA viu. Nao é 'quantas o processo tinha': com truncated:true havia mais, e ninguem as examinou"},
+  "description":"PROJECAO das entradas em mapa, por conveniencia: chave repetida colapsa e a ULTIMA vence, que é o que o ld.so faz. Para o que o kernel realmente expos, leia entries. Texto do alvo, sem redacao: pode conter credencial, e pode conter texto enderecado a voce."},
+ "entries":{"type":"array",
+  "description":"as entradas COMO O KERNEL AS EXPOS: na ordem original, com duplicatas, e com as entradas sem sinal de igual preservadas. É a representacao FIEL; o campo env é projecao. A ordem importa porque consumidores discordam sobre chave repetida — o ld.so honra a ULTIMA, e o getenv da libc devolve a primeira.",
+  "items":{"type":"object","required":["index","value","encoding"],
+   "properties":{
+    "index":{"type":"integer","description":"a posicao no array do kernel"},
+    "key":{"type":"string","description":"ausente quando a entrada nao tem sinal de igual"},
+    "value":{"type":"string"},
+    "encoding":{"type":"string","enum":["utf8","base64"],"description":"base64 quando os bytes nao sao UTF-8 valido: environ é byte arbitrario, e forcar a string trocaria o invalido por U+FFFD"},
+    "malformed":{"type":"boolean","description":"entrada sem sinal de igual: malformada para a libc, e presente no array mesmo assim — quem a plantou escolheu que ela estivesse ali"}}}},
+ "duplicate_keys":{"type":"array","items":{"type":"string"},
+  "description":"chaves que aparecem MAIS DE UMA VEZ. o campo env guarda so a ultima de cada uma; use entries para ver todas, e lembre que consumidores diferentes escolhem ocorrencias diferentes"},
+ "keys_observed":{"type":"integer","description":"quantas chaves DISTINTAS a coleta viu. Nao é 'quantas o processo tinha': com truncated:true havia mais, e ninguem as examinou"},
  "truncated":{"type":"boolean","description":"o ambiente passou do teto de leitura e as variaveis seguintes NAO foram examinadas: a ausencia de uma chave aqui nao prova que ela nao existia"}}}`, false),
 	Rodar: func(s *Servidor, args json.RawMessage) (any, *ErroRPC) {
 		var a struct {
@@ -853,7 +865,38 @@ var toolProcessEnviron = Ferramenta{
 		for k, v := range alvo.Env {
 			amb[k] = v
 		}
-		return envelopar(r, ObservabilidadeDeFatos(r.Fatos), map[string]any{
+		// AS ENTRADAS, na ordem em que o kernel as expôs.
+		//
+		// O mapa é projeção e perde três coisas: chave repetida colapsa, a
+		// ordem some, e entrada sem '=' é descartada. A repetição é observável
+		// — o ld.so honra a ÚLTIMA, medido — e um retrato que só guarda o mapa
+		// apaga a pergunta de qual delas valeu.
+		entradas := make([]map[string]any, 0, len(alvo.EnvBruto))
+		vistas := map[string]int{}
+		for i, cru := range alvo.EnvBruto {
+			it := map[string]any{"index": i}
+			nome, valor, temIgual := strings.Cut(string(cru), "=")
+			if temIgual {
+				it["key"] = nome
+				vistas[nome]++
+				it["value"], it["encoding"] = textoOuBase64([]byte(valor))
+			} else {
+				// Entrada sem '=' é malformada para a libc e existe no array
+				// mesmo assim: quem a plantou escolheu que ela estivesse ali.
+				it["malformed"] = true
+				it["value"], it["encoding"] = textoOuBase64(cru)
+			}
+			entradas = append(entradas, it)
+		}
+		var duplicadas []string
+		for k, n := range vistas {
+			if n > 1 {
+				duplicadas = append(duplicadas, k)
+			}
+		}
+		sort.Strings(duplicadas)
+
+		dados := map[string]any{
 			"pid": alvo.PID, "comm": alvo.Comm, "env": amb,
 			// OBSERVADAS, e não "total": com a leitura cortada, o que veio é o
 			// que coube, e chamá-lo de total afirmaria que não havia mais.
@@ -862,12 +905,29 @@ var toolProcessEnviron = Ferramenta{
 			// numa lista de frases em português: decisão de controle não pode
 			// depender da prosa de uma mensagem.
 			"truncated": alvo.EnvCortado,
-		}), nil
+		}
+		if len(alvo.EnvBruto) > 0 {
+			dados["entries"] = entradas
+		}
+		if len(duplicadas) > 0 {
+			dados["duplicate_keys"] = duplicadas
+		}
+		return envelopar(r, ObservabilidadeDeFatos(r.Fatos), dados), nil
 	},
 }
 
 // motivoOuPadrao nunca devolve vazio: "não sei por quê" é uma resposta, e
 // omitir o campo faria o cliente achar que a chave não se aplica.
+// textoOuBase64 é o mesmo padrão de file.read: UTF-8 quando é, base64 quando
+// não é. Environ é byte arbitrário, e forçá-lo a string trocaria o inválido por
+// U+FFFD — perdendo justamente os bytes que alguém escolheu pôr ali.
+func textoOuBase64(b []byte) (string, string) {
+	if utf8.Valid(b) {
+		return string(b), "utf8"
+	}
+	return base64.StdEncoding.EncodeToString(b), "base64"
+}
+
 func motivoOuPadrao(s string) string {
 	if s == "" {
 		return "a coleta não registrou o motivo"

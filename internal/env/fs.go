@@ -169,7 +169,22 @@ func (e *Env) abrirSemTocarAtime(p string) (*os.File, error) {
 // silêncio quando não se é dono, o O_NONBLOCK que impede o fifo de prender a
 // varredura para sempre. Duas cópias disso divergem, e a que diverge é sempre a
 // que ninguém está olhando.
+// observarAberturaReal é o gancho que permite a um teste PROVAR que nenhum
+// caminho da família de inspeção chega aqui com um objeto que ainda não foi
+// provado regular.
+//
+// Ele existe porque a asserção óbvia não distingue nada: uma recusa com
+// ErrNaoEhArquivo sai igual no código que abre-depois-verifica e no que
+// verifica-antes-de-abrir. O que separa os dois é se o open() do driver rodou —
+// e isso não aparece no valor de retorno.
+//
+// nil em produção; o custo é uma comparação por abertura.
+var observarAberturaReal func(caminho string)
+
 func (e *Env) abrirComExtras(p string, extras int) (*os.File, error) {
+	if observarAberturaReal != nil {
+		observarAberturaReal(p)
+	}
 	flags := os.O_RDONLY | syscall.O_NONBLOCK | extras
 	if err := e.raizIndisponivel(); err != nil {
 		return nil, err

@@ -176,7 +176,25 @@ Dois instantes porque a leitura leva tempo: um `file.hash` de centenas de
 megabytes descreve o arquivo em algum ponto entre eles, e o campo `stable`
 qualifica esse intervalo.
 
-### 4.3 Erros
+### 4.3 Ambiente de processo
+
+`process.environ` devolve duas representações, e a distinção importa:
+
+| Campo | O que é |
+| --- | --- |
+| `entries` | as entradas **como o kernel as expôs**: ordem original, duplicatas, e entradas sem sinal de igual preservadas |
+| `env` | projeção em mapa, por conveniência: chave repetida colapsa e a **última vence** |
+| `duplicate_keys` | as chaves que aparecem mais de uma vez |
+
+A repetição é observável e os consumidores discordam: medido, o `ld.so` honra a
+**última** ocorrência de `LD_PRELOAD`, enquanto o `getenv` da libc devolve a
+primeira. Um implante posto na primeira posição some da projeção e aparece em
+`entries`.
+
+Valores que não são UTF-8 válido saem em `base64`, com `encoding` declarado por
+entrada — forçá-los a string trocaria os bytes inválidos por U+FFFD.
+
+### 4.4 Erros
 
 Duas formas distintas, e o cliente as trata de modo diferente:
 
@@ -315,13 +333,17 @@ componente por descritor, com `O_PATH` e `O_NOFOLLOW`. Nenhum link é atravessad
 em posição alguma, e a resposta traz `path_binding: "exact"` — o arquivo aberto
 está no caminho pedido, e isso é garantia estrutural.
 
-Com `follow_symlinks: true` a resolução é do kernel; `link_chain` e
-`resolved_path` passam a ser **observação**, lidas num segundo passo, e
-`path_binding` diz `"followed"`. O que continua valendo como fato são `dev` e
-`inode`.
+Com `follow_symlinks: true` a cadeia é resolvida como **observação** e o caminho
+resolvido é aberto pelo mesmo percurso. `link_chain` e `resolved_path` descrevem
+o que havia um instante antes; `path_binding` diz `"followed"`, e o que vale como
+fato são `dev` e `inode`.
 
-O percurso com `O_PATH` também identifica device node **sem acionar o `open()`
-do driver**.
+Em modo `--root`, um link de alvo absoluto resolve **dentro da imagem**: um
+`/tmp/x -> /etc/shadow` plantado ali apontava, no sistema original, para o
+`/etc/shadow` daquele sistema. O percurso nunca sai da raiz montada.
+
+Nos dois casos o objeto é identificado com `O_PATH` e só é aberto para leitura
+depois de provado regular — **o `open()` de um device node nunca é acionado**.
 
 ### 7.2 Cancelamento
 

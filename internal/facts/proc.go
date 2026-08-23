@@ -99,8 +99,26 @@ type Process struct {
 	EnvCortado bool `json:"env_truncated,omitempty"`
 	// EnvErro é a evidência de POR QUE a leitura falhou. Nunca controle de
 	// fluxo: quem decide é EnvLido.
-	EnvErro string            `json:"env_error,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
+	EnvErro string `json:"env_error,omitempty"`
+
+	// EnvBruto são as entradas do environ COMO O KERNEL AS EXPÔS: na ordem
+	// original, com duplicatas, e com as entradas sem '=' preservadas.
+	//
+	// Env e EnvKeys são projeções, e cada uma perde algo. O mapa colapsa chave
+	// repetida — e a repetição é observável: o ld.so honra a ÚLTIMA (medido,
+	// com dois LD_PRELOAD e um alvo inexistente em cada posição), enquanto o
+	// getenv da libc devolve a primeira. Consumidores diferentes do mesmo
+	// ambiente discordam, e um retrato que só guarda o mapa apaga a pergunta.
+	// A ordenação de EnvKeys destrói a ordem, que é o que decide aquilo.
+	//
+	// [][]byte, e não []string: environ é byte arbitrário, e o encoding/json
+	// troca UTF-8 inválido por U+FFFD numa string. Em []byte ele vira base64, e
+	// os bytes atravessam o artefato como estavam.
+	//
+	// Só é preenchido sob --allow-secrets: as entradas cruas carregam VALOR, e
+	// gravá-las sem consentimento seria o vazamento que a allowlist evita.
+	EnvBruto [][]byte          `json:"env_raw,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`
 
 	CapEff    uint64 `json:"cap_eff"`
 	TracerPID int    `json:"tracer_pid,omitempty"`
@@ -786,6 +804,10 @@ func readEnviron(p *Process, segredos bool) {
 	}
 	p.Env = map[string]string{}
 	for _, e := range kv {
+		if segredos {
+			// A representação FIEL, antes de qualquer projeção. Ver EnvBruto.
+			p.EnvBruto = append(p.EnvBruto, []byte(e))
+		}
 		k, v, ok := strings.Cut(e, "=")
 		if !ok {
 			continue

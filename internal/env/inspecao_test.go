@@ -43,31 +43,60 @@ func raizDeInspecao(t *testing.T) (*Env, string) {
 	return e, raiz
 }
 
-// EM MODO IMAGEM, O LINK QUE APONTA PARA FORA É RECUSADO.
+// EM MODO IMAGEM, O LINK ABSOLUTO RESOLVE DENTRO DA PRÓPRIA RAIZ.
 //
-// É a garantia que separa "analisar uma imagem montada" de "ler o filesystem de
-// quem investiga": um `/tmp/fuga -> /etc/shadow` plantado dentro da imagem
-// resolveria, sem a raiz travada, para o /etc/shadow do ANALISTA — e a resposta
-// descreveria a estação forense como se fosse o alvo.
+// Um `/tmp/fuga -> /etc/shadow` plantado dentro de uma imagem apontava, no
+// sistema original, para o /etc/shadow DAQUELE sistema. Interpretá-lo contra a
+// raiz montada é a leitura fiel; interpretá-lo contra a raiz do analista seria
+// a ferramenta respondendo sobre a estação forense achando que fala do alvo.
 //
-// A raiz travada do os.Root recusa, e recusa tanto com follow_symlinks quanto
-// sem: o alvo absoluto sai da raiz nos dois casos.
-func TestImagemRecusaLinkQueSaiDaRaiz(t *testing.T) {
-	e, _ := raizDeInspecao(t)
-	for _, seguir := range []bool{false, true} {
-		_, _, err := e.AbrirParaInspecao("/tmp/fuga", seguir)
-		if err == nil {
-			t.Fatalf("follow=%v: um link para /etc/shadow ABSOLUTO dentro de uma "+
-				"imagem foi seguido — isso lê o host de quem investiga", seguir)
-		}
-		if errors.Is(err, ErrEhLink) && seguir {
-			t.Errorf("follow=true: a recusa devia ser da RAIZ, não do O_NOFOLLOW")
+// Este teste já afirmou o contrário — que o link era RECUSADO —, porque a
+// implementação usava os.Root, que não sabe reinterpretar alvo absoluto e por
+// isso o recusa. Recusar é seguro e é menos útil: o arquivo existe na imagem, e
+// quem investiga quer vê-lo.
+//
+// O que não pode mudar, e é o que este teste trava: o caminho nunca sai da raiz
+// montada.
+func TestImagemResolveLinkAbsolutoDentroDaPropriaRaiz(t *testing.T) {
+	e, raiz := raizDeInspecao(t)
+
+	// Sem seguir, é link e ponto — a recusa é resposta.
+	if _, _, err := e.AbrirParaInspecao("/tmp/fuga", false); !errors.Is(err, ErrEhLink) {
+		t.Errorf("follow=false: err=%v, queria ErrEhLink", err)
+	}
+
+	// Seguindo, ele resolve para o shadow DA IMAGEM.
+	fh, id, err := e.AbrirParaInspecao("/tmp/fuga", true)
+	if err != nil {
+		t.Fatalf("follow=true: %v", err)
+	}
+	defer fh.Close()
+
+	daImagem, err := os.Stat(filepath.Join(raiz, "etc", "shadow"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stI, _ := daImagem.Sys().(*syscall.Stat_t)
+	if stI == nil || id.Inode != uint64(stI.Ino) {
+		t.Fatalf("abriu inode %d; o /etc/shadow da IMAGEM é %d", id.Inode, stI.Ino)
+	}
+
+	// E não é o do analista. A asserção é sobre o inode, e não sobre o
+	// conteúdo: num host onde /etc/shadow é ilegível, ler nada passaria por
+	// engano.
+	if doHost, err := os.Stat("/etc/shadow"); err == nil {
+		if stH, ok := doHost.Sys().(*syscall.Stat_t); ok && id.Inode == uint64(stH.Ino) {
+			t.Fatal("abriu o /etc/shadow do ANALISTA: a ferramenta responderia " +
+				"sobre a estação forense achando que fala do alvo")
 		}
 	}
-	// E a cadeia não inventa um caminho que ninguém pode abrir.
-	cadeia, _, _ := e.CadeiaDeLinks("/tmp/fuga")
-	if len(cadeia) == 0 {
-		t.Error("a cadeia precisa dizer que há um link ali, mesmo recusado")
+	// A cadeia diz por onde passou, e o resolvido fica dentro da raiz.
+	cadeia, resolvido, err := e.CadeiaDeLinks("/tmp/fuga")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvido != "/etc/shadow" || len(cadeia) != 1 {
+		t.Errorf("cadeia=%v resolvido=%q", cadeia, resolvido)
 	}
 }
 
@@ -476,7 +505,7 @@ func TestReaberturaSemProcRecusaArquivoTrocado(t *testing.T) {
 	}
 
 	// 1. Inode confere: abre.
-	fh, err := reabrirPeloPai(pai, "alvo", uint64(st.Ino), os.O_RDONLY)
+	fh, err := reabrirPeloPai(pai, "alvo", identidadeDeStat(&st), os.O_RDONLY)
 	if err != nil {
 		t.Fatalf("com o inode certo tinha de abrir: %v", err)
 	}
@@ -495,15 +524,15 @@ func TestReaberturaSemProcRecusaArquivoTrocado(t *testing.T) {
 	if err := os.WriteFile(alvo, []byte("o do atacante"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	var novo syscall.Stat_t
-	if err := syscall.Stat(alvo, &novo); err != nil {
+	var novoSt syscall.Stat_t
+	if err := syscall.Stat(alvo, &novoSt); err != nil {
 		t.Fatal(err)
 	}
-	if novo.Ino == st.Ino {
+	if novoSt.Ino == st.Ino {
 		t.Skip("o filesystem reciclou o inode: o teste não distingue nada aqui")
 	}
 
-	if fh, err := reabrirPeloPai(pai, "alvo", uint64(st.Ino), os.O_RDONLY); err == nil {
+	if fh, err := reabrirPeloPai(pai, "alvo", identidadeDeStat(&st), os.O_RDONLY); err == nil {
 		b := make([]byte, 32)
 		n, _ := fh.Read(b)
 		fh.Close()
@@ -511,6 +540,18 @@ func TestReaberturaSemProcRecusaArquivoTrocado(t *testing.T) {
 			"descreveria a identidade de um objeto e o conteúdo de outro", b[:n])
 	} else if !strings.Contains(err.Error(), "TROCADO") {
 		t.Errorf("a recusa precisa dizer o que houve: %v", err)
+	}
+
+	// 3. E o DEVICE também entra na comparação. A identidade do Linux é o par
+	//    (st_dev, st_ino): número de inode só é único DENTRO de um filesystem, e
+	//    num host onde o atacante monta filesystem outro dispositivo pode trazer
+	//    um inode de mesmo número naquele nome.
+	esperado := identidadeDeStat(&novoSt)
+	esperado.Dev++
+	if fh, err := reabrirPeloPai(pai, "alvo", esperado, os.O_RDONLY); err == nil {
+		fh.Close()
+		t.Error("o dev divergiu e a reabertura aceitou: comparar só o inode " +
+			"aceita a troca de filesystem sob o mesmo nome")
 	}
 }
 
@@ -633,5 +674,70 @@ func TestCapabilityRecusaRevisaoDesconhecida(t *testing.T) {
 		if ok && got.Versao == 0 {
 			t.Errorf("%s: aceitou e não registrou a revisão", c.nome)
 		}
+	}
+}
+
+// NENHUM CAMINHO DA INSPEÇÃO ABRE O QUE AINDA NÃO PROVOU SER REGULAR.
+//
+// O percurso por descritor usa O_PATH, que identifica o objeto sem chamar o
+// open() do driver. Com follow_symlinks:true, porém, a implementação voltava a
+// um O_RDONLY real e só depois perguntava ao fstat o que era aquilo — e para um
+// device node isso é tarde.
+//
+// A asserção óbvia não distingue nada: ErrNaoEhArquivo sai igual nos dois
+// códigos. O que separa é se a abertura real aconteceu, e isso só aparece
+// instrumentando o abridor.
+//
+// A branch importa: file.hash e file.capabilities existem com --profile full
+// mesmo sem --allow-secrets, e um `/tmp/suspeito -> /dev/algo` chega nelas.
+func TestInspecaoNaoAbreObjetoNaoProvado(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Symlink("/dev/null", filepath.Join(dir, "isca")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "comum"), []byte("x"), 0o644); err != nil {
+		t.Skipf("sem onde escrever: %v", err)
+	}
+
+	var reais []string
+	observarAberturaReal = func(p string) { reais = append(reais, p) }
+	t.Cleanup(func() { observarAberturaReal = nil })
+
+	e := &Env{Source: SourceLive, Caps: CapFilesystem, CapReason: map[string]string{}}
+
+	for _, seguir := range []bool{false, true} {
+		reais = nil
+		_, id, err := e.AbrirParaInspecao(filepath.Join(dir, "isca"), seguir)
+
+		if seguir {
+			if !errors.Is(err, ErrNaoEhArquivo) {
+				t.Errorf("follow=true: err=%v, queria ErrNaoEhArquivo", err)
+			}
+			if id.Tipo != "chardev" {
+				t.Errorf("follow=true: a recusa precisa dizer o que era: %q", id.Tipo)
+			}
+		} else if !errors.Is(err, ErrEhLink) {
+			t.Errorf("follow=false: err=%v, queria ErrEhLink", err)
+		}
+
+		if len(reais) > 0 {
+			t.Errorf("follow=%v: %d abertura(s) REAL sobre um caminho que resolve "+
+				"para device: %v\n"+
+				"O open() do driver roda antes de qualquer recusa — num host "+
+				"comprometido, um caminho de aparência banal pode ser um "+
+				"/dev/qualquer-coisa que faz algo ao ser aberto.", seguir, len(reais), reais)
+		}
+	}
+
+	// E o caminho FELIZ continua abrindo: sem isto, um código que recusasse
+	// tudo passaria neste teste.
+	reais = nil
+	fh, id, err := e.AbrirParaInspecao(filepath.Join(dir, "comum"), true)
+	if err != nil {
+		t.Fatalf("arquivo comum com follow=true: %v", err)
+	}
+	fh.Close()
+	if id.Tipo != "regular" {
+		t.Errorf("tipo=%q", id.Tipo)
 	}
 }

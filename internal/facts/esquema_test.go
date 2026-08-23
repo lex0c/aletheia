@@ -50,7 +50,13 @@ func TestImpressaoDoEsquema(t *testing.T) {
 		// E o valor padrão é o CONSERVADOR: false faz a tool recusar responder,
 		// não afirmar ambiente vazio. Um dump velho produziria recusa, que é
 		// lacuna declarada — nunca a leitura tranquilizadora.
-		impressaoGravada = "46c215cb6dba9134"
+		// Atualizada de novo, e pelo mesmo raciocínio: Process.EnvBruto guarda
+		// as entradas do environ como o kernel as expôs. Nenhum CHECK a lê — o
+		// único consumidor é process.environ, que exige --profile full e não
+		// alcança dump nenhum —, e a ausência num dump anterior é o estado
+		// conservador: sem entradas cruas, a tool responde pela projeção e diz
+		// que a projeção é o que ela é.
+		impressaoGravada = "41ffcf4ac4f3e309"
 	)
 	if SchemaVersion != esquemaEsperado {
 		t.Fatalf("SchemaVersion=%d e este teste conhece o %d: atualize os dois "+

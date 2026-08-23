@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -749,5 +750,91 @@ func TestRecusaDeToolSaiMarcadaComoNaoConfiavel(t *testing.T) {
 		if !tem[r] {
 			t.Errorf("a região %q não está declarada: %v", r, regioes)
 		}
+	}
+}
+
+// O ENVIRON É REPRESENTADO COMO O KERNEL O EXPÔS.
+//
+// Env e EnvKeys são projeções, e cada uma perde algo: o mapa colapsa chave
+// repetida, a ordenação de EnvKeys destrói a ordem, e entrada sem sinal de
+// igual é descartada. A tool se chama "ambiente COMPLETO" e diz devolver os
+// bytes observados — contrato forte demais para uma projeção.
+//
+// A repetição é OBSERVÁVEL, e medida: o ld.so honra a ÚLTIMA ocorrência de
+// LD_PRELOAD (dois preloads, um alvo inexistente em cada posição, e a reclamação
+// sempre no segundo), enquanto o getenv da libc devolve a primeira.
+// Consumidores diferentes do mesmo ambiente discordam — e um retrato que só
+// guarda o mapa apaga a pergunta de qual delas valeu.
+func TestEnvironPreservaOrdemDuplicataEBytes(t *testing.T) {
+	s := servidorVivoCompleto(t)
+	capturar(t, s, "complete")
+	r := s.acervo.Todos()[0]
+
+	alvo := -1
+	for i := range r.Fatos.Processes {
+		if r.Fatos.Processes[i].PID == os.Getpid() {
+			alvo = i
+		}
+	}
+	if alvo < 0 {
+		t.Skip("o próprio processo não apareceu na captura")
+	}
+	p := &r.Fatos.Processes[alvo]
+	p.EnvLido = true
+	p.EnvBruto = [][]byte{
+		[]byte("PATH=/usr/bin"),
+		[]byte("LD_PRELOAD=/tmp/implante.so"),
+		[]byte("LD_PRELOAD=/usr/lib/liblegit.so"),
+		[]byte("SEM_IGUAL"),
+		append([]byte("BINARIO="), 0xff, 0xfe, ' ', 'x'),
+	}
+	p.Env = map[string]string{
+		"PATH": "/usr/bin", "LD_PRELOAD": "/usr/lib/liblegit.so",
+	}
+
+	m, er := rodarTool(t, s, "process.environ", fmt.Sprintf(`{"pid":%d}`, p.PID))
+	if er != nil {
+		t.Fatal(er)
+	}
+	d := m["data"].(map[string]any)
+
+	ent, _ := d["entries"].([]any)
+	if len(ent) != 5 {
+		t.Fatalf("entries tem %d entradas, o kernel expôs 5", len(ent))
+	}
+
+	// ORDEM e DUPLICATA: as duas ocorrências, na posição em que estavam.
+	primeira := ent[1].(map[string]any)
+	segunda := ent[2].(map[string]any)
+	if primeira["value"] != "/tmp/implante.so" || segunda["value"] != "/usr/lib/liblegit.so" {
+		t.Errorf("a ordem das duplicatas se perdeu: %v / %v",
+			primeira["value"], segunda["value"])
+	}
+	dup, _ := d["duplicate_keys"].([]any)
+	if len(dup) != 1 || dup[0] != "LD_PRELOAD" {
+		t.Errorf("a chave repetida não foi apontada: %v", d["duplicate_keys"])
+	}
+	// E a projeção continua existindo, com a semântica DITA: a última vence,
+	// que é o que o ld.so faz. O implante fica escondido nela — é por isso que
+	// entries existe.
+	if d["env"].(map[string]any)["LD_PRELOAD"] != "/usr/lib/liblegit.so" {
+		t.Errorf("a projeção mudou de semântica: %v", d["env"])
+	}
+
+	// MALFORMADA: entrada sem sinal de igual é malformada para a libc e existe
+	// no array mesmo assim. Quem a plantou escolheu que ela estivesse ali.
+	if ent[3].(map[string]any)["malformed"] != true {
+		t.Errorf("a entrada sem '=' sumiu ou não foi marcada: %v", ent[3])
+	}
+
+	// BYTES: forçar a string trocaria o inválido por U+FFFD, perdendo
+	// justamente o que alguém escolheu pôr ali.
+	bin := ent[4].(map[string]any)
+	if bin["encoding"] != "base64" {
+		t.Errorf("valor não-UTF8 saiu como %v: os bytes não atravessam", bin["encoding"])
+	}
+	dec, err := base64.StdEncoding.DecodeString(bin["value"].(string))
+	if err != nil || len(dec) < 2 || dec[0] != 0xff || dec[1] != 0xfe {
+		t.Errorf("os bytes não voltaram inteiros: %v (%v)", dec, err)
 	}
 }

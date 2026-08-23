@@ -100,10 +100,6 @@ const MaxLeituraDirecionada = 64 << 10
 // mesmo motivo de sempre: `mkfifo /etc/ld.so.preload` faz o open bloquear para
 // sempre, e /dev/zero não tem fim.
 func (e *Env) AbrirParaInspecao(p string, seguirLink bool) (*os.File, Identidade, error) {
-	extra := syscall.O_NOFOLLOW
-	if seguirLink {
-		extra = 0
-	}
 	// SEM SEGUIR LINK, O CAMINHO É PERCORRIDO POR DESCRITOR.
 	//
 	// É a diferença entre observar e garantir. A versão anterior resolvia a
@@ -129,42 +125,33 @@ func (e *Env) AbrirParaInspecao(p string, seguirLink bool) (*os.File, Identidade
 		return e.abrirPorDescritor(p)
 	}
 
-	// O os.Root NÃO honra O_NOFOLLOW, e isto foi medido: com a raiz travada, um
-	// `/tmp/atalho -> ../etc/shadow` abriu o shadow com follow_symlinks:false.
-	// Ele resolve os componentes por conta própria — é assim que garante que
-	// nada escapa da raiz — e a flag chega ao openat final, quando já não há
-	// link nenhum para recusar.
+	// SEGUINDO LINK, O PERCURSO SEGURO CONTINUA SENDO O MESMO.
 	//
-	// Então a recusa vem de um Lstat antes. É uma pré-checagem, e não a trava do
-	// kernel: entre ela e o open cabe uma troca. A janela é DENTRO da raiz
-	// travada — uma imagem montada, que o analista monta somente-leitura —, e o
-	// que sobra dela a identidade devolvida fecha: dev e inode dizem o que foi
-	// aberto, tenha sido o que for.
+	// Esta branch chamava abrirComExtras, que faz um O_RDONLY real e só DEPOIS
+	// pergunta ao fstat se aquilo era arquivo comum. Para um device node isso é
+	// tarde: o open() do driver já rodou. E a branch não é a exótica —
+	// file.hash e file.capabilities existem com --profile full mesmo sem
+	// --allow-secrets, e um `/tmp/suspeito -> /dev/algo` chega nelas.
 	//
-	// Prometer O_NOFOLLOW aqui e não entregá-lo seria pior que não oferecer a
-	// opção: quem lê "não segui link" concluiria que o caminho pedido é o
-	// caminho lido.
-	fh, err := e.abrirComExtras(p, extra)
+	// A cadeia é resolvida como OBSERVAÇÃO — é o que path_binding:"followed" já
+	// declara — e o caminho resolvido é aberto pelo mesmo walker de O_PATH, que
+	// prova o tipo antes de abrir para leitura. Nenhum caminho desta família
+	// executa open() sobre objeto que ainda não foi provado regular.
+	//
+	// Se o resolvido for um link quando o walker chegar nele, a resolução mudou
+	// no meio: a recusa é o lado seguro, e ela diz isso.
+	_, resolvido, err := e.CadeiaDeLinks(p)
 	if err != nil {
-		// ELOOP com O_NOFOLLOW significa "o componente final É um link", e não
-		// "há um ciclo". Traduzir isso é a diferença entre uma resposta e um
-		// errno cru.
-		if !seguirLink && errors.Is(err, syscall.ELOOP) {
-			return nil, Identidade{}, ErrEhLink
-		}
 		return nil, Identidade{}, err
 	}
-	fi, err := fh.Stat()
-	if err != nil {
-		fh.Close()
-		return nil, Identidade{}, err
+	fh, id, err := e.abrirPorDescritor(resolvido)
+	if errors.Is(err, ErrEhLink) {
+		return nil, id, errors.New("o caminho resolvia para " + resolvido +
+			", e ele já era outro symlink quando a abertura chegou lá: a " +
+			"resolução mudou no meio, e a leitura foi RECUSADA em vez de seguir " +
+			"uma cadeia que ninguém observou")
 	}
-	id := identidadeDe(fi)
-	if !fi.Mode().IsRegular() {
-		fh.Close()
-		return nil, id, ErrNaoEhArquivo
-	}
-	return fh, id, nil
+	return fh, id, err
 }
 
 // identidadeDe extrai a identidade de um FileInfo, indo ao Stat_t por baixo.
@@ -531,7 +518,7 @@ func (e *Env) abrirPorDescritor(p string) (*os.File, Identidade, error) {
 			// node, dev tal, inode tal" é o que quem investiga queria saber.
 			return nil, id, ErrNaoEhArquivo
 		}
-		fh, err := reabrirParaLeitura(atual, pai, parte, id.Inode)
+		fh, err := reabrirParaLeitura(atual, pai, parte, id)
 		syscall.Close(atual)
 		if err != nil {
 			return nil, id, err
@@ -569,7 +556,7 @@ func (e *Env) abrirPorDescritor(p string) (*os.File, Identidade, error) {
 // que continua pinado, e então CONFERE o inode contra o que o percurso
 // identificou. Se alguém trocou o arquivo entre as duas aberturas, os inodes
 // divergem e a leitura é recusada — a corrida vira recusa, não resposta errada.
-func reabrirParaLeitura(fd, pai int, nome string, esperado uint64) (*os.File, error) {
+func reabrirParaLeitura(fd, pai int, nome string, esperado Identidade) (*os.File, error) {
 	const flags = os.O_RDONLY | syscall.O_NONBLOCK
 	viaProc := "/proc/self/fd/" + strconv.Itoa(fd)
 	if fh, err := os.OpenFile(viaProc, flags|syscall.O_NOATIME, 0); err == nil {
@@ -581,7 +568,7 @@ func reabrirParaLeitura(fd, pai int, nome string, esperado uint64) (*os.File, er
 	return reabrirPeloPai(pai, nome, esperado, flags)
 }
 
-func reabrirPeloPai(pai int, nome string, esperado uint64, flags int) (*os.File, error) {
+func reabrirPeloPai(pai int, nome string, esperado Identidade, flags int) (*os.File, error) {
 	abrir := func(f int) (int, error) {
 		return syscall.Openat(pai, nome, f|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	}
@@ -596,12 +583,19 @@ func reabrirPeloPai(pai int, nome string, esperado uint64, flags int) (*os.File,
 		syscall.Close(novo)
 		return nil, err
 	}
-	if uint64(st.Ino) != esperado {
+	// A identidade do Linux é o PAR (st_dev, st_ino), e não o inode sozinho.
+	//
+	// Num host onde o atacante pode montar filesystem, outro dispositivo pode
+	// aparecer naquele nome e trazer um inode de mesmo número — números de
+	// inode só são únicos DENTRO de um filesystem. Comparar só o inode
+	// aceitaria a troca.
+	if uint64(st.Dev) != esperado.Dev || uint64(st.Ino) != esperado.Inode {
 		syscall.Close(novo)
 		return nil, errors.New("o arquivo foi TROCADO entre a identificação e a " +
-			"leitura: o inode mudou. A leitura foi recusada em vez de devolver " +
-			"o conteúdo de outro objeto com o nome pedido")
+			"leitura: o par (dev, inode) mudou. A leitura foi recusada em vez de " +
+			"devolver o conteúdo de outro objeto com o nome pedido")
 	}
+
 	return os.NewFile(uintptr(novo), nome), nil
 }
 

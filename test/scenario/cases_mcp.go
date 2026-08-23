@@ -930,4 +930,69 @@ func init() {
 		},
 		Exit: 0,
 	})
+
+	// ------------------------------------------------------------------ M17
+	//
+	// O CROSS-VIEW É O FATO QUE DECIDE O VALOR DE TODOS OS OUTROS, e por isso
+	// ele precisa sobreviver ao contêiner.
+	//
+	// Quando duas visões do MESMO kernel discordam, nenhuma ausência de achado
+	// vale como resposta. `coverage.get` publica isso como um booleano; esta
+	// tool publica QUAIS testemunhas discordaram, POR QUANTO, e — o caso mais
+	// comum e o mais perigoso — quais nem chegaram a ser comparadas.
+	//
+	// O cenário afirma duas coisas, e nenhuma delas depende de como o host da CI
+	// está configurado:
+	//
+	//  1. os QUATRO eixos estão lá, nesta ordem. O par /proc×/sys e o par
+	//     ftrace×/proc já dividiram um estado só, e a fusão fazia o "agree" de
+	//     um carregar de graça a afirmação do outro — exatamente no host de
+	//     desenvolvimento, onde available_filter_functions é ilegível sem root.
+	//     Separá-los foi a correção; recolá-los é a regressão que este item pega.
+	//
+	//  2. a resposta DIZ o que fazer com ela. "Ausência de achado não vale como
+	//     prova" é a consequência operacional, e ela precisa chegar escrita —
+	//     um booleano `trust_broken` sozinho não ensina ninguém a ler o resto.
+	Register(Scenario{
+		ID:     "M17-mcp-crossview-testemunhas-do-kernel",
+		Desc:   "crossview.get: os quatro eixos separados, e a consequência dita por extenso",
+		Images: []string{"debian:12"},
+		Cmd:    "mcp",
+		Plant:  `sleep 300 & sleep 0.5`,
+		Args:   []string{"--live", "--allow-root"},
+		// UM retrato só, e não dois. A transcrição é fixada antes de o contêiner
+		// subir, então nenhuma chamada consegue citar o `snapshot_id` que a
+		// anterior cunhou — com dois retratos carregados toda tool responde
+		// "informe snapshot_id", e o cenário mediria a ambiguidade em vez do
+		// que veio provar. O portão de escopo (volátil não sustenta cross-view)
+		// é conferido em TestQuemExigeCompletoRecusaOVolatil, que exercita o
+		// mesmo despacho com argumento válido para cada tool que o declara.
+		MCP: []Chamada{
+			{
+				Tool: "snapshot.capture",
+				Args: `{"scope":"complete"}`,
+			},
+			{
+				// Os quatro eixos, na ordem, e a consequência escrita.
+				Tool: "crossview.get",
+				Campos: map[string]string{
+					"data.axes.0.axis": "processes",
+					"data.axes.1.axis": "sockets",
+					"data.axes.2.axis": "modules",
+					"data.axes.3.axis": "modules_ftrace",
+					"provenance.scope": "complete",
+				},
+				Espera: []string{
+					"ausência de uma contradição específica",
+					// O alcance viaja junto: "nenhum PID oculto" sem dizer até
+					// onde se olhou é meia afirmação.
+					`"reach"`,
+				},
+				// A tool não conclui por conta própria: quem decide se o host
+				// está comprometido é o motor de checks, não uma comparação.
+				Proibe: []string{`"severity"`, `"verdict":"OK"`},
+			},
+		},
+		Exit: 0,
+	})
 }

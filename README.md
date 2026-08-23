@@ -654,14 +654,15 @@ traduzida para um canal que não tem exit code.
 
 | Lançamento | Tools | O que acrescenta |
 | --- | --- | --- |
-| `--snapshot dump.json` | 17 | achados, cobertura, dossiês, drift |
-| `--live` / `--root PATH` | 19 | `snapshot.capture` / `snapshot.release` |
-| `+ --profile full` | 21 | `file.hash`, `file.capabilities` |
-| `+ --allow-secrets` | 24 | `file.read`, `file.xattrs`, `process.environ` |
+| `--snapshot dump.json` | 18 | achados, cobertura, dossiês, drift |
+| `--live` | 20 | `snapshot.capture` / `snapshot.release`, `crossview.get` |
+| `--root PATH` | 13 | imagem montada: sem `/proc`, sem processo, sem socket |
+| `+ --profile full` | 22 | `file.hash`, `file.capabilities` |
+| `+ --allow-secrets` | 25 | `file.read`, `file.xattrs`, `process.environ` |
 
 Referência completa — catálogo de tools, contrato de resposta, modelo de
 segurança, limites declarados e diagnóstico: **[docs/MCP.md](docs/MCP.md)**.
-Fluxos de investigação: [docs/PLAYBOOKS.md](docs/PLAYBOOKS.md), cenários 16–19.
+Fluxos de investigação: [docs/PLAYBOOKS.md](docs/PLAYBOOKS.md), cenários 16–20.
 
 ## Quando usar cada comando
 

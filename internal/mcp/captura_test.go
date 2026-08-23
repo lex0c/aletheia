@@ -352,8 +352,9 @@ func TestQuemExigeCompletoRecusaOVolatil(t *testing.T) {
 	// produziria uma recusa por AMBIGUIDADE, e o teste passaria sem nunca ter
 	// exercitado o portão de escopo.
 	args := map[string]string{
-		"net.ip":       fmt.Sprintf(`{"address":"127.0.0.1","snapshot_id":%q}`, primeiro),
-		"file.inspect": fmt.Sprintf(`{"path":"/etc/passwd","snapshot_id":%q}`, primeiro),
+		"crossview.get": fmt.Sprintf(`{"snapshot_id":%q}`, primeiro),
+		"net.ip":        fmt.Sprintf(`{"address":"127.0.0.1","snapshot_id":%q}`, primeiro),
+		"file.inspect":  fmt.Sprintf(`{"path":"/etc/passwd","snapshot_id":%q}`, primeiro),
 		"snapshot.compare": fmt.Sprintf(`{"before_id":%q,"after_id":%q}`,
 			primeiro, segundo),
 	}

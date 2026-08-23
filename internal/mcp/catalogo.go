@@ -20,6 +20,7 @@ func catalogo() []Ferramenta {
 		toolFindingGet,
 		toolFindingsCorrelate,
 		toolCoverageGet,
+		toolCrossView,
 		toolProcessCensus,
 		toolProcessGet,
 		toolProcessTree,

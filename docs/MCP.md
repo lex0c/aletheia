@@ -9,7 +9,7 @@ explícito do operador, adquire evidência nova do host.
 
 **Escopo do documento:** arquitetura, contrato de resposta, catálogo de tools,
 modelo de segurança e operação. Para fluxos de investigação, ver
-[PLAYBOOKS.md](PLAYBOOKS.md), cenários 16–19.
+[PLAYBOOKS.md](PLAYBOOKS.md), cenários 16–20.
 
 ---
 
@@ -56,11 +56,11 @@ por conexão.
 
 | Lançamento | Modo | Tools | Aquisição |
 | --- | --- | --- | --- |
-| `--snapshot F` (repetível) | snapshot | 17 | nenhuma: serve dumps selados |
-| `--live` | live | 19 | `snapshot.capture` do host |
-| `--root PATH` | image | 19 | `snapshot.capture` de imagem montada |
-| `+ --profile full` | — | 21 | mais leitura direcionada de arquivo |
-| `+ --allow-secrets` | — | 24 | mais bytes crus e environ completo |
+| `--snapshot F` (repetível) | snapshot | 18 | nenhuma: serve dumps selados |
+| `--live` | live | 20 | `snapshot.capture` do host |
+| `--root PATH` | image | 13 | `snapshot.capture` de imagem montada |
+| `+ --profile full` | — | 22 | mais leitura direcionada de arquivo |
+| `+ --allow-secrets` | — | 25 | mais bytes crus e environ completo |
 
 A tool que não se aplica **não entra em `tools/list`** — superfície ausente não
 pode ser induzida por texto plantado no alvo. A ausência é declarada em
@@ -231,6 +231,7 @@ indica quando a tool exige um retrato `complete`.
 | `finding.get` | todos | standard | — | — | host_redacted |
 | `findings.correlate` | todos | standard | — | — | host_redacted |
 | `coverage.get` | todos | standard | — | — | host_redacted |
+| `crossview.get` | todos | standard | live | complete | host_redacted |
 | `process.census` | todos | standard | live | — | host_redacted |
 | `process.get` | todos | standard | live | — | host_redacted |
 | `process.tree` | todos | standard | live | — | host_redacted |

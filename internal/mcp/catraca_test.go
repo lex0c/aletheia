@@ -18,6 +18,7 @@ import (
 	"github.com/lex0c/aletheia/internal/dump"
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
+	"strconv"
 )
 
 // As catracas do servidor MCP.
@@ -1266,5 +1267,69 @@ func TestTodaToolEstaNaTabelaDeReferencia(t *testing.T) {
 		if !temNoCatalogo[n] {
 			t.Errorf("a tabela de docs/MCP.md promete %q e o catálogo não a tem", n)
 		}
+	}
+}
+
+// A tabela de lançamento publica CONTAGENS, e contagem envelhece calada.
+//
+// Quem lê a doc decide como iniciar o servidor pelo número da coluna: "20 tools
+// no live, 13 no --root" é a diferença entre esperar processo e socket ou não.
+// O número foi conferido no dia em que foi escrito e depois nunca mais — foi
+// exatamente assim que `--root` acabou publicando 19 quando servia 13, por seis
+// commits, sem que nada quebrasse.
+//
+// Este teste faz a tabela ser derivada em vez de lembrada.
+//
+// A contagem de `--snapshot` merece nota: ela depende da FONTE do dump servido,
+// não do modo. Um dump coletado ao vivo destrava as tools de /proc; um coletado
+// com `--root` não. A linha da doc fala do caso comum — dump ao vivo — e é esse
+// que o teste confere.
+func TestATabelaDeLancamentoDizAContagemVERDADEIRA(t *testing.T) {
+	const caminho = "../../docs/MCP.md"
+	b, err := os.ReadFile(caminho)
+	if err != nil {
+		t.Skipf("docs/MCP.md indisponível: %v", err)
+	}
+
+	conta := func(p Policy, fonte env.Source) int {
+		ativas, _ := Registry(p.Padroes(), fonte)
+		return len(ativas)
+	}
+	padrao := func(m Modo) Policy { return Policy{Modo: m, Perfil: PerfilPadrao} }
+	full := Policy{Modo: ModoLive, Perfil: PerfilCompleto, PermitirRoot: true}
+	segredos := full
+	segredos.PermitirSegredos = true
+
+	real := map[string]int{
+		"--snapshot F":    conta(padrao(ModoSnapshot), env.SourceLive),
+		"--live":          conta(padrao(ModoLive), env.SourceLive),
+		"--root PATH":     conta(padrao(ModoImagem), env.SourceImage),
+		"--profile full":  conta(full, env.SourceLive),
+		"--allow-secrets": conta(segredos, env.SourceLive),
+	}
+
+	// A linha da tabela: | `<lançamento>` … | <modo> | <n> | … |
+	linha := regexp.MustCompile("^\\| `([^`]+)`[^|]*\\|[^|]*\\|\\s*(\\d+)\\s*\\|")
+	visto := 0
+	for _, ln := range strings.Split(string(b), "\n") {
+		m := linha.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		lanc := strings.TrimPrefix(m[1], "+ ")
+		esperado, ok := real[lanc]
+		if !ok {
+			continue
+		}
+		visto++
+		n, _ := strconv.Atoi(m[2])
+		if n != esperado {
+			t.Errorf("docs/MCP.md promete %d tool(s) em %q e o registry serve %d.\n"+
+				"Quem lê a doc escolhe o lançamento por esse número.", n, lanc, esperado)
+		}
+	}
+	if visto != len(real) {
+		t.Errorf("a tabela de lançamento tinha %d linha(s) conferíveis, esperava %d: "+
+			"ou ela mudou de forma, ou este teste deixou de saber lê-la", visto, len(real))
 	}
 }

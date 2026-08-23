@@ -338,11 +338,12 @@ func validarRegistry(t *testing.T, s *Servidor, args map[string]string) {
 func argsDeTeste(t *testing.T, s *Servidor) map[string]string {
 	t.Helper()
 	args := map[string]string{
-		"process.get":  `{"pid":812}`,
-		"process.tree": `{"pid":812}`,
-		"net.ip":       `{"address":"127.0.0.1"}`,
-		"net.port":     `{"port":22}`,
-		"file.inspect": `{"path":"/etc/passwd"}`,
+		"crossview.get": `{}`,
+		"process.get":   `{"pid":812}`,
+		"process.tree":  `{"pid":812}`,
+		"net.ip":        `{"address":"127.0.0.1"}`,
+		"net.port":      `{"port":22}`,
+		"file.inspect":  `{"path":"/etc/passwd"}`,
 		// snapshot.capture cunha um retrato de verdade — por isso o teto do
 		// acervo precisa de uma vaga a mais que o número de capturas do teste.
 		"snapshot.capture": `{"scope":"volatile"}`,

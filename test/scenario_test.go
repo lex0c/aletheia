@@ -1374,6 +1374,18 @@ func caminhoOuNil(v any, campo string) any {
 
 func valorNoCaminho(v any, caminho string) (any, bool) {
 	for _, parte := range strings.Split(caminho, ".") {
+		// Segmento numérico desce em ARRAY. Sem isso, uma resposta cujo assunto
+		// é uma lista — "os três eixos do cross-view", "as páginas de achado" —
+		// só era asserível por substring, e substring não distingue o eixo que
+		// diz agree do eixo ao lado que diz outra coisa.
+		if i, err := strconv.Atoi(parte); err == nil {
+			xs, ok := v.([]any)
+			if !ok || i < 0 || i >= len(xs) {
+				return nil, false
+			}
+			v = xs[i]
+			continue
+		}
 		m, ok := v.(map[string]any)
 		if !ok {
 			return nil, false

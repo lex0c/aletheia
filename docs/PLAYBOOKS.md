@@ -890,3 +890,74 @@ aletheia info --from /casos/vm-23.json file /etc/cron.d/telemetry
 
 A cobertura que o MCP publica é a mesma que o `analyze` produz para a mesma
 seleção. Divergência entre os dois é defeito, e há catraca para isso.
+
+---
+
+## Cenário 20: "O agente não achou nada — isso quer dizer alguma coisa?"
+
+**Situação:** o agente varreu o host, `findings.list` voltou vazio, e alguém
+precisa decidir se o servidor volta para produção.
+
+Vazio não é limpo. O envelope já responde metade disso: `observability.verdict`
+distingue `OK` de `INCOMPLETE`, e a cobertura diz o que não foi examinado. Falta
+a outra metade — se o que *foi* examinado pode ser acreditado.
+
+```
+crossview.get
+```
+
+A tool compara as visões **independentes** que o kernel dá de si mesmo. Um
+rootkit que filtra `/proc` normalmente não filtra as outras portas de saída do
+mesmo dado, e é a divergência entre elas que o denuncia:
+
+| Eixo | Testemunhas | O que a divergência significa |
+| --- | --- | --- |
+| `processes` | listagem de `/proc` × `kill(pid,0)` × `/proc/<pid>` | um processo responde ao kernel e não aparece na listagem |
+| `sockets` | `/proc/net` × `NETLINK_INET_DIAG` | há conexão que a tabela de texto nega |
+| `modules` | `/proc/modules` × `/sys/module` | um módulo se desencadeou de uma lista e ficou na outra |
+| `modules_ftrace` | registro do ftrace × `/proc/modules` | o kernel guarda função rastreável de um módulo que diz não ter carregado — o registro só é limpo no descarregamento real |
+
+Cada eixo tem **três** estados, e o terceiro é o que decide a pergunta:
+
+```json
+{ "axis": "sockets", "state": "not_compared",
+  "witnesses": [ {"name": "/proc/net", "count": 17, "read": true},
+                 {"name": "NETLINK_INET_DIAG", "count": 0, "read": false,
+                  "reason": "…"} ],
+  "meaning": "a segunda visão não respondeu, então não houve comparação: um
+              socket escondido do /proc/net passaria despercebido" }
+```
+
+`agree` e `not_compared` produzem a mesma lista vazia de divergências e
+significam o oposto: no primeiro caso duas testemunhas se confirmaram, no
+segundo só uma falou. Ler `not_compared` como "nada oculto" é a conclusão errada
+mais fácil de tirar desta ferramenta, e é por isso que o estado é explícito.
+
+O alcance faz parte da afirmação. `"reach": 65536` num host com `pid_max`
+4194304 quer dizer que 98% da faixa de PID não foi sondada — a resposta diz isso
+por extenso em vez de deixar o leitor completar para o lado otimista.
+
+**Quando `trust_broken` é `true`:**
+
+```
+"duas visões do MESMO kernel discordam, e por caminhos de código diferentes.
+ A partir daqui, ausência de achado neste host não vale como prova; os achados
+ continuam valendo, e valem mais."
+```
+
+A assimetria é o ponto. Um kernel que mente sobre o que existe não fabrica
+evidência que não existe — então o que foi encontrado continua de pé, e só o que
+*não* foi encontrado perde o valor. Na prática: pare de triar por este host e
+adquira de fora — imagem do disco, `--root` sobre o volume montado em outra
+máquina, tráfego visto pelo switch.
+
+**Verificação pela CLI**, sem passar pelo agente:
+
+```sh
+aletheia analyze /casos/vm-23.json -vv | grep -A3 'cross\.'
+```
+
+Os mesmos fatos alimentam os checks `cross.hidden_pid`, `cross.socket_view`,
+`cross.module_view` e `cross.thread_count` (§35). A tool não conclui nada que o
+motor já não conclua — ela dá acesso ao **detalhe** que o veredito comprime num
+booleano.

@@ -1208,23 +1208,27 @@ func recorte(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// TODA TOOL DO CATÁLOGO É NOMEADA NO README.
+// TODA TOOL DO CATÁLOGO ESTÁ NA TABELA DE docs/MCP.md.
 //
-// A tabela do README é o que alguém lê para saber o que pedir a este servidor, e
-// ela envelheceu em silêncio: a entrega 3 acrescentou cinco tools e a tabela
-// continuou listando as de antes. Pior, ela ainda afirmava que
+// A tabela é o que alguém lê para saber o que pedir a este servidor, e ela
+// envelheceu em silêncio uma vez: a entrega 3 acrescentou cinco tools e a
+// tabela continuou listando as de antes. Pior, ela ainda afirmava que
 // `snapshot.capture` e `snapshot.release` eram "as duas únicas tools que leem o
 // host" — o que a família file.* tornou falso.
+//
+// A tabela mudou de arquivo depois disso (o README tinha 470 linhas de MCP no
+// meio de um documento de introdução), e o teste seguiu junto — uma catraca que
+// aponta para onde o conteúdo NÃO está mais passa por vacuidade.
 //
 // Documentação que descreve outra versão do produto engana quem consulta. É a
 // mesma regra que docs/SCENARIOS.md já tem, e o mesmo padrão que
 // internal/checks usa contra o runbook: quando existe uma lista em prosa e uma
 // no código, alguém precisa comparar as duas.
-func TestTodaToolAparecerNoREADME(t *testing.T) {
-	const caminho = "../../README.md"
+func TestTodaToolEstaNaTabelaDeReferencia(t *testing.T) {
+	const caminho = "../../docs/MCP.md"
 	b, err := os.ReadFile(caminho)
 	if err != nil {
-		t.Skipf("README indisponível: %v", err)
+		t.Skipf("docs/MCP.md indisponível: %v", err)
 	}
 
 	// A TABELA, e não a prosa.
@@ -1244,15 +1248,15 @@ func TestTodaToolAparecerNoREADME(t *testing.T) {
 		}
 	}
 	if len(naTabela) == 0 {
-		t.Fatal("nenhuma linha de tabela de tool no README: ou ela sumiu, ou " +
-			"este teste deixou de saber onde procurar")
+		t.Fatal("nenhuma linha de tabela de tool em docs/MCP.md: ou ela sumiu, " +
+			"ou este teste deixou de saber onde procurar")
 	}
 
 	temNoCatalogo := map[string]bool{}
 	for _, f := range catalogo() {
 		temNoCatalogo[f.Nome] = true
 		if !naTabela[f.Nome] {
-			t.Errorf("a tool %q existe e não está na tabela do README: quem a lê "+
+			t.Errorf("a tool %q existe e não está na tabela de docs/MCP.md: quem a lê "+
 				"para saber o que pedir não vai descobri-la", f.Nome)
 		}
 	}
@@ -1260,7 +1264,7 @@ func TestTodaToolAparecerNoREADME(t *testing.T) {
 	// removida. Quem tentar usá-la recebe method-not-found.
 	for n := range naTabela {
 		if !temNoCatalogo[n] {
-			t.Errorf("a tabela do README promete %q e o catálogo não a tem", n)
+			t.Errorf("a tabela de docs/MCP.md promete %q e o catálogo não a tem", n)
 		}
 	}
 }

@@ -23,6 +23,7 @@ o comportamento aparece e some?          -> watch
 tenho um estado conhecido anterior?       -> baseline
 quero saber exatamente quais regras há?  -> checks
 não confio no binário que está no host?  -> mídia read-only (Cenário 14)
+quero um agente investigando?            -> mcp (Cenários 16-19)
 ```
 
 Abaixo estão fluxos concretos de investigação.
@@ -683,3 +684,209 @@ sudo ./aletheia scan --only kernel -vv
 O objetivo de `-vv` não é produzir um relatório "mais assustador". É mostrar
 evidência e cobertura suficientes para você decidir se o finding é explicável,
 falso positivo ou parte de uma correlação maior.
+
+---
+
+## Cenário 16: "Quero investigar com um agente, sobre um dump que já tenho"
+
+O modo mais seguro de usar o MCP: nada é lido do host durante a sessão.
+
+```sh
+sudo ./aletheia collect --out /casos/vm-23.json
+```
+
+Configure o cliente apontando para o dump:
+
+```json
+{ "mcpServers": {
+    "vm-23": { "command": "/opt/aletheia",
+               "args": ["mcp", "--snapshot", "/casos/vm-23.json"] } } }
+```
+
+O agente tem 17 tools e nenhuma delas toca o filesystem. O servidor **re-aplica
+a redação no ingresso**, então um dump de origem duvidosa não entrega segredo em
+claro por afirmar que já foi redigido.
+
+Peça ao agente que comece por cobertura, não por achados:
+
+```text
+session.status   → o alcance desta execução
+coverage.get     → o que NÃO foi verificado, e por quê
+findings.list    → os achados, com veredito
+finding.get      → evidência e falsos positivos de um achado específico
+```
+
+Uma resposta com zero achados e `verdict: INCOMPLETE` significa "não consegui
+olhar", nunca "host limpo". Se o agente concluir a partir da lista vazia sem
+citar a cobertura, a conclusão está errada.
+
+Para comparar dois momentos:
+
+```sh
+aletheia mcp --snapshot /casos/antes.json --snapshot /casos/depois.json
+```
+
+`snapshot.compare` exige que os dois retratos tenham sido coletados com o mesmo
+alcance. Comparar uma coleta completa com uma volátil produziria centenas de
+falsos "sumiu".
+
+---
+
+## Cenário 17: "Preciso investigar uma máquina remota, e não há agente instalado"
+
+Não é preciso instalar nada antes do incidente. Copie o binário estático e use o
+SSH que já existe:
+
+```sh
+scp aletheia ir@10.0.0.7:/opt/aletheia
+ssh ir@10.0.0.7 'sudo tee /etc/sudoers.d/ir <<< "ir ALL=(ALL) NOPASSWD: /opt/aletheia"'
+```
+
+Configure o cliente com `ssh` como comando:
+
+```json
+{ "mcpServers": {
+    "alvo": {
+      "command": "ssh",
+      "args": ["-T", "-i", "/casos/chave", "ir@10.0.0.7",
+               "sudo -n /opt/aletheia mcp --live --allow-root"] } } }
+```
+
+O `-T` não é opcional. Com pty, o `ssh` ecoa a requisição de volta no stdout e
+traduz `\n` em `\r\n`; o cliente lê o próprio pedido como resposta e o framing
+não fecha.
+
+O agente precisa tirar o próprio retrato antes de qualquer pergunta:
+
+```text
+snapshot.capture {"scope":"complete"}   ~10s, sustenta achado
+snapshot.capture {"scope":"volatile"}   ~164ms, NÃO sustenta achado
+```
+
+O escopo volátil serve para pegar processo efêmero. Ele devolve zero achados com
+o catálogo inteiro declarado não verificado — use quando a pergunta for "o que
+está rodando agora", não "este host está comprometido".
+
+Se não houver `sudo` disponível, o servidor sobe mesmo assim:
+
+```sh
+ssh -T 10.0.0.7 '/opt/aletheia mcp --live'
+```
+
+Ele roda como uid comum e declara em `session.status` as tools que ficaram
+indisponíveis. É uma investigação parcial que diz exatamente o que não alcançou.
+
+**Antes de atribuir qualquer coisa ao invasor**, compare horários. A conta, a
+regra de `sudoers` e a sessão SSH que você criou para o caso aparecem no retrato,
+e os processos da própria cadeia de acesso aparecem com `/proc` ilegível.
+
+Depois da sessão não fica arquivo nem processo no host — apenas o login no
+`wtmp`.
+
+---
+
+## Cenário 18: "O agente encontrou um achado e eu preciso do arquivo"
+
+O perfil padrão responde sobre o retrato. Para ler bytes do host, o operador
+precisa autorizar explicitamente — e são dois portões separados:
+
+```text
+--profile full      o agente escolhe QUE arquivo ler
+--allow-secrets     os bytes CRUS podem sair do processo
+```
+
+A separação existe para permitir identificar um binário sem autorizar que o
+conteúdo dele vá para um modelo remoto:
+
+```sh
+# identifica sem entregar conteúdo: file.hash, file.capabilities
+ssh -T alvo 'sudo -n /opt/aletheia mcp --live --allow-root --profile full'
+
+# entrega conteúdo: acrescenta file.read, file.xattrs, process.environ
+ssh -T alvo 'sudo -n /opt/aletheia mcp --live --allow-root --profile full --allow-secrets'
+```
+
+Fluxo típico depois de um achado de persistência:
+
+```text
+finding.get         → a evidência e o caminho citado
+file.inspect        → procedência do arquivo, no retrato
+file.hash           → sha256 para comparar contra IOC ou pacote
+file.capabilities   → capability em xattr, que não aparece em find -perm
+file.read           → o conteúdo, se o operador autorizou
+```
+
+Estas tools **não** respondem sobre o retrato: elas leem o host no instante da
+chamada, e o envelope traz `started_at`/`finished_at` em vez de `snapshot_id`.
+Não trate o conteúdo como contemporâneo do snapshot.
+
+Dois campos merecem leitura antes de concluir:
+
+```text
+path_binding: "exact"     nenhum symlink foi atravessado — o arquivo está no
+                          caminho pedido, e isso é garantia estrutural
+path_binding: "followed"  você pediu follow_symlinks; link_chain é observação,
+                          e o que vale como fato são dev e inode
+
+stable: false             o arquivo mudou durante o hash: o digest é de uma
+                          mistura temporal e não vale comparação contra IOC
+```
+
+Cada leitura entra na trilha de auditoria com o caminho e a janela. Redirecione
+para arquivo se o caso exigir cadeia de custódia da própria investigação:
+
+```sh
+... mcp --live --allow-root --profile full --audit-log /casos/vm-23.audit.jsonl
+```
+
+---
+
+## Cenário 19: "Quero que o agente investigue, mas não confio no que ele vai concluir"
+
+O servidor é desenhado para que a conclusão seja verificável, não para que seja
+confiável por si. Três mecanismos, e vale saber usá-los.
+
+**Cobertura em toda resposta.** Peça a origem do veredito:
+
+```text
+observability.verdict            OK exige achado nenhum E cobertura completa
+observability.coverage           total, completos, parciais, não verificados
+observability.collector_gaps     o que a COLETA não conseguiu ler
+observability.kernel_trust_broken  o kernel entregou visões incompatíveis de si
+```
+
+Quando `kernel_trust_broken` não está vazio, nenhuma ausência de achado vale
+como resposta — os achados continuam valendo.
+
+**Falso positivo declarado.** Todo check automático declara os seus:
+
+```text
+checks.catalog   → o catálogo, com §ref do runbook e falsos positivos
+finding.get      → os falsos positivos daquele check específico
+```
+
+Se o agente afirma um comprometimento sem ter descartado os falsos positivos
+declarados, a afirmação é fraca — e a informação para descartá-los estava na
+resposta.
+
+**Texto do alvo é evidência, não instrução.** Toda resposta traz:
+
+```json
+"trust": { "domain": "host_supplied", "untrusted": true,
+           "host_supplied_paths": ["data", "observability"] }
+```
+
+O conteúdo listado ali foi escrito por quem controla o host, o que inclui um
+possível invasor. Um `.bashrc` plantado pode conter texto endereçado ao modelo.
+Se o agente mudar de comportamento depois de ler evidência, isso é o achado —
+não o pedido.
+
+Para conferir qualquer conclusão fora do agente, o mesmo dump responde pela CLI:
+
+```sh
+aletheia analyze /casos/vm-23.json -vv
+aletheia info --from /casos/vm-23.json file /etc/cron.d/telemetry
+```
+
+A cobertura que o MCP publica é a mesma que o `analyze` produz para a mesma
+seleção. Divergência entre os dois é defeito, e há catraca para isso.

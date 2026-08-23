@@ -458,8 +458,8 @@ make test-386        # a suíte em 32 bits
 A suíte de cenários inclui a fronteira de injeção sobre argv (M3) e sobre os
 quatro canais do perfil completo (M15), a ausência de superfície de execução
 (M4), a paridade de cobertura com o `analyze` (M6), a captura ao vivo (M10–M11),
-o portão de consentimento (M12), a aquisição de imagem (M13) e o perfil completo
-(M14).
+o portão de consentimento (M12), a aquisição de imagem (M13), o perfil completo
+(M14) e o alvo mudando durante a leitura (M16).
 
 `make fuzz` cobre três parsers: a mensagem JSON-RPC, o framing do transporte e o
 **carregamento do dump** — este último é o mais exposto, porque o artefato não é

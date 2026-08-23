@@ -861,4 +861,73 @@ func init() {
 		},
 		Exit: 0,
 	})
+
+	// ------------------------------------------------------------------ M16
+	//
+	// O ALVO MUDA ENQUANTO A FERRAMENTA LÊ, que é o cenário de um host vivo e
+	// comprometido — e não um acidente.
+	//
+	// file.hash tira um fstat antes e outro depois, no MESMO descritor, e
+	// compara tamanho, mtime e ctime em nanossegundo. Se algo escreveu no meio,
+	// o digest é de uma MISTURA temporal: bytes do conteúdo velho com bytes do
+	// novo, com cara de sha256 do arquivo. Alguém o compararia contra um IOC.
+	//
+	// A catraca unitária prova que MesmoEstado compara certo. O que só o
+	// cenário prova é a fiação: que a tool de fato chama os dois fstat, que o
+	// segundo é do mesmo descritor, e que o resultado chega ao modelo.
+	//
+	// # Por que ele não é flaky
+	//
+	// A janela de leitura foi MEDIDA: 38ms para 8 MB, 168ms para 64 MB, 597ms
+	// para 256 MB. O escritor de fundo grava um byte por iteração, sem sleep —
+	// dezenas de escritas caem dentro de uma janela de 168ms, e o modo de falha
+	// exigiria que TODAS caíssem fora dela. A margem é de ordem de grandeza, não
+	// de sorte.
+	//
+	// O controle negativo é a outra metade: um arquivo do mesmo tamanho que
+	// ninguém toca sai stable:true na mesma execução. Sem ele, um bug que
+	// devolvesse false sempre passaria por este cenário.
+	Register(Scenario{
+		ID:     "M16-mcp-arquivo-que-muda-durante-a-leitura",
+		Desc:   "o alvo reescreve o arquivo enquanto file.hash o lê: o digest sai declarado INSTÁVEL, e o controle que ninguém toca sai estável",
+		Images: []string{"debian:12"},
+		Cmd:    "mcp",
+		Plant: `dd if=/dev/zero of=/tmp/movel.bin bs=1M count=64 status=none
+		dd if=/dev/zero of=/tmp/parado.bin bs=1M count=64 status=none
+		# o escritor de fundo: um byte por vez, em offset variável. Muda
+		# conteúdo e ctime sem mudar tamanho — que é o caso interessante, porque
+		# um teste de tamanho sozinho não o pegaria.
+		( i=0; while [ $i -lt 100000 ]; do
+		    printf 'X' | dd of=/tmp/movel.bin bs=1 seek=$(( (i * 7919) % 60000000 )) \
+		      conv=notrunc status=none 2>/dev/null
+		    i=$((i+1))
+		  done ) &
+		sleep 0.3`,
+		Args: []string{"--live", "--allow-root", "--profile", "full"},
+		MCP: []Chamada{
+			{
+				Tool: "file.hash",
+				Args: `{"path":"/tmp/movel.bin"}`,
+				Campos: map[string]string{
+					"data.stable": "false",
+				},
+				Espera: []string{
+					// A resposta precisa DIZER o que mudou, não só que mudou:
+					// é isso que permite decidir se vale repetir.
+					`"ctime_after"`,
+					`"sha256"`,
+				},
+			},
+			{
+				// CONTROLE NEGATIVO, na mesma execução e com o mesmo tamanho.
+				Tool: "file.hash",
+				Args: `{"path":"/tmp/parado.bin"}`,
+				Campos: map[string]string{
+					"data.stable": "true",
+				},
+				Proibe: []string{`"ctime_after"`},
+			},
+		},
+		Exit: 0,
+	})
 }

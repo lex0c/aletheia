@@ -80,3 +80,58 @@ func TestTimestompClusterPequenoContinuaCritico(t *testing.T) {
 		t.Fatalf("cluster de 2 não é extração em massa: %+v", r.Findings)
 	}
 }
+
+// pkg_hook é o gatilho onde PRESENÇA não é execução, e confundir os dois
+// promovia um host limpo a comprometido.
+//
+// /etc/apt/apt.conf.d/50unattended-upgrades tem a forma exata de um timestomp —
+// mtime na data de build do pacote (anos atrás), ctime na hora em que a camada
+// da imagem foi criada, e nenhum pacote reivindicando o arquivo no dump. Mas ele
+// só define OPÇÃO (Unattended-Upgrade::*, APT::Periodic::*): não roda comando
+// nenhum. Tratá-lo como alvo de persistência o fazia CRITICAL de timestomp num
+// servidor de produção intocado — o T1 da suíte de cenários caía exatamente
+// aqui.
+//
+// Um pkg_hook só tem poder se define um HOOK que executa. Sem hook, o timestomp
+// dele não é promovido; com hook, continua sendo — este teste prova os dois
+// lados na MESMA forma temporal, para que a diferença seja só o conteúdo.
+func TestPkgHookSoTemPoderSeRodaComando(t *testing.T) {
+	ts := func(p string) facts.Timestomp {
+		return facts.Timestomp{Path: p, ModUTC: "2022-12-31T20:59:00Z",
+			MetaUTC: "2026-08-23T16:00:31Z", DeltaH: 31939, Cluster: 1}
+	}
+	// Só opção — a forma do 50unattended-upgrades.
+	soOpcao := facts.Trigger{
+		File: "/etc/apt/apt.conf.d/50unattended-upgrades", Kind: "pkg_hook",
+		When: "a cada operação do gerenciador de pacotes",
+		Lines: []facts.TriggerLine{
+			{N: 1, Text: `APT::Periodic::Unattended-Upgrade "1";`},
+			{N: 2, Text: `Unattended-Upgrade::Origins-Pattern {`},
+			// Um EXEMPLO de hook comentado, como a config padrão traz: casar
+			// aqui reintroduziria o FP por outra porta.
+			{N: 3, Text: `//  DPkg::Pre-Install-Pkgs {"/usr/bin/foo";};`},
+		},
+	}
+	f := &facts.Facts{Timestomps: []facts.Timestomp{ts(soOpcao.File)},
+		Triggers: []facts.Trigger{soOpcao}}
+	r := dataFalsificada.Run(dataFalsificada, f, testEnv())
+	if len(r.Findings) != 0 {
+		t.Errorf("um apt.conf.d só de OPÇÃO virou achado de timestomp (%d): é o FP "+
+			"que fazia o servidor de produção limpo sair CRITICAL", len(r.Findings))
+	}
+
+	// Mesma forma temporal, mas com um HOOK que roda comando: continua CRITICAL.
+	comHook := soOpcao
+	comHook.File = "/etc/apt/apt.conf.d/99backdoor"
+	comHook.Lines = []facts.TriggerLine{
+		{N: 1, Text: `DPkg::Pre-Install-Pkgs {"/usr/local/bin/x || true";};`},
+	}
+	f2 := &facts.Facts{Timestomps: []facts.Timestomp{ts(comHook.File)},
+		Triggers: []facts.Trigger{comHook}}
+	r2 := dataFalsificada.Run(dataFalsificada, f2, testEnv())
+	if len(r2.Findings) != 1 || r2.Findings[0].Sev != check.SevCritical {
+		t.Errorf("um apt hook que RODA comando, com data mexida, deixou de ser "+
+			"CRITICAL: a correção do FP não pode cegar a detecção real. Achados: %d",
+			len(r2.Findings))
+	}
+}

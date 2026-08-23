@@ -258,7 +258,51 @@ var dataFalsificada = check.Check{
 // que não está no /etc/skel é o normal, não um sinal. Os dotfiles por usuário
 // continuam saindo como AVISO pelo check de timestomp — que é onde já estavam —,
 // e o que muda aqui é apenas a PROMOÇÃO a crítico.
-func gatilhoComPoder(t *facts.Trigger) bool { return t.User == "" }
+//
+// pkg_hook é a exceção onde PRESENÇA não é execução. Nos outros diretórios, um
+// arquivo existir já significa que ele roda: um script em /etc/update-motd.d
+// roda no login. Mas /etc/apt/apt.conf.d guarda CONFIGURAÇÃO, e só alguns
+// arquivos ali definem um HOOK que executa comando (DPkg::Pre-Install-Pkgs,
+// *::Pre-Invoke, *::Post-Invoke). A maioria só ajusta opção — Unattended-Upgrade,
+// APT::Periodic, Acquire. Tratar o 50unattended-upgrades (data de pacote, ctime
+// de build, sem dono de pacote no dump) como alvo de persistência o promovia a
+// CRITICAL de timestomp num servidor de produção limpo. Um pkg_hook só tem poder
+// se de fato roda comando.
+func gatilhoComPoder(t *facts.Trigger) bool {
+	if t.User != "" {
+		return false
+	}
+	if t.Kind == "pkg_hook" {
+		return pkgHookRodaComando(t)
+	}
+	return true
+}
+
+// pkgHookRodaComando diz se um arquivo de configuração de gerenciador de pacote
+// EXECUTA algo, em vez de só ajustar opção.
+//
+// Para o apt, executar é definir um hook: Pre-Install-Pkgs, Pre-Invoke ou
+// Post-Invoke recebem uma string que o apt roda como shell. Opção
+// (Unattended-Upgrade::*, APT::Periodic::*, Acquire::*) não roda nada.
+//
+// Os comentários do apt.conf são // e /* */, e a config padrão traz EXEMPLOS de
+// hook comentados — casar dentro deles reintroduziria o mesmo falso positivo por
+// outro caminho. Por isso a linha // é pulada.
+func pkgHookRodaComando(t *facts.Trigger) bool {
+	for _, ln := range t.Lines {
+		s := strings.TrimSpace(ln.Text)
+		if strings.HasPrefix(s, "//") {
+			continue
+		}
+		low := strings.ToLower(s)
+		if strings.Contains(low, "pre-invoke") ||
+			strings.Contains(low, "post-invoke") ||
+			strings.Contains(low, "pre-install-pkgs") {
+			return true
+		}
+	}
+	return false
+}
 
 func arquivoComPoder(f *facts.Facts, p string) string {
 	for i := range f.Suid {

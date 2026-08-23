@@ -249,15 +249,7 @@ var shellStartup = check.Check{
 			// gerenciador guarda. Sem hash disponível não há isenção.
 			donoDoGatilho := entregueIntactoPeloPacote(f, t.File)
 
-			// apt.conf.d executa pelos HOOKS, não pelas linhas de config. AptHooks
-			// é o que o lexer do apt extraiu dos bytes crus, imune ao descarte de
-			// linha-# que faria um hook escondido atrás de /* … */ sumir de Lines.
-			// Para os outros gatilhos, Lines é o que executa.
-			linhasDeExec := t.Lines
-			if len(t.AptHooks) > 0 || strings.Contains(t.File, "/apt/apt.conf.d/") {
-				linhasDeExec = t.AptHooks
-			}
-			for _, ln := range linhasDeExec {
+			for _, ln := range t.Lines {
 				motivo, sev, ok := execSuspect(linhaExecutavel(ln.Text))
 				if ok && donoDoGatilho {
 					ok = false
@@ -462,6 +454,25 @@ var shellEnv = check.Check{
 	},
 }
 
+// linhasExecutaveisDoTrigger devolve o que um gatilho EXECUTA, na representação
+// certa por tipo.
+//
+// Para apt.conf.d é AptHooks — o fato semântico que o lexer do apt extraiu dos
+// bytes crus. Trigger.Lines não serve ali: ele passou pelo parser genérico, que
+// descarta a linha começada por #, e um hook escondido atrás de um bloco /* … */
+// mal fechado some dele. Para todo o resto, Lines É o que executa.
+//
+// A escolha mora AQUI, num lugar só, porque foi a duplicação dela que produziu o
+// defeito: o timestomp leu AptHooks e o trigger_exec continuou em Lines, e o
+// mesmo hook era visto por um check e invisível para o outro. Todo consumidor que
+// pergunta "o que este gatilho executa?" chama isto.
+func linhasExecutaveisDoTrigger(t *facts.Trigger) []facts.TriggerLine {
+	if t.Kind == "pkg_hook" && strings.Contains(t.File, "/apt/apt.conf.d/") {
+		return t.AptHooks
+	}
+	return t.Lines
+}
+
 // triggerExec — runbook §7.7 e §7.12.
 //
 // A mesma pergunta dos outros gatilhos, sobre os que sobraram: rc.local,
@@ -520,7 +531,7 @@ var triggerExec = check.Check{
 			// gerenciador guarda. Sem hash disponível não há isenção.
 			donoDoGatilho := entregueIntactoPeloPacote(f, t.File)
 
-			for _, ln := range t.Lines {
+			for _, ln := range linhasExecutaveisDoTrigger(t) {
 				motivo, sev, ok := execSuspect(linhaExecutavel(ln.Text))
 				if ok && donoDoGatilho {
 					ok = false

@@ -49,6 +49,20 @@ Unattended-Upgrade::Origins-Pattern {
 		{"# dentro de string é dado, não comentário",
 			`DPkg::Pre-Invoke {"/bin/sh -c '# not a comment'";};`,
 			[]string{"/bin/sh -c '# not a comment'"}},
+
+		// P2 da revisão: substring não é diretiva. Pre-Invoke-Disabled contém
+		// "pre-invoke" e o apt NÃO executa a opção.
+		{"nome que só CONTÉM o hook não é hook",
+			`Foo::Pre-Invoke-Disabled {"/usr/local/bin/x";};`, nil},
+
+		// P2 da revisão: escopo aninhado. DPkg{ Pre-Invoke{}; Post-Invoke{}; }
+		// é sintaxe válida, e um hook não pode consumir o comando do outro.
+		{"escopo aninhado com dois hooks",
+			"DPkg {\n Pre-Invoke { \"a\"; };\n Post-Invoke { \"b\"; };\n};",
+			[]string{"a", "b"}},
+
+		{"lista de comandos no mesmo hook",
+			`DPkg::Pre-Install-Pkgs {"a"; "b";};`, []string{"a", "b"}},
 	}
 	for _, c := range casos {
 		hooks := analisarAptHooks([]byte(c.conf))

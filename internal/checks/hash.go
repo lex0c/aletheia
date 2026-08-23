@@ -325,7 +325,7 @@ func arquivoComPoder(f *facts.Facts, p string) string {
 			return "e é um gatilho de " + t.Kind + " (" + t.When + "): a data foi " +
 				"mexida num alvo de persistência"
 		}
-		for _, ln := range t.Lines {
+		for _, ln := range linhasExecutaveisDoTrigger(t) {
 			if facts.PrimeiroCaminhoAbsoluto(ln.Text) == p {
 				return "e o gatilho " + t.File + " o executa: a data foi mexida " +
 					"num alvo de persistência"

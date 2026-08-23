@@ -2,8 +2,18 @@ package facts
 
 import "strings"
 
+// hooksApt são os pontos de configuração que o apt EXECUTA como shell — o último
+// segmento `::` de uma diretiva de hook. Comparação por segmento COMPLETO, não
+// por substring: `Foo::Pre-Invoke-Disabled` contém "pre-invoke" e não roda nada.
+var hooksApt = map[string]bool{
+	"pre-invoke":          true,
+	"post-invoke":         true,
+	"post-invoke-success": true,
+	"pre-install-pkgs":    true,
+}
+
 // analisarAptHooks extrai os hooks ATIVOS de um apt.conf — as diretivas que o
-// apt executa como shell: Pre-Install-Pkgs, Pre-Invoke e Post-Invoke.
+// apt executa como shell —, com o lexer do apt sobre os bytes crus.
 //
 // # Por que na COLETA, e por que com lexer próprio
 //
@@ -16,77 +26,95 @@ import "strings"
 //
 // A segunda linha COMEÇA dentro do bloco. O apt acha o */, fecha o bloco, e o
 // resto — o hook — fica ATIVO. Mas o parser genérico de gatilho descarta toda
-// linha que começa com #, e o hook some da representação inteira: nem o check de
-// timestomp nem o persist.trigger_exec o veem. É um falso negativo determinístico
-// numa superfície que o atacante controla.
+// linha que começa com #, e o hook some da representação inteira: nem o timestomp
+// nem o persist.trigger_exec o veem. É um falso negativo determinístico numa
+// superfície que o atacante controla, e reconstruir a gramática depois é
+// impossível — a informação não está mais lá.
 //
-// Reconstruir a gramática do apt depois que a linha já foi descartada é
-// impossível — a informação não está mais lá. Por isso o lexer roda sobre os
-// BYTES CRUS, na coleta, e o que ele extrai vira fato semântico que os checks
-// leem em vez de reparsear texto.
-//
-// O lexer é ciente de ASPAS: um # ou /* dentro de "…" é dado, não comentário, e
-// uma diretiva só conta quando aparece FORA de aspas. Isso fecha as duas
-// divergências que um mini-parser sobre linhas tinha com o lexer real do apt.
+// O lexer é ciente de ASPAS (# ou /* dentro de "…" é dado), reconhece a diretiva
+// pelo SEGMENTO completo (não por substring) e conta a chave a partir da chave DO
+// HOOK, não do escopo que a envolve — então `DPkg { Pre-Invoke{…}; Post-Invoke{…}; }`
+// separa os dois comandos sem um consumir o outro.
 func analisarAptHooks(raw []byte) []TriggerLine {
 	toks := lexApt(raw)
 	var out []TriggerLine
 	for i := 0; i < len(toks); i++ {
-		if toks[i].str {
-			continue // diretiva dentro de aspas é valor, não hook
-		}
-		low := strings.ToLower(toks[i].text)
-		if !strings.Contains(low, "pre-invoke") &&
-			!strings.Contains(low, "post-invoke") &&
-			!strings.Contains(low, "pre-install-pkgs") {
+		if !ehDiretivaDeHook(toks[i]) {
 			continue
 		}
-		// Fora de comentário e fora de aspas, essas palavras só existem como a
-		// diretiva de hook: nome de opção do apt não as contém. A partir daqui
-		// junta os comandos (as strings) até o fim do statement.
-		cmds := comandosDoHook(toks, i)
+		cmds, ate := comandosDoHook(toks, i+1)
 		if len(cmds) == 0 {
 			// Hook cujo comando não é string literal (variável, include): o poder
 			// existe mesmo sem o texto, e não pode sumir.
-			out = append(out, TriggerLine{N: toks[i].line, Text: strings.TrimSpace(toks[i].text)})
-			continue
+			out = append(out, TriggerLine{N: toks[i].line,
+				Text: strings.TrimSpace(toks[i].text)})
+		} else {
+			out = append(out, cmds...)
 		}
-		out = append(out, cmds...)
+		if ate > i {
+			i = ate
+		}
 	}
 	return out
 }
 
-// comandosDoHook junta as strings que seguem a diretiva no token `de`, até o
-// fim do statement: fecha a chave que abriu, ou o ; quando não há chave.
-func comandosDoHook(toks []aptToken, de int) []TriggerLine {
-	var cmds []TriggerLine
-	prof := strings.Count(toks[de].text, "{") - strings.Count(toks[de].text, "}")
-	temChave := prof > 0
-	for j := de + 1; j < len(toks); j++ {
-		if toks[j].str {
-			if txt := strings.TrimSpace(toks[j].text); txt != "" {
-				cmds = append(cmds, TriggerLine{N: toks[j].line, Text: txt})
-			}
-			if !temChave {
-				break // forma sem chave: um valor e o statement acaba
-			}
-			continue
-		}
-		if strings.Contains(toks[j].text, "{") {
-			temChave = true
-		}
-		prof += strings.Count(toks[j].text, "{") - strings.Count(toks[j].text, "}")
-		if temChave && prof <= 0 {
-			break
-		}
-		if !temChave && strings.Contains(toks[j].text, ";") {
-			break
-		}
+// ehDiretivaDeHook diz se o token é a diretiva de um hook — o último segmento
+// `::` do nome bate EXATAMENTE com um ponto que o apt executa.
+func ehDiretivaDeHook(t aptToken) bool {
+	if t.str || estrutural(t.text) {
+		return false
 	}
-	return cmds
+	seg := t.text
+	if i := strings.LastIndex(seg, "::"); i >= 0 {
+		seg = seg[i+2:]
+	}
+	return hooksApt[strings.ToLower(strings.TrimSpace(seg))]
 }
 
-// aptToken é um pedaço do apt.conf já sem comentário: código ou uma string.
+// comandosDoHook junta as strings do hook que começa DEPOIS de `de`, respeitando
+// o escopo: se abre chave, vai até a chave DELE fechar; se não, até o ;.
+// Devolve os comandos e o índice do último token consumido.
+func comandosDoHook(toks []aptToken, de int) ([]TriggerLine, int) {
+	var cmds []TriggerLine
+	i := de
+	for i < len(toks) && vazio(toks[i]) {
+		i++
+	}
+	if i >= len(toks) {
+		return nil, i
+	}
+	if toks[i].text == "{" {
+		prof := 1
+		for i++; i < len(toks) && prof > 0; i++ {
+			switch {
+			case toks[i].str:
+				if txt := strings.TrimSpace(toks[i].text); txt != "" {
+					cmds = append(cmds, TriggerLine{N: toks[i].line, Text: txt})
+				}
+			case toks[i].text == "{":
+				prof++
+			case toks[i].text == "}":
+				prof--
+			}
+		}
+		return cmds, i - 1
+	}
+	// Forma sem chave: DPkg::Pre-Invoke "cmd"; — a string até o ;.
+	for ; i < len(toks) && toks[i].text != ";"; i++ {
+		if toks[i].str {
+			if txt := strings.TrimSpace(toks[i].text); txt != "" {
+				cmds = append(cmds, TriggerLine{N: toks[i].line, Text: txt})
+			}
+		}
+	}
+	return cmds, i
+}
+
+func estrutural(s string) bool { return s == "{" || s == "}" || s == ";" }
+func vazio(t aptToken) bool    { return !t.str && strings.TrimSpace(t.text) == "" }
+
+// aptToken é um pedaço do apt.conf já sem comentário: uma string, um caractere
+// estrutural ({ } ;), ou um trecho de código entre eles.
 type aptToken struct {
 	str  bool
 	text string
@@ -94,8 +122,8 @@ type aptToken struct {
 }
 
 // lexApt tokeniza um apt.conf resolvendo comentário e aspas na ordem do parser
-// real: bloco /* … */ primeiro, depois // e #, e string "…" protege o conteúdo
-// dos dois.
+// real: bloco /* … */ primeiro, depois // e #, string "…" protege os dois, e {
+// } ; saem como tokens próprios para a contagem de escopo ser exata.
 func lexApt(raw []byte) []aptToken {
 	s := string(raw)
 	var toks []aptToken
@@ -153,6 +181,10 @@ func lexApt(raw []byte) []aptToken {
 			}
 			i++ // aspa de fechamento (ou fim: idempotente)
 			toks = append(toks, aptToken{true, b.String(), startLine})
+		case c == '{' || c == '}' || c == ';':
+			flush()
+			toks = append(toks, aptToken{false, string(c), line})
+			i++
 		default:
 			if code.Len() == 0 {
 				codeLine = line

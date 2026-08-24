@@ -73,6 +73,28 @@ const folgaDeRelogio = 25 * time.Hour
 func fusoDoAlvo(f *Facts, e *env.Env) (*time.Location, bool) {
 	b, err := e.ReadFile("/etc/localtime")
 	if err != nil {
+		// /etc/localtime É UM LINK ABSOLUTO em praticamente toda distribuição
+		// (→ /usr/share/zoneinfo/…), e sob `--root` o os.Root RECUSA link
+		// absoluto: ele o resolveria contra a raiz do PROCESSO, e essa recusa é
+		// justamente o que impede a leitura de escapar para o disco de quem
+		// investiga. O erro sai como "path escapes from parent".
+		//
+		// O efeito era que o fuso do alvo NUNCA era lido em modo image — o
+		// caminho da §35.6, que é onde ele mais importa, porque ali o relógio e
+		// o fuso do analista não têm nada a ver com os do host varrido. Achado
+		// pelo cenário de imagem, não por leitura.
+		//
+		// Seguir a cadeia DENTRO da raiz é o que o kernel do alvo faria, e é o
+		// que alvoFinal já faz para propriedade de pacote. A classe é geral:
+		// qualquer coletor que leia um caminho que seja link absoluto no alvo
+		// esbarra nisto sob --root.
+		if alvo := alvoFinal(e, "/etc/localtime"); alvo != "" {
+			if bs, err2 := e.ReadFile(alvo); err2 == nil {
+				b, err = bs, nil
+			}
+		}
+	}
+	if err != nil {
 		if env.EhLacuna(err) {
 			f.partial("logeventos", "/etc/localtime não pôde ser lido ("+
 				env.MotivoDoErro(err)+"): o fuso do alvo é DESCONHECIDO e as datas "+

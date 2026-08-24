@@ -15,6 +15,9 @@ package scenario
 //	G7  host limpo                    silêncio, que é o contrato mais caro
 //	G8  a mesma linha em dois arquivos  um evento, não dois
 //	G9  auditd parado sem perda       MANUAL, nunca aviso
+//	G10 auth.log 0640 sem privilégio  a forma de campo da lacuna
+//	G11 modo IMAGE                    o fuso vem do TZif do ALVO
+//	G12 --no-logs                     escolha declarada, nunca silêncio
 //
 // # Por que data FIXA e --logs-all
 //
@@ -203,10 +206,109 @@ func init() {
 		},
 		Exit: -1,
 	})
+
+	Register(Scenario{
+		ID:   "G10-auth-log-sem-privilegio-eh-lacuna",
+		Desc: "auth.log 0640 root:adm e coleta SEM privilégio: lacuna, e a cobertura cai",
+		// A FORMA DE CAMPO da lacuna, e o caso cotidiano de quem varre sem root:
+		// em Debian o auth.log é 0640 root:adm por desenho, e uma varredura sem
+		// privilégio bate em EACCES.
+		//
+		// O G6 planta um fifo porque o `-u` do harness vale para o contêiner
+		// inteiro. Aqui o truque é o do X2: o contêiner roda como ROOT, o
+		// plantio cria o arquivo com dono e modo reais, e o `collect` desce de
+		// privilégio dentro do próprio script. Os dois cenários são
+		// complementares — um é o arquivo trocado de lugar, o outro é o arquivo
+		// que o uid não alcança.
+		Images: matriz,
+		Cmd:    "analyze",
+		Plant:  authLogSoParaRoot,
+		Args:   []string{"--only", "logs", "/tmp/cego.json"},
+		ExpectGap: []string{
+			"auth.log não pôde ser lido",
+		},
+		// O que este cenário afirma é a LACUNA. Um aviso aqui seria a ferramenta
+		// concluindo a partir de um arquivo que ela não conseguiu abrir.
+		MaxWarn:          SemAvisos,
+		MustBeIncomplete: true,
+		Exit:             1,
+	})
+
+	Register(Scenario{
+		ID:   "G11-modo-image-le-o-fuso-do-alvo",
+		Desc: "rootfs montado de fora: o horário do log sai do TZif do ALVO, não do analista",
+		// A feature declara SourceLive|SourceImage, e este é o caminho da §35.6 —
+		// varrer a imagem quando o userland do host não é confiável.
+		//
+		// O que SÓ o modo image prova é a afirmação escrita no coletor: o fuso é
+		// decodificado dos BYTES de /etc/localtime do alvo, e nunca por
+		// time.LoadLocation, que leria o zoneinfo de quem investiga. Aqui o alvo
+		// está em +05:45 — um offset que máquina de CI nenhuma tem —, então
+		// `Jan 10 03:00:00` local só pode sair como 21:15Z se os bytes certos
+		// foram lidos.
+		//
+		// Só debian: a alpine base não traz zoneinfo, e montar um TZif à mão em
+		// shell testaria o plantio em vez do produto.
+		Images: []string{"debian:12"},
+		Mode:   Image,
+		Args:   []string{"--only", "logs", "--logs-all"},
+		Plant:  fusoDeKathmandu,
+		Expect: []Expect{
+			{ID: "logs.source_coverage", Evidence: "T21:15:00Z"},
+		},
+		ForbidOutput: []string{
+			// Se o /etc/localtime não tivesse sido lido, o próprio check diria.
+			"o fuso do alvo (/etc/localtime) não foi lido",
+		},
+		Exit: -1,
+	})
+
+	Register(Scenario{
+		ID:   "G12-no-logs-nao-vira-silencio",
+		Desc: "--no-logs: a escolha do operador é DECLARADA, e não vira 'não encontrei'",
+		// O plantio é o do G4 — o vão entre gerações, que dispara sem a flag.
+		// Com ela, o achado tem de sumir E a cobertura tem de cair: desligar a
+		// leitura é escolha de quem roda, e escolha declarada não é ausência de
+		// fato. É esse valor que faz um analyze sobre dump de `wtf` responder
+		// NÃO VERIFICADO em vez de "não achei".
+		Images:    matriz,
+		Args:      []string{"--only", "logs", "--no-logs"},
+		Plant:     vaoEntreGeracoes,
+		Forbid:    []string{"antiforense.log_time_gap"},
+		ExpectGap: []string{"DESLIGADA"},
+		MaxWarn:   SemAvisos,
+		// A cobertura CAI: a pergunta cabia neste host e ninguém a fez.
+		MustBeIncomplete: true,
+		Exit:             1,
+	})
 }
 
 // ---------------------------------------------------------------------------
 // Os plantios. Data FIXA no passado e mtime fixado: ver o comentário do topo.
+
+// authLogSoParaRoot é a forma de campo: 0640 root:adm, como o Debian entrega.
+//
+// O contêiner roda como root para que o plantio consiga o dono e o modo reais; o
+// `collect` desce para nobody dentro do script, e é essa coleta que o cenário
+// analisa. É o idioma do X2, e sem ele a permissão não é reproduzível aqui.
+const authLogSoParaRoot = `
+mkdir -p /var/log
+cat > /var/log/auth.log <<'EOF'
+Jan 10 03:00:00 h sshd[1]: Accepted password for ana from 10.0.0.1 port 5 ssh2
+EOF
+chown 0:0 /var/log/auth.log
+chmod 640 /var/log/auth.log
+su nobody -s /bin/sh -c '/aletheia collect --out /tmp/cego.json --logs-all'
+`
+
+// fusoDeKathmandu põe o ALVO em +05:45, que máquina de CI nenhuma tem.
+const fusoDeKathmandu = `
+mkdir -p /var/log
+cp /usr/share/zoneinfo/Asia/Kathmandu /etc/localtime
+cat > /var/log/auth.log <<'EOF'
+Jan 10 03:00:00 h sshd[1]: Accepted password for ana from 10.0.0.1 port 5 ssh2
+EOF
+`
 
 const chaveForaDoAuthorizedKeys = `
 mkdir -p /var/log /root/.ssh

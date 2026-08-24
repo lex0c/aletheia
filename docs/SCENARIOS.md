@@ -3,7 +3,7 @@
 GERADO de `internal/checks` e `test/scenario`. Não edite à mão:
 `go test ./test/scenario -run TestDocumentoDeCenarios -update`.
 
-133 checks, 248 cenários.
+133 checks, 251 cenários.
 
 Um **check** é uma pergunta que a ferramenta faz ao host. Um **cenário** é um
 host montado de propósito — em contêiner, imagem ou microVM — que prova a
@@ -78,7 +78,7 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 |---|---|---|---|
 | `antiforense.log_time_gap` | 10 | vão de tempo entre duas gerações do log de autenticação | `G4-vao-de-tempo-entre-geracoes` |
 | `logs.audit_records_lost` | 11 | a trilha de auditoria tem buraco | `G3-trilha-de-auditoria-furada`, `G9-auditd-parado-eh-manual` |
-| `logs.source_coverage` | 10 | até onde do passado os logs deste host foram observados | `G3-trilha-de-auditoria-furada`, `G5-journald-only-eh-escopo`, `G8-mesma-linha-em-dois-arquivos` |
+| `logs.source_coverage` | 10 | até onde do passado os logs deste host foram observados | `G11-modo-image-le-o-fuso-do-alvo`, `G3-trilha-de-auditoria-furada`, `G5-journald-only-eh-escopo` +1 |
 
 ### `net` (10)
 
@@ -321,6 +321,9 @@ contêiner não alcança — hidepid, sysctl, módulo, cgroup, eBPF.
 | `F3-rotacao-do-wtmp-nao-eh-achado` | live | a MESMA forma, produzida pelo logrotate: arquivo vivo vazio com sessão aberta |
 | `G1-chave-usada-fora-das-locais` | live | login aceito com chave cujo fingerprint não está em authorized_keys nenhum |
 | `G1-mac-rebaixado` | vm | config pede enforcing e o kernel reporta permissivo: alguém rodou setenforce 0 |
+| `G10-auth-log-sem-privilegio-eh-lacuna` | live | auth.log 0640 root:adm e coleta SEM privilégio: lacuna, e a cobertura cai |
+| `G11-modo-image-le-o-fuso-do-alvo` | image | rootfs montado de fora: o horário do log sai do TZif do ALVO, não do analista |
+| `G12-no-logs-nao-vira-silencio` | live | --no-logs: a escolha do operador é DECLARADA, e não vira 'não encontrei' |
 | `G2-mac-permissivo-declarado` | vm | config PEDE permissivo: é escolha do administrador e não pode virar achado |
 | `G2-sudo-para-tmp` | live | sudo executou binário de /tmp: o COMMAND só existe no log |
 | `G3-hook-de-ftrace-em-vm` | vm | hook de enumeração com tracefs montado pelo próprio guest, sem contêiner privilegiado |

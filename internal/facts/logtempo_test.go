@@ -285,3 +285,50 @@ func tzifDe(offset int32, abrev string) []byte {
 	b = append(b, 0)
 	return b
 }
+
+// /etc/localtime É UM LINK ABSOLUTO em praticamente toda distribuição, e sob
+// `--root` o os.Root RECUSA link absoluto — ele o resolveria contra a raiz do
+// PROCESSO, e essa recusa é o que impede a leitura de escapar para o disco de
+// quem investiga.
+//
+// O efeito era que o fuso do alvo NUNCA era lido em modo image: o caminho da
+// §35.6, que é onde ele mais importa, porque ali o relógio e o fuso do analista
+// não têm nada a ver com os do host varrido. Seguir a cadeia DENTRO da raiz é o
+// que o kernel do alvo faria.
+func TestFusoAtravesDeLinkAbsolutoDentroDaRaiz(t *testing.T) {
+	raiz := t.TempDir()
+	for _, d := range []string{"etc", "usr/share/zoneinfo/Asia"} {
+		if err := os.MkdirAll(filepath.Join(raiz, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(raiz, "usr/share/zoneinfo/Asia/Katmandu"),
+		tzifDe(5*3600+45*60, "+0545"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// ABSOLUTO, como a distribuição escreve.
+	if err := os.Symlink("/usr/share/zoneinfo/Asia/Katmandu",
+		filepath.Join(raiz, "etc/localtime")); err != nil {
+		t.Fatal(err)
+	}
+
+	f := &Facts{}
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	defer e.Close()
+	loc, suposto := fusoDoAlvo(f, e)
+	if suposto {
+		t.Fatalf("o link absoluto derrubou a leitura do fuso: %v", f.Partial["logeventos"])
+	}
+	// A prova é o OFFSET aplicado: 03:00 em +05:45 é 21:15Z do dia anterior.
+	got, ok := instanteDeSyslog(time.January, 10, 3, 0, 0, contextoDeTempo{
+		Loc:    loc,
+		Ancora: time.Date(2026, 1, 12, 0, 0, 0, 0, time.UTC),
+		Agora:  time.Date(2026, 1, 12, 0, 0, 0, 0, time.UTC),
+	})
+	if !ok {
+		t.Fatal("não datou")
+	}
+	if utc(got) != "2026-01-09T21:15:00Z" {
+		t.Errorf("= %s, quer 2026-01-09T21:15:00Z", utc(got))
+	}
+}

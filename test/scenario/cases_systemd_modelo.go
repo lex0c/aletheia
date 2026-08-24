@@ -62,4 +62,30 @@ printf '[Service]\nExecStart=/bin/sh -c "/bin/true && /bin/systemd-net-helper sl
 		},
 		Exit: 2,
 	})
+
+	// A outra metade do MESMO defeito, e a que o US2 não cobre.
+	//
+	// No US2 o segundo programa mora em diretório de PACOTE, então quem salva o
+	// caso é o persist.unit_unowned. Ponha o mesmo segundo programa em /tmp e
+	// aquele check sai de cena de propósito — ele exige dirDePacote —, e o
+	// integrity.no_package_owner também sai, porque pula suspectDir assumindo
+	// que o check de caminho acusa. Sobra o persist.unit_exec_suspect, que
+	// resolvia "o" alvo pela fachada singular e via só o /bin/true.
+	//
+	// É o formato de persistência mais comum que existe: shell, `&&`, binário
+	// em /tmp. Se este cenário ficar verde por acidente — porque outro check
+	// pegou —, o Expect por ID diz qual tinha de ser.
+	Register(Scenario{
+		ID:     "US3-segundo-programa-em-tmp",
+		Desc:   "ExecStart=sh -c '<inocente> && /tmp/<x>' — o caminho do SEGUNDO programa é julgado",
+		Images: matriz,
+		Plant: `mkdir -p /etc/systemd/system
+cp /helper /tmp/systemd-helper
+printf '[Service]\nExecStart=/bin/sh -c "/bin/true && /tmp/systemd-helper sleep 300"\nRestart=always\n' > /etc/systemd/system/tmp-helper.service`,
+		Expect: []Expect{
+			{ID: "persist.unit_exec_suspect", Sev: "CRITICAL", Subject: "tmp-helper.service"},
+			{ID: "persist.unit_exec_suspect", Evidence: "/tmp/systemd-helper"},
+		},
+		Exit: 2,
+	})
 }

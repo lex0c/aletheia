@@ -196,7 +196,10 @@ var unitExecSuspect = check.Check{
 				continue // sombreada ou mascarada: o systemd não a roda
 			}
 			for _, ex := range u.Exec {
-				motivo, sev, ok := execSuspect(ex.Cmd)
+				// ex.Targets, e não uma re-resolução: eles já passaram pelo
+				// PATH/ExecSearchPath/RootDirectory da unit, e recalcular aqui
+				// devolveria nome nu onde a coleta já tinha o caminho.
+				motivo, sev, ok := execSuspectComAlvos(ex.Cmd, ex.Targets)
 				if !ok {
 					continue
 				}
@@ -467,7 +470,7 @@ func calendarInterval(cal string) (int, string, bool) {
 // execSuspect classifica um comando de unit. Devolve o motivo em português
 // porque ele vai direto para a evidência: o operador precisa saber POR QUE,
 // não só que disparou.
-func execSuspect(cmd string) (string, check.Severity, bool) {
+func execSuspectLinha(cmd string) (string, check.Severity, bool) {
 	// A comparação é sobre a linha NORMALIZADA. Todo padrão abaixo tem espaço
 	// embutido — "curl ", "base64 -d", " -c", "trap " —, e um espaço literal é
 	// a coisa mais fácil de evadir que existe: `curl\t-s`, `base64  -d`,
@@ -524,17 +527,73 @@ func execSuspect(cmd string) (string, check.Severity, bool) {
 	// legítimos, e o payload em /tmp/.x desaparecia da decisão. É a mesma
 	// evasão em systemd (ExecStart=/bin/sh -c /tmp/.x), em gatilho e agora em
 	// inetd/xinetd, então mora aqui, num só lugar.
-	bin := strings.TrimLeft(alvoEfetivo(cmd), "-@+!:")
-	if !pareceCaminho(bin) {
-		return "", 0, false
+	//
+	// TODOS os alvos, e não "o" alvo. Uma linha de shell pode executar mais de
+	// um programa, e perguntar só pelo primeiro deixava passar a forma mais
+	// banal que existe:
+	//
+	//	ExecStart=/bin/sh -c '/bin/true && /tmp/systemd-helper'
+	//
+	// shell, `&&`, executável em /tmp. Não é evasão exótica — é o formato de
+	// persistência mais comum que há. O /bin/true é inocente, e antes ele era a
+	// única coisa que este classificador via. Depois que a fachada singular
+	// passou a falhar fechado na cardinalidade, ficou pior: ela devolvia string
+	// vazia, o pareceCaminho recusava, e o check não dizia nada.
+	//
+	// E os vizinhos não cobrem o buraco, por decisão de cada um:
+	// persist.unit_unowned exige dirDePacote (e /tmp não é), e
+	// integrity.no_package_owner pula suspectDir de propósito, porque assume
+	// que ESTE check acusa o caminho. A suposição precisava ser verdade.
+	return "", 0, false
+}
+
+// execSuspect classifica uma linha SOLTA: os padrões da linha, e depois o
+// caminho de cada programa que ela executa.
+func execSuspect(cmd string) (string, check.Severity, bool) {
+	return execSuspectComAlvos(cmd, alvosDoComando(cmd))
+}
+
+// alvosDoComando resolve os alvos de uma linha solta. Para uma unit prefira
+// ex.Targets, que já passou pela resolução de PATH/ExecSearchPath/RootDirectory
+// da unit — recalcular aqui perde isso.
+func alvosDoComando(cmd string) []string {
+	alvos, _ := facts.AlvosEfetivosDeExec(cmd)
+	return alvos
+}
+
+// execSuspectNosAlvos julga o CAMINHO de cada programa que a linha executa.
+//
+// CRITICAL vence WARN: um alvo em /tmp decide a linha inteira, mesmo que outro
+// esteja só num diretório pessoal.
+func execSuspectNosAlvos(alvos []string) (string, check.Severity, bool) {
+	var motivoWarn string
+	for _, a := range alvos {
+		bin := strings.TrimLeft(a, "-@+!:")
+		if !pareceCaminho(bin) {
+			continue
+		}
+		if why, ok := suspectDir(bin); ok {
+			return "executa de " + bin + " — " + why, check.SevCritical, true
+		}
+		if motivoWarn == "" &&
+			(strings.HasPrefix(bin, "/home/") || strings.HasPrefix(bin, "/root/")) {
+			motivoWarn = "executa de diretório pessoal: " + bin
+		}
 	}
-	if why, ok := suspectDir(bin); ok {
-		return "executa de " + bin + " — " + why, check.SevCritical, true
-	}
-	if strings.HasPrefix(bin, "/home/") || strings.HasPrefix(bin, "/root/") {
-		return "executa de diretório pessoal: " + bin, check.SevWarn, true
+	if motivoWarn != "" {
+		return motivoWarn, check.SevWarn, true
 	}
 	return "", 0, false
+}
+
+// execSuspectComAlvos é a forma para quem JÁ tem os alvos resolvidos — a unit,
+// cujo ex.Targets carrega a resolução de PATH e de chroot que recalcular aqui
+// jogaria fora.
+func execSuspectComAlvos(cmd string, alvos []string) (string, check.Severity, bool) {
+	if motivo, sev, ok := execSuspectLinha(cmd); ok {
+		return motivo, sev, ok
+	}
+	return execSuspectNosAlvos(alvos)
 }
 
 // alvoEfetivo delega ao resolvedor de facts — a MESMA resposta que a pergunta

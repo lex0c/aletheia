@@ -3,7 +3,7 @@
 GERADO de `internal/checks` e `test/scenario`. Não edite à mão:
 `go test ./test/scenario -run TestDocumentoDeCenarios -update`.
 
-128 checks, 238 cenários.
+128 checks, 239 cenários.
 
 Um **check** é uma pergunta que a ferramenta faz ao host. Um **cenário** é um
 host montado de propósito — em contêiner, imagem ou microVM — que prova a
@@ -136,7 +136,7 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `persist.unit_bind_shadow` | 7.2 | unit monta outro arquivo por cima de um caminho de sistema | `A12-bind-troca-o-arquivo-sob-caminho-limpo` |
 | `persist.unit_drift` | 7.4 | unit do systemd mudou desde o retrato anterior | `DR1-drift-de-persistencia` |
 | `persist.unit_dropin_exec` | 7.2 | drop-in acrescenta execução a uma unit existente | `60-persistencia-ao-vivo`, `61-persistencia-em-imagem`, `71-adversario-competente` +1 |
-| `persist.unit_exec_suspect` | 7.2 | unit de systemd executa de lugar suspeito, ou baixa o que executa | `60-persistencia-ao-vivo`, `61-persistencia-em-imagem`, `81-minerador-oportunista` +4 |
+| `persist.unit_exec_suspect` | 7.2 | unit de systemd executa de lugar suspeito, ou baixa o que executa | `60-persistencia-ao-vivo`, `61-persistencia-em-imagem`, `81-minerador-oportunista` +5 |
 | `persist.unit_socket_unowned` | 7.2 | unit de ativação expõe gatilho para binário que nenhum pacote entregou | `A5-ativacao-por-socket`, `J2-dropin-ao-lado-da-unit-de-verdade` |
 | `persist.unit_unowned` | 7.2 | serviço de systemd executa um binário de sistema que nenhum pacote entregou | `100-azazel-userland`, `J7-nome-nu-path-padrao`, `US1-nome-nu-atras-de-env` +1 |
 
@@ -417,6 +417,7 @@ contêiner não alcança — hidepid, sysctl, módulo, cgroup, eBPF.
 | `U3-binfmt-com-interpretador-plantado` | vm | interpretador registrado por assinatura: executar um arquivo comum passa a executar outro programa |
 | `US1-nome-nu-atras-de-env` | live | ExecStart=/usr/bin/env <bin> resolve o binário embrulhado e o check de dono o pega |
 | `US2-segundo-programa-atras-do-e-comercial` | live | ExecStart=sh -c '<com dono> && <órfão>' — o SEGUNDO programa da linha também é perguntado ao dono |
+| `US3-segundo-programa-em-tmp` | live | ExecStart=sh -c '<inocente> && /tmp/<x>' — o caminho do SEGUNDO programa é julgado |
 | `V1-preserva-exe-apagado` | live | o binário foi apagado do disco e o processo continua vivo: a cópia em /proc é a última que existe |
 | `V2-preserva-memfd-e-memoria-anonima` | live | execução fileless e região anônima RWX: as duas coisas que só existem enquanto o processo viver |
 | `V3-coleta-parcial-declarada` | live | sem privilégio, metade da coleta falha — e a metade que falhou aparece com o mesmo destaque da que deu certo |

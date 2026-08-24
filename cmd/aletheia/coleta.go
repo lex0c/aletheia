@@ -142,7 +142,17 @@ func runCollect(args []string) int {
 		// umount limpo, e o ext4 com alocação atrasada devolve um arquivo do
 		// tamanho certo cheio de zeros — com o .sha256 ao lado atestando o
 		// conteúdo que não está mais lá.
-		if err := fh.Sync(); err != nil {
+		// O fsync só se aplica a ARQUIVO. Num FIFO — destino legítimo, e o
+		// único especial que o openJSONOut ainda aceita — ele devolve EINVAL
+		// sempre, porque não há nada em disco para commitar. Sem esta guarda o
+		// `collect --out <fifo>` entregava os bytes ao leitor e MESMO ASSIM
+		// saía 3 com um aviso de que o dump podia não sobreviver: falha
+		// anunciada sobre uma coleta que deu certo.
+		regular := false
+		if fi, err := fh.Stat(); err == nil {
+			regular = fi.Mode().IsRegular()
+		}
+		if err := fh.Sync(); regular && err != nil {
 			fmt.Fprintf(os.Stderr, "collect: o dump NÃO foi sincronizado com o disco "+
 				"(%v). Não desligue o host antes de repetir a coleta para outro "+
 				"destino — o que está em %s pode não sobreviver.\n", err, *out)

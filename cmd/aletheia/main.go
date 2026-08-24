@@ -9,6 +9,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -1055,51 +1056,57 @@ func openJSONOut(path string) (*os.File, error) {
 				"%s é um arquivo existente. Esta ferramenta nunca sobrescreve arquivo no\n"+
 					"host sob investigação: escolha outro nome, ou use '-' para a saída padrão.", path)
 		}
-		// device, fifo ou socket: escreve sem criar e sem truncar.
+		// NÃO É REGULAR: o tipo é provado ANTES de qualquer open de verdade.
 		//
-		// O que este ramo NÃO pode fazer é confiar no os.Stat acima. Stat SEGUE
-		// o link, então um `dump.json -> /dev/sda` plantado no diretório de
-		// incidente chegava aqui classificado como "device, uso legítimo", e o
-		// O_WRONLY seco gravava o dump por cima da tabela de partição do host
-		// investigado — com fsync e close bem-sucedidos, .sha256 escrito ao
-		// lado e exit 0 anunciando sucesso. A ferramenta cujo contrato é
-		// read-only destruía o disco que veio periciar.
+		// A versão anterior deste conserto abria com O_WRONLY|O_NONBLOCK e só
+		// então classificava pelo fstat. Para device isso é tarde pelo mesmo
+		// motivo que o preserve acabou de aprender: o estrago mora no open(2).
+		// Um `resultado.json -> /dev/watchdog` no diretório de incidente ARMAVA
+		// o temporizador do host investigado e só depois recebia a recusa — o
+		// comentário dizia "arma no open, antes de qualquer byte" e o código
+		// fazia exatamente esse open.
 		//
-		// O_NOFOLLOW não serve como conserto: /dev/stdout É um symlink (para
-		// /proc/self/fd/1), e recusá-lo quebraria justamente o uso automatizado
-		// que este ramo existe para permitir. O que separa os dois casos não é
-		// haver link, é o TIPO no destino:
+		// O_PATH resolve: ele devolve uma referência ao objeto SEM invocar o
+		// open do driver, o fstat sai do descritor (não do caminho, que pode
+		// ser trocado entre uma chamada e outra), e a reabertura por
+		// /proc/self/fd/N pega o MESMO inode sem resolver caminho de novo.
 		//
-		//	char device, fifo, socket   /dev/stdout, /dev/console, pipe nomeado:
-		//	                            legítimo, e escrever ali não destrói nada
-		//	block device                nenhum uso legítimo, e o estrago é o
-		//	                            disco do host sob investigação
-		//	regular                     recusado logo acima; reconferido aqui
-		//
-		// E a conferência é feita no DESCRITOR, não no caminho: entre o Stat e
-		// o Open o alvo pode ter sido trocado, e é um host possivelmente hostil
-		// que decide quando trocar.
-		//
-		// O O_NONBLOCK é a segunda metade: abrir FIFO para escrita BLOQUEIA até
-		// aparecer um leitor. Um `dump.json -> pipe` pendurava a ferramenta
-		// depois da coleta inteira, com o retrato só na memória — e o Ctrl-C
-		// levava tudo. Com O_NONBLOCK o mesmo caso vira ENXIO na hora, que é
-		// falha alta em vez de sumiço silencioso.
-		fh, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		// Isso preserva o caso legítimo que este ramo existe para atender —
+		// `mkfifo saida && aletheia scan --json saida` continua funcionando —
+		// sem que a ferramenta precise abrir um device para descobrir que não
+		// devia. Recusar o FIFO junto seria mais simples e custaria um uso
+		// automatizado real; provar o tipo antes custa dez linhas e não custa
+		// nenhum.
+		fd, err := syscall.Open(path, oPathSaida|syscall.O_CLOEXEC, 0)
 		if err != nil {
-			return nil, fmt.Errorf("não foi possível escrever %s: %v", path, err)
+			return nil, fmt.Errorf("não foi possível abrir %s: %v", path, err)
 		}
-		fi2, err := fh.Stat()
-		if err != nil {
-			fh.Close()
+		defer syscall.Close(fd)
+		var st syscall.Stat_t
+		if err := syscall.Fstat(fd, &st); err != nil {
 			return nil, fmt.Errorf("não foi possível conferir %s: %v", path, err)
 		}
-		if motivo := tipoDeSaidaRecusado(fi2.Mode()); motivo != "" {
-			fh.Close()
+		if motivo := tipoDeSaidaRecusado(modoDeStat(st.Mode)); motivo != "" {
 			return nil, fmt.Errorf("%s: %s", path, motivo)
 		}
-		// Tira o O_NONBLOCK: ele existia para a ABERTURA não pendurar, e mantê-lo
-		// faria as escritas seguintes devolverem EAGAIN parcial.
+		// O_NONBLOCK: abrir FIFO para escrita bloqueia até aparecer um leitor, e
+		// `dump.json -> pipe` pendurava a ferramenta DEPOIS da coleta inteira,
+		// com o retrato só na memória. Aqui vira ENXIO na hora.
+		fh, err := os.OpenFile("/proc/self/fd/"+strconv.Itoa(fd),
+			os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			// A mensagem nomeia o caminho que o OPERADOR escreveu. O
+			// /proc/self/fd/N é detalhe de implementação, e ENXIO num FIFO tem
+			// uma causa específica que vale dizer em vez de deixar adivinhar.
+			if errors.Is(err, syscall.ENXIO) {
+				return nil, fmt.Errorf("%s é um FIFO sem nenhum leitor do outro "+
+					"lado: escrever ali penduraria a ferramenta. Abra o leitor "+
+					"antes (ex.: `cat %s > arquivo &`), ou use `--json -`.", path, path)
+			}
+			return nil, fmt.Errorf("não foi possível escrever %s: %v", path, err)
+		}
+		// Tira o O_NONBLOCK: ele existia para a ABERTURA não pendurar, e
+		// mantê-lo faria as escritas seguintes devolverem EAGAIN parcial.
 		if err := semNonBlock(fh); err != nil {
 			fh.Close()
 			return nil, fmt.Errorf("não foi possível preparar %s: %v", path, err)
@@ -1211,4 +1218,29 @@ func tipoDeSaidaRecusado(m os.FileMode) string {
 	// o O_NONBLOCK da abertura já transforma "sem leitor do outro lado" em ENXIO
 	// imediato em vez de travamento.
 	return ""
+}
+
+// oPathSaida é O_PATH. O Go não o exporta em syscall, e o valor é 010000000 no
+// Linux, igual em todas as arquiteturas que este projeto constrói.
+const oPathSaida = 0o10000000
+
+// modoDeStat traduz o st_mode cru do fstat para os.FileMode, preservando os
+// bits de TIPO — que é o que tipoDeSaidaRecusado julga.
+func modoDeStat(m uint32) os.FileMode {
+	fm := os.FileMode(m & 0o777)
+	switch m & syscall.S_IFMT {
+	case syscall.S_IFBLK:
+		fm |= os.ModeDevice
+	case syscall.S_IFCHR:
+		fm |= os.ModeDevice | os.ModeCharDevice
+	case syscall.S_IFDIR:
+		fm |= os.ModeDir
+	case syscall.S_IFIFO:
+		fm |= os.ModeNamedPipe
+	case syscall.S_IFLNK:
+		fm |= os.ModeSymlink
+	case syscall.S_IFSOCK:
+		fm |= os.ModeSocket
+	}
+	return fm
 }

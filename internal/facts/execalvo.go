@@ -154,8 +154,36 @@ func alvoDeLinhaDeShell(linha string) (string, bool) {
 			for i+1 < len(toks) && !ehSeparadorDeShell(descascaAspaBorda(toks[i+1])) {
 				i++
 			}
+		case executaCodigoDeShell[t]:
+			// A linha executa código que este parser não segue. Qualquer coisa
+			// que ele apontasse depois disso seria o alvo ERRADO.
+			return "", true
+		case t == "!" || t == "test" || t == "[" || t == "]":
+			// Negação e teste condicional: o programa de verdade está adiante,
+			// atrás de um && ou de um ;. O `!` era o pior dos três — o
+			// TrimLeft abaixo o reduzia a string VAZIA e devolvia
+			// AlvoIndeterminado=false, e aí o chamador caía no
+			// `return toks[0]` e afirmava o próprio INTERPRETADOR (/bin/sh)
+			// como alvo provado da unit.
+			return "", true
+		case strings.HasPrefix(t, "-"):
+			// OPÇÃO, e não programa. O TrimLeft de "-@+!:" existe para os
+			// prefixos de ExecStart do systemd (-, @, +, !, :), que só valem no
+			// PRIMEIRO token de uma linha de unit — dentro de `sh -c` um traço
+			// à frente é opção de comando. Aplicá-lo aqui produzia alvo a
+			// partir de letra de opção: `command -v foo && /usr/lib/.backdoor`
+			// devolvia "v", e `exec -a nome /usr/lib/.backdoor` devolvia "a",
+			// os dois marcados como PROVADOS.
+			//
+			// Não dá para pular a opção e seguir: sem saber se ela consome o
+			// próximo token, o que vier depois pode ser valor e não programa.
+			return "", true
 		default:
-			return strings.TrimLeft(t, "-@+!:"), false
+			alvo := strings.TrimLeft(t, "@+:")
+			if alvo == "" {
+				return "", true
+			}
+			return alvo, false
 		}
 	}
 	// Só atribuição, prefixo e builtin: a linha não aponta para programa nenhum
@@ -255,11 +283,31 @@ var transparenteDeShell = map[string]bool{
 }
 
 // builtinDeShell não executa arquivo: o argumento dele NÃO é programa.
+//
+// `trap`, `source`, `.` e `eval` SAÍRAM daqui — ver executaCodigoDeShell. Eles
+// estavam listados como "não executa arquivo", que é falso para os quatro, e a
+// consequência era pior que um alvo errado: em
+// `sh -c 'source /usr/lib/.backdoor; /bin/true'` o parser consumia o backdoor
+// como argumento inofensivo e resolvia `/bin/true` como alvo PROVADO. A linha
+// executa o conteúdo do backdoor, e o fato serializado dizia que o alvo efetivo
+// era /bin/true.
 var builtinDeShell = map[string]bool{
 	"cd": true, "umask": true, "ulimit": true, "export": true, "set": true,
-	"unset": true, "trap": true, "read": true, "shift": true, "wait": true,
+	"unset": true, "read": true, "shift": true, "wait": true,
 	"echo": true, "printf": true, "true": true, "false": true, ":": true,
-	"source": true, ".": true, "eval": true, "sleep": true,
+	"sleep": true,
+}
+
+// executaCodigoDeShell é o conjunto que RESOLVE OU EXECUTA código que este
+// parser não consegue seguir. Encontrou um, a linha é indeterminada — e ponto.
+//
+// A diferença para builtinDeShell é a que decide o achado: um `cd` desvia o
+// caminho e o programa continua adiante na linha; um `source` EXECUTA outro
+// arquivo, e depois dele o que vier já não é "o alvo efetivo" da unit — é o
+// segundo comando de uma linha que já rodou código de outro lugar.
+var executaCodigoDeShell = map[string]bool{
+	"eval": true, "source": true, ".": true, "trap": true,
+	"exec": false, // exec é transparente de verdade: substitui o processo pelo próximo
 }
 
 // descascaAspaBorda tira a aspa de abertura/fechamento que um argumento de

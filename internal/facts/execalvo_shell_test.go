@@ -152,3 +152,70 @@ func TestSeparadorDentroDeAspasNaoFabricaPrograma(t *testing.T) {
 		}
 	}
 }
+
+// O parser é FAIL-CLOSED: o que ele não sabe seguir vira "não sei".
+//
+// A rodada anterior fechou a estrutura de controle (if/for/while/case), e
+// sobraram quatro famílias que produziam a MESMA mentira — alvo afirmado sobre
+// uma linha que executa outra coisa.
+//
+// A pior delas era `!`: o TrimLeft de "-@+!:" o reduzia a string VAZIA com
+// AlvoIndeterminado=false, e aí o chamador caía no `return toks[0]` e afirmava
+// o PRÓPRIO INTERPRETADOR (/bin/sh) como alvo provado da unit. O TrimLeft
+// existe para os prefixos de ExecStart do systemd, que só valem no primeiro
+// token de uma linha de unit — dentro de `sh -c` um traço à frente é opção.
+//
+// As outras três: teste condicional (`test`, `[`), execução de código que este
+// parser não segue (`eval`, `source`, `.`, `trap` — os quatro estavam listados
+// como builtin "que não executa arquivo", o que é falso), e OPÇÃO virando alvo
+// (`command -v foo` devolvia "v"; `exec -a nome` devolvia "a").
+func TestParserDeShellEhFailClosed(t *testing.T) {
+	casos := []struct{ cmd, porque string }{
+		{`/bin/sh -c '! /usr/lib/systemd/.backdoor'`,
+			"negação: o TrimLeft esvaziava o token e o chamador afirmava o próprio /bin/sh"},
+		{`/bin/sh -c 'test -e /tmp/enable && /usr/lib/systemd/.backdoor'`,
+			"teste condicional: o programa está atrás do &&"},
+		{`/bin/sh -c '[ -e /tmp/x ] && /usr/lib/.backdoor'`,
+			"idem, na forma de colchete"},
+		{`/bin/sh -c 'source /usr/lib/.backdoor; /bin/true'`,
+			"source EXECUTA o arquivo, e o alvo resolvido saía /bin/true"},
+		{`/bin/sh -c '. /usr/lib/.backdoor; /bin/true'`, "idem, forma curta"},
+		{`/bin/sh -c 'eval "$PAYLOAD"; /bin/true'`,
+			"eval executa o que ninguém consegue ler daqui"},
+		{`/bin/sh -c 'trap "/usr/lib/.backdoor" EXIT; /bin/true'`,
+			"trap executa na saída, e o alvo resolvido saía /bin/true"},
+		{`/bin/sh -c 'command -v foo && /usr/lib/.backdoor'`,
+			"opção virando alvo: devolvia \"v\""},
+		{`/bin/sh -c 'exec -a nome /usr/lib/.backdoor'`,
+			"opção virando alvo: devolvia \"a\""},
+	}
+	for _, c := range casos {
+		alvo, indet := AlvoEfetivoDeExec(c.cmd)
+		if !indet {
+			t.Errorf("alvo=%q RESOLVIDO — %s\n  %s\n"+
+				"Interpretação desconhecida virando alvo conhecido é exatamente o "+
+				"invariante que este arquivo existe para sustentar.", alvo, c.porque, c.cmd)
+		}
+	}
+}
+
+// E o outro lado, que não pode ser perdido junto: as formas que o parser SABE
+// desembrulhar continuam resolvendo. Um parser que responde "não sei" para tudo
+// é tão inútil quanto um que mente.
+func TestParserDeShellNaoDesistiuDoQueSabeResolver(t *testing.T) {
+	casos := []struct{ cmd, quer string }{
+		{`/bin/sh -c 'cd /tmp && /bin/shellserver'`, "/bin/shellserver"},
+		{`/bin/sh -c 'exec /bin/shellserver'`, "/bin/shellserver"},
+		{`/bin/sh -c 'X=1 /bin/shellserver'`, "/bin/shellserver"},
+		{`/bin/sh -c '/usr/bin/legitimo --flag'`, "/usr/bin/legitimo"},
+		{`/usr/bin/env /usr/local/bin/app`, "/usr/local/bin/app"},
+	}
+	for _, c := range casos {
+		alvo, indet := AlvoEfetivoDeExec(c.cmd)
+		if indet || alvo != c.quer {
+			t.Errorf("alvo=%q indet=%v, queria %q: %s\n"+
+				"O fail-closed não pode virar 'não sei' para tudo — aí a cobertura "+
+				"cai em todo host e a lacuna deixa de ser lida.", alvo, indet, c.quer, c.cmd)
+		}
+	}
+}

@@ -546,3 +546,115 @@ func TestLogTrocadoPorOutroObjetoNaoViraForaDeEscopo(t *testing.T) {
 		})
 	}
 }
+
+// COBERTURA MEDE OBSERVAÇÃO, NÃO ACHADO.
+//
+// Este é o teste que faltava, e a falta dele escondia o defeito: os outros
+// montavam FonteDeLog À MÃO, já com CobertoDesde/Ate preenchidos, em vez de
+// gerar a fonte a partir de um arquivo de verdade.
+//
+// Um auth.log real é quase todo linha de rotina — `Connection closed by …` —
+// que o parser reconhece e deliberadamente não transforma em evento. Derivando
+// o intervalo dos EVENTOS, a cobertura de um arquivo lido das 10:00 às 23:50
+// encolhia para o instante do único evento interessante. E é sobre esse
+// intervalo que o antiforense.log_time_gap afirma "N dias sem UMA linha de
+// autenticação" — uma frase falsa sobre um arquivo cheio de linhas.
+func TestCoberturaSaiDasLinhasDatadasENaoDosEventos(t *testing.T) {
+	f := raizDeLog(t, map[string]string{
+		"var/log/auth.log": "" +
+			"Aug 24 10:00:00 h sshd[1]: Connection closed by 1.2.3.4 port 5 [preauth]\n" +
+			"Aug 24 12:00:00 h sshd[1]: Connection closed by 1.2.3.4 port 5 [preauth]\n" +
+			"Aug 24 18:00:00 h sshd[1]: Failed password for root from 1.2.3.4 port 5 ssh2\n" +
+			"Aug 24 23:50:00 h sshd[1]: Connection closed by 1.2.3.4 port 5 [preauth]\n",
+	}, nil)
+
+	if len(f.EventosDeLog) != 1 {
+		t.Fatalf("%d eventos, quer 1 (só o Failed password)", len(f.EventosDeLog))
+	}
+	s := f.FontesDeLog[0]
+	if s.CobertoDesde == "" || s.CobertoAte == "" {
+		t.Fatalf("sem cobertura: %+v", s)
+	}
+	// O arquivo foi observado das 10:00 às 23:50, e não às 18:00 em ponto.
+	if !strings.HasSuffix(s.CobertoDesde, "T10:00:00Z") {
+		t.Errorf("CobertoDesde = %q, quer a PRIMEIRA linha datada (10:00)", s.CobertoDesde)
+	}
+	if !strings.HasSuffix(s.CobertoAte, "T23:50:00Z") {
+		t.Errorf("CobertoAte = %q, quer a ÚLTIMA linha datada (23:50)", s.CobertoAte)
+	}
+}
+
+// E a consequência disso no check: um arquivo cheio de linhas de rotina não
+// pode virar "vão de tempo". Sem a correção, duas gerações com eventos em
+// pontas opostas fabricavam um buraco onde havia registro o tempo todo.
+func TestArquivoCheioDeRotinaNaoFabricaVao(t *testing.T) {
+	linhas := func(dia string, horas ...string) string {
+		var b strings.Builder
+		for _, h := range horas {
+			b.WriteString("Aug " + dia + " " + h + " h sshd[1]: Connection closed by 1.2.3.4 port 5 [preauth]\n")
+		}
+		return b.String()
+	}
+	f := raizDeLog(t, map[string]string{
+		// A geração antiga tem evento só no começo; a viva, só no fim. Entre os
+		// dois eventos há três dias — e linha de rotina em todos eles.
+		"var/log/auth.log.1": "Aug 20 00:05:00 h sshd[1]: Failed password for root from 1.2.3.4 port 5 ssh2\n" +
+			linhas("20", "06:00:00", "12:00:00", "18:00:00", "23:00:00") +
+			linhas("21", "06:00:00", "12:00:00", "23:00:00"),
+		"var/log/auth.log": linhas("22", "00:10:00", "06:00:00", "12:00:00") +
+			"Aug 22 18:00:00 h sshd[1]: Failed password for root from 1.2.3.4 port 5 ssh2\n",
+	}, nil)
+
+	de := map[string]FonteDeLog{}
+	for _, s := range f.FontesDeLog {
+		de[s.Path] = s
+	}
+	antiga, viva := de["/var/log/auth.log.1"], de["/var/log/auth.log"]
+	if antiga.CobertoAte == "" || viva.CobertoDesde == "" {
+		t.Fatalf("cobertura vazia: %+v %+v", antiga, viva)
+	}
+	// O fim da antiga (21 às 23:00) encosta no começo da viva (22 às 00:10):
+	// menos de duas horas, e não os três dias que os EVENTOS sugeririam.
+	if !strings.HasSuffix(antiga.CobertoAte, "-21T23:00:00Z") {
+		t.Errorf("fim da geração antiga = %q", antiga.CobertoAte)
+	}
+	if !strings.HasSuffix(viva.CobertoDesde, "-22T00:10:00Z") {
+		t.Errorf("começo da viva = %q", viva.CobertoDesde)
+	}
+}
+
+// MTIME É DO ALVO, e não pode decidir se o arquivo VIVO é sequer aberto.
+//
+// `touch -d '2025-01-01' /var/log/auth.log` custa nada e, com a janela padrão,
+// fazia o conteúdo ATUAL não ser lido: sem evento, sem lacuna, e os checks de
+// auth saindo COMPLETOS. Falso limpo comprado com um metadado que o adversário
+// escreve.
+func TestMtimeForjadoNaoImpedeALeituraDoArquivoVIVO(t *testing.T) {
+	f := raizDeLog(t, map[string]string{
+		"var/log/auth.log":   linhasDeAuth(2),
+		"var/log/auth.log.1": linhasDeAuth(2),
+	}, func(raiz string, _ *envOpts) {
+		antigo := time.Now().Add(-400 * 24 * time.Hour)
+		for _, n := range []string{"var/log/auth.log", "var/log/auth.log.1"} {
+			if err := os.Chtimes(filepath.Join(raiz, n), antigo, antigo); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+
+	de := map[string]string{}
+	for _, s := range f.FontesDeLog {
+		de[s.Path] = s.Estado
+	}
+	if de["/var/log/auth.log"] != FonteLida {
+		t.Errorf("o arquivo VIVO precisa ser aberto sempre: estado = %q", de["/var/log/auth.log"])
+	}
+	// A geração rotacionada continua respeitando a janela: são elas que custam,
+	// e o mtime delas é o único critério de seleção disponível.
+	if de["/var/log/auth.log.1"] != FonteForaDaJanela {
+		t.Errorf("a geração rotacionada segue a janela: estado = %q", de["/var/log/auth.log.1"])
+	}
+	if len(f.EventosDeLog) == 0 {
+		t.Error("nenhum evento: o conteúdo do arquivo vivo não foi lido")
+	}
+}

@@ -303,17 +303,42 @@ func montarEventoAudit(rs []RegistroAudit) (EventoDeLog, bool) {
 	}
 
 	// Os campos de todos os registros do grupo, com o tipo de cada um à mão.
+	//
+	// Três regras de junção, e as três vêm de como o kernel escreve:
+	//
+	//	EXECVE  PLURAL, e o argv precisa da UNIÃO deles. Quando o buffer não
+	//	        comporta mais argumento, audit_log_execve_info() fecha o registro
+	//	        e abre OUTRO AUDIT_EXECVE no mesmo contexto (kernel/auditsc.c):
+	//	        `audit_log_end(*ab); *ab = audit_log_start(…, AUDIT_EXECVE)`.
+	//	        Ficar com o primeiro descarta a CAUDA da linha de comando — e a
+	//	        cauda é onde um `sh -c '<7 KB de argumento benigno> ; /tmp/.x'`
+	//	        põe o que interessa. Falso negativo com caminho de evasão barato.
+	//	PATH    aparece várias vezes (item=0, item=1…). O primeiro é o programa;
+	//	        os outros são bibliotecas e diretórios, e não são o alvo.
+	//	demais  o primeiro vence.
 	tipos := map[string]map[string]string{}
+	execve := map[string]string{}
+	temExecve := false
 	for i := range rs {
+		if rs[i].Tipo == "EXECVE" {
+			temExecve = true
+			for k, v := range rs[i].Campos {
+				if _, ja := execve[k]; !ja {
+					execve[k] = v
+				}
+			}
+			continue
+		}
 		if _, ja := tipos[rs[i].Tipo]; !ja {
 			tipos[rs[i].Tipo] = rs[i].Campos
 			continue
 		}
-		// PATH aparece várias vezes (item=0, item=1…). O primeiro é o programa;
-		// os outros são bibliotecas e diretórios, e não são o alvo.
 		if rs[i].Tipo == "PATH" && tipos["PATH"]["item"] != "0" && rs[i].Campos["item"] == "0" {
 			tipos["PATH"] = rs[i].Campos
 		}
+	}
+	if temExecve {
+		tipos["EXECVE"] = execve
 	}
 
 	sys := tipos["SYSCALL"]

@@ -3,6 +3,7 @@ package facts
 import (
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Parsers de linha de syslog (runbook §10, §12).
@@ -104,7 +105,16 @@ type linhaSyslog struct {
 	Quando string // RFC3339 UTC; vazio = não foi possível datar
 	Tag    string // sshd, sudo, kernel…
 	PID    int
-	Msg    string
+	// Msg é o resto da linha VERBATIM — espaçamento original incluído. Ela é
+	// evidência, e reconstruí-la por Join de campos apagaria tabulação e espaço
+	// múltiplo, que são escolha de quem escreveu a linha.
+	Msg string
+	// Inferido diz que o OFFSET desta data foi suposto, e não lido.
+	//
+	// Só a forma tradicional depende disso: a ISO carrega o próprio offset, e
+	// marcar a data dela como inferida porque o /etc/localtime não abriu seria
+	// desqualificar um carimbo que não precisou de suposição nenhuma.
+	Inferido bool
 }
 
 // separaEnvelope lê a moldura comum a todas as famílias em texto.
@@ -126,9 +136,11 @@ func separaEnvelope(linha string, ctx contextoDeTempo) (linhaSyslog, bool) {
 	}
 
 	var resto []string
+	consumidos := 0
 	if t, ok := instanteISO(campos[0]); ok {
 		out.Quando = utc(t)
 		resto = campos[1:]
+		consumidos = 1
 	} else {
 		mes, ok := mesDeSyslog[campos[0]]
 		if !ok {
@@ -148,7 +160,12 @@ func separaEnvelope(linha string, ctx contextoDeTempo) (linhaSyslog, bool) {
 		if t, ok := instanteDeSyslog(mes, dia, h, m, s, ctx); ok {
 			out.Quando = utc(t)
 		}
+		// O ANO desta forma sempre sai do mtime do arquivo (ver
+		// instanteDeSyslog); o OFFSET sai do /etc/localtime, e só ele pode
+		// faltar. É o offset que decide correlação de segundos.
+		out.Inferido = ctx.Suposto
 		resto = campos[3:]
+		consumidos = 3
 	}
 	if len(resto) < 2 {
 		return out, false
@@ -174,10 +191,36 @@ func separaEnvelope(linha string, ctx contextoDeTempo) (linhaSyslog, bool) {
 			return out, false
 		}
 		out.Tag = tag
-		out.Msg = strings.Join(resto[i+1:], " ")
+		out.Msg = depoisDeTokens(linha, consumidos+i+1)
 		return out, true
 	}
 	return out, false
+}
+
+// depoisDeTokens devolve o resto da linha DEPOIS de n campos separados por
+// branco, sem passar por Join: o espaçamento original é preservado.
+func depoisDeTokens(linha string, n int) string {
+	i, vistos := 0, 0
+	for i < len(linha) && vistos < n {
+		for i < len(linha) && ehBrancoDeLog(linha[i]) {
+			i++
+		}
+		if i >= len(linha) {
+			break
+		}
+		for i < len(linha) && !ehBrancoDeLog(linha[i]) {
+			i++
+		}
+		vistos++
+	}
+	for i < len(linha) && ehBrancoDeLog(linha[i]) {
+		i++
+	}
+	return linha[i:]
+}
+
+func ehBrancoDeLog(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f'
 }
 
 func horaDeSyslog(s string) (h, m, seg int, ok bool) {
@@ -202,20 +245,27 @@ func horaDeSyslog(s string) (h, m, seg int, ok bool) {
 // parseLinhaSyslog é a função PURA: uma linha entra, um evento (ou um contador)
 // sai. Sem I/O, sem estado — o File e a Line são do coletor, que é quem os
 // conhece.
-func parseLinhaSyslog(linha string, ctx contextoDeTempo) (EventoDeLog, ResultadoDeLinha) {
+// O terceiro retorno é o CARIMBO DA LINHA, e ele existe para a cobertura.
+//
+// Cobertura mede OBSERVAÇÃO, não achado: uma linha `Connection closed by …` foi
+// lida, parseada e datada — ela apenas não interessa como evento. Derivar o
+// intervalo observado dos EVENTOS afirmaria que o arquivo só foi visto onde
+// apareceu algo interessante, e é sobre esse intervalo que um check diz "N dias
+// sem UMA linha de autenticação".
+func parseLinhaSyslog(linha string, ctx contextoDeTempo) (EventoDeLog, ResultadoDeLinha, string) {
 	env, ok := separaEnvelope(linha, ctx)
 	if !ok {
-		return EventoDeLog{}, linhaNaoParseada
+		return EventoDeLog{}, linhaNaoParseada, ""
 	}
 	if !produtoresCandidatos[env.Tag] {
-		return EventoDeLog{}, linhaNaoCandidata
+		return EventoDeLog{}, linhaNaoCandidata, env.Quando
 	}
 	medido := produtoresMedidos[env.Tag]
 
 	ev := EventoDeLog{
 		At:         env.Quando,
 		AtKnown:    env.Quando != "",
-		AtInferido: ctx.Suposto,
+		AtInferido: env.Inferido,
 		Process:    env.Tag,
 		PID:        env.PID,
 		Trecho:     trechoDe(env.Msg),
@@ -250,20 +300,30 @@ func parseLinhaSyslog(linha string, ctx contextoDeTempo) (EventoDeLog, Resultado
 		res = linhaNaoMedida
 	}
 	if res != linhaEvento {
-		return EventoDeLog{}, res
+		return EventoDeLog{}, res, env.Quando
 	}
-	return ev, linhaEvento
+	return ev, linhaEvento, env.Quando
 }
 
 // trechoDe corta o texto guardado. O corte é DECLARADO com reticências: um
 // trecho cortado em silêncio faz o operador procurar no arquivo uma linha que
 // não é a que ele está lendo.
+//
+// O corte é em FRONTEIRA DE RUNA, e o teto continua sendo de BYTES — o
+// orçamento é o tamanho do dump, não a contagem de caracteres. Cortar no byte
+// exato parte a sequência UTF-8 no meio e produz `\uFFFD` na evidência: um
+// nome de usuário com acento, um caminho em chinês ou um emoji no User-Agent
+// bastam, e o operador passa a ler um caractere que a linha não tem.
 func trechoDe(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= maxTrechoLog {
 		return s
 	}
-	return s[:maxTrechoLog] + "…"
+	corte := maxTrechoLog
+	for corte > 0 && !utf8.RuneStart(s[corte]) {
+		corte--
+	}
+	return s[:corte] + "…"
 }
 
 // ---------------------------------------------------------------------------

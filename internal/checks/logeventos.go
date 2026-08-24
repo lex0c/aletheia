@@ -79,14 +79,37 @@ func escopoDaFamilia(familias ...string) func(*facts.Facts, *env.Env) (bool, str
 	}
 }
 
-// lacunaDeLog é o preâmbulo COMUM a todos: a lacuna do coletor entra antes de
-// qualquer saída, e o estado da coleta decide se há o que concluir.
+// lacunaDeLog é o preâmbulo COMUM a todos: a lacuna entra antes de qualquer
+// saída, e o estado da coleta decide se há o que concluir.
 //
 // O padrão é o de checks/bpf.go, e existe porque o motor conta
 // Coverage.Complete++ quando res.Partial sai vazio — um check que não lê a
-// chave sai COMPLETO sobre uma fonte que o coletor declarou ilegível.
-func lacunaDeLog(f *facts.Facts, r *check.Result) bool {
-	r.Partial = append(r.Partial, f.Partial["logeventos"]...)
+// lacuna sai COMPLETO sobre uma fonte que o coletor declarou ilegível.
+//
+// # A lacuna é POR FAMÍLIA, e não da coleta inteira
+//
+// A primeira versão despejava Partial["logeventos"] dentro de todo check, e
+// isso desfazia no relatório a granularidade que os fatos de completude
+// constroem: um audit.log ilegível tornava parcial o check de chave SSH, que só
+// lê `auth`. Seguro contra falso limpo, e ruidoso do jeito que faz a cobertura
+// incompleta virar papel de parede.
+//
+// Cada check declara as famílias de que depende, e a lacuna nasce do
+// FonteDeLog delas. Quem reporta a coleta INTEIRA — inclusive os tetos que não
+// pertencem a arquivo nenhum — é o logs.source_coverage.
+func lacunaDeLog(f *facts.Facts, r *check.Result, familias ...string) bool {
+	for i := range f.FontesDeLog {
+		fonte := &f.FontesDeLog[i]
+		if fonte.Lacuna == "" {
+			continue
+		}
+		for _, fam := range familias {
+			if ehFamilia(fonte, fam) {
+				r.Partial = append(r.Partial, fonte.Lacuna)
+				break
+			}
+		}
+	}
 	switch f.LogEstado {
 	case "":
 		r.Partial = append(r.Partial, "este retrato não traz conteúdo de log "+
@@ -219,7 +242,7 @@ var chaveForaDasLocais = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
-		if !lacunaDeLog(f, &r) {
+		if !lacunaDeLog(f, &r, "auth") {
 			return r
 		}
 		// A AFIRMAÇÃO É SOBRE UMA AUSÊNCIA — "este fingerprint não está nas
@@ -353,7 +376,7 @@ var sudoParaAlvoIncomum = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
-		if !lacunaDeLog(f, &r) {
+		if !lacunaDeLog(f, &r, "auth", "audit") {
 			return r
 		}
 
@@ -487,7 +510,7 @@ var trilhaDeAuditoriaComBuraco = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
-		if !lacunaDeLog(f, &r) {
+		if !lacunaDeLog(f, &r, "audit", "kern", "syslog") {
 			return r
 		}
 
@@ -613,7 +636,7 @@ var buracoTemporalNoLog = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
-		if !lacunaDeLog(f, &r) {
+		if !lacunaDeLog(f, &r, "auth") {
 			return r
 		}
 
@@ -711,6 +734,11 @@ var coberturaDeLog = check.Check{
 	},
 	Run: func(self check.Check, f *facts.Facts, e *env.Env) check.Result {
 		var r check.Result
+		// A CHAVE INTEIRA, e só aqui: este é o check que responde pela COLETA,
+		// e há lacuna que não pertence a arquivo nenhum — o teto rígido de
+		// arquivos considerados, o /etc/localtime ilegível. Nos outros, a
+		// lacuna vem da FAMÍLIA de que eles dependem.
+		r.Partial = append(r.Partial, f.Partial["logeventos"]...)
 		if !lacunaDeLog(f, &r) {
 			return r
 		}

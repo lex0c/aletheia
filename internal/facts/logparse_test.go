@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // ctxDeTeste fixa âncora e fuso para que a tabela abaixo não dependa do dia em
@@ -137,7 +138,7 @@ func TestParseDeLinhaPorProdutor(t *testing.T) {
 
 	for _, c := range casos {
 		t.Run(c.nome, func(t *testing.T) {
-			ev, res := parseLinhaSyslog(c.linha, ctxDeTeste())
+			ev, res, _ := parseLinhaSyslog(c.linha, ctxDeTeste())
 			if res != linhaEvento {
 				t.Fatalf("resultado = %v, quer linhaEvento", res)
 			}
@@ -225,7 +226,7 @@ func TestAsRespostasDoParser(t *testing.T) {
 	}
 	for _, c := range casos {
 		t.Run(c.nome, func(t *testing.T) {
-			if _, res := parseLinhaSyslog(c.linha, ctxDeTeste()); res != c.quer {
+			if _, res, _ := parseLinhaSyslog(c.linha, ctxDeTeste()); res != c.quer {
 				t.Errorf("resultado = %v, quer %v", res, c.quer)
 			}
 		})
@@ -239,7 +240,7 @@ func TestAsRespostasDoParser(t *testing.T) {
 func TestLinhaSemDataUtilizavelAindaEhEvento(t *testing.T) {
 	// Sem âncora não há como inferir o ano.
 	ctx := contextoDeTempo{Loc: time.UTC}
-	ev, res := parseLinhaSyslog(
+	ev, res, _ := parseLinhaSyslog(
 		"Aug 24 01:20:33 host sudo[5]: deploy : TTY=pts/0 ; PWD=/tmp ; USER=root ; COMMAND=/tmp/.x",
 		ctx)
 	if res != linhaEvento {
@@ -256,7 +257,7 @@ func TestLinhaSemDataUtilizavelAindaEhEvento(t *testing.T) {
 func TestFusoSupostoMarcaOEvento(t *testing.T) {
 	ctx := ctxDeTeste()
 	ctx.Suposto = true
-	ev, _ := parseLinhaSyslog("Aug 24 01:20:33 host sshd[1]: Accepted password for ana from 10.0.0.1 port 5 ssh2", ctx)
+	ev, _, _ := parseLinhaSyslog("Aug 24 01:20:33 host sshd[1]: Accepted password for ana from 10.0.0.1 port 5 ssh2", ctx)
 	if !ev.AtInferido {
 		t.Error("fuso suposto precisa marcar AtInferido")
 	}
@@ -268,7 +269,7 @@ func TestFusoSupostoMarcaOEvento(t *testing.T) {
 func TestTrechoEhCortadoComMarca(t *testing.T) {
 	longo := "Aug 24 01:20:33 host sudo[5]: deploy : TTY=pts/0 ; PWD=/tmp ; USER=root ; COMMAND=/bin/x " +
 		strings.Repeat("A", 500)
-	ev, res := parseLinhaSyslog(longo, ctxDeTeste())
+	ev, res, _ := parseLinhaSyslog(longo, ctxDeTeste())
 	if res != linhaEvento {
 		t.Fatal("não virou evento")
 	}
@@ -283,7 +284,7 @@ func TestTrechoEhCortadoComMarca(t *testing.T) {
 // O resolvedor de alvos é o mesmo do ExecStart, e por isso `&&` não esconde o
 // segundo programa — foi assim que um backdoor sumia de unit sem deixar lacuna.
 func TestSudoComDoisProgramasNaLinha(t *testing.T) {
-	ev, res := parseLinhaSyslog(
+	ev, res, _ := parseLinhaSyslog(
 		"Aug 24 02:00:00 host sudo[5]: deploy : TTY=pts/0 ; PWD=/ ; USER=root ; "+
 			"COMMAND=/bin/sh -c '/usr/bin/true && /usr/lib/.backdoor'",
 		ctxDeTeste())
@@ -298,5 +299,73 @@ func TestSudoComDoisProgramasNaLinha(t *testing.T) {
 	}
 	if !achou {
 		t.Errorf("o segundo programa da linha sumiu: %v", ev.Alvos)
+	}
+}
+
+// A FORMA ISO CARREGA O PRÓPRIO OFFSET, e marcá-la como inferida porque o
+// /etc/localtime não abriu desqualifica um carimbo que não precisou de
+// suposição nenhuma.
+//
+// Isso importa porque o contrato desta feature diz que horário inferido não
+// sustenta correlação de segundos — e a segunda rodada é toda correlação.
+func TestISONaoEhInferidaMesmoComFusoDesconhecido(t *testing.T) {
+	ctx := ctxDeTeste()
+	ctx.Suposto = true // /etc/localtime ilegível
+
+	iso, _, _ := parseLinhaSyslog(
+		"2026-08-24T01:20:33.123456+02:00 h sshd[1]: Accepted password for ana from 10.0.0.1 port 5 ssh2", ctx)
+	if !iso.AtKnown {
+		t.Fatal("a data ISO precisa ser conhecida")
+	}
+	if iso.AtInferido {
+		t.Error("a ISO traz o próprio offset: nada foi inferido")
+	}
+
+	// E a forma tradicional, na MESMA execução, continua marcada.
+	trad, _, _ := parseLinhaSyslog(
+		"Aug 24 01:20:33 h sshd[1]: Accepted password for ana from 10.0.0.1 port 5 ssh2", ctx)
+	if !trad.AtInferido {
+		t.Error("a forma tradicional depende do fuso do alvo, que aqui foi suposto")
+	}
+}
+
+// O TRECHO É EVIDÊNCIA, e cortar no byte exato parte a sequência UTF-8: um nome
+// com acento, um caminho em chinês ou um emoji no User-Agent bastam para o
+// operador passar a ler um caractere que a linha não tem.
+//
+// O teste anterior usava strings.Repeat("A", 500) — ASCII puro —, entãomedia
+// contagem de runas sem exercer UTF-8 nenhum.
+func TestTrechoNaoParteUTF8(t *testing.T) {
+	// "é" tem 2 bytes: enchendo com ele, o teto de bytes cai no meio de um.
+	msg := strings.Repeat("é", maxTrechoLog)
+	ev, res, _ := parseLinhaSyslog(
+		"Aug 24 01:20:33 h sudo[5]: deploy : TTY=pts/0 ; PWD=/ ; USER=root ; COMMAND=/bin/x "+msg,
+		ctxDeTeste())
+	if res != linhaEvento {
+		t.Fatal("não virou evento")
+	}
+	if !utf8.ValidString(ev.Trecho) {
+		t.Errorf("o trecho não é UTF-8 válido: %q", ev.Trecho)
+	}
+	if len(ev.Trecho) > maxTrechoLog+len("…") {
+		t.Errorf("o teto é de BYTES: %d bytes", len(ev.Trecho))
+	}
+	if !strings.HasSuffix(ev.Trecho, "…") {
+		t.Error("o corte precisa continuar visível")
+	}
+}
+
+// E o trecho é mesmo CRU: o espaçamento da mensagem é escolha de quem escreveu
+// a linha, e reconstruí-la por Join de campos apagaria tabulação e espaço
+// múltiplo.
+func TestTrechoPreservaOEspacamentoOriginal(t *testing.T) {
+	ev, res, _ := parseLinhaSyslog(
+		"Aug 24 01:20:33 h sudo[5]:   deploy : TTY=pts/0 ;  PWD=/tmp\t; USER=root ; COMMAND=/tmp/.upd",
+		ctxDeTeste())
+	if res != linhaEvento {
+		t.Fatal("não virou evento")
+	}
+	if !strings.Contains(ev.Trecho, ";  PWD=/tmp\t;") {
+		t.Errorf("o espaçamento original se perdeu: %q", ev.Trecho)
 	}
 }

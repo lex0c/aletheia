@@ -383,3 +383,38 @@ func TestAuthorizedKeysCommandTiraOCheckDeEscopo(t *testing.T) {
 		t.Error("escopo NÃO derruba a cobertura")
 	}
 }
+
+// A LACUNA É POR FAMÍLIA, e não da coleta inteira.
+//
+// A primeira versão despejava Partial["logeventos"] dentro de todo check, e um
+// audit.log ilegível tornava parcial o check de chave SSH — que só lê `auth`.
+// Seguro contra falso limpo, e ruidoso do jeito que faz a cobertura incompleta
+// virar papel de parede: quem vê tudo parcial para de ler a linha.
+func TestLacunaDeUmaFamiliaNaoContaminaOutra(t *testing.T) {
+	f := fatosDeLog(facts.EventoDeLog{
+		Kind: "auth.accepted", Metodo: "publickey", Fingerprint: "SHA256:AAA",
+		User: "deploy", File: "/var/log/auth.log",
+	})
+	f.Audit.Instalada = true
+	f.FontesDeLog = append(f.FontesDeLog, facts.FonteDeLog{
+		Path: "/var/log/audit/audit.log", Familias: []string{"audit"},
+		Estado: facts.FonteIlegivel,
+		Lacuna: "/var/log/audit/audit.log não pôde ser lido (permission denied)",
+	})
+
+	// O check de chave SSH lê `auth`, que está intacta: nada de parcial.
+	r := rodaLog(t, chaveForaDasLocais, f)
+	if len(r.Coverage.Partial) != 0 {
+		t.Errorf("a lacuna do audit não pode tornar parcial um check de auth: %+v",
+			r.Coverage.Partial)
+	}
+	if len(r.Findings) != 1 {
+		t.Errorf("e o achado continua saindo: %+v", r.Findings)
+	}
+
+	// Já o check da trilha de auditoria depende dela, e TEM que cair.
+	r = rodaLog(t, trilhaDeAuditoriaComBuraco, f)
+	if len(r.Coverage.Partial) == 0 {
+		t.Error("o check que depende de `audit` precisa declarar a lacuna dela")
+	}
+}

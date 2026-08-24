@@ -117,7 +117,7 @@ FLAGS DE scan
                 do relatório e é CONTADO; o que não tem data FICA.
                 Governa TAMBÉM até onde do passado os LOGS são lidos — e o
                 rodapé avisa quando a janela pede mais do que foi observado
-  --only G,G    escopo por subsistema: proc net persist priv integrity kernel app cloud ioc
+  --only G,G    escopo por subsistema: proc net persist priv integrity kernel app cloud logs ioc
   --fs-budget D teto de tempo da varredura de filesystem num FS grande (ex: 10s).
                 O que não couber vira lacuna DECLARADA — a cobertura cai, e o
                 relatório diz onde parou. 0 = sem teto (padrão)

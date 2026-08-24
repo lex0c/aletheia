@@ -128,6 +128,16 @@ type FonteDeLog struct {
 	LeituraDescontinua bool `json:"discontinuous,omitempty"`
 	CorteNoInicio      bool `json:"head_truncated,omitempty"`
 	CorteNoFim         bool `json:"tail_truncated,omitempty"`
+
+	// Lacuna é o que ESTE arquivo não entregou, e por quê. Vazia é o normal.
+	//
+	// Ela existe para que um check degrade pela FAMÍLIA de que depende, e não
+	// pela coleta inteira: um audit.log ilegível não pode tornar parcial um
+	// check que só lê `auth`. Sem este campo, a única fonte de lacuna era o
+	// mapa global Partial["logeventos"], que todo check despejava inteiro — e
+	// isso desfazia, no relatório, a granularidade por fonte que os fatos de
+	// completude constroem.
+	Lacuna string `json:"gap,omitempty"`
 }
 
 // Estados de FonteDeLog.

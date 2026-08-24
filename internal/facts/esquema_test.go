@@ -94,7 +94,14 @@ func TestImpressaoDoEsquema(t *testing.T) {
 		//
 		// LogEstado é o único cujo zero-value é seguro por desenho: "" significa
 		// DESCONHECIDO, e nenhum check conclui a partir dele.
-		impressaoGravada = "80a28f784d4226f9"
+		//
+		// Atualizada DENTRO do 23, sem subir para 24, e a razão é a que a regra
+		// manda perguntar: existe dump v23 no mundo? Não — o 23 nasceu nesta
+		// branch e ela não foi mergeada. FonteDeLog.Lacuna entra na MESMA
+		// estrutura que o 23 introduziu, e nenhum artefato anterior a ela
+		// existe para ser lido torto. Subir para 24 aqui carimbaria uma
+		// incompatibilidade com um formato que ninguém tem.
+		impressaoGravada = "1bdaec63331b1582"
 	)
 	if SchemaVersion != esquemaEsperado {
 		t.Fatalf("SchemaVersion=%d e este teste conhece o %d: atualize os dois "+

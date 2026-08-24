@@ -147,6 +147,7 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 	for _, ina := range inacessiveis {
 		f.FontesDeLog = append(f.FontesDeLog, FonteDeLog{
 			Path: ina.path, Familias: ina.familias, Estado: FonteIlegivel,
+			Lacuna: ina.motivo,
 		})
 		f.partial("logeventos", ina.motivo)
 		parcialPorAcesso = true
@@ -180,11 +181,20 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 			orc.marca("de TEMPO da varredura")
 			break
 		}
-		// A JANELA decide quais ARQUIVOS abrir, e não quais eventos guardar. Um
-		// arquivo cujo mtime é anterior ao horizonte não pode conter linha
-		// dentro dele; e filtrar evento a evento faria a cobertura afirmar um
-		// intervalo cujos eventos não estão no dump.
-		if !desde.IsZero() && !a.mod.IsZero() && a.mod.Before(desde) {
+		// A JANELA decide quais ARQUIVOS abrir, e não quais eventos guardar —
+		// filtrar evento a evento faria a cobertura afirmar um intervalo cujos
+		// eventos não estão no dump.
+		//
+		// MAS ELA NÃO VALE PARA O ARQUIVO VIVO, e a razão é que o mtime é do
+		// ALVO. `touch -d '2025-01-01' /var/log/auth.log` custa nada e, com a
+		// janela padrão de 7 dias, fazia o conteúdo ATUAL do arquivo não ser
+		// nem aberto: sem evento, sem lacuna, e os checks de auth saindo
+		// COMPLETOS. Falso limpo comprado com um metadado que o adversário
+		// escreve — a mesma classe que o coletarTimestomp existe para acusar.
+		//
+		// São meia dúzia de arquivos vivos, com teto de 8 MB cada. Economizar
+		// isso apostando num carimbo que o alvo controla não paga.
+		if a.geracao > 0 && !desde.IsZero() && !a.mod.IsZero() && a.mod.Before(desde) {
 			f.FontesDeLog = append(f.FontesDeLog, FonteDeLog{
 				Path: a.path, Familias: a.familias, Estado: FonteForaDaJanela,
 			})
@@ -409,8 +419,8 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 		// xz, bz2 e zst exigiriam dependência externa, e este binário não tem
 		// nenhuma. É ESCOPO declarado: o arquivo existe e não foi lido.
 		fonte.Estado = FonteFormatoNaoLido
-		f.partial("logeventos", a.path+" está comprimido num formato que este "+
-			"binário não descompacta (só gzip): o conteúdo dele NÃO foi lido")
+		anota(f, &fonte, a.path+" está comprimido num formato que este binário não "+
+			"descompacta (só gzip): o conteúdo dele NÃO foi lido")
 		return fonte, nil
 	}
 
@@ -422,9 +432,9 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 			// EXISTE e não pôde ser lido: a pergunta cabe neste host e ficou sem
 			// resposta. O auth.log é 0640 root:adm em Debian por desenho — sem
 			// root, ou sem estar no grupo adm, esta é a resposta honesta.
-			f.partial("logeventos", a.path+" não pôde ser lido ("+
-				env.MotivoDoErro(err)+"): os eventos dele NÃO foram examinados, e "+
-				"ausência de evento neste intervalo não pode ser afirmada")
+			anota(f, &fonte, a.path+" não pôde ser lido ("+env.MotivoDoErro(err)+
+				"): os eventos dele NÃO foram examinados, e ausência de evento "+
+				"neste intervalo não pode ser afirmada")
 		}
 		return fonte, nil
 	}
@@ -453,6 +463,8 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 		if nLinha > maxLogLinhasArquivo {
 			fonte.Estado = FonteTruncada
 			fonte.CorteNoFim = true
+			fonte.Lacuna = a.path + ": a leitura parou no teto de " +
+				strconv.Itoa(maxLogLinhasArquivo) + " linhas — o resto do arquivo NÃO foi examinado"
 			orc.marca("de " + strconv.Itoa(maxLogLinhasArquivo) + " linhas por arquivo")
 			break
 		}
@@ -468,6 +480,12 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 				continue
 			}
 			fonte.LinhasParseadas++
+			// COBERTURA = OBSERVAÇÃO: qualquer registro com epoch válido diz
+			// que este trecho do arquivo foi lido, mesmo que o montador não
+			// produza evento a partir dele.
+			if t, ok := instanteDeEpoch(strconv.FormatFloat(r.Epoch, 'f', 3, 64)); ok {
+				marcaCobertura(&fonte, utc(t))
+			}
 			// O DENOMINADOR do audit.log são os tipos que o montador promete
 			// consumir, e não toda linha com envelope válido.
 			//
@@ -490,7 +508,15 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 			continue
 		}
 
-		ev, res := parseLinhaSyslog(linha, ctx)
+		ev, res, quandoDaLinha := parseLinhaSyslog(linha, ctx)
+		// COBERTURA = OBSERVAÇÃO, e não achado. Uma linha
+		// `Connection closed by 1.2.3.4` foi lida, parseada e datada — ela só
+		// não interessa como evento. Derivar o intervalo dos EVENTOS afirmaria
+		// que o arquivo foi visto apenas onde apareceu algo interessante, e é
+		// sobre esse intervalo que o antiforense.log_time_gap diz "N dias sem
+		// UMA linha de autenticação". Num arquivo cheio de linhas de rotina e
+		// com um único evento, aquela frase seria falsa.
+		marcaCobertura(&fonte, quandoDaLinha)
 		switch res {
 		case linhaNaoParseada:
 		case linhaNaoCandidata, linhaNaoMedida:
@@ -520,7 +546,7 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 			evs = append(evs, comOrigem(ev, a.path))
 		}
 		if mont.FechadosPorTeto > 0 {
-			f.partial("logeventos", a.path+": "+strconv.Itoa(mont.FechadosPorTeto)+
+			anota(f, &fonte, a.path+": "+strconv.Itoa(mont.FechadosPorTeto)+
 				" evento(s) de auditoria foram montados ANTES de o arquivo dizer que "+
 				"terminaram (teto de "+strconv.Itoa(maxGruposAuditAbertos)+" eventos "+
 				"em aberto): o caminho de alguns pode ter ficado sem o registro PATH "+
@@ -528,19 +554,6 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 		}
 	}
 
-	// A COBERTURA é o que a leitura ALCANÇOU, e sai das datas dos eventos deste
-	// arquivo — não do que foi pedido.
-	for i := range evs {
-		if evs[i].At == "" {
-			continue
-		}
-		if fonte.CobertoDesde == "" || evs[i].At < fonte.CobertoDesde {
-			fonte.CobertoDesde = evs[i].At
-		}
-		if evs[i].At > fonte.CobertoAte {
-			fonte.CobertoAte = evs[i].At
-		}
-	}
 	if fonte.UltimoAt == "" {
 		fonte.UltimoAt = fonte.CobertoAte
 	}
@@ -550,6 +563,21 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 
 	declaraCapacidadeDoParser(f, &fonte)
 	return fonte, evs
+}
+
+// marcaCobertura alarga o intervalo OBSERVADO deste arquivo.
+//
+// Ela é chamada por LINHA DATADA, e não por evento — ver o comentário no laço.
+func marcaCobertura(fonte *FonteDeLog, at string) {
+	if at == "" {
+		return
+	}
+	if fonte.CobertoDesde == "" || at < fonte.CobertoDesde {
+		fonte.CobertoDesde = at
+	}
+	if at > fonte.CobertoAte {
+		fonte.CobertoAte = at
+	}
 }
 
 func comOrigem(ev EventoDeLog, path string) EventoDeLog {
@@ -567,7 +595,7 @@ func comOrigem(ev EventoDeLog, path string) EventoDeLog {
 // varredura limpa até ninguém mais a ler.
 func declaraCapacidadeDoParser(f *Facts, fonte *FonteDeLog) {
 	if fonte.LinhasLidas > 0 && fonte.LinhasParseadas == 0 {
-		f.partial("logeventos", fonte.Path+": "+strconv.Itoa(fonte.LinhasLidas)+
+		anota(f, fonte, fonte.Path+": "+strconv.Itoa(fonte.LinhasLidas)+
 			" linha(s) lidas e NENHUMA no formato syslog esperado — este arquivo "+
 			"não é do formato que este parser conhece, e 'nenhum evento' não pode "+
 			"ser afirmado sobre ele")
@@ -580,11 +608,24 @@ func declaraCapacidadeDoParser(f *Facts, fonte *FonteDeLog) {
 	if fonte.LinhasReconhecidas*5 >= fonte.LinhasCandidatas {
 		return
 	}
-	f.partial("logeventos", fonte.Path+": de "+strconv.Itoa(fonte.LinhasCandidatas)+
+	anota(f, fonte, fonte.Path+": de "+strconv.Itoa(fonte.LinhasCandidatas)+
 		" linha(s) dos produtores que este parser promete entender, só "+
 		strconv.Itoa(fonte.LinhasReconhecidas)+" foram compreendidas — o formato "+
 		"deste host difere do esperado, e a ausência de evento pode ser do parser, "+
 		"não do host")
+}
+
+// anota registra a lacuna nos DOIS lugares: no arquivo, para o check degradar
+// pela família de que depende, e no mapa global, para o relatório de coleta.
+//
+// Os dois são necessários e respondem perguntas diferentes: "esta pergunta
+// ficou sem resposta?" é por família; "o que esta coleta não conseguiu ler?" é
+// da execução inteira.
+func anota(f *Facts, fonte *FonteDeLog, motivo string) {
+	if fonte.Lacuna == "" {
+		fonte.Lacuna = motivo
+	}
+	f.partial("logeventos", motivo)
 }
 
 // abreConteudoDeLog devolve a CABEÇA (quando houve corte) e o CORPO a parsear.
@@ -622,7 +663,14 @@ func abreConteudoDeLog(e *env.Env, a alvoDeLog, orc *orcamento, fonte *FonteDeLo
 			b = b[:tetoZ]
 			fonte.Estado = FonteTruncada
 			fonte.CorteNoFim = true
-			orc.marca("de descompressão (" + strconv.Itoa(maxDescompactado>>20) + " MB por arquivo)")
+			fonte.Lacuna = a.path + ": a descompressão parou em " +
+				strconv.FormatInt(tetoZ>>20, 10) + " MB — o resto do arquivo NÃO foi examinado"
+			// O teto ANUNCIADO tem de ser o APLICADO. `tetoZ` é o menor entre a
+			// descompressão máxima e o que sobrou do orçamento por arquivo —
+			// dizer "64 MB" enquanto se parou em 8 MB é um relatório forense
+			// afirmando um limite que não foi o limite.
+			orc.marca("de leitura por arquivo comprimido (" +
+				strconv.FormatInt(tetoZ>>20, 10) + " MB descomprimidos)")
 		}
 		orc.bytes -= int64(len(b))
 		fonte.BytesLidos = int64(len(b))
@@ -668,6 +716,8 @@ func abreConteudoDeLog(e *env.Env, a alvoDeLog, orc *orcamento, fonte *FonteDeLo
 	fonte.CorteNoInicio = true
 	fonte.LeituraDescontinua = true
 	fonte.Estado = FonteTruncada
+	fonte.Lacuna = a.path + ": maior que o teto por arquivo — só a CAUDA foi lida, e o " +
+		"miolo entre a cabeça e ela NÃO foi observado"
 	return string(cab), string(b), nil
 }
 

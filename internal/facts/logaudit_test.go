@@ -265,3 +265,33 @@ func temAlvo(ev EventoDeLog, alvo string) bool {
 	}
 	return false
 }
+
+// UM EXECVE PODE VIR EM VÁRIOS REGISTROS, e ficar com o primeiro descarta a
+// CAUDA da linha de comando.
+//
+// Não é especulação sobre o auditd: quando o buffer não comporta mais
+// argumento, audit_log_execve_info() fecha o registro e abre outro
+// AUDIT_EXECVE no mesmo contexto — `audit_log_end(*ab); *ab =
+// audit_log_start(…, AUDIT_EXECVE)`, em kernel/auditsc.c.
+//
+// O caminho de evasão é barato e não precisa de nada exótico:
+//
+//	sh -c '<argumentos benignos até encher o buffer> ; /tmp/.payload'
+//
+// Se o payload cair no segundo registro, a execução é reconstruída sem ele — e
+// sem lacuna nenhuma, porque do ponto de vista do parser tudo foi lido.
+func TestExecveEmVariosRegistrosDoMesmoSerial(t *testing.T) {
+	ev := montaDeLinhas(t, []string{
+		`type=SYSCALL msg=audit(1755990137.000:77): syscall=59 pid=9 uid=0 comm="sh" exe="/bin/dash"`,
+		`type=EXECVE msg=audit(1755990137.000:77): argc=4 a0="/bin/sh" a1="-c"`,
+		`type=EXECVE msg=audit(1755990137.000:77): a2="/usr/bin/true && /tmp/.backdoor" a3="ruido"`,
+		`type=PATH msg=audit(1755990137.000:77): item=0 name="/bin/sh"`,
+	})
+	if !temAlvo(ev, "/tmp/.backdoor") {
+		t.Errorf("a cauda do argv veio no SEGUNDO registro e sumiu: %v — trecho %q",
+			ev.Alvos, ev.Trecho)
+	}
+	if !strings.Contains(ev.Trecho, "ruido") {
+		t.Errorf("o último argumento também se perdeu: %q", ev.Trecho)
+	}
+}

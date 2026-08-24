@@ -62,6 +62,45 @@ var rotacaoComBuraco = check.Check{
 		// está vazio, o check saía COMPLETO sobre uma fonte que o coletor
 		// tinha declarado ilegível.
 		r.Partial = append(r.Partial, f.Partial["logs"]...)
+		// Série com sufixo de DATA (`dateext`) não passa por este método, e
+		// isso sai como INFO — não como lacuna de cobertura.
+		//
+		// O método pergunta "falta a geração N no meio?", e data não tem
+		// sucessor definido: entre secure-20260801 e secure-20260815 pode
+		// faltar uma semana apagada, ou o logrotate pode simplesmente não ter
+		// rodado — `minsize` faz exatamente isso, e é o padrão do wtmp no RHEL.
+		// Derivar buraco de aritmética de datas trocaria o falso limpo por um
+		// falso positivo, e num check de antiforense isso custa a confiança no
+		// relatório inteiro.
+		//
+		// O CANAL é a parte que importa, e este arquivo quase repetiu um erro
+		// que a base já pagou três vezes (checks/nss.go em musl,
+		// proc.container_boundary, kernel.module_no_file). Lacuna é "esta
+		// pergunta cabia neste host e eu não consegui responder". Aqui a
+		// pergunta não cabe: o esquema de nomes é outro, e é assim em TODO
+		// Rocky, Alma, CentOS e Fedora de fábrica. Como Partial, isso faria
+		// toda varredura da família RHEL sair INCOMPLETE com exit 1 — inclusive
+		// a de um host limpo —, e uma lacuna que nunca fecha deixa de ser lida.
+		// É escopo, e escopo se declara sem derrubar a cobertura.
+		if datadas := f.SeriesDatadas(); len(datadas) > 0 {
+			amostra := datadas
+			if len(amostra) > 3 {
+				amostra = amostra[:3]
+			}
+			fd := self.F(check.SevInfo, "dateext", "",
+				strconv.Itoa(len(datadas))+" série(s) de log rotacionam por DATA "+
+					"(`dateext`, o padrão de fábrica da família RHEL): "+
+					strings.Join(amostra, ", "),
+				"buraco de rotação é procurado por CONTADOR, e contador tem sucessor "+
+					"definido — entre o 1 e o 3, o 2 existiu e sumiu",
+				"data não tem: entre secure-20260801 e secure-20260815 pode faltar "+
+					"uma semana apagada, ou o logrotate pode não ter rodado (`minsize`, "+
+					"que é o padrão do wtmp no RHEL)",
+				"este método não se aplica a estas séries — é escopo, não lacuna, e "+
+					"por isso a cobertura NÃO cai. Para deleção de log neste host, a "+
+					"via é comparar com um retrato anterior (`drift`)")
+			r.Findings = append(r.Findings, fd)
+		}
 		buracos := f.BuracosNaRotacao()
 		if len(buracos) == 0 {
 			return r

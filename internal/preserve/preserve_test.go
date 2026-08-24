@@ -4,11 +4,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func coletor(t *testing.T) (*Coletor, string) {
@@ -291,5 +293,124 @@ func TestMemoriaCapturaMapeamentoApagado(t *testing.T) {
 	}
 	if fi, err := os.Stat(filepath.Join(dir, filepath.Base(achou.Destino))); err != nil || fi.Size() == 0 {
 		t.Errorf("o arquivo do dump não foi escrito: %v", err)
+	}
+}
+
+// Um FIFO no lugar do arquivo não pode pendurar a coleta — nem levar junto o
+// manifesto de custódia.
+//
+// O `copiar` usava os.Open seco sobre um caminho que o operador copia de um
+// achado, ou seja, um caminho num host que o atacante ainda controla. Trocar o
+// arquivo por um fifo (ele já escreve naquele diretório — foi lá que o webshell
+// apareceu) pendurava o open(2) para SEMPRE.
+//
+// E o pior não era o travamento: o primeiro SIGINT não alcança, porque o
+// bloqueio é anterior ao copiaInterrompivel, que é o único ponto que olha
+// c.Parar; o segundo cai em os.Exit(130) e pula o escreverManifesto. O
+// diretório ficava com as peças já preservadas e SEM os hashes de origem, que
+// só existiam na memória do processo. Evidência sem cadeia de custódia é o que
+// o cabeçalho deste pacote chama de pior que coleta nenhuma.
+//
+// O teste exige as três coisas: volta rápido, recusa DECLARADA (não silêncio), e
+// nenhuma peça inventada.
+func TestFifoNoLugarDoArquivoNaoPenduraENaoEngoleAFalha(t *testing.T) {
+	dir := t.TempDir()
+	alvo := filepath.Join(dir, "alvo")
+	if err := syscall.Mkfifo(alvo, 0o600); err != nil {
+		t.Skipf("mkfifo indisponível: %v", err)
+	}
+	saida := t.TempDir()
+	c, err := Novo(saida, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	feito := make(chan error, 1)
+	go func() { feito <- c.Arquivo(alvo) }()
+
+	select {
+	case err := <-feito:
+		if err == nil {
+			t.Fatal("o fifo foi 'preservado' com sucesso: não há conteúdo para copiar")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Arquivo() não voltou em 10s sobre um fifo — o open(2) está " +
+			"bloqueando, e nem o SIGINT alcança esse ponto: a coleta pendura e o " +
+			"manifesto de custódia não chega a ser escrito")
+	}
+
+	if len(c.Itens) != 0 {
+		t.Errorf("peça registrada para um fifo: %+v", c.Itens)
+	}
+	if len(c.Erros) != 1 {
+		t.Fatalf("a recusa NÃO virou lacuna declarada: Erros=%+v — silêncio aqui "+
+			"faz o alvo sumir do manifesto como se nunca tivesse sido pedido", c.Erros)
+	}
+	if !strings.Contains(c.Erros[0].Motivo, "fifo") {
+		t.Errorf("o motivo não diz o que foi encontrado: %q", c.Erros[0].Motivo)
+	}
+}
+
+// Device é recusado ANTES de o open do driver rodar — para device, o estrago
+// mora no open(2), não no read(2).
+//
+// O conserto anterior fazia O_RDONLY|O_NONBLOCK e só DEPOIS perguntava ao fstat
+// se era arquivo comum. Tarde: a API de watchdog do kernel é explícita — o
+// temporizador ARMA quando /dev/watchdog é aberto, e com `nowayout` fechar não
+// desarma. O comentário citava /dev/watchdog como a razão de existir e a
+// implementação deixava exatamente ele passar.
+//
+// O teste não pode abrir um watchdog para provar isso (reiniciaria a máquina),
+// então mede a propriedade equivalente e verificável: sobre um device de
+// caractere, a recusa acontece e NENHUM descritor de leitura chega a existir. O
+// /dev/null serve de dublê — mesmo tipo, mesma classe de open, sem consequência.
+func TestDeviceEhRecusadoSemAbrirODriver(t *testing.T) {
+	fh, err := abrirRegularProvado("/dev/null")
+	if err == nil {
+		fh.Close()
+		t.Fatal("um device de caractere foi ABERTO para leitura: o open do driver " +
+			"rodou, e num /dev/watchdog isso já armou o temporizador do host " +
+			"investigado — a recusa depois disso chega tarde")
+	}
+	if !strings.Contains(err.Error(), "device") {
+		t.Errorf("a recusa não nomeia o que encontrou: %v", err)
+	}
+
+	// E o caso que NÃO pode ser perdido junto: arquivo comum continua abrindo,
+	// e por descritor — é assim que o exe apagado sobrevive.
+	dir := t.TempDir()
+	alvo := filepath.Join(dir, "bin")
+	if err := os.WriteFile(alvo, []byte("conteudo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := abrirRegularProvado(alvo)
+	if err != nil {
+		t.Fatalf("arquivo comum deixou de abrir: %v", err)
+	}
+	defer ok.Close()
+	b, _ := io.ReadAll(ok)
+	if string(b) != "conteudo" {
+		t.Errorf("leu %q pelo descritor reaberto", b)
+	}
+}
+
+// O exe de um processo vivo continua preservável pelo caminho novo.
+//
+// É a peça mais valiosa deste pacote: /proc/<pid>/exe abre o binário mesmo
+// depois do unlink, e um `kill` destrói a única cópia. A reabertura por
+// /proc/self/fd/N preserva isso porque reabre o INODE pinado, não o caminho —
+// se ela tivesse sido feita por nome, o exe apagado deixaria de ser coletável e
+// o conserto de segurança teria custado a evidência que o pacote existe para
+// salvar.
+func TestExeDeProcessoVivoContinuaPreservavel(t *testing.T) {
+	fh, err := abrirRegularProvado("/proc/self/exe")
+	if err != nil {
+		t.Fatalf("/proc/self/exe deixou de abrir: %v — o exe é a peça que morre "+
+			"com o processo, e sem ela o preserve perde a razão de existir", err)
+	}
+	defer fh.Close()
+	b := make([]byte, 4)
+	if n, _ := fh.Read(b); n != 4 || string(b) != "\x7fELF" {
+		t.Errorf("o descritor reaberto não é o binário: %q", b[:n])
 	}
 }

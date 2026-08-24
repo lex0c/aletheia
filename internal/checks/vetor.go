@@ -123,7 +123,7 @@ var backendExposto = check.Check{
 			}
 		}
 		if len(por) == 0 {
-			r.Partial = partialForOrphanSockets(f)
+			r.Partial = append(r.Partial, partialForOrphanSockets(f)...)
 			return r
 		}
 
@@ -173,7 +173,7 @@ var backendExposto = check.Check{
 			}
 			r.Findings = append(r.Findings, fd)
 		}
-		r.Partial = partialForOrphanSockets(f)
+		r.Partial = append(r.Partial, partialForOrphanSockets(f)...)
 		return r
 	},
 }

@@ -162,7 +162,7 @@ type Ancora struct {
 //	sem --since, sem
 //	  achado datável       devolve vazio: inventar sete dias e apresentá-los como
 //	                       âncora seria fingir que derivou
-func (r *Report) DerivarAncora(j Janela) Ancora {
+func (r *Report) DerivarAncora(j Janela, agora time.Time) Ancora {
 	if j.Ativa {
 		return Ancora{
 			Quando: j.Desde.Format(time.RFC3339),
@@ -179,7 +179,19 @@ func (r *Report) DerivarAncora(j Janela) Ancora {
 	// execução": a ferramenta afirmando uma data que o adversário escreveu.
 	// Data no futuro é SINAL por si, e quem o levanta é o check de timestomp —
 	// aqui ela só não pode servir de âncora.
-	agora := time.Now().UTC()
+	//
+	// O `agora` entra por PARÂMETRO, e é o e.Now — o instante da COLETA, não o
+	// relógio de quem analisa. Era time.Now() aqui, e isso quebrava as duas
+	// coisas que a guarda existe para garantir. O determinismo: o mesmo dump
+	// analisado antes e depois de um timestamp passar do relógio de parede dava
+	// âncora e contagem de `futuros` diferentes — mesma entrada, saída
+	// diferente, e o drift compara justamente saídas. E a própria guarda: ela
+	// passava a valer contra o relógio do ANALISTA, então um `touch -d "+2
+	// hours"` era rejeitado hoje e aceito amanhã, bastando ao adversário forjar
+	// menos que o atraso entre coletar e analisar. Todo o resto do caminho de
+	// análise já usa e.Now por este motivo (ver dump.go, onde o Env do artefato
+	// nasce com Now = collected_at).
+	agora = agora.UTC()
 	var melhor Finding
 	var melhorT time.Time
 	var futuros int

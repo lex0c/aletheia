@@ -72,7 +72,7 @@ var arquivosDeAmbiente = []string{".env", ".env.local", ".env.production"}
 var raizesDeServico = []string{"/srv", "/opt", "/var/www", "/data", "/usr/share/nginx"}
 
 func collectSegredos(f *Facts, e *env.Env) {
-	for _, h := range homeDirs(e) {
+	for _, h := range homeDirs(f, e, "segredo") {
 		for _, c := range caminhosDeSegredo {
 			registraSegredo(f, e, h+"/"+c.rel, c.tipo)
 		}

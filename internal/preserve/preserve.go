@@ -551,7 +551,29 @@ func (c *Coletor) copiar(origem, nome, tipo string) (Item, error) {
 	if err != nil {
 		return Item{}, err
 	}
-	src, err := os.Open(origem)
+	// O_NONBLOCK na abertura, e o TIPO conferido no descritor.
+	//
+	// Era `os.Open` seco, sobre um caminho que o operador copia de um achado —
+	// ou seja, um caminho num host que o atacante ainda controla. Duas coisas
+	// saíam disso, e as duas foram medidas:
+	//
+	// Um `mkfifo` no lugar do arquivo (o atacante já escreve naquele diretório;
+	// foi lá que o webshell apareceu) pendurava o open(2) para SEMPRE. O
+	// primeiro SIGINT não alcança: o bloqueio é anterior ao copiaInterrompivel,
+	// que é o único ponto que olha c.Parar. O segundo cai em os.Exit(130) e
+	// pula o escreverManifesto — então o diretório fica com as peças já
+	// preservadas e SEM os hashes de origem, que só existiam na memória do
+	// processo. É o desfecho que o cabeçalho deste arquivo chama de pior que
+	// coleta nenhuma.
+	//
+	// E `--file /dev/watchdog` era aceito: o open do driver roda, e o host
+	// investigado reinicia.
+	//
+	// A defesa já existia no projeto — env.abrirVerificado e
+	// dump.AbrirArtefato fazem exatamente isto, e o comentário do segundo diz
+	// que nasceu porque um os.Open seco travou o servidor MCP antes da primeira
+	// resposta. Não tinha sido estendida para o irmão que escreve evidência.
+	src, err := abrirRegularProvado(origem)
 	if err != nil {
 		return Item{}, err
 	}
@@ -777,4 +799,90 @@ func nomeSeguro(p string) string {
 		s = s[:120] + "-" + hex.EncodeToString(soma[:4])
 	}
 	return s
+}
+
+// oPath é O_PATH. O Go não o exporta em syscall, e o valor é 010000000 no
+// Linux — igual em todas as arquiteturas que este projeto constrói.
+const oPath = 0o10000000
+
+// abrirRegularProvado abre para leitura SÓ depois de provar que o objeto é
+// arquivo comum, e a prova acontece sem chamar o open do driver.
+//
+// A versão anterior deste conserto fazia O_RDONLY|O_NONBLOCK e só DEPOIS
+// perguntava ao fstat se aquilo era regular. Para um device isso é tarde: o
+// estrago mora no open(2), não no read(2). A API de watchdog do kernel é
+// explícita — o temporizador ARMA quando /dev/watchdog é aberto, e com
+// `nowayout` fechar não desarma. Ou seja, o comentário citava /dev/watchdog
+// como a razão de existir e a implementação deixava exatamente ele passar: o
+// operador roda o comando que o relatório imprimiu sobre
+// `/tmp/suspeito -> /dev/watchdog`, e o host investigado reinicia.
+//
+// Este é o mesmo raciocínio que env.AbrirParaInspecao já tinha escrito para o
+// caminho do MCP, com todas as letras: "faz um O_RDONLY real e só DEPOIS
+// pergunta ao fstat se aquilo era arquivo comum. Para um device node isso é
+// tarde: o open() do driver já rodou." A lição existia no projeto e este
+// arquivo a reaprendeu do jeito caro.
+//
+// A sequência:
+//
+//	O_PATH      referência ao objeto SEM invocar o open do driver
+//	fstat       o TIPO, tirado do descritor e não do caminho — entre um Lstat
+//	            e um open cabe a troca do link, e quem escolhe a hora de trocar
+//	            é o host investigado
+//	reabertura  /proc/self/fd/N reabre o MESMO inode sem resolver caminho de
+//	            novo, então nem a corrida nem uma segunda resolução entram
+//
+// A reabertura por /proc/self/fd é o que preserva o caso mais valioso deste
+// pacote: um exe APAGADO continua legível pelo descritor, porque o inode segue
+// pinado mesmo sem nome no diretório.
+func abrirRegularProvado(origem string) (*os.File, error) {
+	fd, err := syscall.Open(origem, oPath|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer syscall.Close(fd)
+
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return nil, err
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		// Recusa DECLARADA: quem chama transforma isto em linha preserve_failed,
+		// então o manifesto diz que o alvo existia e não foi preservado — em vez
+		// de o diretório simplesmente não ter a peça.
+		return nil, fmt.Errorf("%s não é arquivo comum (%s): preservar um fifo, "+
+			"device ou socket não copia conteúdo nenhum — e ABRIR um device já "+
+			"altera o host (um /dev/watchdog arma o temporizador no open). NÃO foi "+
+			"preservado, e nada foi aberto", origem, tipoDeArquivo(os.FileMode(st.Mode)))
+	}
+
+	// O_NONBLOCK também na reabertura: o tipo já está provado, mas a flag custa
+	// nada e fecha a janela de um objeto trocado entre o fstat e esta linha —
+	// o /proc/self/fd/N reabre o inode pinado, não o caminho, então a troca não
+	// alcança; a flag é cinto de segurança.
+	fh, err := os.OpenFile("/proc/self/fd/"+strconv.Itoa(fd),
+		os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, fmt.Errorf("%s: o objeto foi provado regular mas não reabriu "+
+			"por descritor (%v) — /proc montado?", origem, err)
+	}
+	return fh, nil
+}
+
+// tipoDeArquivo nomeia o que NÃO é arquivo comum, para a recusa dizer o que
+// encontrou em vez de só dizer não.
+func tipoDeArquivo(m os.FileMode) string {
+	switch {
+	case m&os.ModeNamedPipe != 0:
+		return "fifo"
+	case m&os.ModeSocket != 0:
+		return "socket"
+	case m&os.ModeCharDevice != 0:
+		return "device de caractere"
+	case m&os.ModeDevice != 0:
+		return "device de bloco"
+	case m.IsDir():
+		return "diretório"
+	}
+	return m.String()
 }

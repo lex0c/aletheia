@@ -188,7 +188,7 @@ func TestMerge_DropinMesmoNomeSoOMaiorAplica(t *testing.T) {
 	for _, u := range us {
 		if u.Name == "x.service" && u.Efetiva() {
 			for _, ex := range u.Exec {
-				alvos = append(alvos, ex.Target)
+				alvos = append(alvos, ex.AlvoUnico())
 			}
 		}
 	}
@@ -249,9 +249,9 @@ func TestMerge_ExecSearchPathDeDropinAlcancaBase(t *testing.T) {
 	if base == nil || len(base.Exec) != 1 {
 		t.Fatalf("base: %+v", base)
 	}
-	if base.Exec[0].Target != "/tmp/.hidden/agent" {
+	if base.Exec[0].AlvoUnico() != "/tmp/.hidden/agent" {
 		t.Errorf("o ExecStart da base deve resolver contra o ExecSearchPath do drop-in: Target=%q, Cmd=%q",
-			base.Exec[0].Target, base.Exec[0].Cmd)
+			base.Exec[0].AlvoUnico(), base.Exec[0].Cmd)
 	}
 }
 
@@ -269,7 +269,7 @@ func TestMerge_DropinPorPadrao(t *testing.T) {
 		for _, u := range us {
 			if u.Name == unit && u.Efetiva() {
 				for _, ex := range u.Exec {
-					if ex.Target == alvo {
+					if ex.AlvoUnico() == alvo {
 						return true
 					}
 				}
@@ -397,7 +397,7 @@ func TestMerge_DropinResetaSearchPathMoveAlvo(t *testing.T) {
 	if svc == nil || len(svc.Exec) == 0 {
 		t.Fatalf("svc.service sem Exec: %+v", us)
 	}
-	alvo := svc.Exec[0].Target
+	alvo := svc.Exec[0].AlvoUnico()
 	if !strings.Contains(alvo, "/tmp/.oculto/agent") {
 		t.Fatalf("reset+re-aponta do drop-in devia mover o alvo para /tmp/.oculto/agent, veio %q", alvo)
 	}
@@ -424,7 +424,7 @@ func TestMerge_NomeNuResolveContraPathPadrao(t *testing.T) {
 	if web == nil || len(web.Exec) == 0 {
 		t.Fatalf("web.service sem Exec: %+v", us)
 	}
-	if alvo := web.Exec[0].Target; alvo != "/usr/sbin/shellserver" {
+	if alvo := web.Exec[0].AlvoUnico(); alvo != "/usr/sbin/shellserver" {
 		t.Fatalf("nome nu devia resolver contra o PATH fixo do systemd para /usr/sbin/shellserver, veio %q", alvo)
 	}
 }
@@ -441,7 +441,7 @@ func TestMerge_PathProprioNaoResolveContraPadrao(t *testing.T) {
 	if web == nil || len(web.Exec) == 0 {
 		t.Fatalf("web.service sem Exec: %+v", us)
 	}
-	if alvo := web.Exec[0].Target; alvo != "shellserver" {
+	if alvo := web.Exec[0].AlvoUnico(); alvo != "shellserver" {
 		t.Fatalf("com PATH próprio o nome nu fica cru (não modelamos esse PATH), veio %q", alvo)
 	}
 }
@@ -524,7 +524,7 @@ func TestMerge_DropinMesmaArvoreEspecificidadeVence(t *testing.T) {
 	for _, u := range us {
 		if u.Name == "zoo.service" && u.Efetiva() {
 			for _, ex := range u.Exec {
-				alvos = append(alvos, ex.Target)
+				alvos = append(alvos, ex.AlvoUnico())
 			}
 		}
 	}
@@ -557,8 +557,8 @@ func TestMerge_EnvironmentPATHResolveNomeNu(t *testing.T) {
 	if len(u.Exec) != 1 || u.Exec[0].Cmd != "/tmp/.cache/agent --daemon" {
 		t.Fatalf("Environment=PATH deve resolver o nome nu contra o path próprio: %+v", u.Exec)
 	}
-	if u.Exec[0].Target != "/tmp/.cache/agent" {
-		t.Errorf("alvo efetivo deve ser /tmp/.cache/agent, veio %q", u.Exec[0].Target)
+	if u.Exec[0].AlvoUnico() != "/tmp/.cache/agent" {
+		t.Errorf("alvo efetivo deve ser /tmp/.cache/agent, veio %q", u.Exec[0].AlvoUnico())
 	}
 }
 
@@ -612,8 +612,8 @@ func TestMerge_NomeNuAtrasDeWrapperResolve(t *testing.T) {
 	}
 	// /usr/local/bin está no PATH fixo do systemd.exec(5): o agente embrulhado
 	// resolve para lá, não fica nome nu.
-	if u.Exec[0].Target != "/usr/local/bin/agent" {
-		t.Errorf("alvo atrás de env deve resolver: quer /usr/local/bin/agent, veio %q", u.Exec[0].Target)
+	if u.Exec[0].AlvoUnico() != "/usr/local/bin/agent" {
+		t.Errorf("alvo atrás de env deve resolver: quer /usr/local/bin/agent, veio %q", u.Exec[0].AlvoUnico())
 	}
 }
 
@@ -628,8 +628,8 @@ func TestMerge_RootDirectoryPrefixaAlvo(t *testing.T) {
 	if u == nil || len(u.Exec) != 1 {
 		t.Fatalf("unit/exec: %+v", us)
 	}
-	if u.Exec[0].Target != "/jail/usr/bin/x" {
-		t.Errorf("RootDirectory deve prefixar o alvo: quer /jail/usr/bin/x, veio %q", u.Exec[0].Target)
+	if u.Exec[0].AlvoUnico() != "/jail/usr/bin/x" {
+		t.Errorf("RootDirectory deve prefixar o alvo: quer /jail/usr/bin/x, veio %q", u.Exec[0].AlvoUnico())
 	}
 }
 

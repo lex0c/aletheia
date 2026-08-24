@@ -9,6 +9,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -469,8 +471,56 @@ func aoInterromper() {
 	go func() {
 		<-c
 		fmt.Fprint(os.Stderr, "\r\033[K\ninterrompido\n")
+		limparSaidaVazia()
 		os.Exit(130)
 	}()
+}
+
+// saidaVazia guarda o destino ABERTO que ainda não recebeu byte nenhum.
+//
+// O destino do --json e do --out é aberto ANTES da parte cara, com O_EXCL, para
+// que uma colisão de nome seja recusada antes de a coleta rodar e não depois. O
+// efeito colateral é que um Ctrl-C no meio da coleta deixa no disco um arquivo
+// de ZERO byte — e como o próximo O_EXCL recusa arquivo existente, a repetição
+// óbvia (Ctrl-C, rodar de novo) morria com exit 3 e forçava outro nome.
+//
+// Pior que o incômodo: um wrapper que faz `grep -c '"sev":"CRITICAL"' saida`
+// recebe 0 tanto da varredura limpa quanto da abortada.
+//
+// Então o arquivo é removido na saída por sinal, e SÓ enquanto está vazio: a
+// partir do primeiro byte escrito ele é resultado parcial, e apagar resultado
+// parcial de uma coleta que pode não se repetir seria o erro oposto.
+var saidaVazia struct {
+	mu   sync.Mutex
+	path string
+}
+
+func marcarSaidaVazia(path string) {
+	saidaVazia.mu.Lock()
+	saidaVazia.path = path
+	saidaVazia.mu.Unlock()
+}
+
+// saidaComecouAEscrever desarma a limpeza: daqui em diante há conteúdo.
+func saidaComecouAEscrever() {
+	saidaVazia.mu.Lock()
+	saidaVazia.path = ""
+	saidaVazia.mu.Unlock()
+}
+
+func limparSaidaVazia() {
+	saidaVazia.mu.Lock()
+	p := saidaVazia.path
+	saidaVazia.path = ""
+	saidaVazia.mu.Unlock()
+	if p == "" {
+		return
+	}
+	// Confere o tamanho em vez de confiar no flag: entre marcar e o sinal
+	// chegar, outra coisa pode ter escrito ali.
+	if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && fi.Size() == 0 {
+		os.Remove(p)
+	}
 }
 
 // relatarTempoDeColeta diz, no stderr, ONDE o tempo da coleta foi — mas só
@@ -540,6 +590,9 @@ func runWtf(args []string) int {
 	fs.Var(&ignore, "ignore", "excluir caminho da varredura de FS (repetível): --ignore /data/xmls")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
+		return 3
+	}
+	if recusaPosicional(fs, "wtf") {
 		return 3
 	}
 	if *root != "" {
@@ -641,6 +694,13 @@ func runScan(args []string, wtf bool) int {
 	fs.Var(&ignore, "ignore", "excluir caminho da varredura de FS (repetível): --ignore /data/xmls")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
+		return 3
+	}
+	nome := "scan"
+	if wtf {
+		nome = "wtf"
+	}
+	if recusaPosicional(fs, nome) {
 		return 3
 	}
 
@@ -760,9 +820,9 @@ func runScan(args []string, wtf bool) int {
 // aplicarJanela recorta o relatório e monta o que precisa ser DITO sobre o
 // recorte. Nada aqui é silencioso: o que saiu é contado por severidade, o que
 // não tinha data é contado à parte, e o âncora declara de onde veio.
-func aplicarJanela(r *check.Report, j check.Janela) *report.JanelaInfo {
+func aplicarJanela(r *check.Report, j check.Janela, agora time.Time) *report.JanelaInfo {
 	rec := r.Aplicar(j)
-	anc := r.DerivarAncora(j)
+	anc := r.DerivarAncora(j, agora)
 	if !j.Ativa && anc.Quando == "" {
 		return nil // sem janela e sem achado datável: não há o que declarar
 	}
@@ -874,6 +934,9 @@ func runBaseline(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 3
 	}
+	if recusaPosicional(fs, "baseline") {
+		return 3
+	}
 	if *root != "" {
 		if fi, err := os.Stat(*root); err != nil || !fi.IsDir() {
 			fmt.Fprintf(os.Stderr, "--root: %s não é um diretório acessível\n", *root)
@@ -946,7 +1009,11 @@ func abrirSaidaJSON(path string) (*os.File, error) {
 	case "-":
 		return os.Stdout, nil
 	}
-	return openJSONOut(path)
+	fh, err := openJSONOut(path)
+	if err == nil {
+		marcarSaidaVazia(path)
+	}
+	return fh, err
 }
 
 // writeJSONL escreve no destino JÁ ABERTO. Devolve o exit code final, que NUNCA
@@ -957,6 +1024,7 @@ func writeJSONL(fh *os.File, veredito int, r *check.Report, f *facts.Facts, e *e
 	if fh == nil {
 		return veredito
 	}
+	saidaComecouAEscrever()
 	err := report.JSONL(fh, r, f, e, bl, jn, an)
 	if fh != os.Stdout {
 		if cerr := fh.Close(); err == nil {
@@ -988,10 +1056,60 @@ func openJSONOut(path string) (*os.File, error) {
 				"%s é um arquivo existente. Esta ferramenta nunca sobrescreve arquivo no\n"+
 					"host sob investigação: escolha outro nome, ou use '-' para a saída padrão.", path)
 		}
-		// device, fifo ou socket: escreve sem criar e sem truncar
-		fh, err := os.OpenFile(path, os.O_WRONLY, 0)
+		// NÃO É REGULAR: o tipo é provado ANTES de qualquer open de verdade.
+		//
+		// A versão anterior deste conserto abria com O_WRONLY|O_NONBLOCK e só
+		// então classificava pelo fstat. Para device isso é tarde pelo mesmo
+		// motivo que o preserve acabou de aprender: o estrago mora no open(2).
+		// Um `resultado.json -> /dev/watchdog` no diretório de incidente ARMAVA
+		// o temporizador do host investigado e só depois recebia a recusa — o
+		// comentário dizia "arma no open, antes de qualquer byte" e o código
+		// fazia exatamente esse open.
+		//
+		// O_PATH resolve: ele devolve uma referência ao objeto SEM invocar o
+		// open do driver, o fstat sai do descritor (não do caminho, que pode
+		// ser trocado entre uma chamada e outra), e a reabertura por
+		// /proc/self/fd/N pega o MESMO inode sem resolver caminho de novo.
+		//
+		// Isso preserva o caso legítimo que este ramo existe para atender —
+		// `mkfifo saida && aletheia scan --json saida` continua funcionando —
+		// sem que a ferramenta precise abrir um device para descobrir que não
+		// devia. Recusar o FIFO junto seria mais simples e custaria um uso
+		// automatizado real; provar o tipo antes custa dez linhas e não custa
+		// nenhum.
+		fd, err := syscall.Open(path, oPathSaida|syscall.O_CLOEXEC, 0)
 		if err != nil {
+			return nil, fmt.Errorf("não foi possível abrir %s: %v", path, err)
+		}
+		defer syscall.Close(fd)
+		var st syscall.Stat_t
+		if err := syscall.Fstat(fd, &st); err != nil {
+			return nil, fmt.Errorf("não foi possível conferir %s: %v", path, err)
+		}
+		if motivo := tipoDeSaidaRecusado(modoDeStat(st.Mode)); motivo != "" {
+			return nil, fmt.Errorf("%s: %s", path, motivo)
+		}
+		// O_NONBLOCK: abrir FIFO para escrita bloqueia até aparecer um leitor, e
+		// `dump.json -> pipe` pendurava a ferramenta DEPOIS da coleta inteira,
+		// com o retrato só na memória. Aqui vira ENXIO na hora.
+		fh, err := os.OpenFile("/proc/self/fd/"+strconv.Itoa(fd),
+			os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			// A mensagem nomeia o caminho que o OPERADOR escreveu. O
+			// /proc/self/fd/N é detalhe de implementação, e ENXIO num FIFO tem
+			// uma causa específica que vale dizer em vez de deixar adivinhar.
+			if errors.Is(err, syscall.ENXIO) {
+				return nil, fmt.Errorf("%s é um FIFO sem nenhum leitor do outro "+
+					"lado: escrever ali penduraria a ferramenta. Abra o leitor "+
+					"antes (ex.: `cat %s > arquivo &`), ou use `--json -`.", path, path)
+			}
 			return nil, fmt.Errorf("não foi possível escrever %s: %v", path, err)
+		}
+		// Tira o O_NONBLOCK: ele existia para a ABERTURA não pendurar, e
+		// mantê-lo faria as escritas seguintes devolverem EAGAIN parcial.
+		if err := semNonBlock(fh); err != nil {
+			fh.Close()
+			return nil, fmt.Errorf("não foi possível preparar %s: %v", path, err)
 		}
 		return fh, nil
 	}
@@ -1030,4 +1148,99 @@ func runChecks(args []string) int {
 	fmt.Printf("\n%d checks registrados. A coluna de falso positivo é o que o operador\n", len(all))
 	fmt.Println("lê ANTES de decidir se vale investigar um achado.")
 	return 0
+}
+
+// semNonBlock desliga o O_NONBLOCK de um descritor já aberto.
+//
+// A flag serve à ABERTURA — é ela que faz um FIFO sem leitor falhar com ENXIO
+// em vez de pendurar o processo para sempre. Depois disso ela atrapalha: numa
+// escrita grande, um descritor não bloqueante devolve EAGAIN e escreve pela
+// metade, e o dump sairia truncado sem ninguém dizer.
+func semNonBlock(fh *os.File) error {
+	fd := int(fh.Fd())
+	flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_GETFL, 0)
+	if errno != 0 {
+		return errno
+	}
+	if _, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd),
+		syscall.F_SETFL, flags&^syscall.O_NONBLOCK); errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+// tipoDeSaidaRecusado decide, pelo TIPO do destino já aberto, se escrever ali é
+// aceitável. String vazia = pode.
+//
+// A decisão mora numa função separada porque ela é a metade que precisa ser
+// testável: provar o ramo do device de bloco de ponta a ponta exigiria um
+// /dev/sda gravável, ou seja, root — e uma trava que só roda como root não roda.
+func tipoDeSaidaRecusado(m os.FileMode) string {
+	switch {
+	case m.IsRegular():
+		// Reconferido no DESCRITOR. O os.Stat de cima segue link e olha o
+		// caminho; entre ele e o open o alvo pode ter sido trocado, e quem
+		// escolhe a hora de trocar é um host possivelmente hostil.
+		return "virou um arquivo comum entre a conferência e a abertura. Esta " +
+			"ferramenta nunca sobrescreve arquivo no host sob investigação."
+	case m&os.ModeDevice != 0:
+		// DEVICE, de bloco OU de caractere. A permissão anterior valia só para
+		// bloco, sobre a premissa de que "escrever num char device não destrói
+		// nada" — e ela é falsa. O Linux tem /dev/mem (memória física),
+		// /dev/kmem, /dev/port (portas de I/O) e /dev/watchdog, todos de
+		// caractere, e o watchdog nem precisa do write: ele ARMA no open, e com
+		// `nowayout` fechar não desarma.
+		//
+		// O caso legítimo que a permissão existia para atender continua
+		// atendido, e por um caminho melhor: `--json -` escreve no stdout, e aí
+		// quem abriu /dev/console foi o SHELL do operador, não o scanner:
+		//
+		//	aletheia scan --json - > /dev/console
+		//
+		// A decisão de escrever num device passa a ser de quem tem contexto para
+		// tomá-la. Vale notar que a permissão já era meio quebrada na prática:
+		// `--json /dev/stdout` com o stdout redirecionado para arquivo é visto
+		// pelo os.Stat como arquivo COMUM, e já era recusado — o ramo permissivo
+		// só valia quando o stdout era terminal.
+		return "é (ou aponta para) um DEVICE. Escrever ali pode destruir o disco " +
+			"do host investigado (/dev/sda), alterar memória física (/dev/mem) ou " +
+			"armar um temporizador de reinício (/dev/watchdog) — e um device ARMA " +
+			"no open, antes de qualquer byte. Para console ou stdout use `--json -` " +
+			"e redirecione no shell. Se o caminho é um link no diretório de " +
+			"incidente, ele não estava lá por acaso."
+	case m&os.ModeSocket != 0:
+		// Socket não aceita write() comum sem estar conectado, e um "destino"
+		// que falha no meio da escrita deixa dump pela metade sem dizer.
+		return "é um SOCKET, e não um destino de arquivo — recusado."
+	}
+	// Sobra o FIFO, e ele segue permitido: `mkfifo saida && aletheia scan --json
+	// saida` é uso automatizado legítimo, escrever num pipe não destrói nada, e
+	// o O_NONBLOCK da abertura já transforma "sem leitor do outro lado" em ENXIO
+	// imediato em vez de travamento.
+	return ""
+}
+
+// oPathSaida é O_PATH. O Go não o exporta em syscall, e o valor é 010000000 no
+// Linux, igual em todas as arquiteturas que este projeto constrói.
+const oPathSaida = 0o10000000
+
+// modoDeStat traduz o st_mode cru do fstat para os.FileMode, preservando os
+// bits de TIPO — que é o que tipoDeSaidaRecusado julga.
+func modoDeStat(m uint32) os.FileMode {
+	fm := os.FileMode(m & 0o777)
+	switch m & syscall.S_IFMT {
+	case syscall.S_IFBLK:
+		fm |= os.ModeDevice
+	case syscall.S_IFCHR:
+		fm |= os.ModeDevice | os.ModeCharDevice
+	case syscall.S_IFDIR:
+		fm |= os.ModeDir
+	case syscall.S_IFIFO:
+		fm |= os.ModeNamedPipe
+	case syscall.S_IFLNK:
+		fm |= os.ModeSymlink
+	case syscall.S_IFSOCK:
+		fm |= os.ModeSocket
+	}
+	return fm
 }

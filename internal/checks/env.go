@@ -99,8 +99,8 @@ var procLdPreload = check.Check{
 			}
 		}
 		if semEnviron > 0 {
-			r.Partial = []string{strconv.Itoa(semEnviron) +
-				" processos com environ ilegível não foram avaliados"}
+			r.Partial = append(r.Partial, strconv.Itoa(semEnviron)+
+				" processos com environ ilegível não foram avaliados")
 		}
 		return r
 	},

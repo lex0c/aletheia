@@ -133,6 +133,24 @@ var gatilhosDeSistema = []struct{ path, kind, when string }{
 	{"/etc/profile", "shell", "shell de LOGIN, para todo usuário"},
 	{"/etc/bash.bashrc", "shell", "shell INTERATIVO, para todo usuário — roda a cada login SSH"},
 	{"/etc/zsh/zshenv", "shell", "SEMPRE em zsh, inclusive shell não interativo"},
+	// As grafias da família RHEL. Elas faltavam, e a falta era invisível: o
+	// caminho não existe naquela distro, então nem o ramo negativo do lookup
+	// era tomado — nada coletado e NENHUMA lacuna declarada.
+	//
+	// O /etc/bashrc do RHEL, Rocky, Alma, CentOS e Fedora é o equivalente exato
+	// do bash.bashrc do Debian, e o /etc/profile chama ele na linha 76. Uma
+	// linha anexada ali executa em todo bash interativo de todo usuário, root
+	// incluído, a cada login SSH. Sem estas entradas, persist.trigger_exec,
+	// shell_startup, bash_env, shell_env, a checagem de escape de terminal, o
+	// timestomp sobre conteúdo de gatilho e a comparação de drift ficavam todos
+	// cegos ali — com o relatório dizendo cobertura COMPLETA.
+	//
+	// Que o projeto já conhecia o caminho está em vigia.go, que o lista em
+	// caminhosDePersistencia: a tabela é que não tinha sido atualizada junto.
+	{"/etc/bashrc", "shell", "shell INTERATIVO, para todo usuário (família RHEL) — roda a cada login SSH"},
+	{"/etc/zshenv", "shell", "SEMPRE em zsh (família RHEL), inclusive shell não interativo"},
+	{"/etc/zprofile", "shell", "zsh de LOGIN, para todo usuário (família RHEL)"},
+	{"/etc/zshrc", "shell", "zsh INTERATIVO, para todo usuário (família RHEL)"},
 	{"/etc/rc.local", "rc", "no BOOT, se tiver bit de execução"},
 	{"/etc/rc.d/rc.local", "rc", "no BOOT, se tiver bit de execução"},
 	{"/etc/ssh/sshrc", "ssh_rc", "a cada login SSH, antes do shell do usuário"},
@@ -146,6 +164,18 @@ var gatilhosDeSistema = []struct{ path, kind, when string }{
 var gatilhosDeDiretorio = []struct{ dir, kind, when string }{
 	{"/etc/profile.d", "shell", "shell de login, para TODO usuário — um arquivo aqui vale para todos"},
 	{"/etc/init.d", "initd", "no boot, convertido em unit pelo systemd-sysv-generator"},
+	// O rc.local do OpenRC, e ele não era coletado por NADA.
+	//
+	// O serviço `local` vem no runlevel default de fábrica no Alpine e no
+	// Gentoo, e executa todo /etc/local.d/*.start no boot como root. É o
+	// equivalente direto do /etc/rc.local, que é coberto — mas num host OpenRC
+	// não há systemd, então um script ali não é Unit, não é Cron e não era
+	// Trigger. Como nenhum coletor o alcançava, ele nem entrava em
+	// candidatosDePropriedade: nem o discriminador de dono de pacote era
+	// aplicado. A varredura saía OK com cobertura completa.
+	//
+	// O `.stop` entra junto: roda no desligamento, com o mesmo privilégio.
+	{"/etc/local.d", "rc", "no BOOT (OpenRC: serviço `local`, no runlevel default) — e no desligamento, para os .stop"},
 	{"/etc/update-motd.d", "motd", "a cada login, ao montar a mensagem do dia"},
 	{"/etc/apt/apt.conf.d", "pkg_hook", "a cada operação do gerenciador de pacotes"},
 	{"/etc/dnf/plugins", "pkg_hook", "a cada operação do gerenciador de pacotes"},
@@ -163,6 +193,14 @@ var gatilhosDeDiretorio = []struct{ dir, kind, when string }{
 	{"/etc/periodic/15min", "cron_script", "a cada quinze minutos"},
 	{"/etc/periodic/hourly", "cron_script", "de hora em hora"},
 	{"/etc/periodic/daily", "cron_script", "uma vez por dia"},
+	// weekly e monthly faltavam, e a assimetria era só desta tabela: cron.go e
+	// vigia.go já listam os cinco. O efeito é o pior tipo de meio-caminho — o
+	// arquivo ERA inventariado como entrada de cron (a propriedade de pacote
+	// era perguntada) e o CONTEÚDO nunca era lido, então uma linha anexada a um
+	// script já existente e pertencente a pacote passava com "owned". A mesma
+	// edição em /etc/cron.weekly no Debian é pega.
+	{"/etc/periodic/weekly", "cron_script", "uma vez por semana"},
+	{"/etc/periodic/monthly", "cron_script", "uma vez por mês"},
 	{"/etc/pam.d", "pam", "a cada autenticação"},
 	{"/usr/lib/systemd/system-generators", "generator", "em todo boot e reload, ANTES das units"},
 	{"/etc/systemd/system-generators", "generator", "em todo boot e reload, ANTES das units"},
@@ -269,7 +307,7 @@ func collectTriggers(f *Facts, e *env.Env) {
 		skel[g.nome] = linhasDe(e, "/etc/skel/"+g.nome)
 	}
 	var negados []string
-	for _, home := range homeDirs(e) {
+	for _, home := range homeDirs(f, e, "startup") {
 		u := home[strings.LastIndexByte(home, '/')+1:]
 		for _, g := range gatilhosDeHome {
 			p := home + "/" + g.nome

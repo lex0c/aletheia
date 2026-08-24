@@ -358,8 +358,27 @@ func (v *varredura) rodar(n int) {
 				if !ok {
 					return
 				}
-				v.visitar(t)
-				v.terminou()
+				// O `terminou` é DEFERIDO, e o closure existe só para que ele
+				// rode por ITERAÇÃO em vez de na saída da goroutine.
+				//
+				// Sem isso, um panic dentro de visitar matava o trabalhador
+				// ENTRE o visitar e o terminou: guardaGoroutine recuperava, o
+				// wg.Done liberava, e `v.ativos` — incrementado lá no proxima —
+				// nunca voltava. Os outros N-1 trabalhadores ficavam presos no
+				// laço de proxima, que só devolve false com a fila vazia E
+				// ativos == 0, girando em Gosched+1ms para sempre. A única
+				// saída era o WalkExpired, que é falso quando WalkDeadline é
+				// zero — ou seja, no collect e no scan sem --fs-budget.
+				//
+				// É exatamente o desfecho que o comentário do guardaGoroutine
+				// diz que ele existe para impedir: "a ferramenta PENDURARIA,
+				// sem saída e sem relatório, que é pior que cair". O invariante
+				// tinha sido aplicado aos mutexes (defer Unlock) e não a este
+				// contador, que é uma trava de terminação com outro nome.
+				func() {
+					defer v.terminou()
+					v.visitar(t)
+				}()
 			}
 		}()
 	}

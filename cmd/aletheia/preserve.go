@@ -70,6 +70,31 @@ func runPreserve(args []string) int {
 			"(--pid, --file, --bpf ou --pcap)")
 		return 3
 	}
+	// --mem sem --pid não faz nada, e "não faz nada" aqui era SILENCIOSO.
+	//
+	// O `if *mem` vive dentro do laço sobre os PIDs, então sem --pid ele nunca
+	// é alcançado: nenhuma linha preserve_failed, nada no manifesto, e exit 0 —
+	// que a usage define como "guardou tudo o que foi pedido". O respondedor que
+	// digitou --mem acredita ter capturado o código injetado; o processo é morto
+	// em seguida e a memória se foi, com o registro dizendo que deu certo.
+	//
+	// A checagem equivalente já existe uma tela adiante, no montarCaptura, que
+	// recusa --iface/--host/--port/--proto/--all sem --pcap — por este motivo
+	// exato. --mem e --mem-max tinham ficado de fora.
+	if len(pids) == 0 {
+		var soltas []string
+		if *mem {
+			soltas = append(soltas, "--mem")
+		}
+		if memMaxInformado(fs) {
+			soltas = append(soltas, "--mem-max")
+		}
+		if len(soltas) > 0 {
+			fmt.Fprintf(os.Stderr, "preserve: %s só faz sentido com --pid "+
+				"(a memória preservada é a de um processo)\n", strings.Join(soltas, " e "))
+			return 3
+		}
+	}
 	// Os alvos são convertidos ANTES de qualquer escrita.
 	//
 	// Eles eram convertidos dentro do laço que já copiava, então
@@ -558,4 +583,18 @@ func numeros(vals []string, flag string) ([]uint64, int) {
 		out = append(out, n)
 	}
 	return out, 0
+}
+
+// memMaxInformado diz se o operador ESCREVEU --mem-max, e não se o valor difere
+// do padrão. A diferença importa: `--mem-max` com o valor padrão continua sendo
+// um pedido, e um pedido que não vai ser atendido precisa ser recusado em voz
+// alta em vez de ignorado.
+func memMaxInformado(fs *flag.FlagSet) bool {
+	visto := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "mem-max" {
+			visto = true
+		}
+	})
+	return visto
 }

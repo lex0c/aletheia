@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lex0c/aletheia/internal/env"
 )
@@ -177,5 +178,82 @@ func TestCamadaDeImagemDeContainerNaoEhVarrida(t *testing.T) {
 	if !citou {
 		t.Errorf("a árvore pulada não foi declarada, nem o caminho para varrê-la: %v",
 			f.PersistDenied["suid"])
+	}
+}
+
+// Panic num trabalhador NÃO pode pendurar a pool.
+//
+// O `rodar` chamava `v.visitar(t)` e `v.terminou()` como duas instruções
+// soltas. Um panic dentro do visitar matava o trabalhador ENTRE as duas: o
+// guardaGoroutine recuperava e o wg.Done liberava, mas `v.ativos` — que o
+// proxima tinha incrementado — nunca voltava. Os outros trabalhadores ficavam
+// presos no laço do proxima, que só devolve false com fila vazia E ativos == 0,
+// girando em Gosched+1ms para sempre. Sem WalkDeadline (o padrão do collect e
+// do scan sem --fs-budget) não havia saída nenhuma.
+//
+// O desfecho era pior que uma queda, e o comentário do guardaGoroutine já dizia
+// isso com todas as letras: "a ferramenta PENDURARIA, sem saída e sem
+// relatório". O invariante do defer tinha sido aplicado aos mutexes e esquecido
+// no contador, que é uma trava de terminação com outro nome.
+//
+// O panic é forçado com `donos` nil: o visitar termina em `v.donos.juntar(...)`
+// sempre que acha dono de arquivo, e receiver nil ali desreferencia. O teste
+// EXIGE ver a lacuna do panic — sem isso ele viraria um no-op silencioso no dia
+// em que alguém puser uma guarda de nil no caminho, passando sem testar nada.
+func TestPanicEmTrabalhadorDeSuidNaoPenduraAVarredura(t *testing.T) {
+	raiz := t.TempDir()
+	for _, d := range []string{"a", "b", "c", "d"} {
+		dir := filepath.Join(raiz, d)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "x"), []byte("bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e := env.Probe(env.Options{Root: raiz})
+	t.Cleanup(func() { e.Close() })
+
+	f := &Facts{}
+	v := &varredura{
+		e: e, f: f,
+		limite: 1000,
+		donos:  nil, // o gatilho do panic
+	}
+	// Caminho VIRTUAL, como suidRaizes: quem traduz para o disco é o env.
+	for _, d := range []string{"/a", "/b", "/c", "/d"} {
+		v.fila = append(v.fila, tarefaDir{dir: d, teto: 4})
+	}
+
+	feito := make(chan struct{})
+	go func() {
+		defer close(feito)
+		v.rodar(4)
+	}()
+
+	select {
+	case <-feito:
+	case <-time.After(10 * time.Second):
+		v.mu.Lock()
+		ativos, fila := v.ativos, len(v.fila)
+		v.mu.Unlock()
+		t.Fatalf("rodar() não voltou em 10s (ativos=%d fila=%d): o contador de "+
+			"ativos vazou num panic e os trabalhadores restantes giram para "+
+			"sempre — a ferramenta pendura sem saída e sem relatório", ativos, fila)
+	}
+
+	if v.ativos != 0 {
+		t.Errorf("ativos=%d depois de rodar() voltar: o contador vazou", v.ativos)
+	}
+	var viuPanic bool
+	for _, m := range f.Partial["suid"] {
+		if strings.Contains(m, "panic") {
+			viuPanic = true
+		}
+	}
+	if !viuPanic {
+		t.Fatalf("nenhum panic foi provocado, então este teste não testou o que "+
+			"diz testar — o gatilho (donos nil) deixou de valer. Lacunas vistas: %v",
+			f.Partial["suid"])
 	}
 }

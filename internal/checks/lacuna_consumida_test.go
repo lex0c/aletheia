@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -138,6 +139,66 @@ func chavesConsumidas(t *testing.T) map[string]bool {
 		}
 	}
 	return out
+}
+
+// A TERCEIRA catraca: `r.Partial` só pode ser ANEXADO, nunca ATRIBUÍDO.
+//
+// As duas acima perguntam se a chave é lida em algum lugar do pacote. Ambas
+// passavam enquanto o check fazia isto:
+//
+//	r.Partial = append(r.Partial, f.Partial["net"]...)   // linha 52
+//	…
+//	r.Partial = partialForOrphanSockets(f)               // linha 106 — apaga
+//
+// A string `f.Partial["net"]` APARECE no fonte, então reConsome a encontrava e
+// declarava a chave consumida. Cinquenta e quatro linhas depois a atribuição
+// jogava fora o que tinha sido anexado, e como o helper devolve nil quando o
+// contador é zero, `res.Partial` chegava VAZIO ao motor — que faz
+// `Coverage.Complete++`. O `correlate.revshell`, que é o check CRITICAL de
+// reverse shell, certificava-se de ter coberto o que devia sobre uma tabela
+// /proc/net que o coletor tinha declarado ter lido pela metade.
+//
+// Um regex sobre o texto não consegue ver isso: ele vê a menção, não a ordem.
+// Esta catraca não tenta ver a ordem — proíbe a FORMA. Anexar é sempre correto
+// (`append(nil, nil...)` continua nil), atribuir só é correto por acidente de
+// posição, e o acidente não sobrevive à próxima edição.
+func TestPartialSoEhAnexadoNuncaAtribuido(t *testing.T) {
+	// Casa `r.Partial =` (ou res.Partial, etc.) quando o que vem depois NÃO é
+	// `append(`. O `[^=]` no fim evita casar `==`.
+	reAtribui := regexp.MustCompile(`(\w+)\.Partial\s*=\s*([^=\s][^\n]*)`)
+
+	nomes, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	var achados []string
+	for _, n := range nomes {
+		if strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(n)
+		if err != nil {
+			t.Fatalf("ler %s: %v", n, err)
+		}
+		for i, ln := range strings.Split(string(b), "\n") {
+			m := reAtribui.FindStringSubmatch(ln)
+			if m == nil || strings.HasPrefix(strings.TrimSpace(m[2]), "append(") {
+				continue
+			}
+			achados = append(achados, n+":"+strconv.Itoa(i+1)+": "+strings.TrimSpace(ln))
+		}
+	}
+	sort.Strings(achados)
+	if len(achados) > 0 {
+		t.Errorf("estes pontos ATRIBUEM a .Partial em vez de anexar:\n  %s\n\n"+
+			"Atribuir apaga tudo que foi anexado antes no mesmo Run — inclusive a "+
+			"lacuna que o coletor emitiu e que o check acabou de propagar. Quando o "+
+			"lado direito devolve nil (todo helper devolve, quando o contador é "+
+			"zero), o resultado chega VAZIO ao motor e ele conta o check como "+
+			"COMPLETO sobre uma fonte que ninguém leu inteira.\n"+
+			"Conserto: `r.Partial = append(r.Partial, <o que estava aqui>...)`.",
+			strings.Join(achados, "\n  "))
+	}
 }
 
 // fontesDoPacote lê os .go NÃO-teste de um diretório. Ler o fonte é o que

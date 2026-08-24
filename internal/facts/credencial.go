@@ -53,7 +53,7 @@ type DestinoConhecido struct {
 
 func collectCredenciais(f *Facts, e *env.Env) {
 	dirs := []string{"/etc/ssh"}
-	for _, h := range homeDirs(e) {
+	for _, h := range homeDirs(f, e, "credencial") {
 		dirs = append(dirs, h+"/.ssh")
 	}
 

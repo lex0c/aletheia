@@ -110,7 +110,17 @@ func unit(name, path string, exec ...facts.ExecLine) facts.Unit {
 	return facts.Unit{Name: name, Path: path, Kind: "service", Scope: "system", Exec: exec}
 }
 
-func ex(k, cmd string) facts.ExecLine { return facts.ExecLine{Key: k, Cmd: cmd} }
+// ex monta a linha como a COLETA a entrega: com os Targets já resolvidos.
+//
+// O campo é o que persist.unit_unowned e persist.unit_exec_suspect consomem —
+// eles não recalculam, de propósito, porque a resolução de
+// PATH/ExecSearchPath/RootDirectory acontece na coleta e recalcular aqui
+// devolveria nome nu onde já havia caminho. Uma fixture sem Targets descreve um
+// estado que o coletor não produz, e o teste passaria a medir outra coisa.
+func ex(k, cmd string) facts.ExecLine {
+	alvos, indet := facts.AlvosEfetivosDeExec(cmd)
+	return facts.ExecLine{Key: k, Cmd: cmd, Targets: alvos, AlvoIndeterminado: indet}
+}
 
 func TestExecSuspectClassifica(t *testing.T) {
 	casos := []struct {
@@ -465,5 +475,59 @@ func TestPreloadReportaSoARaizDaHeranca(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(r.Findings[0].Evidence, " "), "2 processos descendentes") {
 		t.Errorf("evidência: %v", r.Findings[0].Evidence)
+	}
+}
+
+// O SEGUNDO programa de um `sh -c` precisa ser julgado pelo CAMINHO.
+//
+//	ExecStart=/bin/sh -c '/bin/true && /tmp/systemd-helper'
+//
+// shell, `&&`, executável em /tmp. Não é evasão exótica — é o formato de
+// persistência mais comum que existe. O classificador resolvia "o" alvo pela
+// fachada singular e via só o /bin/true, que é inocente; depois que a fachada
+// passou a falhar fechado na cardinalidade ficou pior, devolvendo string vazia.
+//
+// E os vizinhos não cobrem, cada um por decisão própria: persist.unit_unowned
+// exige dirDePacote e /tmp não é território de pacote;
+// integrity.no_package_owner pula suspectDir DE PROPÓSITO, porque assume que
+// este check acusa o caminho. A suposição precisava ser verdade.
+func TestSegundoProgramaEmDiretorioSuspeitoEhAcusado(t *testing.T) {
+	casos := []struct {
+		cmd  string
+		quer string
+	}{
+		{`/bin/sh -c '/bin/true && /tmp/systemd-helper'`, "/tmp/systemd-helper"},
+		{`/bin/sh -c '/usr/bin/legit; /dev/shm/.x'`, "/dev/shm/.x"},
+		{`/bin/sh -c '/usr/bin/legit || /var/tmp/.agent'`, "/var/tmp/.agent"},
+	}
+	for _, c := range casos {
+		u := unit("x.service", "/etc/systemd/system/x.service", ex("ExecStart", c.cmd))
+		f := &facts.Facts{Units: []facts.Unit{u}}
+		r := unitExecSuspect.Run(unitExecSuspect, f, imgEnv())
+		if len(r.Findings) != 1 || r.Findings[0].Sev != check.SevCritical {
+			t.Errorf("%s -> %d achado(s) %v: o segundo programa da linha não foi "+
+				"julgado, e nenhum outro check cobre esse caminho", c.cmd,
+				len(r.Findings), r.Findings)
+			continue
+		}
+		if ev := strings.Join(r.Findings[0].Evidence, " "); !strings.Contains(ev, c.quer) {
+			t.Errorf("%s: a evidência não cita %s\n%s", c.cmd, c.quer, ev)
+		}
+	}
+}
+
+// E o outro lado: um alvo inocente sozinho continua não acusando. Julgar TODOS
+// os alvos não pode virar acusar por qualquer um.
+func TestLinhaComAlvosInocentesNaoAcusa(t *testing.T) {
+	for _, cmd := range []string{
+		`/bin/sh -c '/bin/true && /usr/bin/legit'`,
+		`/usr/bin/legit --flag`,
+		`/bin/sh -c 'cd /srv && /usr/bin/app'`,
+	} {
+		u := unit("ok.service", "/etc/systemd/system/ok.service", ex("ExecStart", cmd))
+		f := &facts.Facts{Units: []facts.Unit{u}}
+		if r := unitExecSuspect.Run(unitExecSuspect, f, imgEnv()); len(r.Findings) != 0 {
+			t.Errorf("%s acusou: %v", cmd, r.Findings)
+		}
 	}
 }

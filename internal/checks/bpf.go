@@ -152,12 +152,19 @@ var bpfSemDono = check.Check{
 				"nenhum processo tem descritor aberto para ele, não há pin no " +
 					"bpffs, não há link e nenhum prog_array o alcança",
 			}
+			// "por uid N" só é dito quando o kernel DISSE. Num kernel < 4.14 o
+			// created_by_uid não existe no bpf_prog_info, e imprimir o zero
+			// atribuía a carga ao root — dado inventado dentro da evidência de
+			// um achado CRITICAL irreversível.
+			autor := "por uid " + strconv.Itoa(int(p.UID))
+			if p.UIDDesconhecido {
+				autor = "por autor NÃO informado por este kernel (created_by_uid " +
+					"só existe a partir do 4.14)"
+			}
 			if p.CarregadoUTC != "" {
-				ev = append(ev, "carregado em "+p.CarregadoUTC+" (UTC), por uid "+
-					strconv.Itoa(int(p.UID)))
+				ev = append(ev, "carregado em "+p.CarregadoUTC+" (UTC), "+autor)
 			} else {
-				ev = append(ev, "carregado por uid "+strconv.Itoa(int(p.UID))+
-					"; o instante não pôde ser datado")
+				ev = append(ev, "carregado "+autor+"; o instante não pôde ser datado")
 			}
 			if m := fix.Motivo(); m != "" {
 				ev = append(ev, m)

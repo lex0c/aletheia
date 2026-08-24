@@ -238,16 +238,34 @@ type ExecLine struct {
 	// deixa essa resolução partir sempre da origem, não de um Cmd já mexido por
 	// uma resolução por-arquivo que o merge invalidou. Interno à coleta.
 	RawCmd string `json:"-"`
-	// Target é o ALVO EFETIVO — o programa que de fato roda, desembrulhados os
-	// wrappers (env, sudo, sh -c, env -S). Computado UMA vez na coleta para que
-	// a pergunta de propriedade e os checks de execução usem a MESMA resposta.
-	Target string `json:"target,omitempty"`
-	// AlvoIndeterminado diz que a linha EXECUTA algo e não deu para provar o
-	// quê — `sh -c` com substituição de comando, subshell, ou só builtin.
+	// Targets são os ALVOS EFETIVOS — os programas que de fato rodam,
+	// desembrulhados os wrappers (env, sudo, sh -c, env -S). Computados UMA vez
+	// na coleta para que a pergunta de propriedade e os checks de execução usem
+	// a MESMA resposta.
 	//
-	// É diferente de Target vazio por não haver Exec: aqui há execução e não há
-	// nome. Sem esta distinção o check calaria igual nos dois casos, e um deles
-	// é uma lacuna que o operador precisa ver.
+	// PLURAL, e essa é a correção que mais custou a aparecer. O campo era
+	// `Target string`, e o modelo inteiro assumia que uma linha de shell tem um
+	// alvo. Não tem: `ExecStart=sh -c '/usr/bin/true && /usr/lib/.backdoor'`
+	// tem dois, e o resolvedor devolvia o PRIMEIRO com AlvoIndeterminado=false
+	// — então o backdoor sumia de candidatosDePropriedade e do
+	// persist.unit_unowned sem deixar lacuna nenhuma. Não dependia de test, de
+	// source, de eval nem de sintaxe complicada: bastava um `&&`.
+	//
+	// Duas rodadas de conserto trataram isso como lista de palavras faltando na
+	// peneira, e as duas erraram o alvo — o defeito era a CARDINALIDADE do
+	// fato, não a gramática.
+	Targets []string `json:"targets,omitempty"`
+	// AlvoIndeterminado diz que ALGUMA PARTE executável da linha não pôde ser
+	// determinada — `sh -c` com substituição de comando, subshell, eval, ou
+	// estrutura de controle.
+	//
+	// É diferente de Targets vazio por não haver Exec: aqui há execução e não
+	// há nome. Sem esta distinção o check calaria igual nos dois casos, e um
+	// deles é uma lacuna que o operador precisa ver.
+	//
+	// E ele CONVIVE com Targets preenchido: em `/usr/bin/legit; eval "$CMD"` a
+	// resposta honesta é "vi /usr/bin/legit, e há uma parte que não sei". Uma
+	// lacuna não apaga o que foi positivamente observado.
 	AlvoIndeterminado bool `json:"target_undetermined,omitempty"`
 }
 
@@ -437,7 +455,7 @@ type ToolArtifact struct {
 }
 
 func collectToolArtifacts(f *Facts, e *env.Env) {
-	homes := homeDirs(e)
+	homes := homeDirs(f, e, "persist")
 	visto := map[string]bool{}
 	var negados []string
 
@@ -752,7 +770,7 @@ func collectUnits(f *Facts, e *env.Env) {
 	}
 
 	// Unit de usuário mora no home, fora das árvores acima (runbook §7.3).
-	homes := homeDirs(e)
+	homes := homeDirs(f, e, "persist")
 	if len(homes) == 0 {
 		f.denyPersist("unit", "/etc/passwd ilegível ou vazio: nenhum home foi "+
 			"vasculhado, e unit de usuário é um esconderijo comum")
@@ -1329,26 +1347,29 @@ func mesclarUnits(f *Facts, units []Unit, e *env.Env) {
 				// agent` desembrulha para `agent`, e sem resolvê-lo o alvo ficava nome
 				// nu — fora do check de dono. `env` roda o programa via PATH, os
 				// mesmos `dirs`.
-				tgt, indet := AlvoEfetivoDeExec(cmd)
+				alvos, indet := AlvosEfetivosDeExec(cmd)
 				units[i].Exec[j].AlvoIndeterminado = indet
-				if indet {
-					// Sem alvo provado não há o que resolver nem o que perguntar
-					// ao dono; quem declara a lacuna é o check.
-					units[i].Exec[j].Target = ""
-					continue
-				}
-				if len(dirs) > 0 && !strings.ContainsRune(strings.TrimLeft(tgt, "-@+!:"), '/') {
-					tgt = resolverNomeNu(e, tgt, dirs)
-				}
-				if rootDir != "" {
-					// O alvo absoluto que não veio pela busca (ExecStart=/usr/bin/x)
-					// ainda precisa do prefixo do chroot; o que veio da busca já
-					// resolveu sob o root, e sobRoot é idempotente.
-					tgt = sobRoot(rootDir, tgt)
+				// A lacuna NÃO descarta os alvos provados: antes, `indet`
+				// zerava o Target e dava `continue`, então numa linha com uma
+				// parte irresolúvel o que ESTAVA provado saía da pergunta de
+				// propriedade junto.
+				var resolvidos []string
+				for _, tgt := range alvos {
+					if len(dirs) > 0 && !strings.ContainsRune(strings.TrimLeft(tgt, "-@+!:"), '/') {
+						tgt = resolverNomeNu(e, tgt, dirs)
+					}
+					if rootDir != "" {
+						// O alvo absoluto que não veio pela busca
+						// (ExecStart=/usr/bin/x) ainda precisa do prefixo do
+						// chroot; o que veio da busca já resolveu sob o root, e
+						// sobRoot é idempotente.
+						tgt = sobRoot(rootDir, tgt)
+					}
+					resolvidos = append(resolvidos, tgt)
 				}
 				// RootImage= não mexe no alvo: a unit inteira é PULADA pelos checks
 				// de arquivo (u.RootImage != ""), com a lacuna já declarada.
-				units[i].Exec[j].Target = tgt
+				units[i].Exec[j].Targets = resolvidos
 			}
 		}
 	}
@@ -1828,7 +1849,7 @@ func parseUnitFile(f *Facts, e *env.Env, path, scope, tipo string, vendor bool) 
 	// checks de caminho suspeito e propriedade veem o alvo concreto.
 	resolverComandosUnit(&u, e)
 	for i := range u.Exec {
-		u.Exec[i].Target, u.Exec[i].AlvoIndeterminado = AlvoEfetivoDeExec(u.Exec[i].Cmd)
+		u.Exec[i].Targets, u.Exec[i].AlvoIndeterminado = AlvosEfetivosDeExec(u.Exec[i].Cmd)
 	}
 	return u
 }
@@ -2144,9 +2165,32 @@ func camposComAspas(s string) []string {
 
 // homeDirs devolve os diretórios pessoais, do passwd do ALVO — nunca do host
 // do analista.
-func homeDirs(e *env.Env) []string {
+//
+// A `chave` é a do coletor que PERGUNTA, e existe porque o silêncio aqui era o
+// falso "limpo" mais barato de provocar em toda a base.
+//
+// Era um `return nil` seco. homeDirs é metade das raízes de varrerCodigo e
+// alimenta também segredo, credencial, trust, ssh e startup — então um
+// /etc/passwd ilegível, ou acima do teto de 32 MiB do env.MaxLeitura, esvaziava
+// todos eles de uma vez sem que UM deles declarasse nada. Medido: a mesma
+// imagem com um webshell em /home/vitima sai `exit=2 RESULT: CRITICAL` com o
+// passwd normal e `exit=1 RESULT: INCOMPLETE — 0 achados` com 34 MB de
+// comentários no fim do passwd (a glibc ignora comentário; o host segue
+// funcionando). E o app.code_backdoor se declarava COMPLETO nas duas.
+//
+// A chave entra por parâmetro em vez de sair de uma constante porque é ela que
+// decide QUAL check degrada — a mesma razão que o comentário do rodarColetor dá
+// para separar chave de nome: "o coletor caiu" sem dizer qual manda o operador
+// procurar no lugar errado.
+func homeDirs(f *Facts, e *env.Env, chave string) []string {
 	b, err := e.ReadFile("/etc/passwd")
 	if err != nil {
+		if env.EhLacuna(err) {
+			f.partial(chave, "/etc/passwd não pôde ser lido ("+env.MotivoDoErro(err)+
+				"): os diretórios pessoais NÃO foram derivados, e tudo que esta "+
+				"varredura faria dentro deles ficou de fora — a ausência de achado "+
+				"em home nenhum NÃO pode ser afirmada")
+		}
 		return nil
 	}
 	seen := map[string]bool{}
@@ -2222,4 +2266,17 @@ func (f *Facts) scannerFoiAteOFim(sc *bufio.Scanner, cat, caminho string) bool {
 		return false
 	}
 	return true
+}
+
+// AlvoUnico devolve o alvo quando a linha tem EXATAMENTE um, e vazio quando
+// tem zero ou vários.
+//
+// É a mesma regra fail-closed da fachada AlvoEfetivoDeExec, e existe para quem
+// só sabe formular a pergunta sobre um alvo. Uma linha com dois programas não
+// tem "o" alvo: devolver o primeiro ali foi a evasão que motivou o plural.
+func (e ExecLine) AlvoUnico() string {
+	if len(e.Targets) != 1 {
+		return ""
+	}
+	return e.Targets[0]
 }

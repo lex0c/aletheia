@@ -48,7 +48,7 @@ func init() {
 		// esses checks declaram e que ninguém provava que eles evitam.
 		Forbid: []string{
 			"proc.memfd_exec", "proc.exe_deleted", "correlate.revshell", "net.pivot",
-			"antiforense.log_rotation_gap", "path.hidden_exec",
+			"path.hidden_exec",
 			// Duas negativas que só um host realista prova: conta bem formada
 			// aparece em passwd E em shadow, e servidor de produção não tem
 			// socket de captura aberto.
@@ -58,6 +58,29 @@ func init() {
 			// "aqui esta pergunta não existe" —, e proibi-lo seria proibir a
 			// ferramenta de declarar o próprio alcance.
 			"priv.account_no_shadow", "net.packet_socket",
+		},
+		// antiforense.log_rotation_gap saiu do Forbid e virou ForbidFinding POR
+		// SEVERIDADE, e a distinção é a mesma que o parágrafo acima faz para o
+		// proc.container_boundary: proibir o ID inteiro proibiria a ferramenta
+		// de declarar o próprio alcance.
+		//
+		// Este host tem as DUAS formas de rotação — `.1`/`.2.gz` no nginx e no
+		// syslog, e `app.log-20260815.gz` (sufixo de DATA) em /var/log/app. A
+		// segunda não passa pelo método de contador, e dizer isso é obrigação:
+		// silenciar faria a família RHEL inteira, onde `dateext` é o padrão de
+		// fábrica, sair com cobertura completa sobre um método que não roda ali.
+		//
+		// O que continua proibido é a ACUSAÇÃO — WARN e CRITICAL. Num host
+		// legítimo com rotação de verdade, o check não pode dizer que alguém
+		// apagou log. Isto é mais forte que o Forbid anterior, não menos:
+		// antes, qualquer disparo falhava; agora falha o disparo ERRADO, e a
+		// nota de escopo é exercida em vez de proibida.
+		ForbidFinding: []Expect{
+			{ID: "antiforense.log_rotation_gap", Sev: "WARNING"},
+			{ID: "antiforense.log_rotation_gap", Sev: "CRITICAL"},
+		},
+		Expect: []Expect{
+			{ID: "antiforense.log_rotation_gap", Sev: "INFO", Subject: "dateext"},
 		},
 		MaxWarn:        11,
 		Exit:           1,

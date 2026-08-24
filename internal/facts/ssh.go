@@ -210,7 +210,7 @@ func collectSSHClientConfig(f *Facts, e *env.Env) {
 	sysPermit := temPermitLocalYes(sysDirs)
 	f.SSHClientExec = append(f.SSHClientExec, execDeDirs(sysDirs, "", sysPermit)...)
 
-	for _, home := range homeDirs(e) {
+	for _, home := range homeDirs(f, e, "ssh") {
 		u := home[strings.LastIndexByte(home, '/')+1:]
 		var dirs []dirCliente
 		coletaDirsCliente(f, e, home+"/.ssh/config", home+"/.ssh", home, map[string]bool{}, &dirs, 0)
@@ -574,7 +574,7 @@ func collectAuthorizedKeys(f *Facts, e *env.Env) {
 	type alvo struct{ user, path string }
 	var alvos []alvo
 
-	for _, home := range homeDirs(e) {
+	for _, home := range homeDirs(f, e, "ssh") {
 		u := home[strings.LastIndexByte(home, '/')+1:]
 		for _, n := range []string{"authorized_keys", "authorized_keys2"} {
 			alvos = append(alvos, alvo{u, home + "/.ssh/" + n})
@@ -582,7 +582,7 @@ func collectAuthorizedKeys(f *Facts, e *env.Env) {
 	}
 	// AuthorizedKeysFile fora do padrão: o caminho com %u por usuário.
 	if p := f.SSH.AuthorizedKeysFile; p != "" && strings.HasPrefix(p, "/") {
-		for _, home := range homeDirs(e) {
+		for _, home := range homeDirs(f, e, "ssh") {
 			u := home[strings.LastIndexByte(home, '/')+1:]
 			alvos = append(alvos, alvo{u, strings.NewReplacer(
 				"%u", u, "%h", home, "%%", "%").Replace(p)})

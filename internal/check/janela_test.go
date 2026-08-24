@@ -97,7 +97,7 @@ func TestAncoraDerivaDoAchadoMaisSevero(t *testing.T) {
 			QuandoFonte: "início do processo"},
 		{ID: "warn.novo", Sev: SevWarn, Quando: "2026-08-16T10:00:00Z", Subject: "y"},
 	}}
-	a := r.DerivarAncora(Janela{})
+	a := r.DerivarAncora(Janela{}, agora)
 	if a.Quando != "2026-08-12T10:00:00Z" {
 		t.Errorf("âncora = %q, queria o crítico mais recente", a.Quando)
 	}
@@ -113,12 +113,12 @@ func TestAncoraDerivaDoAchadoMaisSevero(t *testing.T) {
 // âncora seria fingir que derivou de alguma coisa.
 func TestSemAchadoDatavelNaoInventaAncora(t *testing.T) {
 	r := &Report{Findings: []Finding{{ID: "a", Sev: SevWarn}}}
-	if a := r.DerivarAncora(Janela{}); a.Quando != "" {
+	if a := r.DerivarAncora(Janela{}, agora); a.Quando != "" {
 		t.Errorf("âncora inventado: %+v", a)
 	}
 	// Com --since, o âncora é o que o operador informou, e a origem diz isso.
 	j, _ := ParseJanela("72h", agora)
-	a := r.DerivarAncora(j)
+	a := r.DerivarAncora(j, agora)
 	if a.Quando == "" || a.Origem != "informado em --since 72h" {
 		t.Errorf("âncora com janela = %+v", a)
 	}
@@ -152,5 +152,54 @@ func TestCriticoRecortadoNaoDeixaSairOK(t *testing.T) {
 	}
 	if r.Verdict() == "OK" {
 		t.Error("verdict OK com um crítico recortado é a mentira que a frota lê")
+	}
+}
+
+// A guarda de data futura vale contra o relógio da COLETA, não contra o de quem
+// analisa — e é isso que a torna intransponível.
+//
+// Era `time.Now()` dentro do DerivarAncora. O efeito: a janela em que uma data
+// forjada é aceita cresce sozinha com o tempo. O adversário não precisa acertar
+// nada; basta forjar uma data menor que o atraso entre coletar e analisar, e
+// esperar. Um dump coletado na madrugada e analisado de manhã já aceita
+// qualquer forja dentro daquelas horas — e a âncora sai com Origem "derivado
+// desta execução", que é a ferramenta assinando uma data que o atacante
+// escreveu.
+//
+// O segundo efeito é o determinismo: com o relógio de parede na conta, o MESMO
+// dump analisado duas vezes dá âncoras diferentes assim que um timestamp
+// atravessa o "agora". O drift compara exatamente essas saídas.
+//
+// Aqui `agora` é o instante da coleta (2026-08-17). O achado forjado está DEPOIS
+// dele e, quando este teste foi escrito, ANTES do relógio real — que é a janela
+// exata onde o defeito vivia.
+func TestDataForjadaDepoisDaColetaNaoViraAncora(t *testing.T) {
+	r := &Report{Findings: []Finding{
+		{ID: "crit.real", Sev: SevCritical, Quando: "2026-08-15T10:00:00Z", Subject: "a",
+			QuandoFonte: "início do processo"},
+		{ID: "crit.forjado", Sev: SevCritical, Quando: "2026-08-20T10:00:00Z", Subject: "b",
+			QuandoFonte: "mtime do arquivo"},
+	}}
+	a := r.DerivarAncora(Janela{}, agora)
+	if a.Quando != "2026-08-15T10:00:00Z" {
+		t.Errorf("âncora = %q (de %q): a data POSTERIOR à coleta venceu o desempate. "+
+			"Com o relógio de parede no lugar do e.Now, esta forja passa a ser "+
+			"aceita sozinha, só pelo tempo entre coletar e analisar.", a.Quando, a.De)
+	}
+}
+
+// O mesmo dump analisado em dois instantes diferentes precisa dar a MESMA
+// âncora: é o que o drift compara.
+func TestAncoraNaoDependeDeQuandoSeAnalisa(t *testing.T) {
+	mk := func() *Report {
+		return &Report{Findings: []Finding{
+			{ID: "crit.a", Sev: SevCritical, Quando: "2026-08-16T10:00:00Z", Subject: "a",
+				QuandoFonte: "início do processo"},
+		}}
+	}
+	um := mk().DerivarAncora(Janela{}, agora)
+	dois := mk().DerivarAncora(Janela{}, agora.Add(90*24*time.Hour))
+	if um.Quando != dois.Quando || um.De != dois.De {
+		t.Errorf("a âncora mudou com o relógio: %+v vs %+v", um, dois)
 	}
 }

@@ -59,6 +59,15 @@ type ProgramaBPF struct {
 	// carregado em dois hosts tem a mesma tag, e é por ela que se compara.
 	Tag string `json:"tag,omitempty"`
 	UID uint32 `json:"created_by_uid"`
+	// UIDDesconhecido diz que o kernel NÃO preencheu created_by_uid — o campo
+	// entrou no bpf_prog_info no 4.14, e num 4.13 a struct tem 40 bytes e para
+	// antes dele. O leitor com bounds-check já devolvia 0 corretamente para
+	// "não presente", e o zero era serializado e impresso como fato: a
+	// evidência do achado dizia "carregado por uid 0", atribuindo a carga ao
+	// ROOT num kernel que nunca disse quem carregou. Campo ausente virando zero
+	// virando afirmação — a forma exata do erro que esta ferramenta existe para
+	// não cometer.
+	UIDDesconhecido bool `json:"created_by_uid_unknown,omitempty"`
 	// CarregadoUTC é derivado do relógio de boot. Vazio quando o boot não é
 	// conhecido — campo ausente vira desconhecido, nunca zero.
 	CarregadoUTC string `json:"loaded_utc,omitempty"`
@@ -203,6 +212,8 @@ func collectBPF(f *Facts, e *env.Env) {
 			ID: p.ID, TipoNum: p.TipoNum, Tipo: p.Tipo, Nome: p.Nome,
 			Tag: p.Tag, UID: p.UID, Mapas: p.NumMaps, Instrucoes: p.Insns,
 			CarregadoUTC: quandoCarregou(f, p.CargaNS),
+			// O kbpf já mede quanto o kernel preencheu; até aqui ninguém lia.
+			UIDDesconhecido: p.SemDados,
 		}
 		f.BPF.Programas = append(f.BPF.Programas, pr)
 	}
@@ -522,7 +533,7 @@ func anexosDeCgroup(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]
 
 	prazo := time.Now().Add(prazoCgroup)
 	var naoAbertos []string
-	var consultados, falhasDeQuery int
+	var consultados, falhasDeQuery, semProgQuery int
 	consultar := func(p string) {
 		// FD cru com O_DIRECTORY, no idioma de syscall do resto do kbpf: o
 		// BPF_PROG_QUERY só quer o descritor do diretório do cgroup. Evita o
@@ -539,9 +550,16 @@ func anexosDeCgroup(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]
 			}
 			return
 		}
-		porTipo, errosPorTipo := kbpf.AnexosDeCgroup(fd, kbpf.TiposDeCgroup)
+		porTipo, errosPorTipo, semComando := kbpf.AnexosDeCgroup(fd, kbpf.TiposDeCgroup)
 		syscall.Close(fd)
 		consultados++
+		// Comando ausente (kernel < 4.15) não é "nada anexado": é NADA
+		// PERGUNTADO. Conta como falha de query para que a cobertura caia e o
+		// cobreFixacao pare de autorizar a acusação de programa sem dono.
+		if semComando {
+			semProgQuery++
+			falhasDeQuery++
+		}
 		rel := strings.TrimPrefix(p, base)
 		if rel == "" {
 			rel = "/"
@@ -602,6 +620,17 @@ func anexosDeCgroup(f *Facts, porID map[uint32]*ProgramaBPF, citados map[uint32]
 	if cortouFundo {
 		f.partial("bpf", "árvore de cgroup mais funda que "+strconv.Itoa(maxCgroupDepth)+
 			" níveis: os cgroups abaixo NÃO foram descidos")
+	}
+	// O comando não existe: nada foi perguntado, e isso NÃO é "nada anexado".
+	//
+	// BPF_PROG_QUERY é do 4.15. Antes dele o bpf(2) devolve EINVAL para o
+	// comando inteiro, com a mesma cara de "este attach type não existe" — e a
+	// regra por tipo engolia os 28 calada, deixando a árvore "completa" sobre
+	// zero consultas bem-sucedidas.
+	if semProgQuery > 0 {
+		f.partial("bpf", "este kernel não tem BPF_PROG_QUERY (o comando é do 4.15): "+
+			"os anexos de cgroup de "+strconv.Itoa(semProgQuery)+" cgroup(s) NÃO "+
+			"foram enumerados, e a ausência de anexo NÃO pode ser afirmada a partir daqui")
 	}
 	// Cobertura COMPLETA da árvore: nenhum teto, nenhum prazo, nenhum cgroup
 	// ilegível ou não aberto. Cada um desses é um lugar onde um anexo pode

@@ -135,7 +135,7 @@ var shellDeServico = check.Check{
 			}
 			r.Findings = append(r.Findings, fd)
 		}
-		r.Partial = partialForUnreadable(semExe)
+		r.Partial = append(r.Partial, partialForUnreadable(semExe)...)
 		return r
 	},
 }

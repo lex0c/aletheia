@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -347,5 +348,69 @@ func TestFifoNoLugarDoArquivoNaoPenduraENaoEngoleAFalha(t *testing.T) {
 	}
 	if !strings.Contains(c.Erros[0].Motivo, "fifo") {
 		t.Errorf("o motivo não diz o que foi encontrado: %q", c.Erros[0].Motivo)
+	}
+}
+
+// Device é recusado ANTES de o open do driver rodar — para device, o estrago
+// mora no open(2), não no read(2).
+//
+// O conserto anterior fazia O_RDONLY|O_NONBLOCK e só DEPOIS perguntava ao fstat
+// se era arquivo comum. Tarde: a API de watchdog do kernel é explícita — o
+// temporizador ARMA quando /dev/watchdog é aberto, e com `nowayout` fechar não
+// desarma. O comentário citava /dev/watchdog como a razão de existir e a
+// implementação deixava exatamente ele passar.
+//
+// O teste não pode abrir um watchdog para provar isso (reiniciaria a máquina),
+// então mede a propriedade equivalente e verificável: sobre um device de
+// caractere, a recusa acontece e NENHUM descritor de leitura chega a existir. O
+// /dev/null serve de dublê — mesmo tipo, mesma classe de open, sem consequência.
+func TestDeviceEhRecusadoSemAbrirODriver(t *testing.T) {
+	fh, err := abrirRegularProvado("/dev/null")
+	if err == nil {
+		fh.Close()
+		t.Fatal("um device de caractere foi ABERTO para leitura: o open do driver " +
+			"rodou, e num /dev/watchdog isso já armou o temporizador do host " +
+			"investigado — a recusa depois disso chega tarde")
+	}
+	if !strings.Contains(err.Error(), "device") {
+		t.Errorf("a recusa não nomeia o que encontrou: %v", err)
+	}
+
+	// E o caso que NÃO pode ser perdido junto: arquivo comum continua abrindo,
+	// e por descritor — é assim que o exe apagado sobrevive.
+	dir := t.TempDir()
+	alvo := filepath.Join(dir, "bin")
+	if err := os.WriteFile(alvo, []byte("conteudo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := abrirRegularProvado(alvo)
+	if err != nil {
+		t.Fatalf("arquivo comum deixou de abrir: %v", err)
+	}
+	defer ok.Close()
+	b, _ := io.ReadAll(ok)
+	if string(b) != "conteudo" {
+		t.Errorf("leu %q pelo descritor reaberto", b)
+	}
+}
+
+// O exe de um processo vivo continua preservável pelo caminho novo.
+//
+// É a peça mais valiosa deste pacote: /proc/<pid>/exe abre o binário mesmo
+// depois do unlink, e um `kill` destrói a única cópia. A reabertura por
+// /proc/self/fd/N preserva isso porque reabre o INODE pinado, não o caminho —
+// se ela tivesse sido feita por nome, o exe apagado deixaria de ser coletável e
+// o conserto de segurança teria custado a evidência que o pacote existe para
+// salvar.
+func TestExeDeProcessoVivoContinuaPreservavel(t *testing.T) {
+	fh, err := abrirRegularProvado("/proc/self/exe")
+	if err != nil {
+		t.Fatalf("/proc/self/exe deixou de abrir: %v — o exe é a peça que morre "+
+			"com o processo, e sem ela o preserve perde a razão de existir", err)
+	}
+	defer fh.Close()
+	b := make([]byte, 4)
+	if n, _ := fh.Read(b); n != 4 || string(b) != "\x7fELF" {
+		t.Errorf("o descritor reaberto não é o binário: %q", b[:n])
 	}
 }

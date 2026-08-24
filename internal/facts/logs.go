@@ -219,12 +219,47 @@ func (f *Facts) BuracosNaRotacao() map[string][]int {
 		// Do 1 até o maior presente: o que faltar no meio foi removido. A
 		// geração 0 não entra — um arquivo vivo ausente é outra história, e
 		// distribuição nenhuma garante que ele exista.
+		//
 		// TETO: `maior` sai de um Atoi do sufixo de um NOME DE ARQUIVO, e um
 		// `touch /var/log/x.500000000` derrubava o processo por falta de
 		// memória — exit 2, que a frota lê como comprometimento. Rotação de
 		// verdade não passa de algumas dezenas de gerações.
+		//
+		// O teto DESCARTA A GERAÇÃO ABSURDA, e não a série.
+		//
+		// Antes ele fazia `continue` sobre a base inteira, e isso entregava ao
+		// atacante um jeito barato de desligar o check: um `touch
+		// /var/log/auth.log.401` ao lado de auth.log.1 e auth.log.3 fazia o
+		// buraco REAL da geração 2 — a semana que ele apagou — deixar de ser
+		// procurado. A defesa contra o custo virava a ferramenta de quem ela
+		// devia pegar.
 		if maior > maxGeracoes {
-			continue
+			var reais []int
+			var absurdas int
+			for _, g := range gers {
+				if g <= maxGeracoes {
+					reais = append(reais, g)
+					continue
+				}
+				absurdas++
+			}
+			f.partial("logs", base+": "+strconv.Itoa(absurdas)+" arquivo(s) com "+
+				"sufixo de geração acima de "+strconv.Itoa(maxGeracoes)+
+				" foram DESCARTADOS da análise de rotação (rotação de verdade não "+
+				"passa de algumas dezenas): o número saiu do nome do arquivo, que "+
+				"o host escolhe")
+			if len(reais) == 0 {
+				continue
+			}
+			gers = reais
+			maior = gers[len(gers)-1]
+			if maior == 0 {
+				continue
+			}
+			tem = map[int]bool{}
+			for _, g := range gers {
+				tem[g] = true
+			}
 		}
 		var faltam []int
 		for g := 1; g < maior; g++ {

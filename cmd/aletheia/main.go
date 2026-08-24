@@ -1176,19 +1176,39 @@ func tipoDeSaidaRecusado(m os.FileMode) string {
 		// escolhe a hora de trocar é um host possivelmente hostil.
 		return "virou um arquivo comum entre a conferência e a abertura. Esta " +
 			"ferramenta nunca sobrescreve arquivo no host sob investigação."
-	case m&os.ModeDevice != 0 && m&os.ModeCharDevice == 0:
-		// Device de BLOCO: nenhum uso legítimo, e o estrago é o disco do host
-		// sob investigação. Era o desfecho de um `dump.json -> /dev/sda`
-		// plantado no diretório de incidente — o Stat via "device", o ramo
-		// permissivo aceitava, e o dump ia por cima da tabela de partição com
-		// exit 0 anunciando sucesso.
-		return "é (ou aponta para) um DEVICE DE BLOCO. Escrever ali destruiria o " +
-			"conteúdo do disco do host investigado — recusado. Se o caminho é um " +
-			"link no diretório de incidente, ele não estava lá por acaso."
+	case m&os.ModeDevice != 0:
+		// DEVICE, de bloco OU de caractere. A permissão anterior valia só para
+		// bloco, sobre a premissa de que "escrever num char device não destrói
+		// nada" — e ela é falsa. O Linux tem /dev/mem (memória física),
+		// /dev/kmem, /dev/port (portas de I/O) e /dev/watchdog, todos de
+		// caractere, e o watchdog nem precisa do write: ele ARMA no open, e com
+		// `nowayout` fechar não desarma.
+		//
+		// O caso legítimo que a permissão existia para atender continua
+		// atendido, e por um caminho melhor: `--json -` escreve no stdout, e aí
+		// quem abriu /dev/console foi o SHELL do operador, não o scanner:
+		//
+		//	aletheia scan --json - > /dev/console
+		//
+		// A decisão de escrever num device passa a ser de quem tem contexto para
+		// tomá-la. Vale notar que a permissão já era meio quebrada na prática:
+		// `--json /dev/stdout` com o stdout redirecionado para arquivo é visto
+		// pelo os.Stat como arquivo COMUM, e já era recusado — o ramo permissivo
+		// só valia quando o stdout era terminal.
+		return "é (ou aponta para) um DEVICE. Escrever ali pode destruir o disco " +
+			"do host investigado (/dev/sda), alterar memória física (/dev/mem) ou " +
+			"armar um temporizador de reinício (/dev/watchdog) — e um device ARMA " +
+			"no open, antes de qualquer byte. Para console ou stdout use `--json -` " +
+			"e redirecione no shell. Se o caminho é um link no diretório de " +
+			"incidente, ele não estava lá por acaso."
+	case m&os.ModeSocket != 0:
+		// Socket não aceita write() comum sem estar conectado, e um "destino"
+		// que falha no meio da escrita deixa dump pela metade sem dizer.
+		return "é um SOCKET, e não um destino de arquivo — recusado."
 	}
-	// char device, fifo e socket seguem permitidos: /dev/stdout, /dev/console e
-	// pipe nomeado são uso automatizado legítimo, e escrever neles não destrói
-	// nada. Note que /dev/stdout É um symlink — recusar link por princípio
-	// quebraria exatamente o caso que este ramo existe para atender.
+	// Sobra o FIFO, e ele segue permitido: `mkfifo saida && aletheia scan --json
+	// saida` é uso automatizado legítimo, escrever num pipe não destrói nada, e
+	// o O_NONBLOCK da abertura já transforma "sem leitor do outro lado" em ENXIO
+	// imediato em vez de travamento.
 	return ""
 }

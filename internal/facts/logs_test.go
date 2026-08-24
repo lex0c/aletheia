@@ -1,6 +1,9 @@
 package facts
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // `dateext` é o padrão de fábrica da família RHEL, e o parser só entendia
 // contador.
@@ -80,5 +83,53 @@ func TestSerieDatadaNaoViraBuracoEEhDeclarada(t *testing.T) {
 	}
 	if len(g.SeriesDatadas()) != 0 {
 		t.Errorf("série com contador marcada como datada: %v", g.SeriesDatadas())
+	}
+}
+
+// Um número de geração absurdo descarta a GERAÇÃO, nunca a série.
+//
+// O teto de maxGeracoes existe porque `maior` sai de um Atoi do sufixo de um
+// nome de arquivo, e um `touch /var/log/x.500000000` derrubava o processo por
+// falta de memória. Mas ele fazia `continue` sobre a base inteira — e isso
+// entregava ao atacante um jeito barato de DESLIGAR o check: um
+// `touch /var/log/auth.log.401` ao lado faz o buraco real da geração 2 deixar
+// de ser procurado. A defesa contra o custo virava ferramenta de quem ela devia
+// pegar.
+func TestGeracaoAbsurdaNaoDesligaAAnaliseDaSerie(t *testing.T) {
+	f := &Facts{Logs: []ArquivoDeLog{
+		{Path: "/var/log/auth.log", Base: "/var/log/auth.log", Geracao: 0},
+		{Path: "/var/log/auth.log.1", Base: "/var/log/auth.log", Geracao: 1},
+		{Path: "/var/log/auth.log.3", Base: "/var/log/auth.log", Geracao: 3},
+		// O plantado pelo atacante.
+		{Path: "/var/log/auth.log.401", Base: "/var/log/auth.log", Geracao: 401},
+	}}
+	b := f.BuracosNaRotacao()
+	faltam := b["/var/log/auth.log"]
+	if len(faltam) != 1 || faltam[0] != 2 {
+		t.Errorf("buracos = %v, queria [2]: a geração 401 desligou a análise da "+
+			"série inteira, e a semana que o atacante apagou deixou de ser "+
+			"procurada", faltam)
+	}
+	// E o descarte é DECLARADO: silenciar seria trocar um problema por outro.
+	var disse bool
+	for _, m := range f.Partial["logs"] {
+		if strings.Contains(m, "401") || strings.Contains(m, "DESCARTADO") {
+			disse = true
+		}
+	}
+	if !disse {
+		t.Errorf("o descarte da geração absurda não foi declarado: %v", f.Partial["logs"])
+	}
+}
+
+// E a razão de o teto existir continua valendo: o número gigante não pode virar
+// um laço de 500 milhões de voltas.
+func TestGeracaoGiganteNaoViraLacoDeMemoria(t *testing.T) {
+	f := &Facts{Logs: []ArquivoDeLog{
+		{Path: "/var/log/x", Base: "/var/log/x", Geracao: 0},
+		{Path: "/var/log/x.500000000", Base: "/var/log/x", Geracao: 500000000},
+	}}
+	if b := f.BuracosNaRotacao(); len(b) > 0 {
+		t.Errorf("uma série com só a geração absurda produziu buracos: %v", b)
 	}
 }

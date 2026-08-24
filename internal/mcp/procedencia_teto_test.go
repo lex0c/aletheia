@@ -3,6 +3,8 @@ package mcp
 import (
 	"strings"
 	"testing"
+
+	"github.com/lex0c/aletheia/internal/env"
 )
 
 // Um escalar da procedência não pode inutilizar a sessão inteira.
@@ -70,5 +72,61 @@ func TestProvenanceEstaEntreOsCaminhosComTextoDoAlvo(t *testing.T) {
 				"de artefato não autenticado — texto do atacante numa região que a "+
 				"resposta afirma ser de autoria da ferramenta.", r)
 		}
+	}
+}
+
+// O teto por ESCALAR não alcança `caps`, que é um array — e o array reabre o
+// mesmo DoS de sessão inteira.
+//
+// O dump não é autenticado: quem o escreveu escolhe o que ele diz. Com cem mil
+// entradas em `caps`, ou com mil nomes gigantes, a procedência volta a estourar
+// o MaxResultado de TODA resposta — e a consequência é a que o teste acima
+// descreve: o snapshot.capture sucede por dentro, o id nunca chega ao modelo, e
+// a sessão fica irrecuperável.
+//
+// A canonicalização resolve pela forma, e não por mais um teto: capacidade é
+// conjunto, então remontar num bitset e devolver Names() dá uma lista cujo
+// tamanho é limitado pelo que ESTE binário conhece. O que não é reconhecido
+// vira CONTAGEM — o fato "havia nomes que não entendi" sobrevive sem deixar o
+// alvo escolher o tamanho da resposta.
+func TestCapsHostilNaoInflaOEnvelope(t *testing.T) {
+	var hostis []string
+	for i := 0; i < 50000; i++ {
+		hostis = append(hostis, "filesystem") // repetição pura
+	}
+	for i := 0; i < 500; i++ {
+		hostis = append(hostis, strings.Repeat("Z", 4096)) // nomes gigantes
+	}
+	caps, estranhas := env.CapsDeNomes(hostis)
+	nomes := caps.Names()
+
+	if len(nomes) > 64 {
+		t.Errorf("caps canonicalizado saiu com %d entradas: o tamanho ainda depende "+
+			"do que o dump traz, e não do que este binário conhece", len(nomes))
+	}
+	var bytes int
+	for _, n := range nomes {
+		bytes += len(n)
+	}
+	if bytes > MaxCampoProcedencia {
+		t.Errorf("caps ocupa %d bytes — acima do teto de um escalar, e ele entra em "+
+			"TODO envelope", bytes)
+	}
+	// Repetição vira uma entrada só, e o nome gigante não é ecoado.
+	var vezes int
+	for _, n := range nomes {
+		if n == "filesystem" {
+			vezes++
+		}
+		if len(n) > 64 {
+			t.Errorf("nome de capacidade escolhido pelo alvo foi ECOADO (%d bytes)", len(n))
+		}
+	}
+	if vezes != 1 {
+		t.Errorf("filesystem apareceu %d vezes: a lista não foi deduplicada", vezes)
+	}
+	if len(estranhas) != 500 {
+		t.Errorf("os %d nomes desconhecidos precisam ser CONTADOS para virar "+
+			"unknown_caps_count, não engolidos", len(estranhas))
 	}
 }

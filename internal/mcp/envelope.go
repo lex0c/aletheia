@@ -3,6 +3,7 @@ package mcp
 import (
 	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/dump"
+	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
 	"strconv"
 )
@@ -66,6 +67,16 @@ type Procedencia struct {
 	ColetadoPor string   `json:"collected_by,omitempty"`
 	ColetaSHA   string   `json:"collector_sha256,omitempty"`
 	Caps        []string `json:"caps,omitempty"`
+	// CapsDesconhecidas conta os nomes de capacidade que este binário não
+	// reconhece, em vez de ecoá-los.
+	//
+	// A lista vem de um artefato que o envelope declara `authenticated: false`,
+	// e o teto por ESCALAR não a alcançava: `caps` é um array, e cem mil
+	// entradas — ou mil nomes gigantes — reabrem exatamente o DoS que o
+	// MaxCampoProcedencia fecha, com a mesma consequência de sessão
+	// irrecuperável. Contar em vez de repetir mantém o fato ("havia nomes que
+	// não entendi") sem deixar o alvo escolher o tamanho da resposta.
+	CapsDesconhecidas int `json:"unknown_caps_count,omitempty"`
 
 	// Redacao é o que o ARTEFATO PROVA sobre a própria redação — nunca o que o
 	// servidor gostaria de afirmar sobre ele.
@@ -176,12 +187,23 @@ func ProcedenciaDeDump(id string, d *dump.Dump, sidecar, escopo string) Proceden
 		// declara NÃO autenticado: quem escreveu o dump escolheu o que eles
 		// dizem. Passam pelo mesmo teto que o hostname.
 		ColetadoEm: cortarCampoDoAlvo(a.CollectedAt), ColetadoPor: cortarCampoDoAlvo(a.Tool),
-		ColetaSHA: cortarCampoDoAlvo(a.ToolSHA), Caps: a.Caps,
+		ColetaSHA: cortarCampoDoAlvo(a.ToolSHA),
 		// DO ARTEFATO, e não do modo do servidor.
 		Redacao: string(d.Redacao.Estado()),
 		Sidecar: sidecar,
 		Escopo:  escopo,
 	}
+	// Caps CANONICALIZADO, e não repassado cru.
+	//
+	// CapsDeNomes remonta o conjunto num bitset e Names() o devolve na ordem
+	// fixa da tabela, cada capacidade no máximo uma vez — então o tamanho passa
+	// a ser limitado pelo que este binário conhece, e não pelo que o dump traz.
+	// A infraestrutura já existia e já era usada pelo dump.Env(); só esta borda
+	// tinha ficado de fora.
+	caps, estranhas := env.CapsDeNomes(a.Caps)
+	p.Caps = caps.Names()
+	p.CapsDesconhecidas = len(estranhas)
+
 	if d.Facts != nil {
 		p.Host = cortarCampoDoAlvo(d.Facts.Host.Hostname)
 	}

@@ -1,6 +1,9 @@
 package facts
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // O alvo de `sh -c` era o primeiro token cru, e isso produzia alvos que não são
 // programa: "X=1", "exec", "cd". Não é erro neutro — o unit_unowned pergunta a
@@ -90,5 +93,62 @@ func TestTetoDeWrappersDeclaraIndeterminadoENaoAlvoVazio(t *testing.T) {
 			"/usr/bin/env /usr/bin/env /usr/bin/env /usr/lib/.backdoor")
 	if alvo != "/usr/lib/.backdoor" || indet {
 		t.Errorf("sete wrappers deviam resolver: alvo=%q indet=%v", alvo, indet)
+	}
+}
+
+// Sintaxe de CONTROLE do shell não pode virar "alvo resolvido".
+//
+// O `default` do parser devolvia o primeiro token não tratado como alvo
+// provado, e palavra reservada cai ali. O resultado era a MESMA classe de
+// defeito que este arquivo existe para não cometer — o binário real fora da
+// pergunta de propriedade, sem lacuna — só que alcançada com sintaxe de shell
+// perfeitamente normal:
+//
+//	ExecStart=sh -c 'if test -e /tmp/a; then exec /usr/lib/.backdoor; fi'
+//	  -> alvo "if", AlvoIndeterminado=false
+//	  -> /usr/lib/.backdoor nunca entra em candidatosDePropriedade
+//	  -> persist.unit_unowned não avalia, e não declara nada
+//
+// A resposta certa não é escrever um shell: é dizer "não sei". O sistema já
+// sabe tratar indeterminado.
+func TestSintaxeDeControleDoShellViraIndeterminado(t *testing.T) {
+	casos := []string{
+		`/bin/sh -c 'if test -e /tmp/a; then exec /usr/lib/systemd/.backdoor; fi'`,
+		`/bin/sh -c 'for i in 1 2; do /usr/lib/.x; done'`,
+		`/bin/sh -c 'while true; do /usr/lib/.x; done'`,
+		`/bin/sh -c 'until false; do /usr/lib/.x; done'`,
+		`/bin/sh -c 'case $x in a) /usr/lib/.x ;; esac'`,
+		`/bin/sh -c '{ /usr/lib/.x; }'`,
+		`/bin/sh -c 'time /usr/lib/.x'`,
+	}
+	for _, c := range casos {
+		alvo, indet := AlvoEfetivoDeExec(c)
+		if !indet {
+			t.Errorf("alvo=%q RESOLVIDO para uma linha com estrutura de shell: %s\n"+
+				"O programa real está adiante, e afirmar o token de controle tira "+
+				"o binário da pergunta de propriedade sem deixar lacuna.", alvo, c)
+		}
+	}
+}
+
+// Texto DENTRO DE ASPAS nunca vira executável.
+//
+// separaOperadoresDeShell punha espaço em volta de `;` sem olhar aspas, e o
+// comentário apostava que isso "no máximo leva a indeterminado". Medido, não
+// levava: o `;` forjado dentro da string encerrava o consumo do builtin e o
+// resto do TEXTO virava programa afirmado.
+func TestSeparadorDentroDeAspasNaoFabricaPrograma(t *testing.T) {
+	casos := []string{
+		`/bin/sh -c 'echo "texto; /bin/nao-roda"'`,
+		`/bin/sh -c 'echo "a | /bin/nao-roda"'`,
+		`/bin/sh -c 'logger "falha && /bin/nao-roda"'`,
+	}
+	for _, c := range casos {
+		alvo, _ := AlvoEfetivoDeExec(c)
+		if strings.Contains(alvo, "nao-roda") {
+			t.Errorf("alvo=%q saiu de dentro de uma string: %s\n"+
+				"Aquele caminho nunca executa — é uma pergunta de propriedade "+
+				"sobre texto, e o programa real sumiu do lugar dele.", alvo, c)
+		}
 	}
 }

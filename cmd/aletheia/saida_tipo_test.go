@@ -28,10 +28,13 @@ func TestTipoDeSaidaRecusaDeviceDeBlocoEAceitaOsLegitimos(t *testing.T) {
 			"escrever ali destrói o disco do host investigado"},
 		{"arquivo comum", 0, true,
 			"trocado entre a conferência e a abertura — nunca sobrescrever"},
-		{"char device (/dev/stdout, /dev/console)", os.ModeDevice | os.ModeCharDevice, false,
-			"uso automatizado legítimo, e escrever não destrói nada"},
-		{"fifo (pipe nomeado)", os.ModeNamedPipe, false, "uso legítimo"},
-		{"socket", os.ModeSocket, false, "uso legítimo"},
+		{"char device (/dev/mem, /dev/port, /dev/watchdog)", os.ModeDevice | os.ModeCharDevice, true,
+			"/dev/mem escreve memória física e /dev/watchdog ARMA no open — a " +
+				"premissa de que char device é inofensivo é falsa"},
+		{"socket", os.ModeSocket, true, "não é destino de arquivo"},
+		{"fifo (pipe nomeado)", os.ModeNamedPipe, false,
+			"escrever num pipe não destrói nada, e o O_NONBLOCK já resolve o " +
+				"caso sem leitor"},
 	}
 	for _, c := range casos {
 		t.Run(c.nome, func(t *testing.T) {

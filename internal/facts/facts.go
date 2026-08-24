@@ -316,11 +316,21 @@ import (
 //	     forma que fazia o antiforense.wtmp_cleared disparar CRITICAL
 //	     irreversível em jump host RHEL saudável — e o log_rotation_gap não
 //	     achar buraco nenhum, estruturalmente, na família inteira.
-//	   ExecLine.AlvoIndeterminado  o teto de 8 wrappers devolvia `("", false)`,
+//	   ExecLine.AlvoIndeterminado  DUAS mudanças, e as duas ampliam quando a
+//	     linha responde "não sei". Primeiro o teto de 8 wrappers devolvia `("", false)`,
 //	     e o false ali significa "alvo PROVADO": a ferramenta afirmava ter
 //	     provado que a linha não aponta para lugar nenhum. Hoje é `true`. Num
 //	     dump v21 aquelas linhas vêm marcadas como provadas, e o binário real
 //	     continua fora da pergunta de propriedade, sem lacuna.
+//	     Depois, o parser de `sh -c` deixou de chamar SINTAXE DE CONTROLE de
+//	     alvo: `if`, `for`, `while`, `case`, `{` e companhia devolviam o próprio
+//	     token com AlvoIndeterminado=false, então
+//	     `sh -c 'if test -e /x; then exec /usr/lib/.backdoor; fi'` saía com alvo
+//	     "if" e o backdoor nunca entrava em candidatosDePropriedade — a mesma
+//	     classe de defeito, alcançada com sintaxe de shell normal. Junto, o
+//	     tokenizer passou a respeitar aspas: `echo "a | /bin/x"` afirmava
+//	     `/bin/x` como programa, que é uma pergunta de propriedade sobre TEXTO.
+//	     Num dump v21 esses dois casos vêm com o alvo falso e sem lacuna.
 const SchemaVersion = 22
 
 // Facts é o retrato do host.

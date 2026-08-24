@@ -119,7 +119,7 @@ func AlvoEfetivoDeExec(cmd string) (string, bool) {
 // substituição de comando e subshell: ali o alvo depende de execução, e afirmar
 // qualquer coisa seria inventar.
 func alvoDeLinhaDeShell(linha string) (string, bool) {
-	toks := strings.Fields(separaOperadoresDeShell(descascaAspaBorda(strings.TrimSpace(linha))))
+	toks := camposDeShell(separaOperadoresDeShell(descascaAspaBorda(strings.TrimSpace(linha))))
 	for i := 0; i < len(toks); i++ {
 		t := descascaAspaBorda(toks[i])
 		switch {
@@ -130,6 +130,22 @@ func alvoDeLinhaDeShell(linha string) (string, bool) {
 			return "", true
 		case ehSeparadorDeShell(t):
 			continue
+		case palavraReservadaDeShell[t]:
+			// ESTRUTURA DE CONTROLE: a linha tem gramática que este parser não
+			// interpreta, e o programa de verdade está adiante.
+			//
+			// O `default` devolvia o token como ALVO RESOLVIDO, então
+			// `sh -c 'if test -e /tmp/a; then exec /usr/lib/.backdoor; fi'`
+			// saía com alvo "if" e AlvoIndeterminado=false. O efeito é
+			// exatamente o bug que este arquivo existe para não cometer: o
+			// binário real some da pergunta de propriedade, o ramo
+			// `if ex.AlvoIndeterminado` de checks/systemd.go não é tomado, e
+			// não há finding nem lacuna. Só que por sintaxe de shell normal.
+			//
+			// Não se conserta escrevendo um shell. Conserta-se dizendo a
+			// verdade: o que exige interpretação vira "não sei", e o resto do
+			// sistema já sabe tratar isso.
+			return "", true
 		case ehAtribuicaoDeShell(t), transparenteDeShell[t]:
 			continue
 		case builtinDeShell[t]:
@@ -155,8 +171,39 @@ func alvoDeLinhaDeShell(linha string) (string, bool) {
 // leva a "indeterminado", que é o lado seguro de errar.
 func separaOperadoresDeShell(s string) string {
 	var b strings.Builder
+	// DENTRO DE ASPAS não há operador.
+	//
+	// O comentário acima apostava que um espaço a mais dentro de aspas "no
+	// máximo leva a indeterminado, que é o lado seguro de errar". Medido, não
+	// levava: `sh -c 'echo "texto; /bin/nao-roda"'` devolvia
+	// alvo=/bin/nao-roda com indeterminado=false. O `;` forjado dentro da
+	// string encerrava o consumo do builtin `echo`, e o resto do TEXTO virava
+	// um programa afirmado — uma pergunta de propriedade sobre um caminho que
+	// nunca executa, e o `echo` real desaparecendo do lugar dele.
+	//
+	// O rastreamento é o mínimo: aspa simples não interpreta nada até a próxima
+	// aspa simples; aspa dupla idem, respeitando a barra invertida.
+	var aspa byte
 	for i := 0; i < len(s); i++ {
 		c := s[i]
+		switch {
+		case aspa != 0:
+			if c == '\\' && aspa == '"' && i+1 < len(s) {
+				b.WriteByte(c)
+				i++
+				b.WriteByte(s[i])
+				continue
+			}
+			if c == aspa {
+				aspa = 0
+			}
+			b.WriteByte(c)
+			continue
+		case c == '\'' || c == '"':
+			aspa = c
+			b.WriteByte(c)
+			continue
+		}
 		if c != ';' && c != '|' && c != '&' {
 			b.WriteByte(c)
 			continue
@@ -295,4 +342,76 @@ func firstTokenExec(s string) string {
 func colapsaBrancoExec(s string) string {
 	s = strings.ReplaceAll(s, "$IFS", " ")
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// palavraReservadaDeShell é a gramática de controle que este parser NÃO
+// interpreta — e por isso declara indeterminado em vez de apontar um token.
+//
+// A peneira é conservadora de propósito: cada entrada aqui é uma construção
+// cujo programa de verdade está em outro lugar da linha. Nomear o token de
+// controle como alvo é a pior das duas respostas possíveis, porque tira o
+// binário real da pergunta de propriedade SEM deixar lacuna.
+var palavraReservadaDeShell = map[string]bool{
+	"if": true, "then": true, "elif": true, "else": true, "fi": true,
+	"for": true, "select": true, "while": true, "until": true,
+	"do": true, "done": true, "in": true,
+	"case": true, "esac": true, "function": true,
+	"{": true, "}": true, "[[": true, "]]": true,
+	// `time` é palavra reservada do shell antes de ser /usr/bin/time, e a
+	// forma reservada mede o comando SEGUINTE. Indeterminado é o lado certo de
+	// errar aqui: o alternativo é apontar "time" como o programa.
+	"time": true, "coproc": true,
+}
+
+// camposDeShell separa por branco, mas trata TRECHO ENTRE ASPAS como um token.
+//
+// O strings.Fields não sabe de aspas, e por isso a proteção do
+// separaOperadoresDeShell não bastava sozinha: em
+// `echo "a | /bin/nao-roda"` o `|` já vem cercado de espaços DENTRO da string,
+// então o Fields o promovia a token próprio sem ninguém ter inserido nada. O
+// builtin `echo` parava de consumir naquele separador falso e o resto do TEXTO
+// — `/bin/nao-roda"` — caía no default e virava um programa afirmado.
+//
+// O efeito é uma pergunta de propriedade sobre um caminho que nunca executa, e
+// o programa real desaparecendo do lugar dele. Com o trecho citado inteiro num
+// token só, o builtin o consome como argumento e a linha responde
+// indeterminado — que é a verdade.
+//
+// Aspa não fechada leva o resto da linha para um token só, e daí para
+// indeterminado: o lado seguro de errar.
+func camposDeShell(s string) []string {
+	var out []string
+	var b strings.Builder
+	var aspa byte
+	empurra := func() {
+		if b.Len() > 0 {
+			out = append(out, b.String())
+			b.Reset()
+		}
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case aspa != 0:
+			if c == '\\' && aspa == '"' && i+1 < len(s) {
+				b.WriteByte(c)
+				i++
+				b.WriteByte(s[i])
+				continue
+			}
+			if c == aspa {
+				aspa = 0
+			}
+			b.WriteByte(c)
+		case c == '\'' || c == '"':
+			aspa = c
+			b.WriteByte(c)
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			empurra()
+		default:
+			b.WriteByte(c)
+		}
+	}
+	empurra()
+	return out
 }

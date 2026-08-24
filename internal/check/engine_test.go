@@ -483,3 +483,87 @@ func TestVolatilTambemMontaLacunaDeColeta(t *testing.T) {
 		t.Fatalf("o retorno cedo do volátil perdeu a lacuna: %v", r.Coverage.CollectorGaps)
 	}
 }
+
+// O ESCOPO DINÂMICO: a pergunta que não existe neste host sai do DENOMINADOR.
+//
+// É a quarta forma de escopo do motor, e a única que só os FATOS respondem — as
+// outras três (modo, capability sem mecanismo, comparação ausente) saem do
+// ambiente. Sem ela, um check de log num host journald-only sairia COMPLETO
+// tendo olhado o vazio: nada falhou, e é isso que torna o falso "limpo"
+// convincente.
+func TestEscopoDinamicoSaiDoDenominador(t *testing.T) {
+	rodou := false
+	c := mkCheck("pergunta-que-nao-cabe", func(c *Check) {
+		c.Escopo = func(*facts.Facts, *env.Env) (bool, string, []string) {
+			return false, "este host não tem log em texto: o journal é binário", nil
+		}
+		c.Run = func(Check, *facts.Facts, *env.Env) Result {
+			rodou = true
+			return Result{}
+		}
+	})
+	r := Run([]Check{c, mkCheck("cabe")}, &facts.Facts{}, liveEnv(env.CapProcfs))
+
+	if rodou {
+		t.Error("o check fora de escopo NÃO pode rodar: ele concluiria sobre o vazio")
+	}
+	if r.Coverage.Total != 1 {
+		t.Errorf("Total = %d, quer 1 — escopo sai do DENOMINADOR", r.Coverage.Total)
+	}
+	if r.Coverage.Complete != 1 {
+		t.Errorf("Complete = %d, quer 1 (o outro check)", r.Coverage.Complete)
+	}
+	lacunas, escopo := r.Coverage.NaoVerificados()
+	if len(escopo) != 1 {
+		t.Fatalf("escopo = %d, quer 1", len(escopo))
+	}
+	if len(lacunas) != 0 {
+		t.Errorf("escopo NÃO é lacuna: %v", lacunas)
+	}
+	if !strings.Contains(escopo[0].Reason, "journal") {
+		t.Errorf("o motivo precisa dizer por que a pergunta não cabe: %q", escopo[0].Reason)
+	}
+	// E o ponto inteiro: a cobertura continua íntegra. Uma pergunta que não
+	// existe neste host não pode impedir o exit 0 para sempre — lacuna que nunca
+	// fecha é lacuna que as pessoas aprendem a ignorar.
+	if r.Coverage.Incomplete() {
+		t.Error("escopo NÃO pode derrubar a cobertura")
+	}
+	if r.Exit() != 0 {
+		t.Errorf("Exit = %d, quer 0", r.Exit())
+	}
+}
+
+// A ORDEM importa: sem a capability, não se sabe se a fonte existe — e não
+// saber é LACUNA, a resposta oposta ao escopo. Inverter isto transformaria "não
+// pude olhar" em "não havia o que olhar".
+func TestEscopoNaoEhAvaliadoAntesDeRequires(t *testing.T) {
+	perguntou := false
+	c := mkCheck("precisa-fs", func(c *Check) {
+		c.Requires = env.CapDebugfs
+		c.Escopo = func(*facts.Facts, *env.Env) (bool, string, []string) {
+			perguntou = true
+			return false, "não cabe", nil
+		}
+	})
+	r := Run([]Check{c}, &facts.Facts{}, liveEnv(env.CapProcfs))
+
+	if perguntou {
+		t.Error("o Escopo foi consultado sem a capability: ele responderia sobre fatos que ninguém coletou")
+	}
+	lacunas, escopo := r.Coverage.NaoVerificados()
+	if len(lacunas) != 1 || len(escopo) != 0 {
+		t.Fatalf("quer 1 LACUNA e 0 escopo, tem %d e %d", len(lacunas), len(escopo))
+	}
+	if r.Coverage.Total != 1 {
+		t.Errorf("Total = %d, quer 1 — lacuna FICA no denominador", r.Coverage.Total)
+	}
+}
+
+// Escopo nil é o caso comum: o check roda como sempre.
+func TestSemEscopoNadaMuda(t *testing.T) {
+	r := Run([]Check{mkCheck("normal")}, &facts.Facts{}, liveEnv(env.CapProcfs))
+	if r.Coverage.Total != 1 || r.Coverage.Complete != 1 {
+		t.Errorf("Total/Complete = %d/%d, quer 1/1", r.Coverage.Total, r.Coverage.Complete)
+	}
+}

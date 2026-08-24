@@ -114,7 +114,9 @@ FLAGS DE scan
                 Achado por indicador é CRÍTICO — e vale o que a lista valer
   --since S     janela de investigação: instante (2026-04-30T18:00Z,
                 2026-04-30) ou duração (72h, 7d). O que tem data e cai FORA sai
-                do relatório e é CONTADO; o que não tem data FICA
+                do relatório e é CONTADO; o que não tem data FICA.
+                Governa TAMBÉM até onde do passado os LOGS são lidos — e o
+                rodapé avisa quando a janela pede mais do que foi observado
   --only G,G    escopo por subsistema: proc net persist priv integrity kernel app cloud ioc
   --fs-budget D teto de tempo da varredura de filesystem num FS grande (ex: 10s).
                 O que não couber vira lacuna DECLARADA — a cobertura cai, e o
@@ -124,6 +126,13 @@ FLAGS DE scan
                 vhost em /home). Pseudo-FS e montagem de REDE são pulados e
                 declarados; contêiner rodando, >2 MB e ofuscado seguem de fora.
                 Mais caro — combine com --fs-budget e --ignore
+  --no-logs     NÃO lê o conteúdo dos logs. O inventário de rotação continua; o
+                que sai é a leitura das linhas. Desligado NÃO vira "nada
+                encontrado": o relatório declara que não olhou
+  --logs-all    lê log sem janela temporal e com mais gerações. Os tetos de
+                BYTES, de linhas, de eventos e de descompressão continuam
+                valendo — o host é adversário, e um .gz de 40 KB pode
+                descomprimir para 40 GB
   --mode M      auto | manual
   --coverage    mostrar a seção de cobertura (causas e gaps); o NÚMERO já fica no resumo
   -v, -vv       evidência por achado / + INFO e detalhe de cobertura
@@ -283,7 +292,8 @@ MCP — a pergunta que a IA faz DE VOLTA
 
 
 FLAGS DE collect E analyze
-  collect --out F [--root PATH] [--ignore PATH] [--all-fs]   escreve o dump ("-" = stdout)
+  collect --out F [--root PATH] [--ignore PATH] [--all-fs] [--since S]
+               [--no-logs] [--logs-all]                     escreve o dump ("-" = stdout)
   analyze DUMP [--ioc F] [--since S] [--only G,G] [--mode M] [--baseline F]
                [--json F] [-v|-vv]
 
@@ -297,6 +307,12 @@ FLAGS DE collect E analyze
 
   O --since do analyze é ancorado no instante da COLETA, não no relógio de quem
   analisa: "as 72h anteriores ao retrato" é a pergunta que faz sentido.
+
+  E o --since do COLLECT é outra coisa: ele decide até que ponto do passado os
+  LOGS são LIDOS, que é custo na hora da coleta e não pode ser refeito depois —
+  a VM já não existe. Um analyze com janela maior que a da coleta pergunta sobre
+  dias que ninguém abriu, e o rodapé diz isso em vez de deixar o silêncio passar
+  por observação.
 
   Hash de indicador é a única coisa que o analyze não procura sozinho: hash se
   calcula durante a coleta. Uma lista com hashes sobre um dump que não os
@@ -635,6 +651,14 @@ func runWtf(args []string) int {
 	// encontrado". (Faltava: o comentário de Env prometia isto e o código não
 	// cumpria — só o scan ligava o WalkDeadline.)
 	e.WalkDeadline = start.Add(*budget * 3 / 4)
+	// O CONTEÚDO dos logs fica FORA do wtf, e não por economia de tempo.
+	//
+	// LacunasDeColeta despeja todo f.Partial na cobertura sem filtrar pela
+	// seleção, então um coletor de log que estourasse o prazo daria ao wtf uma
+	// lacuna PERMANENTE — e lacuna que nunca fecha é lacuna que as pessoas
+	// aprendem a ignorar. Os checks de log são todos Wtf:false: nenhum deles
+	// deixa de rodar por causa disto, porque nenhum deles rodaria aqui.
+	e.SemLogs = true
 	prog := progress.New(os.Stderr, start, *noProg, corHabilitada(os.Stderr))
 	e.Progress = prog
 	defer prog.Stop()
@@ -688,6 +712,8 @@ func runScan(args []string, wtf bool) int {
 		noProg   = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
 		fsBudget = fs.Duration("fs-budget", 0, "teto de tempo da varredura de filesystem (0 = sem teto)")
 		allFS    = fs.Bool("all-fs", false, "varrer código na FS montada INTEIRA (a partir de /), não só os web roots")
+		noLogs   = fs.Bool("no-logs", false, "não ler o CONTEÚDO dos logs (o inventário de rotação continua)")
+		logsAll  = fs.Bool("logs-all", false, "ler log sem janela temporal e com mais gerações (os tetos de bytes e de eventos CONTINUAM valendo)")
 		autoload = fs.Bool("allow-kernel-autoload", false, "permitir consulta por netlink que pode AUTOCARREGAR o módulo de diagnóstico (altera o host)")
 	)
 	var ignore listaCaminhos
@@ -747,6 +773,14 @@ func runScan(args []string, wtf bool) int {
 	}
 	e.Ignorar(ignore)
 	e.CodigoTudo = *allFS
+	e.SemLogs = *noLogs
+	e.LogsTudo = *logsAll
+	// O --since governa DUAS coisas, e elas não são a mesma: aqui ele decide
+	// quais arquivos de log são ABERTOS (custo), e no fim decide o recorte do
+	// relatório. Quem alarga a janela do relatório sem alargar a da coleta
+	// pergunta sobre um intervalo que ninguém leu — e é por isso que o
+	// horizonte EFETIVO viaja no dump e sai no rodapé.
+	e.LogsDesde = janela.Desde
 	aoInterromper()
 	// Num FS grande, quem tem pressa limita a varredura no tempo; o que ela não
 	// terminar vira lacuna declarada, e a cobertura cai — nunca "nada achado".
@@ -820,7 +854,7 @@ func runScan(args []string, wtf bool) int {
 // aplicarJanela recorta o relatório e monta o que precisa ser DITO sobre o
 // recorte. Nada aqui é silencioso: o que saiu é contado por severidade, o que
 // não tinha data é contado à parte, e o âncora declara de onde veio.
-func aplicarJanela(r *check.Report, j check.Janela, agora time.Time) *report.JanelaInfo {
+func aplicarJanela(r *check.Report, f *facts.Facts, j check.Janela, agora time.Time) *report.JanelaInfo {
 	rec := r.Aplicar(j)
 	anc := r.DerivarAncora(j, agora)
 	if !j.Ativa && anc.Quando == "" {
@@ -835,6 +869,25 @@ func aplicarJanela(r *check.Report, j check.Janela, agora time.Time) *report.Jan
 	}
 	if j.Ativa {
 		info.Desde, info.Spec = j.Desde.Format(time.RFC3339), j.Spec
+		// A JANELA PODE PEDIR MAIS PASSADO DO QUE FOI LIDO, e os dois números
+		// vivem em lugares diferentes: o recorte é de quem analisa, o horizonte
+		// é de quem coletou. Um dump feito com o padrão de 7 dias, analisado com
+		// `--since 30d`, tem 23 dias sobre os quais NADA pode ser dito — e sem
+		// esta linha eles saem com a mesma cara de 23 dias limpos.
+		if f != nil {
+			switch {
+			case f.LogJanelaEfetiva != "" && f.LogJanelaEfetiva > info.Desde:
+				info.LogHorizonte, info.LogAquemDaJanela = f.LogJanelaEfetiva, true
+			case f.LogJanelaEfetiva == "" &&
+				(f.LogEstado == facts.LogColetado || f.LogEstado == facts.LogParcial):
+				// HORIZONTE VAZIO é o caso mais forte, e era o que escapava: a
+				// coleta rodou e nenhum evento pôde ser datado — porque os
+				// arquivos ficaram fora da janela DELA, ou porque nenhuma linha
+				// tinha carimbo utilizável. O silêncio do período inteiro não
+				// significa nada, e sem esta linha ele se parece com observação.
+				info.LogAquemDaJanela = true
+			}
+		}
 	}
 	return info
 }

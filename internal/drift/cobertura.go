@@ -128,6 +128,14 @@ var NaoCobertas = []Superficie{
 	{Nome: "logs e histórico de shell", Campo: "logs",
 		Porque: "append-only: eles são a EVIDÊNCIA da mudança, não o estado que " +
 			"mudou. Comparar dois retratos de um log diria apenas que o tempo passou"},
+	{Nome: "eventos de log", Campo: "log_events",
+		Porque: "mesma razão do inventário acima, e uma segunda que é só dela: a " +
+			"JANELA DESLIZA. Dois retratos de 'últimos 7 dias' tomados com um dia de " +
+			"intervalo têm conjuntos diferentes por construção — um dia entrou e um " +
+			"dia saiu, sem nada ter mudado no host. Reportar isso como surgiu/sumiu " +
+			"seria transformar a passagem do tempo em achado, em volume de centenas " +
+			"de linhas por comparação. O que o evento de log responde é 'o que " +
+			"ACONTECEU antes', e essa pergunta não precisa de retrato anterior"},
 	{Nome: "segmentos SysV SHM", Campo: "sysvipc_shm",
 		Porque: "runtime volátil, e o segmento interessante é o que existe AGORA — " +
 			"pergunta que o check pontual responde melhor que uma comparação"},
@@ -159,6 +167,18 @@ var NaoCobertas = []Superficie{
 	{Nome: "config de cliente completo", Campo: "ssh_client_complete", Porque: "sinal de cobertura"},
 	{Nome: "âncoras de TLS completas", Campo: "ca_complete", Porque: "sinal de cobertura"},
 	{Nome: "hosts lido", Campo: "hosts_read", Porque: "sinal de cobertura"},
+	{Nome: "fontes de log e o que se leu de cada uma", Campo: "log_sources",
+		Porque: "sinal de cobertura — é ele que impede uma lista vazia de eventos " +
+			"de ser lida como 'nada aconteceu'"},
+	{Nome: "estado da coleta de log", Campo: "log_state", Porque: "sinal de cobertura"},
+	{Nome: "horizonte de log pedido", Campo: "log_window_requested",
+		Porque: "parâmetro da coleta, não estado do host"},
+	{Nome: "horizonte de log alcançado", Campo: "log_window_effective", Porque: "sinal de cobertura"},
+	{Nome: "log sem janela (--logs-all)", Campo: "log_window_all",
+		Porque: "parâmetro da coleta, não estado do host"},
+	{Nome: "log em texto completo", Campo: "log_text_complete", Porque: "sinal de cobertura"},
+	{Nome: "audit.log completo", Campo: "audit_log_complete", Porque: "sinal de cobertura"},
+	{Nome: "fuso do alvo lido", Campo: "target_tz_read", Porque: "sinal de cobertura"},
 	{Nome: "resolver lido", Campo: "resolver_read", Porque: "sinal de cobertura"},
 	{Nome: "confiança entre hosts completa", Campo: "host_trust_complete", Porque: "sinal de cobertura"},
 	{Nome: "módulos lidos", Campo: "modules_read", Porque: "sinal de cobertura"},

@@ -90,6 +90,16 @@ var fontesDeCompletude = []fonteDeCompletude{
 	{Fato: "BootConfigLido", Sites: []string{"boot/grub/grub.cfg"}},
 	{Fato: "HistoricoDeLoginLido", Sites: []string{"var/log/wtmp"}},
 
+	// As TRÊS do conteúdo de log. Elas são o caso que a catraca pegou ANTES de
+	// existirem: a primeira versão derivava as duas primeiras do estado global
+	// da coleta, e assim um audit.log ilegível derrubava o fato do log em TEXTO
+	// — que podia ter sido lido inteiro. Cada uma responde pela sua fonte.
+	{Fato: "LogTextoCompleto", Sites: []string{"var/log/auth.log"}},
+	{Fato: "AuditLogCompleto", Sites: []string{"var/log/audit/audit.log"}},
+	// O fuso é fonte de terceiro tipo: ele não é log nenhum, e derrubá-lo não
+	// impede a leitura de linha alguma — só faz as datas serem supostas em UTC.
+	{Fato: "FusoDoAlvoLido", Sites: []string{"etc/localtime"}},
+
 	// --- fontes que não existem sob --root ---
 	{Fato: "ModulosLidos", SoVivo: "/proc/modules só existe no host vivo; em imagem " +
 		"não há kernel rodando para listar módulo carregado"},
@@ -118,6 +128,10 @@ func coletoresDaRaiz(f *Facts, e *env.Env) {
 	collectModprobe(f, e)
 	collectBoot(f, e)
 	collectLogins(f, e)
+	// collectLogs ANTES: é ele quem inventaria as gerações de /var/log, e é do
+	// inventário que sai a lista de arquivos que o coletor de eventos abre.
+	collectLogs(f, e)
+	collectEventosDeLog(f, e)
 }
 
 // raizSemeada é a raiz onde TUDO está legível. Cada arquivo aqui existe para
@@ -159,6 +173,16 @@ var raizSemeada = map[string]string{
 
 	"boot/grub/grub.cfg": "linux /vmlinuz root=/dev/sda1 ro quiet\n",
 	"var/log/wtmp":       "",
+
+	// Conteúdo de log: uma linha reconhecível em cada família, mais o TZif do
+	// alvo. Sem elas o controle já sairia falso, e o experimento mediria a
+	// ausência do arquivo em vez da leitura dele.
+	"var/log/auth.log": "Aug 24 01:20:33 h sshd[1]: Accepted password for ana " +
+		"from 10.0.0.1 port 5 ssh2\n",
+	"var/log/audit/audit.log": "type=SYSCALL msg=audit(1755990137.123:456): syscall=59 " +
+		"pid=1 uid=0 comm=\"sh\"\ntype=EXECVE msg=audit(1755990137.123:456): argc=1 " +
+		"a0=\"/bin/sh\"\n",
+	"etc/localtime": "",
 }
 
 func montarRaizSemeada(t *testing.T) string {
@@ -170,6 +194,11 @@ func montarRaizSemeada(t *testing.T) string {
 			t.Fatal(err)
 		}
 		conteudo := []byte(c)
+		if rel == "etc/localtime" {
+			// TZif de verdade: um arquivo vazio não decodifica, e o fato sairia
+			// falso no controle por FORMATO — medindo outra coisa.
+			conteudo = tzifDe(-3*3600, "-03")
+		}
 		if rel == "var/log/wtmp" {
 			// múltiplo do registro utmp nas duas larguras: o coletor recusa
 			// tamanho ímpar por FORMATO, e aí o teste mediria outra coisa.

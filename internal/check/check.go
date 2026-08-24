@@ -204,6 +204,32 @@ type Check struct {
 	// o usa como seleção.
 	Drift bool
 
+	// Escopo responde, DEPOIS da coleta e a partir dos FATOS, se a pergunta deste
+	// check existe neste host. `false` tira o check do DENOMINADOR, como já
+	// acontece com o drift sem comparação.
+	//
+	// # A distinção que ele carrega
+	//
+	// "esta pergunta não cabe aqui" (escopo, cobertura intacta) nunca é "eu não
+	// consegui responder" (lacuna, cobertura cai). As três decisões de escopo que
+	// o motor já tomava saem do AMBIENTE — modo, capability sem mecanismo,
+	// comparação ausente. Esta é a quarta, e é a única que só os FATOS respondem.
+	//
+	// O caso que a obrigou: num host journald-only não existe /var/log/auth.log,
+	// porque a distribuição não instala rsyslog. Nenhum bit de capability e nenhum
+	// modo dizem isso, e um check de log sairia COMPLETO tendo olhado o vazio — a
+	// forma mais convincente de falso "limpo", porque nada falhou. Um auth.log
+	// INEXISTENTE e um auth.log ILEGÍVEL produzem a mesma lista vazia, e só o
+	// coletor sabe qual dos dois foi.
+	//
+	// REGRA: a função lê FATOS. O `e` entra para modo e capability; ir ao disco
+	// aqui quebraria a pureza de que a suíte inteira depende (pureza_test.go).
+	//
+	// `manual` é o que o operador faz quando a pergunta não cabe — mesmo campo do
+	// NotChecked, e pelo mesmo motivo: escopo sem saída deixa o leitor sem o que
+	// fazer com a informação.
+	Escopo func(f *facts.Facts, e *env.Env) (aplicavel bool, motivo string, manual []string)
+
 	// Run recebe o próprio Check para poder montar Findings com o ID, o Ref
 	// e os FalsePositives dele — sem referenciar a var de pacote, o que
 	// criaria ciclo de inicialização.

@@ -316,6 +316,19 @@ import (
 //	     forma que fazia o antiforense.wtmp_cleared disparar CRITICAL
 //	     irreversível em jump host RHEL saudável — e o log_rotation_gap não
 //	     achar buraco nenhum, estruturalmente, na família inteira.
+//	   ExecLine.Target -> ExecLine.Targets  o campo virou PLURAL, e essa é a
+//	     mudança de forma mais funda desta rodada. O modelo assumia que uma
+//	     linha de shell tem UM alvo, e não tem: um
+//	     `ExecStart=sh -c '/usr/bin/true && /usr/lib/.backdoor'` tem dois, o
+//	     resolvedor devolvia o PRIMEIRO com AlvoIndeterminado=false, e o
+//	     backdoor sumia de candidatosDePropriedade e do persist.unit_unowned
+//	     sem deixar lacuna nenhuma — sem depender de test, source, eval ou de
+//	     sintaxe complicada: bastava um `&&`. Num dump v21 (e num v22 anterior a
+//	     esta mudança) o campo antigo traz só o primeiro programa da linha, e
+//	     é sobre essa lista incompleta que a pergunta de propriedade seria
+//	     feita. AlvoIndeterminado passou a CONVIVER com Targets preenchido:
+//	     em `/usr/bin/legit; eval "$CMD"` a resposta é "vi este, e há uma parte
+//	     que não sei" — uma lacuna não apaga o que foi observado.
 //	   ExecLine.AlvoIndeterminado  DUAS mudanças, e as duas ampliam quando a
 //	     linha responde "não sei". Primeiro o teto de 8 wrappers devolvia `("", false)`,
 //	     e o false ali significa "alvo PROVADO": a ferramenta afirmava ter

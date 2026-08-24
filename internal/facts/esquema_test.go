@@ -82,7 +82,7 @@ func TestImpressaoDoEsquema(t *testing.T) {
 		// separa logrotate de antiforense) e por log_rotation_gap. Zerado
 		// significa "esta rotação é por contador", e é exatamente a leitura que
 		// fazia o wtmp_cleared acusar toda a família RHEL.
-		impressaoGravada = "8d04b0a63b336ebb"
+		impressaoGravada = "7201c90aa50a7e2b"
 	)
 	if SchemaVersion != esquemaEsperado {
 		t.Fatalf("SchemaVersion=%d e este teste conhece o %d: atualize os dois "+

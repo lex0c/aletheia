@@ -100,43 +100,55 @@ var unitSemDono = check.Check{
 					// seria dizer "olhei e não achei" sobre uma linha que nem
 					// foi resolvida — a confusão que esta ferramenta existe
 					// para não cometer.
+					//
+					// A lacuna é declarada E os alvos que FORAM provados
+					// continuam avaliados abaixo: numa linha como
+					// `/usr/bin/legit; eval "$CMD"` a resposta honesta é "vi
+					// este, e há uma parte que não sei". O `continue` de antes
+					// jogava fora a metade observada junto com a desconhecida.
 					indeterminados = append(indeterminados,
 						u.Name+": "+ex.Key+"="+ex.Cmd)
-					continue
 				}
-				// ex.Target é o ALVO EFETIVO já resolvido pelo coletor (com o
-				// ExecSearchPath/PATH/RootDirectory da unit e o wrapper
-				// desembrulhado) — a MESMA string que candidatosDePropriedade usou.
-				// Recalcular alvoEfetivo(ex.Cmd) aqui perdia a resolução: um
-				// `ExecStart=/usr/bin/env agent` deixava o alvo como nome nu "agent",
-				// que não casava com o /usr/local/bin/agent do conjunto semDono.
-				alvo := strings.TrimLeft(ex.Target, "-@+!:")
-				if !semDono[alvo] || !dirDePacote(alvo) {
-					continue
-				}
-				chave := u.Name + "\x00" + alvo
-				if visto[chave] {
-					continue
-				}
-				visto[chave] = true
+				// ex.Targets são os ALVOS EFETIVOS já resolvidos pelo coletor
+				// (com o ExecSearchPath/PATH/RootDirectory da unit e o wrapper
+				// desembrulhado) — as MESMAS strings que
+				// candidatosDePropriedade usou. Recalcular alvoEfetivo(ex.Cmd)
+				// aqui perdia a resolução: um `ExecStart=/usr/bin/env agent`
+				// deixava o alvo como nome nu "agent", que não casava com o
+				// /usr/local/bin/agent do conjunto semDono.
+				//
+				// PLURAL: uma linha de `sh -c` pode executar mais de um
+				// programa, e avaliar só o primeiro deixava
+				// `/usr/bin/true && /usr/lib/.backdoor` passar inteiro.
+				for _, alvoBruto := range ex.Targets {
+					alvo := strings.TrimLeft(alvoBruto, "-@+!:")
+					if !semDono[alvo] || !dirDePacote(alvo) {
+						continue
+					}
+					chave := u.Name + "\x00" + alvo
+					if visto[chave] {
+						continue
+					}
+					visto[chave] = true
 
-				ev := []string{
-					ex.Key + "=" + ex.Cmd,
-					"o alvo " + alvo + " mora em diretório de PACOTE e NENHUM pacote o " +
-						"reivindica (base: " + f.Pkg.Kind + "): binário de sistema que " +
-						"ninguém entregou",
-					"arquivo: " + u.Path,
-				}
-				ev = append(ev, unitContext(u)...)
+					ev := []string{
+						ex.Key + "=" + ex.Cmd,
+						"o alvo " + alvo + " mora em diretório de PACOTE e NENHUM pacote o " +
+							"reivindica (base: " + f.Pkg.Kind + "): binário de sistema que " +
+							"ninguém entregou",
+						"arquivo: " + u.Path,
+					}
+					ev = append(ev, unitContext(u)...)
 
-				fd := self.F(check.SevCritical, u.Name, "", ev...)
-				fd.Quando, fd.QuandoFonte = u.ModUTC, "mtime do arquivo da unit"
-				fd.NextSteps = []string{
-					"remova a UNIT antes de matar o processo — com Restart o systemd " +
-						"o ressuscita em segundos",
-					"preserve o binário " + alvo + " antes de qualquer coisa",
+					fd := self.F(check.SevCritical, u.Name, "", ev...)
+					fd.Quando, fd.QuandoFonte = u.ModUTC, "mtime do arquivo da unit"
+					fd.NextSteps = []string{
+						"remova a UNIT antes de matar o processo — com Restart o systemd " +
+							"o ressuscita em segundos",
+						"preserve o binário " + alvo + " antes de qualquer coisa",
+					}
+					r.Findings = append(r.Findings, fd)
 				}
-				r.Findings = append(r.Findings, fd)
 			}
 		}
 		if n := len(indeterminados); n > 0 {
@@ -936,15 +948,18 @@ var bindQueTrocaArquivo = check.Check{
 // atacante dentro do processo, sob um caminho que o host mostra íntegro.
 func bindSombreiaExec(execs []facts.ExecLine, destino string) (bool, string) {
 	for _, ex := range execs {
-		alvo := strings.TrimLeft(ex.Target, "-@+!:")
-		if alvo == "" {
-			continue
-		}
-		if alvo == destino {
-			return true, "o próprio alvo de " + ex.Key
-		}
-		if strings.HasPrefix(alvo, strings.TrimSuffix(destino, "/")+"/") {
-			return true, "o diretório de onde " + ex.Key + " carrega (" + alvo + ")"
+		// TODOS os alvos: com `sh -c 'a && b'` o bind pode sombrear o segundo.
+		for _, alvoBruto := range ex.Targets {
+			alvo := strings.TrimLeft(alvoBruto, "-@+!:")
+			if alvo == "" {
+				continue
+			}
+			if alvo == destino {
+				return true, "o próprio alvo de " + ex.Key
+			}
+			if strings.HasPrefix(alvo, strings.TrimSuffix(destino, "/")+"/") {
+				return true, "o diretório de onde " + ex.Key + " carrega (" + alvo + ")"
+			}
 		}
 	}
 	return false, ""

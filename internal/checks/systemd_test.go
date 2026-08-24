@@ -1,6 +1,7 @@
 package checks
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/lex0c/aletheia/internal/check"
@@ -17,7 +18,7 @@ func TestUnitSemDono(t *testing.T) {
 		// pós-coleta faria.
 		return facts.Unit{
 			Name: baseDe(path), Path: path, Kind: "service", Vendor: vendor,
-			Exec: []facts.ExecLine{{Key: "ExecStart", Cmd: cmd, Target: alvoDeTeste(cmd)}},
+			Exec: []facts.ExecLine{{Key: "ExecStart", Cmd: cmd, Targets: []string{alvoDeTeste(cmd)}}},
 		}
 	}
 	casos := []struct {
@@ -55,4 +56,57 @@ func TestUnitSemDono(t *testing.T) {
 func alvoDeTeste(cmd string) string {
 	alvo, _ := facts.AlvoEfetivoDeExec(cmd)
 	return alvo
+}
+
+// O SEGUNDO programa de uma linha de shell precisa CHEGAR ao check.
+//
+// Este é o teste de ponta a ponta do defeito que a terceira revisão encontrou.
+// `ExecLine.Target` era singular, o resolvedor devolvia o primeiro programa e
+// parava, e num
+//
+//	ExecStart=/bin/sh -c '/usr/bin/true && /usr/lib/systemd/.backdoor'
+//
+// o /usr/bin/true (com dono de pacote) era a única coisa que chegava aqui. O
+// backdoor órfão em diretório de pacote não produzia persist.unit_unowned e não
+// produzia lacuna — nenhum finding, nenhuma cobertura degradada, sem depender
+// de test, source, eval ou de sintaxe complicada. Bastava um `&&`.
+//
+// O teste monta os alvos pelo RESOLVEDOR de verdade, e não à mão, para que ele
+// meça a cadeia inteira: se o resolvedor voltar a devolver um só, este teste cai.
+func TestSegundoProgramaDeLinhaDeShellChegaAoCheck(t *testing.T) {
+	cmd := `/bin/sh -c '/usr/bin/true && /usr/lib/systemd/.backdoor'`
+	alvos, indet := facts.AlvosEfetivosDeExec(cmd)
+	if len(alvos) != 2 {
+		t.Fatalf("o resolvedor devolveu %d alvo(s) (%q, indet=%v): esta fixture "+
+			"depende de ele enxergar os dois programas da linha", len(alvos), alvos, indet)
+	}
+
+	f := &facts.Facts{
+		Pkg: facts.PkgDB{Kind: "dpkg", Consultavel: true},
+		Units: []facts.Unit{{
+			Name: "app.service", Path: "/etc/systemd/system/app.service", Kind: "service",
+			Exec: []facts.ExecLine{{Key: "ExecStart", Cmd: cmd, Targets: alvos}},
+		}},
+		Ownership: []facts.Ownership{
+			{Path: "/usr/bin/true", Owned: true},
+			{Path: "/usr/lib/systemd/.backdoor", Owned: false},
+		},
+	}
+	f.Index()
+	r := unitSemDono.Run(unitSemDono, f, testEnv())
+
+	var citou bool
+	for _, fd := range r.Findings {
+		for _, e := range fd.Evidence {
+			if strings.Contains(e, "/usr/lib/systemd/.backdoor") {
+				citou = true
+			}
+		}
+	}
+	if !citou {
+		t.Errorf("o backdoor atrás do && NÃO produziu achado: %d finding(s), %+v\n"+
+			"Ele é órfão e mora em diretório de pacote — a única razão de não "+
+			"aparecer é a linha ter sido reduzida ao primeiro programa.",
+			len(r.Findings), r.Findings)
+	}
 }

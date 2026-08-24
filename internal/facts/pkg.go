@@ -361,7 +361,13 @@ func candidatosDePropriedade(f *Facts, e *env.Env) map[string][]string {
 			// Sem o alvo aqui, unit_unowned calculava o alvo certo mas a pergunta
 			// de propriedade nunca fora feita sobre ele.
 			add(primeiroToken(ex.Cmd), "unit "+u.Name)
-			add(ex.Target, "unit "+u.Name+" (alvo efetivo)")
+			// TODOS os alvos: uma linha de `sh -c` pode executar mais de um
+			// programa, e perguntar a propriedade só do primeiro deixava o
+			// segundo — que é onde o backdoor mora, num
+			// `/usr/bin/true && /usr/lib/.backdoor` — fora da pergunta.
+			for _, t := range ex.Targets {
+				add(t, "unit "+u.Name+" (alvo efetivo)")
+			}
 		}
 	}
 	// A lib de cada fonte NSS: um libnss_ sem dono é carregado em toda resolução

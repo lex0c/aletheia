@@ -26,7 +26,7 @@ import "strings"
 // Um alvo falso não é neutro: o unit_unowned pergunta propriedade DELE, não
 // acha nada em diretório de pacote e cala. Binário órfão em /bin escapava por
 // um prefixo `exec`, que ainda por cima é idioma legítimo de wrapper.
-func AlvoEfetivoDeExec(cmd string) (string, bool) {
+func AlvosEfetivosDeExec(cmd string) ([]string, bool) {
 	toks := strings.Fields(colapsaBrancoExec(cmd))
 	for passo := 0; passo < 8 && len(toks) > 0; passo++ {
 		base := baseCaminhoExec(strings.TrimLeft(toks[0], "-@+!:"))
@@ -71,19 +71,31 @@ func AlvoEfetivoDeExec(cmd string) (string, bool) {
 		case interpretadoresExec[base]:
 			for i := 1; i < len(toks); i++ {
 				if toks[i] == "-c" && i+1 < len(toks) {
-					alvo, indet := alvoDeLinhaDeShell(strings.Join(toks[i+1:], " "))
-					if indet {
-						return "", true
+					alvos, indet := alvosDeLinhaDeShell(strings.Join(toks[i+1:], " "))
+					// A LACUNA NÃO APAGA O QUE FOI OBSERVADO.
+					//
+					// Antes, `indet` fazia return ("", true) e jogava fora os
+					// alvos já provados. Numa linha como
+					// `/usr/bin/legit; eval "$CMD"` isso trocava uma resposta
+					// parcial correta — "vi este, e há uma parte que não sei" —
+					// por silêncio total sobre o que estava provado.
+					for i := range alvos {
+						alvos[i] = descascaAspaBorda(alvos[i])
 					}
-					if alvo != "" {
-						return descascaAspaBorda(alvo), false
+					if len(alvos) == 0 {
+						// Só builtin, atribuição e prefixo: a linha não aponta
+						// para programa nenhum que este parser consiga nomear.
+						// Contrato de sempre — devolver o interpretador aqui
+						// mandaria a pergunta de propriedade para /bin/sh, que
+						// é ruído com dono de pacote.
+						return nil, true
 					}
-					return toks[0], false
+					return alvos, indet
 				}
 			}
-			return toks[0], false
+			return []string{toks[0]}, false
 		default:
-			return descascaAspaBorda(toks[0]), false
+			return []string{descascaAspaBorda(toks[0])}, false
 		}
 	}
 	// Sair do laço é INDETERMINADO, não "alvo provado vazio".
@@ -101,13 +113,51 @@ func AlvoEfetivoDeExec(cmd string) (string, bool) {
 	// declarar exatamente esta lacuna — era pulado. Um
 	// `ExecStart=/usr/bin/env … (×8) /usr/lib/systemd/.upd` saía do relatório em
 	// silêncio, com cobertura declarada completa.
-	return "", true
+	return nil, true
 }
 
-// alvoDeLinhaDeShell acha o primeiro PROGRAMA de uma linha de `sh -c`.
+// AlvoEfetivoDeExec é a fachada de UM alvo, para quem só sabe lidar com um.
 //
-// Não é um shell: é uma peneira conservadora com três regras, e ela prefere
-// dizer "não sei" a apontar para o token errado.
+// Ela é FAIL-CLOSED na cardinalidade, e isso é o conserto: uma linha com mais
+// de um programa não tem "o" alvo, e devolver o primeiro era a evasão que
+// motivou o plural. `sh -c '/usr/bin/true && /usr/lib/.backdoor'` respondia
+// /usr/bin/true com AlvoIndeterminado=false, e o backdoor sumia da pergunta de
+// propriedade sem deixar lacuna — sem depender de test, source, eval ou de
+// sintaxe complicada nenhuma. Bastava um `&&`.
+//
+// Quem precisa da resposta inteira chama AlvosEfetivosDeExec.
+func AlvoEfetivoDeExec(cmd string) (string, bool) {
+	alvos, indet := AlvosEfetivosDeExec(cmd)
+	if len(alvos) != 1 {
+		return "", true
+	}
+	return alvos[0], indet
+}
+
+// alvosDeLinhaDeShell acha TODOS os programas de uma linha de `sh -c`.
+//
+// Não é um shell: é uma peneira conservadora, e ela prefere dizer "não sei" a
+// apontar para o token errado.
+//
+// # Por que TODOS, e não "o" programa
+//
+// A versão anterior devolvia o PRIMEIRO e parava. `ExecLine` tinha um campo
+// Target, singular, e o modelo inteiro assumia que uma linha de shell tem um
+// alvo. Uma linha de shell não tem: `/usr/bin/true && /usr/lib/.backdoor` tem
+// dois, e o segundo desaparecia da pergunta de propriedade com
+// AlvoIndeterminado=false — sem depender de test, source, eval ou de sintaxe
+// complicada. Bastava um `&&`.
+//
+// Adicionar mais palavras à peneira não resolveria: o defeito não era a lista,
+// era a CARDINALIDADE do fato. Um teste chegava a fixar a evasão, exigindo
+// "/bin/cat" para `/bin/cat /etc/x | /tmp/y` — onde /tmp/y também executa.
+//
+// # E a lacuna não apaga o observado
+//
+// `indet` deixou de ser um return imediato: uma parte irresolúvel marca a
+// linha como incompleta E preserva os alvos já provados. Em
+// `/usr/bin/legit; eval "$CMD"` a resposta honesta é "vi /usr/bin/legit, e há
+// uma parte que não sei" — não silêncio sobre os dois.
 //
 //	atribuição   VAR=val no começo não é o programa — o shell as consome
 //	transparente exec/command/nohup/setsid/time rodam o que vem depois
@@ -118,77 +168,82 @@ func AlvoEfetivoDeExec(cmd string) (string, bool) {
 // /bin/x, e apontar para /tmp seria pior que não apontar. O que interrompe é
 // substituição de comando e subshell: ali o alvo depende de execução, e afirmar
 // qualquer coisa seria inventar.
-func alvoDeLinhaDeShell(linha string) (string, bool) {
+func alvosDeLinhaDeShell(linha string) ([]string, bool) {
 	toks := camposDeShell(separaOperadoresDeShell(descascaAspaBorda(strings.TrimSpace(linha))))
+
+	var alvos []string
+	indet := false
+	// pularArgumentos anda até o próximo separador: o que vem depois de um
+	// programa (ou de um builtin) são ARGUMENTOS dele, e não outro programa.
+	// Só depois de um `;`, `&&`, `||` ou `|` começa um comando novo.
+	pularArgumentos := func(i int) int {
+		for i+1 < len(toks) && !ehSeparadorDeShell(descascaAspaBorda(toks[i+1])) {
+			i++
+		}
+		return i
+	}
+
 	for i := 0; i < len(toks); i++ {
 		t := descascaAspaBorda(toks[i])
 		switch {
 		case t == "":
 			continue
-		case ehSubstituicaoDeShell(t):
-			// $(...), `...`, subshell: o programa é resultado de execução.
-			return "", true
 		case ehSeparadorDeShell(t):
 			continue
-		case palavraReservadaDeShell[t]:
-			// ESTRUTURA DE CONTROLE: a linha tem gramática que este parser não
-			// interpreta, e o programa de verdade está adiante.
-			//
-			// O `default` devolvia o token como ALVO RESOLVIDO, então
-			// `sh -c 'if test -e /tmp/a; then exec /usr/lib/.backdoor; fi'`
-			// saía com alvo "if" e AlvoIndeterminado=false. O efeito é
-			// exatamente o bug que este arquivo existe para não cometer: o
-			// binário real some da pergunta de propriedade, o ramo
-			// `if ex.AlvoIndeterminado` de checks/systemd.go não é tomado, e
-			// não há finding nem lacuna. Só que por sintaxe de shell normal.
-			//
-			// Não se conserta escrevendo um shell. Conserta-se dizendo a
-			// verdade: o que exige interpretação vira "não sei", e o resto do
-			// sistema já sabe tratar isso.
-			return "", true
 		case ehAtribuicaoDeShell(t), transparenteDeShell[t]:
 			continue
-		case builtinDeShell[t]:
-			// Consome até o próximo separador: o argumento do builtin não é
-			// programa, e devolvê-lo era o defeito.
-			for i+1 < len(toks) && !ehSeparadorDeShell(descascaAspaBorda(toks[i+1])) {
-				i++
-			}
+
+		case palavraReservadaDeShell[t]:
+			// ESTRUTURA DE CONTROLE: a gramática daqui para a frente não é
+			// seguível por este parser, então nem o comando atual nem os
+			// seguintes podem ser afirmados. Devolve o que JÁ foi provado e
+			// marca o resto como desconhecido.
+			return alvos, true
+
+		case ehSubstituicaoDeShell(t):
+			// $(...), `...`, subshell: o programa é RESULTADO de execução.
+			indet = true
+			i = pularArgumentos(i)
 		case executaCodigoDeShell[t]:
-			// A linha executa código que este parser não segue. Qualquer coisa
-			// que ele apontasse depois disso seria o alvo ERRADO.
-			return "", true
+			// eval, source, ., trap: a linha executa código que este parser não
+			// segue. O comando é desconhecido, e os outros da linha continuam
+			// valendo.
+			indet = true
+			i = pularArgumentos(i)
 		case t == "!" || t == "test" || t == "[" || t == "]":
 			// Negação e teste condicional: o programa de verdade está adiante,
-			// atrás de um && ou de um ;. O `!` era o pior dos três — o
-			// TrimLeft abaixo o reduzia a string VAZIA e devolvia
-			// AlvoIndeterminado=false, e aí o chamador caía no
-			// `return toks[0]` e afirmava o próprio INTERPRETADOR (/bin/sh)
-			// como alvo provado da unit.
-			return "", true
+			// atrás de um && ou de um ;. O `!` era o pior dos três — o TrimLeft
+			// o reduzia a string VAZIA com AlvoIndeterminado=false, e aí o
+			// chamador caía no `return toks[0]` e afirmava o próprio
+			// INTERPRETADOR (/bin/sh) como alvo provado da unit.
+			indet = true
+			i = pularArgumentos(i)
 		case strings.HasPrefix(t, "-"):
 			// OPÇÃO, e não programa. O TrimLeft de "-@+!:" existe para os
-			// prefixos de ExecStart do systemd (-, @, +, !, :), que só valem no
-			// PRIMEIRO token de uma linha de unit — dentro de `sh -c` um traço
-			// à frente é opção de comando. Aplicá-lo aqui produzia alvo a
-			// partir de letra de opção: `command -v foo && /usr/lib/.backdoor`
-			// devolvia "v", e `exec -a nome /usr/lib/.backdoor` devolvia "a",
-			// os dois marcados como PROVADOS.
-			//
-			// Não dá para pular a opção e seguir: sem saber se ela consome o
-			// próximo token, o que vier depois pode ser valor e não programa.
-			return "", true
+			// prefixos de ExecStart do systemd, que só valem no PRIMEIRO token
+			// de uma linha de unit — dentro de `sh -c` um traço à frente é
+			// opção de comando, e aplicá-lo aqui fabricava alvo a partir de
+			// letra: `command -v foo` devolvia "v", `exec -a nome` devolvia
+			// "a", os dois marcados como PROVADOS.
+			indet = true
+			i = pularArgumentos(i)
+
+		case builtinDeShell[t]:
+			// Builtin não executa arquivo: o argumento dele NÃO é programa, e
+			// devolvê-lo era o defeito original. Não é lacuna — é certeza de
+			// que não há alvo NESTE comando.
+			i = pularArgumentos(i)
+
 		default:
-			alvo := strings.TrimLeft(t, "@+:")
-			if alvo == "" {
-				return "", true
+			if alvo := strings.TrimLeft(t, "@+:"); alvo != "" {
+				alvos = append(alvos, alvo)
+			} else {
+				indet = true
 			}
-			return alvo, false
+			i = pularArgumentos(i)
 		}
 	}
-	// Só atribuição, prefixo e builtin: a linha não aponta para programa nenhum
-	// que este parser consiga nomear.
-	return "", true
+	return alvos, indet
 }
 
 // separaOperadoresDeShell põe espaço em volta de ;, &&, ||, | e &.
@@ -405,10 +460,12 @@ var palavraReservadaDeShell = map[string]bool{
 	"do": true, "done": true, "in": true,
 	"case": true, "esac": true, "function": true,
 	"{": true, "}": true, "[[": true, "]]": true,
-	// `time` é palavra reservada do shell antes de ser /usr/bin/time, e a
-	// forma reservada mede o comando SEGUINTE. Indeterminado é o lado certo de
-	// errar aqui: o alternativo é apontar "time" como o programa.
-	"time": true, "coproc": true,
+	// `time` NÃO entra aqui: ele já está em transparenteDeShell, que é o
+	// tratamento certo — a forma reservada mede o comando SEGUINTE, então
+	// pular o `time` e resolver o que vem depois é mais informação, não menos.
+	// Listá-lo nos dois lugares fazia a peneira desistir de uma linha que ela
+	// sabe ler.
+	"coproc": true,
 }
 
 // camposDeShell separa por branco, mas trata TRECHO ENTRE ASPAS como um token.

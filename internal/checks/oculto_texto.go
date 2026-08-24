@@ -200,8 +200,13 @@ func caminhosNoCaminhoDaExecucao(f *facts.Facts) []caminhoOlhado {
 	}
 	for i := range f.Units {
 		for _, ex := range f.Units[i].Exec {
-			add(nz(ex.Target, primeiroToken(ex.Cmd)), "unit "+f.Units[i].Name+
-				" ("+ex.Key+")")
+			if len(ex.Targets) == 0 {
+				add(primeiroToken(ex.Cmd), "unit "+f.Units[i].Name+" ("+ex.Key+")")
+				continue
+			}
+			for _, t := range ex.Targets {
+				add(t, "unit "+f.Units[i].Name+" ("+ex.Key+")")
+			}
 		}
 	}
 	for i := range f.CodigoSuspeito {

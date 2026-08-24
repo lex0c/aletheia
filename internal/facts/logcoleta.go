@@ -83,7 +83,12 @@ var familiasDeLog = map[string][]string{
 
 // orcamento é o custo COMPARTILHADO entre todos os arquivos desta coleta.
 type orcamento struct {
-	bytes    int64
+	bytes int64
+	// eventos é o que RESTA do teto, e ele é decrementado DURANTE a extração de
+	// cada arquivo — não depois. Antes, leFonteDeLog montava os eventos do
+	// arquivo INTEIRO e o chamador cortava em 5000: o dump saía limitado e a
+	// alocação que o teto existe para impedir já tinha acontecido, sobre um
+	// arquivo cujo conteúdo o adversário escolhe.
 	eventos  int
 	arquivos int
 	estourou map[string]bool
@@ -117,7 +122,7 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 	if e.LogsTudo {
 		tetoArquivos = maxLogArquivosHard
 	}
-	orc := &orcamento{bytes: maxLogBytesTotal, estourou: map[string]bool{}}
+	orc := &orcamento{bytes: maxLogBytesTotal, eventos: maxEventosLog, estourou: map[string]bool{}}
 	parcialPorAcesso := false
 
 	alvos, inacessiveis, descartados := alvosDeLog(f, e)
@@ -164,21 +169,30 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 
 	visto := map[string]string{} // impressão do evento -> arquivo onde apareceu
 	parcial := parcialPorAcesso
-	for _, a := range alvos {
-		if orc.arquivos >= tetoArquivos {
-			orc.marca("de " + strconv.Itoa(tetoArquivos) + " arquivos de log")
-			break
+	parouEm, motivoDaParada := -1, ""
+	for idx, a := range alvos {
+		// TETO GLOBAL PARA A SELEÇÃO, e o que sobra NÃO some.
+		//
+		// Sair do laço sem registrar os alvos restantes fazia a família deles
+		// sumir de FontesDeLog — e escopoDaFamilia decide que uma família existe
+		// consultando exatamente isso. Um audit.log que esgotasse o orçamento
+		// antes do auth.log tirava os checks de auth do DENOMINADOR, com a frase
+		// "este host não tem log em TEXTO" sobre um arquivo que a coleta apenas
+		// não alcançou. É a confusão entre escopo e lacuna que o resto do projeto
+		// recusa — e aqui ela entrava por um `break`.
+		switch {
+		case orc.arquivos >= tetoArquivos:
+			motivoDaParada = "o teto de " + strconv.Itoa(tetoArquivos) + " arquivos de log"
+		case orc.bytes <= 0:
+			motivoDaParada = "o teto de " + strconv.Itoa(maxLogBytesTotal>>20) + " MB de log lidos"
+		case orc.eventos <= 0:
+			motivoDaParada = "o teto de " + strconv.Itoa(maxEventosLog) + " eventos de log"
+		case e.WalkExpired():
+			motivoDaParada = "o teto de TEMPO da varredura"
 		}
-		if orc.bytes <= 0 {
-			orc.marca("de " + strconv.Itoa(maxLogBytesTotal>>20) + " MB de log lidos")
-			break
-		}
-		if len(f.EventosDeLog) >= maxEventosLog {
-			orc.marca("de " + strconv.Itoa(maxEventosLog) + " eventos de log")
-			break
-		}
-		if e.WalkExpired() {
-			orc.marca("de TEMPO da varredura")
+		if motivoDaParada != "" {
+			parouEm = idx
+			orc.marca(strings.TrimPrefix(motivoDaParada, "o teto "))
 			break
 		}
 		// A JANELA decide quais ARQUIVOS abrir, e não quais eventos guardar —
@@ -202,16 +216,31 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 		}
 		orc.arquivos++
 
-		ctx := contextoDeTempo{Loc: loc, Suposto: suposto, Ancora: a.mod, Agora: e.Now}
+		// A ÂNCORA DO ANO, e ela não pode ser o mtime no arquivo VIVO.
+		//
+		// O arquivo vivo é o que está sendo escrito AGORA: a última linha dele é,
+		// por definição, recente. Ancorar no mtime deixava o adversário escolher
+		// o ano das linhas com um `touch -d '2025-08-24'` — e um ano a menos
+		// empurra o achado para fora de `--since 7d`, onde o relatório passa a
+		// mostrar só a contagem dele. O gate de abertura já foi corrigido; esta é
+		// a segunda porta da mesma casa.
+		//
+		// Para o ROTACIONADO o mtime continua sendo a melhor pista que existe:
+		// ele não é mais escrito, e a coleta não tem outra referência.
+		ancora := a.mod
+		if a.geracao == 0 {
+			ancora = e.Now
+		}
+		ctx := contextoDeTempo{Loc: loc, Suposto: suposto, Ancora: ancora, Agora: e.Now}
 		fonte, evs := leFonteDeLog(f, e, a, ctx, orc)
-		if fonte.Estado != FonteLida {
+		// Lacuna num arquivo LIDO — capacidade do parser, montagem incompleta do
+		// audit — também é coleta parcial. Sem isto, o fato de RESUMO dizia
+		// `collected` enquanto o fato detalhado carregava a lacuna: dois fatos da
+		// mesma coleta se contradizendo.
+		if fonte.Estado != FonteLida || fonte.Lacuna != "" {
 			parcial = true
 		}
 		for i := range evs {
-			if len(f.EventosDeLog) >= maxEventosLog {
-				orc.marca("de " + strconv.Itoa(maxEventosLog) + " eventos de log")
-				break
-			}
 			ev := evs[i]
 			// DEDUPE ENTRE ARQUIVOS, nunca dentro do mesmo. Conforme a
 			// configuração do rsyslog, a mesma mensagem do sshd cai em auth.log
@@ -228,6 +257,18 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 			fonte.EventosGerados++
 		}
 		f.FontesDeLog = append(f.FontesDeLog, fonte)
+	}
+
+	if parouEm >= 0 {
+		for _, a := range alvos[parouEm:] {
+			f.FontesDeLog = append(f.FontesDeLog, FonteDeLog{
+				Path: a.path, Familias: a.familias, Estado: FonteNaoLida,
+				Lacuna: a.path + " NÃO foi visitado: a coleta parou antes dele por " +
+					motivoDaParada + ". O arquivo existe, e nada pode ser afirmado " +
+					"sobre o que há nele",
+			})
+		}
+		parcial = true
 	}
 
 	for teto := range orc.estourou {
@@ -460,6 +501,22 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 			break
 		}
 		nLinha++
+		// O TETO DE EVENTOS PARA A EXTRAÇÃO AQUI, e não depois de o arquivo
+		// inteiro virar objeto.
+		//
+		// E parar aqui também interrompe a COBERTURA: continuar lendo carimbos
+		// depois de deixar de extrair afirmaria que aquele trecho foi observado
+		// — quando, dali em diante, evento nenhum seria detectado. É o mesmo
+		// erro que a cobertura por evento cometia, pelo outro lado.
+		if orc.eventos <= 0 {
+			fonte.Estado = FonteTruncada
+			fonte.CorteNoFim = true
+			fonte.Lacuna = a.path + ": a extração parou no teto de " +
+				strconv.Itoa(maxEventosLog) + " eventos — o resto do arquivo NÃO foi " +
+				"examinado, e a cobertura acima não o alcança"
+			orc.marca("de " + strconv.Itoa(maxEventosLog) + " eventos de log")
+			break
+		}
 		if nLinha > maxLogLinhasArquivo {
 			fonte.Estado = FonteTruncada
 			fonte.CorteNoFim = true
@@ -501,6 +558,7 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 			r.Linha = nLinha
 			for _, ev := range mont.Alimenta(r) {
 				evs = append(evs, comOrigem(ev, a.path))
+				orc.eventos--
 			}
 			if err != nil {
 				break
@@ -536,6 +594,7 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 			fonte.LinhasReconhecidas++
 			ev.Line = nLinha
 			evs = append(evs, comOrigem(ev, a.path))
+			orc.eventos--
 		}
 		if err != nil {
 			break
@@ -544,6 +603,7 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 	if mont != nil {
 		for _, ev := range mont.Fecha() {
 			evs = append(evs, comOrigem(ev, a.path))
+			orc.eventos--
 		}
 		if mont.FechadosPorTeto > 0 {
 			anota(f, &fonte, a.path+": "+strconv.Itoa(mont.FechadosPorTeto)+

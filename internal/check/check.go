@@ -120,6 +120,21 @@ type Finding struct {
 	// frases mandam o operador para lugares diferentes.
 	QuandoFonte string `json:"when_source,omitempty"`
 
+	// QuandoInferido marca a data que não foi LIDA, e sim deduzida — e ela NÃO
+	// recorta: um achado assim fica no relatório mesmo caindo fora da janela.
+	//
+	// O caso que a exige é o syslog tradicional, que não carrega ano nem fuso. O
+	// ano sai do mtime do arquivo, e mtime é falsificável com um `touch`; o fuso
+	// sai do /etc/localtime, e sem ele o horário pode estar catorze horas fora.
+	// Com data inferida entrando no recorte, um `touch -d` de um ano atrás
+	// empurra o achado para fora de `--since 7d` e o relatório passa a mostrar
+	// só a CONTAGEM dele — o adversário escolhendo o que o operador lê.
+	//
+	// A regra é a mesma que a janela já aplica ao achado SEM data: descartar por
+	// uma data em que não se confia é esconder por ignorância, não por escolha.
+	// A data continua no achado, porque ela informa; ela só não decide.
+	QuandoInferido bool `json:"when_inferred,omitempty"`
+
 	// Irreversible marca o achado cujo passo seguinte se perde para sempre se
 	// for pulado — matar um processo memfd destrói a única cópia do binário.
 	// O relatório promove estes ao passo 1 por ESTE campo, não por casar o

@@ -262,6 +262,15 @@ func TestCandidatasNaoCompreendidasViramLacuna(t *testing.T) {
 	if !strings.Contains(juntas, "compreendidas") {
 		t.Errorf("faltou a lacuna de capacidade do parser: %v", f.Partial["logeventos"])
 	}
+	// E o fato de RESUMO precisa concordar com o detalhado: um arquivo LIDO com
+	// lacuna ainda é coleta parcial. Dizer `collected` aqui seria dois fatos da
+	// mesma coleta se contradizendo.
+	if f.LogEstado != LogParcial {
+		t.Errorf("LogEstado = %q, quer partial — a fonte carrega lacuna", f.LogEstado)
+	}
+	if f.FontesDeLog[0].Lacuna == "" {
+		t.Error("a lacuna precisa estar NO ARQUIVO, para o check degradar pela família")
+	}
 }
 
 // ARQUIVO ILEGÍVEL É LACUNA, e é o par do teste de escopo acima: o auth.log é
@@ -656,5 +665,113 @@ func TestMtimeForjadoNaoImpedeALeituraDoArquivoVIVO(t *testing.T) {
 	}
 	if len(f.EventosDeLog) == 0 {
 		t.Error("nenhum evento: o conteúdo do arquivo vivo não foi lido")
+	}
+}
+
+// O MTIME NÃO PODE DECIDIR O ANO DO ARQUIVO VIVO.
+//
+// Corrigir só o gate de abertura fechou uma porta e deixou a outra: o arquivo
+// passava a ser lido, e o `touch -d` continuava escolhendo o ANO das linhas.
+// Um ano a menos empurra o achado para fora de `--since 7d`, e o relatório passa
+// a mostrar só a contagem dele — o adversário escolhendo o que o operador lê.
+//
+// O arquivo vivo é o que está sendo escrito AGORA: a última linha dele é, por
+// definição, recente. A âncora dele é a COLETA.
+func TestAnoDoArquivoVivoNaoVemDoMtime(t *testing.T) {
+	f := raizDeLog(t, map[string]string{
+		"var/log/auth.log": linhasDeAuth(2),
+	}, func(raiz string, _ *envOpts) {
+		antigo := time.Now().Add(-400 * 24 * time.Hour)
+		if err := os.Chtimes(filepath.Join(raiz, "var/log/auth.log"), antigo, antigo); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	if len(f.EventosDeLog) == 0 {
+		t.Fatal("o arquivo vivo precisa ser lido")
+	}
+	limite := utc(time.Now().Add(-366 * 24 * time.Hour))
+	for _, ev := range f.EventosDeLog {
+		if ev.At < limite {
+			t.Errorf("evento datado em %s — o mtime forjado (400 dias atrás) escolheu "+
+				"o ano, e um `touch -d` passa a decidir o que cai fora da janela", ev.At)
+		}
+	}
+}
+
+// TETO GLOBAL NÃO PODE APAGAR UMA FAMÍLIA.
+//
+// Sair do laço sem registrar os alvos restantes fazia a família deles sumir de
+// FontesDeLog — e é dali que escopoDaFamilia decide se a pergunta cabe no host.
+// Um audit.log que esgotasse o orçamento antes do auth.log tirava os checks de
+// auth do DENOMINADOR, com a frase "este host não tem log em TEXTO" sobre um
+// arquivo que a coleta apenas não alcançou.
+func TestTetoGlobalNaoTransformaFamiliaEmForaDeEscopo(t *testing.T) {
+	// audit.log ordena ANTES de auth.log e gasta o orçamento de eventos.
+	var b strings.Builder
+	for i := 0; i <= maxEventosLog; i++ {
+		b.WriteString("type=SYSCALL msg=audit(17365000" + strconv.Itoa(10000+i) +
+			".000:" + strconv.Itoa(i) + "): syscall=59 pid=1 uid=0 comm=\"x\"\n")
+	}
+	f := raizDeLog(t, map[string]string{
+		"var/log/audit/audit.log": b.String(),
+		"var/log/auth.log":        linhasDeAuth(2),
+	}, nil)
+
+	c := f.CoberturaLog("auth")
+	if !c.Existe {
+		t.Fatal("o auth.log existe no host: dizer que não é a mentira que separa " +
+			"escopo de lacuna")
+	}
+	if c.Lida {
+		t.Error("e ele NÃO foi lido: Lida precisa ser falso")
+	}
+	achou := false
+	for _, s := range f.FontesDeLog {
+		if s.Path == "/var/log/auth.log" {
+			achou = true
+			if s.Estado != FonteNaoLida || s.Lacuna == "" {
+				t.Errorf("fonte = %+v, quer nao_visitada com lacuna", s)
+			}
+		}
+	}
+	if !achou {
+		t.Error("o alvo não visitado precisa CONSTAR das fontes")
+	}
+}
+
+// O TETO DE EVENTOS VALE DURANTE A EXTRAÇÃO, não depois.
+//
+// Antes, leFonteDeLog montava os eventos do arquivo INTEIRO e o chamador cortava
+// em 5000: o dump saía limitado e a alocação que o teto existe para impedir já
+// tinha acontecido — sobre um arquivo cujo conteúdo o adversário escolhe.
+//
+// E parar a extração também interrompe a COBERTURA: continuar lendo carimbos
+// depois de deixar de extrair afirmaria que aquele trecho foi observado, quando
+// dali em diante evento nenhum seria detectado.
+func TestTetoDeEventosParaAExtracaoEACobertura(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < maxEventosLog+10; i++ {
+		b.WriteString("Aug 24 01:00:00 h sshd[1]: Failed password for root from 1.2.3.4 port 5 ssh2\n")
+	}
+	// A última linha é datada BEM depois: se a cobertura a alcançar, ela está
+	// afirmando observação de um trecho que a extração já tinha abandonado.
+	b.WriteString("Aug 24 23:59:00 h sshd[1]: Failed password for root from 1.2.3.4 port 5 ssh2\n")
+
+	f := raizDeLog(t, map[string]string{"var/log/auth.log": b.String()}, nil)
+
+	if n := len(f.EventosDeLog); n > maxEventosLog {
+		t.Errorf("%d eventos, teto é %d", n, maxEventosLog)
+	}
+	s := f.FontesDeLog[0]
+	if s.Estado != FonteTruncada || s.Lacuna == "" {
+		t.Errorf("o corte precisa ser declarado NO ARQUIVO: %+v", s)
+	}
+	if strings.HasSuffix(s.CobertoAte, "T23:59:00Z") {
+		t.Error("a cobertura passou do ponto em que a extração parou: ela estaria " +
+			"afirmando observação onde evento nenhum seria detectado")
+	}
+	if f.LogEstado != LogParcial {
+		t.Errorf("LogEstado = %q, quer partial", f.LogEstado)
 	}
 }

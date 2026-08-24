@@ -153,7 +153,7 @@ func JSONL(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, bl *Baselin
 		if err := enc.Encode(janelaLine{
 			Host: host, TS: ts, Tool: tool, ID: "window",
 			Desde: jn.Desde, Spec: jn.Spec, Fora: jn.Fora,
-			ForaTexto: jn.ForaTexto, SemData: jn.SemData,
+			ForaTexto: jn.ForaTexto, SemData: jn.SemData, Inferidos: jn.Inferidos,
 			Ancora: jn.Ancora, AncoraOrigem: jn.AncoraOrigem, AncoraDe: jn.AncoraDe,
 			LogHorizonte: jn.LogHorizonte, LogAquem: jn.LogAquemDaJanela,
 		}); err != nil {
@@ -194,6 +194,7 @@ type janelaLine struct {
 	Fora      int    `json:"outside_window,omitempty"`
 	ForaTexto string `json:"outside_by_severity,omitempty"`
 	SemData   int    `json:"undated_kept,omitempty"`
+	Inferidos int    `json:"inferred_kept,omitempty"`
 
 	Ancora       string `json:"anchor,omitempty"`
 	AncoraOrigem string `json:"anchor_origin,omitempty"`

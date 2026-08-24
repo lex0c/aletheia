@@ -362,6 +362,8 @@ dump pode conter:
 | BPF | programas, maps, links, referências e owners que as APIs disponíveis permitem observar |
 | ftrace | funções instrumentadas e callbacks visíveis em tracefs/debugfs |
 | Kernel security | lockdown, assinatura obrigatória de módulos, Secure Boot, IMA, `modules_disabled`, `kptr_restrict`, `dmesg_restrict`, unprivileged BPF e Yama |
+| Logs (estrutura) | inventário de `/var/log`: arquivos, gerações de rotação (contador e `dateext`), tamanhos e registros de login do `wtmp`/`btmp`/`utmp` |
+| Logs (conteúdo) | eventos NORMALIZADOS de `auth.log`/`secure`, `syslog`/`messages`, `kern.log`, `cron` e `audit.log` — este montado por EVENTO, juntando os registros `SYSCALL`+`EXECVE`+`CWD`+`PATH` do mesmo serial. Cada arquivo declara o intervalo que foi efetivamente OBSERVADO, quantas linhas o parser entendeu, e o que ficou de fora — sem isso, uma lista vazia de eventos seria indistinguível de host tranquilo, arquivo ilegível e formato desconhecido |
 | Cross-view | fatos usados para comparar visões independentes de processos, threads, módulos e BPF |
 | Cobertura | quais fontes foram observadas, quais estavam parciais, quais não puderam ser verificadas e por quê |
 | Aquisição | instante da coleta, versão/hash da ferramenta, capabilities disponíveis e lacunas encontradas |
@@ -817,6 +819,20 @@ COBERTURA  105/105 completos · 2 fora de escopo
 
 O mesmo vale para o modo `image` (não há kernel vivo para consultar) e para
 contêiner, onde `/sys/kernel` é mascarado pelo runtime de propósito.
+
+E vale para o LOG, onde a distinção decide o resultado de metade da frota. Um
+host que não instala rsyslog — Debian 12, Fedora e derivados — não tem
+`/var/log/auth.log`: o journal é binário, e esta versão não o lê. A pergunta não
+existe ali, então os checks de autenticação por log saem do denominador e a
+cobertura fica intacta. Já um `auth.log` que EXISTE e não abre — ele é 0640
+`root:adm` por desenho no Debian — é lacuna: a pergunta cabia e ficou sem
+resposta. Os dois produzem a mesma lista vazia de eventos, e só a observabilidade
+por fonte os separa.
+
+Este é o primeiro escopo que só os FATOS respondem. Os outros três saem do
+ambiente — modo, capability sem mecanismo, comparação ausente — e são decididos
+antes de o check rodar; nenhum bit de capability diz que uma distribuição não
+instala rsyslog.
 
 ---
 

@@ -862,6 +862,7 @@ func aplicarJanela(r *check.Report, f *facts.Facts, j check.Janela, agora time.T
 	}
 	info := &report.JanelaInfo{
 		Fora: rec.Fora, SemData: rec.SemData, MaisRecente: rec.MaisRecente,
+		Inferidos:    rec.Inferidos,
 		ForaTexto:    porSeveridade(rec.ForaSev),
 		Ancora:       anc.Quando,
 		AncoraOrigem: anc.Origem,

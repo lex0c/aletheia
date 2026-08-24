@@ -284,6 +284,7 @@ var chaveForaDasLocais = check.Check{
 		type uso struct {
 			user, ip, quando string
 			n                int
+			inferido         bool
 		}
 		porChave := map[string]*uso{}
 		var ordem []string
@@ -299,6 +300,9 @@ var chaveForaDasLocais = check.Check{
 				ordem = append(ordem, ev.Fingerprint)
 			}
 			u.n++
+			// A INCERTEZA DA DATA VIAJA COM O ACHADO: basta um evento datado por
+			// inferência para que a data deste achado não possa recortar nada.
+			u.inferido = u.inferido || ev.AtInferido
 			if ev.At != "" && (u.quando == "" || ev.At > u.quando) {
 				u.quando = ev.At
 			}
@@ -324,6 +328,7 @@ var chaveForaDasLocais = check.Check{
 			fd.Chave = fp
 			if u.quando != "" {
 				fd.Quando, fd.QuandoFonte = u.quando, "último login registrado com esta chave"
+				fd.QuandoInferido = u.inferido
 			}
 			fd.NextSteps = []string{
 				"confirme com o dono da conta " + u.user + " se a chave foi removida " +
@@ -434,6 +439,9 @@ var sudoParaAlvoIncomum = check.Check{
 				fd.Chave = user + " " + alvo
 				if ag.Ultimo != "" {
 					fd.Quando, fd.QuandoFonte = ag.Ultimo, "última execução registrada no log"
+					for _, ex := range ag.Exemplos {
+						fd.QuandoInferido = fd.QuandoInferido || ex.AtInferido
+					}
 				}
 				fd.NextSteps = []string{
 					"o arquivo pode não existir mais: `ls -la " + alvo + "` responde " +
@@ -516,6 +524,7 @@ var trilhaDeAuditoriaComBuraco = check.Check{
 
 		var perdaForte, paradaLimpa int
 		var quando string
+		var inferido bool
 		var exemplos []string
 		for i := range f.EventosDeLog {
 			ev := &f.EventosDeLog[i]
@@ -525,6 +534,7 @@ var trilhaDeAuditoriaComBuraco = check.Check{
 			if ev.At > quando {
 				quando = ev.At
 			}
+			inferido = inferido || ev.AtInferido
 			if len(exemplos) < 3 && ev.Trecho != "" {
 				exemplos = append(exemplos, ev.Trecho)
 			}
@@ -573,6 +583,7 @@ var trilhaDeAuditoriaComBuraco = check.Check{
 		fd := self.F(sev, sujeito, "", linhas...)
 		if quando != "" {
 			fd.Quando, fd.QuandoFonte = quando, "última perda registrada no audit.log"
+			fd.QuandoInferido = inferido
 		}
 		fd.NextSteps = []string{
 			"`auditctl -s` mostra lost e backlog ATUAIS: compare com o que o log diz",
@@ -687,6 +698,10 @@ var buracoTemporalNoLog = check.Check{
 			fd := self.F(check.SevManual, faixas[i+1].path, "", ev...)
 			fd.Chave = faixas[i].path + "→" + faixas[i+1].path
 			fd.Quando, fd.QuandoFonte = faixas[i].ate, "última linha antes do vão"
+			// A cobertura é datada como as LINHAS são, e as do syslog tradicional
+			// dependem do mtime para o ano. Se a família tem evento inferido, a
+			// data deste achado não recorta.
+			fd.QuandoInferido = familiaTemDataInferida(f, "auth")
 			fd.NextSteps = []string{
 				"o wtmp é testemunha INDEPENDENTE: `last -F` mostra se houve login " +
 					"dentro do vão. Se houve, o silêncio do auth.log deixa de ter " +
@@ -699,6 +714,20 @@ var buracoTemporalNoLog = check.Check{
 		}
 		return r
 	},
+}
+
+// familiaTemDataInferida diz se algum evento daquela família foi datado por
+// dedução — ano vindo do mtime, ou fuso suposto.
+func familiaTemDataInferida(f *facts.Facts, familia string) bool {
+	for i := range f.EventosDeLog {
+		if !f.EventosDeLog[i].AtInferido {
+			continue
+		}
+		if familiaDoArquivo(f, f.EventosDeLog[i].File, "") == familia {
+			return true
+		}
+	}
+	return false
 }
 
 func ehFamilia(s *facts.FonteDeLog, familia string) bool {

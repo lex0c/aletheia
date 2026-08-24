@@ -152,6 +152,12 @@ const (
 	// escopo do FORMATO, e chamá-lo de "grande demais" seria etiqueta errada
 	// dentro do próprio fato.
 	FonteFormatoNaoLido = "formato_nao_lido"
+	// FonteNaoLida é o arquivo que a coleta NEM CHEGOU A VISITAR, porque um teto
+	// global parou a seleção antes dele. Ele existe no host, e é isso que
+	// precisa constar: sem a entrada, a família dele sairia como INEXISTENTE, e
+	// os checks dela sairiam de escopo dizendo "esta pergunta não cabe neste
+	// host" quando a verdade é "eu parei antes de chegar nele".
+	FonteNaoLida = "nao_visitada"
 )
 
 // lidaOuTruncada diz se o arquivo foi de fato ABERTO e teve conteúdo entregue ao

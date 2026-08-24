@@ -82,6 +82,9 @@ type JanelaInfo struct {
 	MaisRecente string
 	// SemData são os achados sem data, que FICARAM.
 	SemData int
+	// Inferidos são os que tinham data, caíram fora, e ficaram porque a data
+	// foi DEDUZIDA e não lida.
+	Inferidos int
 
 	// Ancora é a data de referência da investigação (§9), com a origem dela.
 	Ancora       string
@@ -694,6 +697,11 @@ func writeJanela(w io.Writer, j *JanelaInfo) {
 		if j.SemData > 0 {
 			fmt.Fprintf(w, "            %d achado(s) SEM data foram MANTIDOS: descartá-los "+
 				"seria esconder por ignorância, não por escolha\n", j.SemData)
+		}
+		if j.Inferidos > 0 {
+			fmt.Fprintf(w, "            %d achado(s) com data INFERIDA ficaram apesar de "+
+				"caírem fora: o ano do syslog vem do mtime, que um `touch` reescreve\n",
+				j.Inferidos)
 		}
 	}
 	if j.LogAquemDaJanela {

@@ -105,6 +105,9 @@ type Recorte struct {
 	ForaSev     map[Severity]int
 	SemData     int
 	MaisRecente string // o achado fora da janela mais próximo dela
+	// Inferidos são os achados que caíram fora da janela e FICARAM porque a
+	// data deles foi deduzida, não lida. Ver Finding.QuandoInferido.
+	Inferidos int
 }
 
 // Aplicar recorta o relatório. Devolve o que ficou de fora, contado.
@@ -122,6 +125,13 @@ func (r *Report) Aplicar(j Janela) Recorte {
 			// aos poucos sem que a janela comece a esconder o que ainda não foi
 			// datado.
 			rec.SemData++
+			dentro = append(dentro, f)
+		case t.Before(j.Desde) && f.QuandoInferido:
+			// DATA INFERIDA NÃO RECORTA. Ver Finding.QuandoInferido: o ano do
+			// syslog tradicional vem do mtime, que um `touch` reescreve, e o
+			// fuso pode não ter sido lido. Deixar essa data excluir achado
+			// entregaria ao adversário o controle do que aparece no relatório.
+			rec.Inferidos++
 			dentro = append(dentro, f)
 		case t.Before(j.Desde):
 			rec.Fora++

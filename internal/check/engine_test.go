@@ -567,3 +567,53 @@ func TestSemEscopoNadaMuda(t *testing.T) {
 		t.Errorf("Total/Complete = %d/%d, quer 1/1", r.Coverage.Total, r.Coverage.Complete)
 	}
 }
+
+// DATA INFERIDA NÃO RECORTA.
+//
+// O ano de uma linha de syslog tradicional vem do mtime do arquivo, e mtime é
+// falsificável com um `touch`; o fuso vem do /etc/localtime, e sem ele o horário
+// pode estar catorze horas fora. Deixar essa data excluir achado entregaria ao
+// adversário o controle do que o operador lê: um `touch -d` de um ano atrás
+// empurra o achado para fora de `--since 7d`, e sobra a contagem.
+//
+// A regra é a mesma que a janela já aplica ao achado SEM data: descartar por uma
+// data em que não se confia é esconder por ignorância, não por escolha.
+func TestDataInferidaNaoEhRecortadaPelaJanela(t *testing.T) {
+	velho := "2025-01-01T00:00:00Z"
+	r := &Report{Findings: []Finding{
+		{ID: "lido", Sev: SevWarn, Quando: velho},
+		{ID: "inferido", Sev: SevWarn, Quando: velho, QuandoInferido: true},
+	}}
+	rec := r.Aplicar(Janela{
+		Ativa: true, Spec: "7d",
+		Desde: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC),
+	})
+
+	if len(r.Findings) != 1 || r.Findings[0].ID != "inferido" {
+		t.Fatalf("quer só o achado de data inferida mantido, tem %+v", r.Findings)
+	}
+	if rec.Fora != 1 {
+		t.Errorf("Fora = %d, quer 1 (o de data LIDA)", rec.Fora)
+	}
+	if rec.Inferidos != 1 {
+		t.Errorf("Inferidos = %d, quer 1 — mantido, e CONTADO", rec.Inferidos)
+	}
+}
+
+// E a data inferida DENTRO da janela não vira ruído de contagem: ela só é
+// notável quando teria sido cortada.
+func TestDataInferidaDentroDaJanelaNaoEhContada(t *testing.T) {
+	r := &Report{Findings: []Finding{
+		{ID: "inferido", Sev: SevWarn, Quando: "2026-08-20T00:00:00Z", QuandoInferido: true},
+	}}
+	rec := r.Aplicar(Janela{
+		Ativa: true, Spec: "7d",
+		Desde: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC),
+	})
+	if len(r.Findings) != 1 {
+		t.Fatalf("o achado está dentro da janela: %+v", r.Findings)
+	}
+	if rec.Inferidos != 0 {
+		t.Errorf("Inferidos = %d, quer 0 — ele não precisou da exceção", rec.Inferidos)
+	}
+}

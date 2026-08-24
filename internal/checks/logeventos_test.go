@@ -47,8 +47,11 @@ func TestChaveUsadaQueNaoEstaMaisNoAuthorizedKeys(t *testing.T) {
 		t.Fatalf("%d achados: %+v", len(r.Findings), r.Findings)
 	}
 	fd := r.Findings[0]
-	if fd.Sev != check.SevWarn {
-		t.Errorf("Sev = %v — log sozinho não sustenta CRITICAL", fd.Sev)
+	// MANUAL, e não aviso: desligamento de conta e rotação de chave deixam
+	// exatamente esta forma, e a ferramenta não separa uma da outra. Foi o T1 —
+	// o servidor de produção de referência — que cobrou a decisão.
+	if fd.Sev != check.SevManual {
+		t.Errorf("Sev = %v, quer MANUAL", fd.Sev)
 	}
 	if fd.Subject != "SHA256:AAA" {
 		t.Errorf("Subject = %q", fd.Subject)
@@ -357,5 +360,26 @@ func TestSudoComAlvoIndeterminadoDeclaraLacuna(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(r.Coverage.Partial[0].Reasons, " "), "não foi avaliado") {
 		t.Errorf("motivo = %v", r.Coverage.Partial[0].Reasons)
+	}
+}
+
+// AuthorizedKeysCommand tira a AUTORIDADE dos arquivos locais: quem responde
+// "esta chave está autorizada?" é um programa, e o authorized_keys em disco é
+// vazio por construção. Sem esta guarda, o check falaria em TODO login
+// bem-sucedido de um host de frota grande — continuamente, não por acidente.
+func TestAuthorizedKeysCommandTiraOCheckDeEscopo(t *testing.T) {
+	f := fatosDeLog(facts.EventoDeLog{
+		Kind: "auth.accepted", Metodo: "publickey", Fingerprint: "SHA256:AAA",
+		User: "deploy", File: "/var/log/auth.log",
+	})
+	f.SSH.AuthorizedKeysCommand = "/usr/bin/sss_ssh_authorizedkeys"
+
+	r := rodaLog(t, chaveForaDasLocais, f)
+	lacunas, escopo := r.Coverage.NaoVerificados()
+	if len(escopo) != 1 {
+		t.Fatalf("quer 1 fora de escopo, tem %d (lacunas: %d)", len(escopo), len(lacunas))
+	}
+	if r.Coverage.Incomplete() {
+		t.Error("escopo NÃO derruba a cobertura")
 	}
 }

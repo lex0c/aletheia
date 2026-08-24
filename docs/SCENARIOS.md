@@ -328,7 +328,7 @@ contêiner não alcança — hidepid, sysctl, módulo, cgroup, eBPF.
 | `G4-montagem-que-esconde-em-vm` | vm | bind por cima de /etc num kernel próprio, sem privilégio emprestado de contêiner |
 | `G4-vao-de-tempo-entre-geracoes` | live | dias sem uma linha de autenticação entre duas gerações consecutivas |
 | `G5-journald-only-eh-escopo` | live | host sem log em TEXTO: a pergunta não cabe, e a cobertura NÃO cai |
-| `G6-auth-log-ilegivel-eh-lacuna` | live | o arquivo EXISTE e não abre: a cobertura precisa cair |
+| `G6-auth-log-desviado-eh-lacuna` | live | o auth.log foi trocado por um fifo: existe, não se lê, e NÃO é fora de escopo |
 | `G7-host-limpo-fica-calado` | live | auth.log de rotina: sudo de administração e logins normais, e nenhum achado |
 | `G8-mesma-linha-em-dois-arquivos` | live | o rsyslog duplica a mensagem do sshd: um evento, não dois |
 | `G9-auditd-parado-eh-manual` | live | DAEMON_END sozinho: parada administrativa não é evasão |

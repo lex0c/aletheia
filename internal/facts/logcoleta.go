@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"compress/gzip"
 	"io"
+	"io/fs"
 	"sort"
 	"strconv"
 	"strings"
@@ -325,6 +326,23 @@ func alvosDeLog(f *Facts, e *env.Env) ([]alvoDeLog, []fonteInacessivel, int) {
 				continue
 			}
 			if !fi.Mode().IsRegular() {
+				// NÃO É ARQUIVO COMUM, e sumir daqui em silêncio é o defeito:
+				// um /var/log/auth.log trocado por fifo, por symlink para
+				// /dev/null ou por diretório sai do inventário (que filtra
+				// regular) E sairia daqui — a família ficaria sem fonte nenhuma,
+				// e a coleta concluiria "este host não tem log em texto".
+				//
+				// É a versão de log do que o HistoricoShell.Desviado já
+				// reconhece para o histórico de shell: apontar o arquivo para o
+				// vazio é a forma mais barata de anti-forense que existe, e ela
+				// não pode virar escopo.
+				inacessiveis = append(inacessiveis, fonteInacessivel{
+					path: vivo, familias: []string{fam},
+					motivo: vivo + " existe e NÃO é arquivo comum (" + tipoDeObjeto(fi.Mode()) +
+						"): o conteúdo dele não foi lido, e um log apontado para " +
+						"outro lugar é anti-forense barato — isto NÃO é o mesmo que " +
+						"o host não ter log em texto",
+				})
 				continue
 			}
 			// Existe, é arquivo comum, e o inventário não o trouxe (diretório
@@ -754,4 +772,22 @@ func janelaEfetiva(f *Facts) string {
 		}
 	}
 	return pior
+}
+
+// tipoDeObjeto nomeia o que está no lugar do arquivo. O nome importa: "fifo" e
+// "link" mandam o operador para investigações diferentes.
+func tipoDeObjeto(m fs.FileMode) string {
+	switch {
+	case m&fs.ModeSymlink != 0:
+		return "link simbólico"
+	case m.IsDir():
+		return "diretório"
+	case m&fs.ModeNamedPipe != 0:
+		return "fifo"
+	case m&fs.ModeSocket != 0:
+		return "socket"
+	case m&fs.ModeDevice != 0:
+		return "dispositivo"
+	}
+	return m.String()
 }

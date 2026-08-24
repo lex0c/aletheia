@@ -11,7 +11,7 @@ package scenario
 //	G3  trilha de auditoria furada    audit_lost + DAEMON_ABORT
 //	G4  vão de tempo entre gerações   apagar linha não fura a rotação
 //	G5  journald-only                 ESCOPO: a cobertura NÃO pode cair
-//	G6  auth.log ilegível             LACUNA: a cobertura TEM que cair
+//	G6  auth.log trocado por fifo     LACUNA: a cobertura TEM que cair
 //	G7  host limpo                    silêncio, que é o contrato mais caro
 //	G8  a mesma linha em dois arquivos  um evento, não dois
 //	G9  auditd parado sem perda       MANUAL, nunca aviso
@@ -37,14 +37,17 @@ func init() {
 		Args:   []string{"--only", "priv", "--logs-all"},
 		Plant:  chaveForaDoAuthorizedKeys,
 		Expect: []Expect{
-			{ID: "logs.pubkey_not_in_local_keys", Sev: "WARN",
+			// MANUAL: desligamento de conta e rotação de chave deixam a mesma
+			// forma, e foi o T1 — o servidor de produção de referência — que
+			// cobrou essa decisão ao ganhar dois avisos que não valiam a atenção.
+			{ID: "logs.pubkey_not_in_local_keys", Sev: "MANUAL",
 				Subject: "SHA256:naoEstaEmLugarNenhum"},
 			{ID: "logs.pubkey_not_in_local_keys", Evidence: "não aparece em nenhum"},
 			// O horizonte precisa viajar junto: sem ele o achado carrega uma
 			// afirmação implícita sobre tudo que não apareceu.
 			{ID: "logs.pubkey_not_in_local_keys", Evidence: "observado de forma contínua"},
 		},
-		Exit: 1,
+		Exit: -1,
 	})
 
 	Register(Scenario{
@@ -124,18 +127,25 @@ func init() {
 	})
 
 	Register(Scenario{
-		ID:   "G6-auth-log-ilegivel-eh-lacuna",
-		Desc: "o arquivo EXISTE e não abre: a cobertura precisa cair",
-		// O par exato do G5, e a diferença entre os dois é o que separa escopo
-		// de lacuna. Em Debian o auth.log é 0640 root:adm por desenho, então
-		// sem root esta é a resposta honesta — e ela não pode ser confundida com
-		// o host que não TEM log em texto.
+		ID:   "G6-auth-log-desviado-eh-lacuna",
+		Desc: "o auth.log foi trocado por um fifo: existe, não se lê, e NÃO é fora de escopo",
+		// O par exato do G5, e a diferença entre os dois é o que separa escopo de
+		// lacuna: lá o arquivo NÃO EXISTE, aqui ele existe e não entrega
+		// conteúdo. Apontar o log para outro lugar é a forma mais barata de
+		// anti-forense que existe — a mesma que o antiforense.shell_history já
+		// reconhece para o histórico —, e ela não pode fazer a ferramenta
+		// concluir que o host não tem log.
+		//
+		// O plantio é de FIFO, e não de permissão, por uma limitação do harness:
+		// o `-u` vale para o contêiner inteiro, então plantar como nobody não
+		// consegue nem escrever em /var/log, e plantar como root faz o scan ler
+		// tudo. A variante de permissão está travada em teste unitário, que
+		// controla o uid.
 		Images: matriz,
-		User:   "nobody",
 		Args:   []string{"--only", "logs", "--logs-all"},
-		Plant:  authLogIlegivel,
+		Plant:  authLogDesviado,
 		ExpectGap: []string{
-			"auth.log não pôde ser lido",
+			"/var/log/auth.log existe e NÃO é arquivo comum",
 		},
 		// Sem achado NENHUM: o que este cenário afirma é a LACUNA. Um aviso aqui
 		// significaria a ferramenta concluindo a partir de um arquivo que ela não
@@ -260,14 +270,21 @@ mkdir -p /var/log/journal/1234567890
 printf 'LPKSHHRH\000\000\000\000' > /var/log/journal/1234567890/system.journal
 `
 
-const authLogIlegivel = `
+// authLogDesviado troca o log por um FIFO: ele existe, e não entrega conteúdo.
+//
+// A forma de campo mais comum é outra — 0640 root:adm, ilegível sem root —, e
+// ela não pode ser plantada aqui: o `-u` do harness vale para o contêiner
+// inteiro, então plantar como nobody não escreve em /var/log, e plantar como
+// root faz o scan ler tudo. A variante de permissão está travada em teste
+// unitário, que controla o uid.
+//
+// O fifo não é substituto pobre: ele é o caso adversarial de verdade. Um
+// `mkfifo` (ou um link para /dev/null) no lugar do auth.log some do inventário,
+// que filtra arquivo comum — e fazia a família inteira parecer inexistente.
+const authLogDesviado = `
 mkdir -p /var/log
-cat > /var/log/auth.log <<'EOF'
-Jan 10 03:00:00 h sshd[1]: Accepted password for ana from 10.0.0.1 port 5 ssh2
-EOF
-chmod 640 /var/log/auth.log
-chown 0:0 /var/log/auth.log
-touch -t 202501120000 /var/log/auth.log
+rm -f /var/log/auth.log
+mkfifo /var/log/auth.log
 `
 
 // authLogDeRotina é o que um servidor real escreve num dia normal: instalação

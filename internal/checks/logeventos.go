@@ -156,6 +156,31 @@ func declaraHorizonte(f *facts.Facts, familia string, ev []string) []string {
 // autorização veio de outro lugar (CA, AuthorizedKeysCommand). O nome do check
 // diz o FATO OBSERVADO, e não a conclusão: o fingerprint não aparece nas chaves
 // locais.
+//
+// # Por que MANUAL, e não aviso
+//
+// Porque a ferramenta não separa as duas leituras, e as inocentes não são raras:
+//
+//	CA e AuthorizedKeysCommand  a chave NUNCA está em arquivo local, por
+//	                            desenho. O segundo é fato coletado e sai de
+//	                            ESCOPO aqui; o primeiro (TrustedUserCAKeys) não
+//	                            é coletado ainda, e num host que o usa este check
+//	                            dispararia em TODO login legítimo
+//	desligamento e rotação      remover a chave de quem saiu da equipe deixa
+//	                            exatamente esta forma, e o log lembra os logins
+//	                            que ela fez antes
+//
+// O T1 — o servidor de produção montado por quem NÃO conhecia a ferramenta —
+// disparou duas vezes, e o contrato dele diz o que fazer nessa hora: "se um
+// check novo acrescentar um aviso aqui, alguém decide se ele vale a atenção que
+// custa". Como AVISO não vale: o operador não consegue agir sem perguntar a uma
+// pessoa, e é isso que MANUAL significa nesta base. (Parte daquele disparo é
+// construção da fixture, cujo log traz fingerprint inventado; o argumento não
+// depende disso — depende do host com CA, onde o disparo é contínuo.)
+//
+// A promoção a aviso pertence à correlação, onde há testemunha independente: o
+// authorized_keys da conta modificado DEPOIS do login, ou a conta que não existe
+// mais.
 var chaveForaDasLocais = check.Check{
 	ID:       "logs.pubkey_not_in_local_keys",
 	Ref:      "12",
@@ -164,7 +189,23 @@ var chaveForaDasLocais = check.Check{
 	Mode:     check.ModeAuto,
 	Sources:  env.SourceLive | env.SourceImage,
 	Requires: env.CapFilesystem,
-	Escopo:   escopoDaFamilia("auth"),
+	Escopo: func(f *facts.Facts, e *env.Env) (bool, string, []string) {
+		// AuthorizedKeysCommand tira a AUTORIDADE dos arquivos locais: quem
+		// responde "esta chave está autorizada?" é um programa, e o
+		// authorized_keys em disco é vazio por construção. Sem esta guarda, o
+		// check falaria em todo login bem-sucedido de um host de frota grande —
+		// não como falso positivo ocasional, mas continuamente.
+		if f.SSH.AuthorizedKeysCommand != "" {
+			return false, "o sshd deste host resolve chave por AuthorizedKeysCommand (" +
+					f.SSH.AuthorizedKeysCommand + "): quem autoriza é um programa, e o " +
+					"authorized_keys em disco não é a autoridade — a pergunta não cabe aqui",
+				[]string{
+					"a lista efetiva está em quem o AuthorizedKeysCommand consulta " +
+						"(LDAP, SSSD, um serviço interno): confira por lá",
+				}
+		}
+		return escopoDaFamilia("auth")(f, e)
+	},
 	FalsePositives: []string{
 		"CERTIFICADO DE CA (`TrustedUserCAKeys`) autoriza sem que a chave esteja " +
 			"em arquivo nenhum do host — é o desenho de frota grande, e ali este " +
@@ -252,9 +293,11 @@ var chaveForaDasLocais = check.Check{
 				strconv.Itoa(u.n) + " login(s) com esta chave no intervalo lido",
 				"o log é ALEGAÇÃO do host sobre o próprio passado, não prova: quem " +
 					"tem root reescreve estas linhas",
+				"é MANUAL porque a ferramenta não separa limpeza de rastro de rotação " +
+					"legítima: quem separa é quem conhece a equipe",
 			}
 			ev = declaraHorizonte(f, "auth", ev)
-			fd := self.F(check.SevWarn, fp, "", ev...)
+			fd := self.F(check.SevManual, fp, "", ev...)
 			fd.Chave = fp
 			if u.quando != "" {
 				fd.Quando, fd.QuandoFonte = u.quando, "último login registrado com esta chave"

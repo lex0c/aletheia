@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -467,5 +468,81 @@ func TestTipoDeAuditDesconhecidoNaoContaComoReconhecido(t *testing.T) {
 	}
 	if s.LinhasCandidatas != 1 {
 		t.Errorf("LinhasCandidatas = %d, quer 1 — só o SYSCALL é prometido", s.LinhasCandidatas)
+	}
+}
+
+// LOG TROCADO POR OUTRA COISA não é "este host não tem log".
+//
+// Um `mkfifo /var/log/auth.log` — ou um link para /dev/null — some do
+// inventário, que filtra arquivo comum, e fazia a família inteira parecer
+// inexistente: a coleta concluía FORA DE ESCOPO, os checks saíam do
+// denominador, e a cobertura ficava intacta. Apontar o log para o vazio é a
+// forma mais barata de anti-forense que existe — a mesma que o
+// antiforense.shell_history já reconhece para o histórico — e ela não pode
+// comprar silêncio com aparência de escopo.
+func TestLogTrocadoPorOutroObjetoNaoViraForaDeEscopo(t *testing.T) {
+	casos := []struct {
+		nome string
+		cria func(t *testing.T, p string)
+		quer string
+	}{
+		{
+			nome: "fifo",
+			cria: func(t *testing.T, p string) {
+				if err := syscall.Mkfifo(p, 0o644); err != nil {
+					t.Skipf("mkfifo indisponível aqui: %v", err)
+				}
+			},
+			quer: "fifo",
+		},
+		{
+			nome: "link para /dev/null",
+			cria: func(t *testing.T, p string) {
+				if err := os.Symlink("/dev/null", p); err != nil {
+					t.Fatal(err)
+				}
+			},
+			quer: "link simbólico",
+		},
+		{
+			nome: "diretório",
+			cria: func(t *testing.T, p string) {
+				if err := os.Mkdir(p, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			quer: "diretório",
+		},
+	}
+
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			raiz := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(raiz, "var/log"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			c.cria(t, filepath.Join(raiz, "var/log/auth.log"))
+
+			e := env.Probe(env.Options{Root: raiz, Version: "test"})
+			defer e.Close()
+			f := &Facts{}
+			collectLogs(f, e)
+			collectEventosDeLog(f, e)
+
+			if f.LogEstado == LogForaDeEscopo {
+				t.Fatal("o arquivo EXISTE: chamar isto de fora de escopo entrega " +
+					"silêncio a quem trocou o log de lugar")
+			}
+			juntas := strings.Join(f.Partial["logeventos"], " ")
+			if !strings.Contains(juntas, c.quer) {
+				t.Errorf("a lacuna precisa NOMEAR o que está no lugar (%s): %v", c.quer, f.Partial["logeventos"])
+			}
+			// E a família precisa continuar EXISTINDO e não lida: é isso que
+			// mantém os checks no denominador.
+			cob := f.CoberturaLog("auth")
+			if !cob.Existe || cob.Lida {
+				t.Errorf("cobertura = %+v, quer Existe=true Lida=false", cob)
+			}
+		})
 	}
 }

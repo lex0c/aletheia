@@ -167,7 +167,8 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 		return
 	}
 
-	visto := map[string]string{} // impressão do evento -> arquivo onde apareceu
+	visto := map[string]string{}      // impressão do evento -> arquivo onde apareceu
+	saiuDaJanela := map[string]bool{} // família -> uma geração já acabou antes do horizonte
 	parcial := parcialPorAcesso
 	parouEm, motivoDaParada := -1, ""
 	for idx, a := range alvos {
@@ -195,22 +196,31 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 			orc.marca(strings.TrimPrefix(motivoDaParada, "o teto "))
 			break
 		}
-		// A JANELA decide quais ARQUIVOS abrir, e não quais eventos guardar —
-		// filtrar evento a evento faria a cobertura afirmar um intervalo cujos
-		// eventos não estão no dump.
+		// A JANELA PARA DE OLHAR O MTIME.
 		//
-		// MAS ELA NÃO VALE PARA O ARQUIVO VIVO, e a razão é que o mtime é do
-		// ALVO. `touch -d '2025-01-01' /var/log/auth.log` custa nada e, com a
-		// janela padrão de 7 dias, fazia o conteúdo ATUAL do arquivo não ser
-		// nem aberto: sem evento, sem lacuna, e os checks de auth saindo
-		// COMPLETOS. Falso limpo comprado com um metadado que o adversário
-		// escreve — a mesma classe que o coletarTimestomp existe para acusar.
+		// Ela decidia se um arquivo era aberto comparando o `mtime` com o
+		// horizonte, e mtime é METADADO DO ALVO. Corrigir só o arquivo vivo
+		// fechou meia porta: a outra metade custa três comandos e some com uma
+		// geração inteira —
 		//
-		// São meia dúzia de arquivos vivos, com teto de 8 MB cada. Economizar
-		// isso apostando num carimbo que o alvo controla não paga.
-		if a.geracao > 0 && !desde.IsZero() && !a.mod.IsZero() && a.mod.Before(desde) {
+		//	mv /var/log/auth.log /var/log/auth.log.1
+		//	touch -d '2020-01-01' /var/log/auth.log.1
+		//	: > /var/log/auth.log
+		//
+		// — e como `fora_da_janela` não conta contra a completude, aquilo saía
+		// sem lacuna nenhuma. Falso limpo comprado com um carimbo que o
+		// adversário escreve.
+		//
+		// A seleção passa a ser por ORDEM DE GERAÇÃO (mais nova primeiro) e
+		// pelos TETOS, que são números que a ferramenta controla. A janela
+		// continua limitando custo, mas por CONTEÚDO OBSERVADO: quando uma
+		// geração acaba inteira antes do horizonte, as mais antigas DAQUELA
+		// FAMÍLIA não são abertas — elas só podem ser mais velhas ainda, e isso
+		// se sabe por tê-las lido, não por acreditar no que elas dizem de si.
+		if !desde.IsZero() && familiaJaSaiu(a.familias, saiuDaJanela) {
 			f.FontesDeLog = append(f.FontesDeLog, FonteDeLog{
 				Path: a.path, Familias: a.familias, Estado: FonteForaDaJanela,
+				Lacuna: "", // não é lacuna: uma geração MAIS NOVA já terminava antes do horizonte
 			})
 			continue
 		}
@@ -255,6 +265,14 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 			visto[imp] = ev.File
 			f.EventosDeLog = append(f.EventosDeLog, ev)
 			fonte.EventosGerados++
+		}
+		// A GERAÇÃO ACABOU ANTES DO HORIZONTE: as mais antigas desta família só
+		// podem ser mais velhas, e aí a janela para de abri-las. A decisão sai do
+		// conteúdo que foi LIDO, e não do que o inode diz.
+		if !desde.IsZero() && fonte.CobertoAte != "" && fonte.CobertoAte < utc(desde) {
+			for _, fam := range a.familias {
+				saiuDaJanela[fam] = true
+			}
 		}
 		f.FontesDeLog = append(f.FontesDeLog, fonte)
 	}
@@ -540,8 +558,9 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 			// COBERTURA = OBSERVAÇÃO: qualquer registro com epoch válido diz
 			// que este trecho do arquivo foi lido, mesmo que o montador não
 			// produza evento a partir dele.
+			// O epoch do auditd é UTC por construção: nada é inferido.
 			if t, ok := instanteDeEpoch(strconv.FormatFloat(r.Epoch, 'f', 3, 64)); ok {
-				marcaCobertura(&fonte, utc(t))
+				marcaCobertura(&fonte, Carimbo{At: utc(t)})
 			}
 			// O DENOMINADOR do audit.log são os tipos que o montador promete
 			// consumir, e não toda linha com envelope válido.
@@ -566,7 +585,7 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 			continue
 		}
 
-		ev, res, quandoDaLinha := parseLinhaSyslog(linha, ctx)
+		ev, res, carimbo := parseLinhaSyslog(linha, ctx)
 		// COBERTURA = OBSERVAÇÃO, e não achado. Uma linha
 		// `Connection closed by 1.2.3.4` foi lida, parseada e datada — ela só
 		// não interessa como evento. Derivar o intervalo dos EVENTOS afirmaria
@@ -574,7 +593,7 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 		// sobre esse intervalo que o antiforense.log_time_gap diz "N dias sem
 		// UMA linha de autenticação". Num arquivo cheio de linhas de rotina e
 		// com um único evento, aquela frase seria falsa.
-		marcaCobertura(&fonte, quandoDaLinha)
+		marcaCobertura(&fonte, carimbo)
 		switch res {
 		case linhaNaoParseada:
 		case linhaNaoCandidata, linhaNaoMedida:
@@ -601,7 +620,20 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 		}
 	}
 	if mont != nil {
+		// O QUE SOBRA NO MONTADOR também passa pelo orçamento. Com a
+		// finalização por terminador e por tempo, o que sobra aqui é a última
+		// janela de dois segundos do arquivo — mas o teto é promessa, e promessa
+		// com exceção não é teto.
 		for _, ev := range mont.Fecha() {
+			if orc.eventos <= 0 {
+				fonte.Estado = FonteTruncada
+				fonte.CorteNoFim = true
+				fonte.Lacuna = a.path + ": o teto de " + strconv.Itoa(maxEventosLog) +
+					" eventos foi atingido com eventos de auditoria ainda em aberto — " +
+					"eles NÃO entraram no retrato"
+				orc.marca("de " + strconv.Itoa(maxEventosLog) + " eventos de log")
+				break
+			}
 			evs = append(evs, comOrigem(ev, a.path))
 			orc.eventos--
 		}
@@ -628,16 +660,32 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 // marcaCobertura alarga o intervalo OBSERVADO deste arquivo.
 //
 // Ela é chamada por LINHA DATADA, e não por evento — ver o comentário no laço.
-func marcaCobertura(fonte *FonteDeLog, at string) {
-	if at == "" {
+func marcaCobertura(fonte *FonteDeLog, c Carimbo) {
+	if c.At == "" {
 		return
 	}
-	if fonte.CobertoDesde == "" || at < fonte.CobertoDesde {
-		fonte.CobertoDesde = at
+	if fonte.CobertoDesde == "" || c.At < fonte.CobertoDesde {
+		fonte.CobertoDesde = c.At
 	}
-	if at > fonte.CobertoAte {
-		fonte.CobertoAte = at
+	if c.At > fonte.CobertoAte {
+		fonte.CobertoAte = c.At
 	}
+	// A CONFIANÇA é da cobertura, e basta uma linha inferida para o intervalo
+	// inteiro deixar de ser exato: não há como dizer qual ponta veio de onde.
+	fonte.CoberturaAnoInferido = fonte.CoberturaAnoInferido || c.AnoInferido
+	fonte.CoberturaFusoInferido = fonte.CoberturaFusoInferido || c.FusoInferido
+}
+
+// familiaJaSaiu diz se TODAS as famílias deste arquivo já saíram da janela. Um
+// arquivo compartilhado — o /var/log/messages do Alpine é `auth`, `syslog` e
+// `kern` ao mesmo tempo — continua sendo aberto enquanto UMA delas interessar.
+func familiaJaSaiu(familias []string, saiu map[string]bool) bool {
+	for _, fam := range familias {
+		if !saiu[fam] {
+			return false
+		}
+	}
+	return len(familias) > 0
 }
 
 func comOrigem(ev EventoDeLog, path string) EventoDeLog {

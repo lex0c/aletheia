@@ -141,20 +141,12 @@ func TestCampoNumericoNaoEhDecodificadoComoHex(t *testing.T) {
 // distintos com o mesmo número colidiriam num só, e o caminho de um sairia
 // atribuído ao outro.
 func TestSerialRepetidoComEpochDiferenteSaoEventosDISTINTOS(t *testing.T) {
-	m := novoMontadorDeAudit()
-	for _, l := range []string{
+	evs := alimenta(t, novoMontadorDeAudit(), []string{
 		`type=SYSCALL msg=audit(1755990137.000:7): syscall=59 pid=1 uid=0 comm="a"`,
 		`type=EXECVE msg=audit(1755990137.000:7): argc=1 a0="/bin/a"`,
 		`type=SYSCALL msg=audit(1755999999.000:7): syscall=59 pid=2 uid=0 comm="b"`,
 		`type=EXECVE msg=audit(1755999999.000:7): argc=1 a0="/bin/b"`,
-	} {
-		r, ok := parseRegistroAudit(l)
-		if !ok {
-			t.Fatalf("não parseou: %s", l)
-		}
-		m.Alimenta(r)
-	}
-	evs := m.Fecha()
+	})
 	if len(evs) != 2 {
 		t.Fatalf("%d evento(s), quer 2 — o mesmo serial em epochs diferentes é outro evento", len(evs))
 	}
@@ -163,28 +155,96 @@ func TestSerialRepetidoComEpochDiferenteSaoEventosDISTINTOS(t *testing.T) {
 	}
 }
 
-// O TETO DE GRUPOS ABERTOS é contra o arquivo PLANTADO: um milhão de seriais
-// órfãos consumiria memória sem limite, e a varredura morreria com exit 2 — que
-// a frota lê como comprometimento.
-func TestTetoDeGruposAbertosNaoDeixaAMemoriaCrescer(t *testing.T) {
-	m := novoMontadorDeAudit()
-	saiu := 0
-	for i := 0; i < maxGruposAuditAbertos+50; i++ {
-		r, ok := parseRegistroAudit(`type=SYSCALL msg=audit(175599.00` +
-			strconv.Itoa(i%10) + `:` + strconv.Itoa(i) + `): syscall=59 pid=1 uid=0 comm="x"`)
-		if !ok {
-			t.Fatalf("não parseou no i=%d", i)
+// O TETO DE GRUPOS ABERTOS é BACKSTOP, e só morde no arquivo PLANTADO: um
+// milhão de seriais órfãos — nenhum com terminador, todos no mesmo instante —
+// consumiria memória sem limite.
+//
+// Com carimbos que ANDAM, o fluxo fecha sozinho pelo tempo, e o backstop não
+// conta lacuna nenhuma. Era o contrário antes: o teto era o único mecanismo de
+// finalização, então todo host com mais de cinco mil eventos ganhava uma lacuna
+// que não significava nada.
+func TestTetoDeGruposEhBackstopENaoFinalizacaoNormal(t *testing.T) {
+	t.Run("órfãos no mesmo instante: o backstop segura", func(t *testing.T) {
+		m := novoMontadorDeAudit()
+		saiu := 0
+		for i := 0; i < maxGruposAuditAbertos+50; i++ {
+			r, ok := parseRegistroAudit(`type=SYSCALL msg=audit(1755990137.000:` +
+				strconv.Itoa(i) + `): syscall=59 pid=1 uid=0 comm="x"`)
+			if !ok {
+				t.Fatalf("não parseou no i=%d", i)
+			}
+			saiu += len(m.Alimenta(r))
 		}
-		saiu += len(m.Alimenta(r))
-	}
-	if len(m.grupos) > maxGruposAuditAbertos {
-		t.Errorf("%d grupos abertos, teto é %d", len(m.grupos), maxGruposAuditAbertos)
-	}
-	if m.FechadosPorTeto == 0 {
-		t.Error("o teto mordeu e não foi contado: sem a contagem não há lacuna a declarar")
-	}
-	if saiu == 0 {
-		t.Error("os grupos fechados pelo teto precisam SAIR como evento, não sumir")
+		if len(m.grupos) > maxGruposAuditAbertos {
+			t.Errorf("%d grupos abertos, teto é %d", len(m.grupos), maxGruposAuditAbertos)
+		}
+		if m.FechadosPorTeto == 0 {
+			t.Error("o backstop mordeu e não foi contado")
+		}
+		if saiu == 0 {
+			t.Error("os grupos fechados pelo teto precisam SAIR como evento")
+		}
+	})
+
+	t.Run("fluxo normal: o tempo fecha, e o backstop não conta lacuna", func(t *testing.T) {
+		m := novoMontadorDeAudit()
+		vivos := 0
+		for i := 0; i < maxGruposAuditAbertos+50; i++ {
+			// Um evento por segundo, com terminador — o fluxo de um host de
+			// verdade.
+			ep := strconv.Itoa(1755990137 + i)
+			for _, l := range []string{
+				`type=SYSCALL msg=audit(` + ep + `.000:` + strconv.Itoa(i) + `): syscall=59 pid=1 uid=0 comm="x"`,
+				`type=EOE msg=audit(` + ep + `.000:` + strconv.Itoa(i) + `): `,
+			} {
+				r, ok := parseRegistroAudit(l)
+				if !ok {
+					t.Fatalf("não parseou: %s", l)
+				}
+				vivos += len(m.Alimenta(r))
+			}
+		}
+		if m.FechadosPorTeto != 0 {
+			t.Errorf("FechadosPorTeto = %d — o teto virou finalização normal, e cada "+
+				"fechamento vira lacuna num host movimentado", m.FechadosPorTeto)
+		}
+		if len(m.grupos) > 2 {
+			t.Errorf("%d grupos em aberto no fim: o terminador não fechou nada", len(m.grupos))
+		}
+		if vivos < maxGruposAuditAbertos {
+			t.Errorf("%d eventos saíram durante o fluxo, quer ~%d", vivos, maxGruposAuditAbertos)
+		}
+	})
+}
+
+// O TERMINADOR é o que o kernel manda: PROCTITLE e depois EOE, com o comentário
+// "to help user space know we are finished" (kernel/auditsc.c). Várias
+// configurações filtram o EOE do arquivo, e aí o PROCTITLE é o último.
+func TestTerminadorFechaOEvento(t *testing.T) {
+	for _, terminador := range []string{
+		`type=EOE msg=audit(1755990137.000:1): `,
+		`type=PROCTITLE msg=audit(1755990137.000:1): proctitle=2F62696E2F7368`,
+	} {
+		m := novoMontadorDeAudit()
+		var saiu []EventoDeLog
+		for _, l := range []string{
+			`type=SYSCALL msg=audit(1755990137.000:1): syscall=59 pid=1 uid=0 comm="sh"`,
+			`type=EXECVE msg=audit(1755990137.000:1): argc=1 a0="/bin/sh"`,
+			terminador,
+		} {
+			r, ok := parseRegistroAudit(l)
+			if !ok {
+				t.Fatalf("não parseou: %s", l)
+			}
+			saiu = append(saiu, m.Alimenta(r)...)
+		}
+		if len(saiu) != 1 {
+			t.Errorf("%s: %d eventos DURANTE o fluxo, quer 1 — o terminador não fechou",
+				strings.Fields(terminador)[0], len(saiu))
+		}
+		if len(m.grupos) != 0 {
+			t.Errorf("%s: sobrou grupo em aberto", strings.Fields(terminador)[0])
+		}
 	}
 }
 
@@ -242,19 +302,27 @@ func TestLinhaQueNaoEhAuditEhRecusada(t *testing.T) {
 
 func montaDeLinhas(t *testing.T, linhas []string) EventoDeLog {
 	t.Helper()
-	m := novoMontadorDeAudit()
+	evs := alimenta(t, novoMontadorDeAudit(), linhas)
+	if len(evs) != 1 {
+		t.Fatalf("%d eventos, quer 1: %v", len(evs), evs)
+	}
+	return evs[0]
+}
+
+// alimenta junta o que sai DURANTE o fluxo e o que sobra no fim — que é o que o
+// coletor faz. Um evento agora fecha quando o terminador chega ou quando o
+// fluxo o deixa para trás, e não só no EOF.
+func alimenta(t *testing.T, m *montadorDeAudit, linhas []string) []EventoDeLog {
+	t.Helper()
+	var evs []EventoDeLog
 	for _, l := range linhas {
 		r, ok := parseRegistroAudit(l)
 		if !ok {
 			t.Fatalf("não parseou: %s", l)
 		}
-		m.Alimenta(r)
+		evs = append(evs, m.Alimenta(r)...)
 	}
-	evs := m.Fecha()
-	if len(evs) != 1 {
-		t.Fatalf("%d eventos, quer 1: %v", len(evs), evs)
-	}
-	return evs[0]
+	return append(evs, m.Fecha()...)
 }
 
 func temAlvo(ev EventoDeLog, alvo string) bool {

@@ -158,23 +158,69 @@ func TestHorizonteEfetivoNaoEhOPedido(t *testing.T) {
 	}
 }
 
-// A JANELA decide quais ARQUIVOS abrir. Um arquivo velho demais não é aberto, e
-// isso sai DECLARADO — não em silêncio.
-func TestArquivoForaDaJanelaNaoEhAberto(t *testing.T) {
+// A JANELA NÃO OLHA O MTIME — ela olha o CONTEÚDO que foi lido.
+//
+// O gate por mtime custava três comandos para sumir com uma geração inteira:
+//
+//	mv /var/log/auth.log /var/log/auth.log.1
+//	touch -d '2020-01-01' /var/log/auth.log.1
+//	: > /var/log/auth.log
+//
+// e como `fora_da_janela` não conta contra a completude, aquilo saía sem lacuna
+// nenhuma. Agora o mtime não decide abertura: a geração é lida.
+func TestJanelaNaoConfiaNoMtimeDoRotacionado(t *testing.T) {
 	f := raizDeLog(t, map[string]string{
-		"var/log/auth.log":   linhasDeAuth(2),
+		"var/log/auth.log":   "",
 		"var/log/auth.log.1": linhasDeAuth(2),
-	}, func(raiz string, o *envOpts) {
-		velho := time.Now().Add(-90 * 24 * time.Hour)
-		if err := os.Chtimes(filepath.Join(raiz, "var/log/auth.log.1"), velho, velho); err != nil {
+	}, func(raiz string, _ *envOpts) {
+		antigo := time.Now().Add(-2000 * 24 * time.Hour)
+		if err := os.Chtimes(filepath.Join(raiz, "var/log/auth.log.1"), antigo, antigo); err != nil {
 			t.Fatal(err)
 		}
 	})
 
+	de := map[string]string{}
 	for _, s := range f.FontesDeLog {
-		if strings.HasSuffix(s.Path, "auth.log.1") && s.Estado != FonteForaDaJanela {
-			t.Errorf("a geração velha deveria estar fora da janela: %+v", s)
+		de[s.Path] = s.Estado
+	}
+	if de["/var/log/auth.log.1"] != FonteLida {
+		t.Errorf("a geração rotacionada precisa ser LIDA (estado %q): o mtime é do "+
+			"alvo, e deixá-lo decidir abertura entrega o esconderijo", de["/var/log/auth.log.1"])
+	}
+	if len(f.EventosDeLog) == 0 {
+		t.Error("o conteúdo movido para a geração rotacionada não foi observado")
+	}
+}
+
+// E a janela continua limitando custo, por CONTEÚDO OBSERVADO: quando uma
+// geração acaba inteira antes do horizonte, as mais antigas daquela família não
+// precisam ser abertas — elas só podem ser mais velhas ainda.
+func TestJanelaParaDeAbrirDepoisDeUmaGeracaoAntiga(t *testing.T) {
+	antiga := "Jan 02 01:00:00 h sshd[1]: Accepted password for ana from 10.0.0.1 port 5 ssh2\n"
+	f := raizDeLog(t, map[string]string{
+		"var/log/auth.log":   linhasDeAuth(1),
+		"var/log/auth.log.1": antiga,
+		"var/log/auth.log.2": antiga,
+	}, func(raiz string, o *envOpts) {
+		o.desde = time.Now().Add(-24 * time.Hour)
+		antigo := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
+		for _, n := range []string{"var/log/auth.log.1", "var/log/auth.log.2"} {
+			if err := os.Chtimes(filepath.Join(raiz, n), antigo, antigo); err != nil {
+				t.Fatal(err)
+			}
 		}
+	})
+
+	de := map[string]string{}
+	for _, s := range f.FontesDeLog {
+		de[s.Path] = s.Estado
+	}
+	if de["/var/log/auth.log.1"] != FonteLida {
+		t.Errorf("a primeira geração é lida para SE SABER que ela é antiga: %q",
+			de["/var/log/auth.log.1"])
+	}
+	if de["/var/log/auth.log.2"] != FonteForaDaJanela {
+		t.Errorf("a geração seguinte não precisa ser aberta: %q", de["/var/log/auth.log.2"])
 	}
 }
 
@@ -632,13 +678,12 @@ func TestArquivoCheioDeRotinaNaoFabricaVao(t *testing.T) {
 	}
 }
 
-// MTIME É DO ALVO, e não pode decidir se o arquivo VIVO é sequer aberto.
+// MTIME É DO ALVO, e não decide leitura em geração nenhuma.
 //
 // `touch -d '2025-01-01' /var/log/auth.log` custa nada e, com a janela padrão,
 // fazia o conteúdo ATUAL não ser lido: sem evento, sem lacuna, e os checks de
-// auth saindo COMPLETOS. Falso limpo comprado com um metadado que o adversário
-// escreve.
-func TestMtimeForjadoNaoImpedeALeituraDoArquivoVIVO(t *testing.T) {
+// auth saindo COMPLETOS.
+func TestMtimeForjadoNaoImpedeALeitura(t *testing.T) {
 	f := raizDeLog(t, map[string]string{
 		"var/log/auth.log":   linhasDeAuth(2),
 		"var/log/auth.log.1": linhasDeAuth(2),
@@ -651,20 +696,14 @@ func TestMtimeForjadoNaoImpedeALeituraDoArquivoVIVO(t *testing.T) {
 		}
 	})
 
-	de := map[string]string{}
 	for _, s := range f.FontesDeLog {
-		de[s.Path] = s.Estado
-	}
-	if de["/var/log/auth.log"] != FonteLida {
-		t.Errorf("o arquivo VIVO precisa ser aberto sempre: estado = %q", de["/var/log/auth.log"])
-	}
-	// A geração rotacionada continua respeitando a janela: são elas que custam,
-	// e o mtime delas é o único critério de seleção disponível.
-	if de["/var/log/auth.log.1"] != FonteForaDaJanela {
-		t.Errorf("a geração rotacionada segue a janela: estado = %q", de["/var/log/auth.log.1"])
+		if s.Estado != FonteLida {
+			t.Errorf("%s: estado = %q, quer lido — o mtime não decide abertura",
+				s.Path, s.Estado)
+		}
 	}
 	if len(f.EventosDeLog) == 0 {
-		t.Error("nenhum evento: o conteúdo do arquivo vivo não foi lido")
+		t.Error("nenhum evento: o conteúdo não foi lido")
 	}
 }
 
@@ -773,5 +812,58 @@ func TestTetoDeEventosParaAExtracaoEACobertura(t *testing.T) {
 	}
 	if f.LogEstado != LogParcial {
 		t.Errorf("LogEstado = %q, quer partial", f.LogEstado)
+	}
+}
+
+// O TETO DE EVENTOS VALE PARA O AUDITD TAMBÉM.
+//
+// A correção anterior morde durante o laço de linhas, e o auditd escapava por
+// fora dele: nada fechava no meio do fluxo, e o Fecha() do fim despejava o
+// arquivo inteiro de uma vez. Com dez mil seriais distintos, o retrato saía com
+// o dobro do teto.
+func TestTetoDeEventosValeParaOAuditd(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 2*maxEventosLog; i++ {
+		// Sem terminador e no MESMO instante: o pior caso para o montador, que é
+		// onde o backstop precisa segurar sem furar o orçamento.
+		b.WriteString("type=SYSCALL msg=audit(1736500000.000:" + strconv.Itoa(i) +
+			"): syscall=59 pid=1 uid=0 comm=\"x\"\n")
+	}
+	f := raizDeLog(t, map[string]string{"var/log/audit/audit.log": b.String()}, nil)
+
+	if n := len(f.EventosDeLog); n > maxEventosLog {
+		t.Errorf("%d eventos, teto é %d", n, maxEventosLog)
+	}
+	if f.LogEstado != LogParcial {
+		t.Errorf("LogEstado = %q, quer partial", f.LogEstado)
+	}
+	if f.FontesDeLog[0].Lacuna == "" {
+		t.Error("o corte precisa ser declarado no arquivo")
+	}
+}
+
+// E o host MOVIMENTADO com fluxo normal não ganha lacuna nenhuma: os eventos
+// fecham pelo terminador que o kernel emite, o backstop não morde, e a coleta
+// sai completa. Antes, todo audit.log com mais de cinco mil eventos ganhava uma
+// lacuna que não significava nada — porque o teto era o único mecanismo de
+// finalização.
+func TestAuditMovimentadoNaoFabricaLacuna(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 300; i++ {
+		ep := strconv.Itoa(1736500000 + i)
+		b.WriteString("type=SYSCALL msg=audit(" + ep + ".000:" + strconv.Itoa(i) +
+			"): syscall=59 pid=1 uid=0 comm=\"x\"\n")
+		b.WriteString("type=EOE msg=audit(" + ep + ".000:" + strconv.Itoa(i) + "): \n")
+	}
+	f := raizDeLog(t, map[string]string{"var/log/audit/audit.log": b.String()}, nil)
+
+	if len(f.Partial["logeventos"]) != 0 {
+		t.Errorf("fluxo normal não pode virar lacuna: %v", f.Partial["logeventos"])
+	}
+	if f.LogEstado != LogColetado {
+		t.Errorf("LogEstado = %q, quer collected", f.LogEstado)
+	}
+	if len(f.EventosDeLog) != 300 {
+		t.Errorf("%d eventos, quer 300", len(f.EventosDeLog))
 	}
 }

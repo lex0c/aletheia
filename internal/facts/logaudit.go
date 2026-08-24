@@ -232,22 +232,51 @@ type chaveAudit struct {
 	serial uint32
 }
 
-// maxGruposAuditAbertos limita quantos eventos incompletos ficam em memória.
+// maxGruposAuditAbertos é o BACKSTOP ADVERSARIAL, e não o mecanismo normal de
+// finalização.
 //
-// Os registros de um evento são adjacentes no arquivo, então o teto quase nunca
-// morde. Ele existe para o caso que não é acidente: um audit.log plantado com um
-// milhão de seriais ÓRFÃOS — um registro cada, nenhum completo — consumiria
-// memória sem limite, e a varredura morreria com exit 2, que a frota lê como
-// comprometimento. Ver guardaGoroutine para o mesmo raciocínio.
+// Ele existia sozinho, e isso estava errado por dois lados. Um audit.log
+// movimentado passa de cinco mil eventos sem esforço, então o teto virava a
+// forma NORMAL de fechar evento — e cada fechamento contava como lacuna, que é a
+// lacuna constante que ninguém lê. E como nada fechava no meio do fluxo, o
+// Fecha() do fim despejava tudo de uma vez, furando o teto de eventos.
+//
+// Ele fica, para o arquivo plantado com um milhão de seriais órfãos.
 const maxGruposAuditAbertos = 5000
+
+// folgaDeEventoAudit é a janela de tempo DO PRÓPRIO FLUXO depois da qual um
+// evento sem terminador é dado por encerrado.
+//
+// Dois segundos, que é o `end_of_event_timeout` do auditd.conf(5) — o mesmo
+// número que o ausearch e a auparse usam para decidir que um evento acabou. Não
+// é relógio de parede: é a diferença entre o carimbo do registro que chega e o
+// do grupo em aberto, então o resultado não depende de quando a varredura roda.
+const folgaDeEventoAudit = 2.0
+
+// terminaEvento reconhece o fim de um evento multi-registro.
+//
+// O kernel diz isso explicitamente, e em ordem (kernel/auditsc.c):
+//
+//	if (context->context == AUDIT_CTX_SYSCALL)
+//	        audit_log_proctitle();
+//	/* Send end of event record to help user space know we are finished */
+//	ab = audit_log_start(context, GFP_KERNEL, AUDIT_EOE);
+//
+// O EOE é o terminador de verdade. O PROCTITLE entra junto porque várias
+// configurações de auditd filtram o EOE do arquivo, e aí ele é o último que
+// chega. Quando os dois vêm, o PROCTITLE fecha e o EOE cai num grupo que já não
+// existe — ver Alimenta.
+func terminaEvento(tipo string) bool {
+	return tipo == "EOE" || tipo == "PROCTITLE"
+}
 
 // montadorDeAudit acumula registros por identidade e devolve eventos.
 type montadorDeAudit struct {
 	grupos map[chaveAudit][]RegistroAudit
 	ordem  []chaveAudit
-	// FechadosPorTeto conta os eventos que foram montados ANTES de o arquivo
-	// dizer que acabaram. Vira lacuna declarada: o evento saiu, e pode ter saído
-	// sem o PATH que resolveria o caminho.
+	// FechadosPorTeto conta só os fechamentos pelo BACKSTOP — não os normais.
+	// Ele é o que vira lacuna, e por isso não pode contar o funcionamento
+	// comum: um contador que sobe em todo host movimentado não informa nada.
 	FechadosPorTeto int
 }
 
@@ -256,33 +285,92 @@ func novoMontadorDeAudit() *montadorDeAudit {
 }
 
 // Alimenta acrescenta um registro e devolve o que fechou por causa dele.
+//
+// Três razões de fechar, nesta ordem:
+//
+//	terminador   EOE ou PROCTITLE: o evento acabou, e o kernel disse
+//	tempo        o registro que chegou é mais de 2s mais novo que um grupo em
+//	             aberto. Registros de eventos diferentes PODEM vir intercalados,
+//	             então "adjacente" nunca foi garantia — é a mesma regra do
+//	             ausearch
+//	teto         backstop adversarial, e só ele conta como lacuna
 func (m *montadorDeAudit) Alimenta(r RegistroAudit) []EventoDeLog {
 	ch := chaveAudit{r.Epoch, r.Serial}
+	var out []EventoDeLog
+
+	// O EOE que chega depois de o PROCTITLE já ter fechado o grupo não abre um
+	// grupo novo: ele não carrega campo que interesse, e um grupo só com EOE
+	// não produz evento nenhum — mas ocuparia espaço e apareceria no Fecha.
+	if _, vivo := m.grupos[ch]; !vivo && r.Tipo == "EOE" {
+		return nil
+	}
+
+	out = append(out, m.fechaVelhos(r.Epoch)...)
+
 	if _, visto := m.grupos[ch]; !visto {
 		m.ordem = append(m.ordem, ch)
 	}
-	m.grupos[ch] = append(m.grupos[ch], r)
+	if r.Tipo != "EOE" {
+		m.grupos[ch] = append(m.grupos[ch], r)
+	} else if _, vivo := m.grupos[ch]; !vivo {
+		return out
+	}
 
-	var out []EventoDeLog
+	if terminaEvento(r.Tipo) {
+		if ev, ok := m.fecha(ch); ok {
+			out = append(out, ev)
+		}
+		return out
+	}
+
 	for len(m.ordem) > maxGruposAuditAbertos {
 		velha := m.ordem[0]
-		m.ordem = m.ordem[1:]
-		rs := m.grupos[velha]
-		delete(m.grupos, velha)
 		m.FechadosPorTeto++
-		if ev, ok := montarEventoAudit(rs); ok {
+		if ev, ok := m.fecha(velha); ok {
 			out = append(out, ev)
 		}
 	}
 	return out
 }
 
-// Fecha monta o que sobrou. Sem isto, o último evento do arquivo — que é o mais
-// recente, e o que mais interessa numa triagem — ficaria de fora.
+// fechaVelhos encerra os grupos que o FLUXO deixou para trás.
+func (m *montadorDeAudit) fechaVelhos(agora float64) []EventoDeLog {
+	var out []EventoDeLog
+	for len(m.ordem) > 0 {
+		ch := m.ordem[0]
+		if agora-ch.epoch <= folgaDeEventoAudit {
+			break
+		}
+		if ev, ok := m.fecha(ch); ok {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// fecha monta o evento daquele grupo e o remove, mantendo a ordem consistente.
+func (m *montadorDeAudit) fecha(ch chaveAudit) (EventoDeLog, bool) {
+	rs, existe := m.grupos[ch]
+	delete(m.grupos, ch)
+	for i, k := range m.ordem {
+		if k == ch {
+			m.ordem = append(m.ordem[:i], m.ordem[i+1:]...)
+			break
+		}
+	}
+	if !existe {
+		return EventoDeLog{}, false
+	}
+	return montarEventoAudit(rs)
+}
+
+// Fecha monta o que sobrou. Com a finalização por terminador e por tempo, o que
+// sobra aqui é só a última janela de dois segundos do arquivo — e não o arquivo
+// inteiro, como era quando o teto era o único mecanismo.
 func (m *montadorDeAudit) Fecha() []EventoDeLog {
 	var out []EventoDeLog
-	for _, ch := range m.ordem {
-		if ev, ok := montarEventoAudit(m.grupos[ch]); ok {
+	for _, ch := range append([]chaveAudit(nil), m.ordem...) {
+		if ev, ok := m.fecha(ch); ok {
 			out = append(out, ev)
 		}
 	}

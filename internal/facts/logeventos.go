@@ -41,11 +41,27 @@ type EventoDeLog struct {
 
 	At      string `json:"at,omitempty"` // RFC3339 UTC
 	AtKnown bool   `json:"at_known"`
-	// AtInferido marca a data cujo FUSO foi suposto. O syslog tradicional não
-	// carrega ano nem offset: o ano sai do mtime do arquivo, e o fuso sai do
-	// /etc/localtime do alvo — quando ele pôde ser lido. Um horário com offset
-	// suposto não sustenta correlação de segundos, e quem o usa precisa saber.
-	AtInferido bool `json:"at_inferred,omitempty"`
+
+	// DUAS INCERTEZAS, e não uma: o syslog tradicional não carrega ano NEM
+	// offset, e as duas faltas erram em escalas diferentes.
+	//
+	//	ano inferido    sai do mtime do arquivo (ou da coleta, no arquivo vivo).
+	//	                Erra em MESES, e é o que decide se um achado cai dentro
+	//	                ou fora de uma janela de investigação
+	//	fuso inferido   sai do /etc/localtime do alvo, quando ele pôde ser lido.
+	//	                Erra em HORAS, e é o que decide correlação de segundos
+	//
+	// Juntá-las num bit só foi o defeito: `AtInferido` significava só o fuso, e
+	// o Finding.QuandoInferido — construído em cima dele — prometia que "data
+	// deduzida não recorta". O ano é exatamente o que a janela recorta, e ele
+	// ficava de fora da promessa: com /etc/localtime legível e um `touch -d` no
+	// rotacionado, o achado voltava a poder ser escondido.
+	//
+	// A separação também é o que a correlação da próxima rodada precisa: ligar
+	// um EXECVE a um login exige saber se cada relógio erra em segundos ou em
+	// meses.
+	AtAnoInferido  bool `json:"at_year_inferred,omitempty"`
+	AtFusoInferido bool `json:"at_tz_inferred,omitempty"`
 
 	File string `json:"file"`
 	Line int    `json:"line,omitempty"`
@@ -125,6 +141,14 @@ type FonteDeLog struct {
 
 	// LeituraDescontinua marca o arquivo lido em DUAS pontas com o miolo fora.
 	// Sem esta marca, PrimeiroAt e CobertoAte pareceriam um intervalo contínuo.
+	// A confiança das datas da COBERTURA, que é propriedade dela e não dos
+	// eventos: a cobertura sai de toda linha datada, inclusive das que não
+	// viram evento. Um arquivo cheio de linhas de rotina datadas por inferência
+	// tem cobertura inferida e evento nenhum — e quem perguntasse aos eventos
+	// concluiria que as datas foram lidas.
+	CoberturaAnoInferido  bool `json:"coverage_year_inferred,omitempty"`
+	CoberturaFusoInferido bool `json:"coverage_tz_inferred,omitempty"`
+
 	LeituraDescontinua bool `json:"discontinuous,omitempty"`
 	CorteNoInicio      bool `json:"head_truncated,omitempty"`
 	CorteNoFim         bool `json:"tail_truncated,omitempty"`
@@ -200,6 +224,13 @@ type AgregadoDeLog struct {
 	// Exemplos são poucos de propósito: 427 falhas da mesma origem são UM
 	// achado com contagem, nunca 427 findings.
 	Exemplos []EventoDeLog
+
+	// TemDataInferida é sobre TODOS os eventos do grupo, e não sobre os três
+	// Exemplos. Primeiro e Ultimo já eram calculados sobre todos, então tirar a
+	// confiança dos exemplos comparava universos diferentes: quatro eventos, com
+	// o mais recente inferido e os três primeiros exatos, produziam um achado
+	// datado pelo quarto e marcado como exato.
+	TemDataInferida bool
 }
 
 const maxExemplosPorAgregado = 3
@@ -230,6 +261,7 @@ func (f *Facts) AgregarLog(kinds ...string) []AgregadoDeLog {
 			ordem = append(ordem, id)
 		}
 		a.Contagem++
+		a.TemDataInferida = a.TemDataInferida || ev.AtAnoInferido || ev.AtFusoInferido
 		if len(a.Exemplos) < maxExemplosPorAgregado {
 			a.Exemplos = append(a.Exemplos, *ev)
 		}
@@ -348,7 +380,7 @@ func (f *Facts) CoberturaLog(familia string) CoberturaDeLog {
 	if len(faixas) == 0 {
 		if out.Lida {
 			out.Motivo = "os arquivos da família " + familia + " foram lidos e nenhuma " +
-				"linha pôde ser datada"
+				"linha (ou registro) pôde ser datada"
 		} else {
 			out.Motivo = "nenhum arquivo da família " + familia + " pôde ser lido"
 		}

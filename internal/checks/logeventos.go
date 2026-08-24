@@ -301,8 +301,9 @@ var chaveForaDasLocais = check.Check{
 			}
 			u.n++
 			// A INCERTEZA DA DATA VIAJA COM O ACHADO: basta um evento datado por
-			// inferência para que a data deste achado não possa recortar nada.
-			u.inferido = u.inferido || ev.AtInferido
+			// inferência — de ano OU de fuso — para que a data deste achado não
+			// possa recortar nada.
+			u.inferido = u.inferido || ev.AtAnoInferido || ev.AtFusoInferido
 			if ev.At != "" && (u.quando == "" || ev.At > u.quando) {
 				u.quando = ev.At
 			}
@@ -439,9 +440,10 @@ var sudoParaAlvoIncomum = check.Check{
 				fd.Chave = user + " " + alvo
 				if ag.Ultimo != "" {
 					fd.Quando, fd.QuandoFonte = ag.Ultimo, "última execução registrada no log"
-					for _, ex := range ag.Exemplos {
-						fd.QuandoInferido = fd.QuandoInferido || ex.AtInferido
-					}
+					// Do AGREGADO, e não dos exemplos: Ultimo é calculado sobre
+					// todos os eventos, e olhar só os três primeiros compararia
+					// universos diferentes.
+					fd.QuandoInferido = ag.TemDataInferida
 				}
 				fd.NextSteps = []string{
 					"o arquivo pode não existir mais: `ls -la " + alvo + "` responde " +
@@ -534,7 +536,7 @@ var trilhaDeAuditoriaComBuraco = check.Check{
 			if ev.At > quando {
 				quando = ev.At
 			}
-			inferido = inferido || ev.AtInferido
+			inferido = inferido || ev.AtAnoInferido || ev.AtFusoInferido
 			if len(exemplos) < 3 && ev.Trecho != "" {
 				exemplos = append(exemplos, ev.Trecho)
 			}
@@ -716,14 +718,17 @@ var buracoTemporalNoLog = check.Check{
 	},
 }
 
-// familiaTemDataInferida diz se algum evento daquela família foi datado por
-// dedução — ano vindo do mtime, ou fuso suposto.
+// familiaTemDataInferida diz se as datas da COBERTURA daquela família foram
+// deduzidas — ano vindo da âncora, ou fuso suposto.
+//
+// Ela pergunta às FONTES, e não aos eventos, porque a cobertura é feita de toda
+// linha datada — inclusive das que não viram evento. Um arquivo cheio de linhas
+// de rotina datadas por inferência tem cobertura inferida e evento nenhum, e
+// perguntar aos eventos concluiria que aquelas datas foram lidas.
 func familiaTemDataInferida(f *facts.Facts, familia string) bool {
-	for i := range f.EventosDeLog {
-		if !f.EventosDeLog[i].AtInferido {
-			continue
-		}
-		if familiaDoArquivo(f, f.EventosDeLog[i].File, "") == familia {
+	for i := range f.FontesDeLog {
+		s := &f.FontesDeLog[i]
+		if ehFamilia(s, familia) && (s.CoberturaAnoInferido || s.CoberturaFusoInferido) {
 			return true
 		}
 	}
@@ -803,8 +808,8 @@ var coberturaDeLog = check.Check{
 			}
 			observadas++
 			if c.ContinuoDesde == "" {
-				linhas = append(linhas, fam+": os arquivos existem e NENHUM evento "+
-					"pôde ser datado")
+				linhas = append(linhas, fam+": os arquivos existem e NENHUMA linha "+
+					"(ou registro) observada pôde ser datada")
 				continue
 			}
 			l := fam + ": contínuo de " + c.ContinuoDesde + " a " + c.ContinuoAte

@@ -109,12 +109,20 @@ type linhaSyslog struct {
 	// evidência, e reconstruí-la por Join de campos apagaria tabulação e espaço
 	// múltiplo, que são escolha de quem escreveu a linha.
 	Msg string
-	// Inferido diz que o OFFSET desta data foi suposto, e não lido.
-	//
-	// Só a forma tradicional depende disso: a ISO carrega o próprio offset, e
-	// marcar a data dela como inferida porque o /etc/localtime não abriu seria
-	// desqualificar um carimbo que não precisou de suposição nenhuma.
-	Inferido bool
+	// AnoInferido e FusoInferido são as DUAS incertezas da data. Ver
+	// EventoDeLog: a ISO carrega ano e offset e não infere nada; a tradicional
+	// infere o ano sempre, e o fuso quando o /etc/localtime não abriu.
+	AnoInferido  bool
+	FusoInferido bool
+}
+
+// Carimbo é a data de uma LINHA, com a confiança dela. É o que a cobertura
+// consome — ela mede observação, e observação inclui a linha que não virou
+// evento.
+type Carimbo struct {
+	At           string
+	AnoInferido  bool
+	FusoInferido bool
 }
 
 // separaEnvelope lê a moldura comum a todas as famílias em texto.
@@ -160,10 +168,11 @@ func separaEnvelope(linha string, ctx contextoDeTempo) (linhaSyslog, bool) {
 		if t, ok := instanteDeSyslog(mes, dia, h, m, s, ctx); ok {
 			out.Quando = utc(t)
 		}
-		// O ANO desta forma sempre sai do mtime do arquivo (ver
-		// instanteDeSyslog); o OFFSET sai do /etc/localtime, e só ele pode
-		// faltar. É o offset que decide correlação de segundos.
-		out.Inferido = ctx.Suposto
+		// O ANO desta forma SEMPRE é inferido — a linha não o carrega, e ele sai
+		// da âncora (mtime do rotacionado, instante da coleta no arquivo vivo).
+		// O OFFSET sai do /etc/localtime, e só ele pode faltar.
+		out.AnoInferido = true
+		out.FusoInferido = ctx.Suposto
 		resto = campos[3:]
 		consumidos = 3
 	}
@@ -252,23 +261,25 @@ func horaDeSyslog(s string) (h, m, seg int, ok bool) {
 // intervalo observado dos EVENTOS afirmaria que o arquivo só foi visto onde
 // apareceu algo interessante, e é sobre esse intervalo que um check diz "N dias
 // sem UMA linha de autenticação".
-func parseLinhaSyslog(linha string, ctx contextoDeTempo) (EventoDeLog, ResultadoDeLinha, string) {
+func parseLinhaSyslog(linha string, ctx contextoDeTempo) (EventoDeLog, ResultadoDeLinha, Carimbo) {
 	env, ok := separaEnvelope(linha, ctx)
 	if !ok {
-		return EventoDeLog{}, linhaNaoParseada, ""
+		return EventoDeLog{}, linhaNaoParseada, Carimbo{}
 	}
+	c := Carimbo{At: env.Quando, AnoInferido: env.AnoInferido, FusoInferido: env.FusoInferido}
 	if !produtoresCandidatos[env.Tag] {
-		return EventoDeLog{}, linhaNaoCandidata, env.Quando
+		return EventoDeLog{}, linhaNaoCandidata, c
 	}
 	medido := produtoresMedidos[env.Tag]
 
 	ev := EventoDeLog{
-		At:         env.Quando,
-		AtKnown:    env.Quando != "",
-		AtInferido: env.Inferido,
-		Process:    env.Tag,
-		PID:        env.PID,
-		Trecho:     trechoDe(env.Msg),
+		At:             env.Quando,
+		AtKnown:        env.Quando != "",
+		AtAnoInferido:  env.AnoInferido,
+		AtFusoInferido: env.FusoInferido,
+		Process:        env.Tag,
+		PID:            env.PID,
+		Trecho:         trechoDe(env.Msg),
 	}
 
 	var res ResultadoDeLinha
@@ -300,9 +311,9 @@ func parseLinhaSyslog(linha string, ctx contextoDeTempo) (EventoDeLog, Resultado
 		res = linhaNaoMedida
 	}
 	if res != linhaEvento {
-		return EventoDeLog{}, res, env.Quando
+		return EventoDeLog{}, res, c
 	}
-	return ev, linhaEvento, env.Quando
+	return ev, linhaEvento, c
 }
 
 // trechoDe corta o texto guardado. O corte é DECLARADO com reticências: um

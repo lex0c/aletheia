@@ -35,7 +35,7 @@ func TestParseDeLinhaPorProdutor(t *testing.T) {
 			linha: "Aug 24 01:20:33 host sshd[1234]: Accepted publickey for deploy " +
 				"from 185.10.2.4 port 55234 ssh2: RSA SHA256:47DEQpj8HBSa",
 			quer: EventoDeLog{
-				Kind: "auth.accepted", At: "2026-08-24T01:20:33Z", AtKnown: true,
+				Kind: "auth.accepted", At: "2026-08-24T01:20:33Z", AtKnown: true, AtAnoInferido: true,
 				User: "deploy", RemoteIP: "185.10.2.4", Metodo: "publickey",
 				Fingerprint: "SHA256:47DEQpj8HBSa", Process: "sshd", PID: 1234,
 			},
@@ -44,7 +44,7 @@ func TestParseDeLinhaPorProdutor(t *testing.T) {
 			nome:  "sshd: senha aceita, sem fingerprint",
 			linha: "Aug 24 01:21:00 host sshd[9]: Accepted password for root from 10.0.0.1 port 5 ssh2",
 			quer: EventoDeLog{
-				Kind: "auth.accepted", At: "2026-08-24T01:21:00Z", AtKnown: true,
+				Kind: "auth.accepted", At: "2026-08-24T01:21:00Z", AtKnown: true, AtAnoInferido: true,
 				User: "root", RemoteIP: "10.0.0.1", Metodo: "password",
 				Process: "sshd", PID: 9,
 			},
@@ -53,7 +53,7 @@ func TestParseDeLinhaPorProdutor(t *testing.T) {
 			nome:  "sshd: usuário inválido é Kind PRÓPRIO, não uma falha qualquer",
 			linha: "Aug 24 01:22:00 host sshd[9]: Failed password for invalid user admin from 1.2.3.4 port 5 ssh2",
 			quer: EventoDeLog{
-				Kind: "auth.invalid_user", At: "2026-08-24T01:22:00Z", AtKnown: true,
+				Kind: "auth.invalid_user", At: "2026-08-24T01:22:00Z", AtKnown: true, AtAnoInferido: true,
 				User: "admin", RemoteIP: "1.2.3.4", Metodo: "password",
 				Process: "sshd", PID: 9,
 			},
@@ -63,7 +63,7 @@ func TestParseDeLinhaPorProdutor(t *testing.T) {
 			linha: "Aug 24 01:23:00 host sshd-session[77]: Accepted publickey for ana " +
 				"from 10.1.1.1 port 5 ssh2: ED25519 SHA256:AAAA",
 			quer: EventoDeLog{
-				Kind: "auth.accepted", At: "2026-08-24T01:23:00Z", AtKnown: true,
+				Kind: "auth.accepted", At: "2026-08-24T01:23:00Z", AtKnown: true, AtAnoInferido: true,
 				User: "ana", RemoteIP: "10.1.1.1", Metodo: "publickey",
 				Fingerprint: "SHA256:AAAA", Process: "sshd-session", PID: 77,
 			},
@@ -72,7 +72,7 @@ func TestParseDeLinhaPorProdutor(t *testing.T) {
 			nome:  "sudo: o COMMAND passa pelo resolvedor de alvos",
 			linha: "Aug 24 02:00:00 host sudo[5]:   deploy : TTY=pts/0 ; PWD=/tmp ; USER=root ; COMMAND=/tmp/.upd",
 			quer: EventoDeLog{
-				Kind: "auth.sudo", At: "2026-08-24T02:00:00Z", AtKnown: true,
+				Kind: "auth.sudo", At: "2026-08-24T02:00:00Z", AtKnown: true, AtAnoInferido: true,
 				User: "deploy", Process: "sudo", PID: 5, Alvos: []string{"/tmp/.upd"},
 			},
 		},
@@ -80,7 +80,7 @@ func TestParseDeLinhaPorProdutor(t *testing.T) {
 			nome:  "su: a troca de usuário, com o alvo entre parênteses",
 			linha: "Aug 24 02:05:00 host su[6]: (to root) deploy on pts/0",
 			quer: EventoDeLog{
-				Kind: "auth.su", At: "2026-08-24T02:05:00Z", AtKnown: true,
+				Kind: "auth.su", At: "2026-08-24T02:05:00Z", AtKnown: true, AtAnoInferido: true,
 				User: "deploy", Process: "su", PID: 6, Alvos: []string{"root"},
 			},
 		},
@@ -88,7 +88,7 @@ func TestParseDeLinhaPorProdutor(t *testing.T) {
 			nome:  "useradd: a conta criada, com o UID que o cruzamento precisa",
 			linha: "Aug 24 03:00:00 host useradd[7]: new user: name=backdoor, UID=0, GID=0, home=/home/backdoor, shell=/bin/bash",
 			quer: EventoDeLog{
-				Kind: "account.created", At: "2026-08-24T03:00:00Z", AtKnown: true,
+				Kind: "account.created", At: "2026-08-24T03:00:00Z", AtKnown: true, AtAnoInferido: true,
 				User: "backdoor", UID: 0, UIDKnown: true, Process: "useradd", PID: 7,
 			},
 		},
@@ -96,7 +96,7 @@ func TestParseDeLinhaPorProdutor(t *testing.T) {
 			nome:  "CRON: o comando executado",
 			linha: "Aug 24 04:00:01 host CRON[8]: (root) CMD (/usr/local/bin/coleta.sh)",
 			quer: EventoDeLog{
-				Kind: "cron.exec", At: "2026-08-24T04:00:01Z", AtKnown: true,
+				Kind: "cron.exec", At: "2026-08-24T04:00:01Z", AtKnown: true, AtAnoInferido: true,
 				User: "root", Process: "CRON", PID: 8, Alvos: []string{"/usr/local/bin/coleta.sh"},
 			},
 		},
@@ -104,7 +104,7 @@ func TestParseDeLinhaPorProdutor(t *testing.T) {
 			nome:  "kernel: perda de registro do auditd é buraco na trilha",
 			linha: "Aug 24 05:00:00 host kernel: [12345.678901] audit: audit_lost=42 audit_rate_limit=0 audit_backlog_limit=64",
 			quer: EventoDeLog{
-				Kind: "audit.lost", At: "2026-08-24T05:00:00Z", AtKnown: true,
+				Kind: "audit.lost", At: "2026-08-24T05:00:00Z", AtKnown: true, AtAnoInferido: true,
 				Process: "kernel",
 			},
 		},
@@ -112,7 +112,7 @@ func TestParseDeLinhaPorProdutor(t *testing.T) {
 			nome:  "kernel: módulo fora da árvore",
 			linha: "Aug 24 05:01:00 host kernel: [1.0] socknd: loading out-of-tree module taints kernel.",
 			quer: EventoDeLog{
-				Kind: "kernel.module_loaded", At: "2026-08-24T05:01:00Z", AtKnown: true,
+				Kind: "kernel.module_loaded", At: "2026-08-24T05:01:00Z", AtKnown: true, AtAnoInferido: true,
 				Process: "kernel", Alvos: []string{"socknd"},
 			},
 		},
@@ -120,7 +120,7 @@ func TestParseDeLinhaPorProdutor(t *testing.T) {
 			nome:  "busybox do Alpine insere facility.level entre host e tag",
 			linha: "Aug 24 06:00:00 host authpriv.info sshd[3]: Accepted password for ana from 10.0.0.2 port 5 ssh2",
 			quer: EventoDeLog{
-				Kind: "auth.accepted", At: "2026-08-24T06:00:00Z", AtKnown: true,
+				Kind: "auth.accepted", At: "2026-08-24T06:00:00Z", AtKnown: true, AtAnoInferido: true,
 				User: "ana", RemoteIP: "10.0.0.2", Metodo: "password",
 				Process: "sshd", PID: 3,
 			},
@@ -258,8 +258,12 @@ func TestFusoSupostoMarcaOEvento(t *testing.T) {
 	ctx := ctxDeTeste()
 	ctx.Suposto = true
 	ev, _, _ := parseLinhaSyslog("Aug 24 01:20:33 host sshd[1]: Accepted password for ana from 10.0.0.1 port 5 ssh2", ctx)
-	if !ev.AtInferido {
-		t.Error("fuso suposto precisa marcar AtInferido")
+	if !ev.AtFusoInferido {
+		t.Error("fuso suposto precisa marcar AtFusoInferido")
+	}
+	// E o ANO da forma tradicional é SEMPRE inferido: a linha não o carrega.
+	if !ev.AtAnoInferido {
+		t.Error("a forma tradicional não traz ano: ele sai da âncora, sempre")
 	}
 }
 
@@ -317,15 +321,18 @@ func TestISONaoEhInferidaMesmoComFusoDesconhecido(t *testing.T) {
 	if !iso.AtKnown {
 		t.Fatal("a data ISO precisa ser conhecida")
 	}
-	if iso.AtInferido {
-		t.Error("a ISO traz o próprio offset: nada foi inferido")
+	if iso.AtFusoInferido || iso.AtAnoInferido {
+		t.Error("a ISO traz ano E offset: nada foi inferido")
 	}
 
 	// E a forma tradicional, na MESMA execução, continua marcada.
 	trad, _, _ := parseLinhaSyslog(
 		"Aug 24 01:20:33 h sshd[1]: Accepted password for ana from 10.0.0.1 port 5 ssh2", ctx)
-	if !trad.AtInferido {
+	if !trad.AtFusoInferido {
 		t.Error("a forma tradicional depende do fuso do alvo, que aqui foi suposto")
+	}
+	if !trad.AtAnoInferido {
+		t.Error("e o ano dela sai da âncora, sempre — é o que a janela recorta")
 	}
 }
 

@@ -101,7 +101,13 @@ func TestImpressaoDoEsquema(t *testing.T) {
 		// estrutura que o 23 introduziu, e nenhum artefato anterior a ela
 		// existe para ser lido torto. Subir para 24 aqui carimbaria uma
 		// incompatibilidade com um formato que ninguém tem.
-		impressaoGravada = "1bdaec63331b1582"
+		//
+		// Atualizada de novo, pelo mesmo motivo e ainda dentro do 23:
+		// AtInferido virou DOIS bits (ano e fuso, que erram em escalas
+		// diferentes) e FonteDeLog ganhou a confiança das datas da COBERTURA.
+		// Tudo dentro de estruturas que o 23 introduziu, e nenhum artefato
+		// anterior a elas existe.
+		impressaoGravada = "3dec648ff4f96f93"
 	)
 	if SchemaVersion != esquemaEsperado {
 		t.Fatalf("SchemaVersion=%d e este teste conhece o %d: atualize os dois "+

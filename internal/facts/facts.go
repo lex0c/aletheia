@@ -655,7 +655,25 @@ type Facts struct {
 	// global mentiria para um dos lados. Este serve ao rodapé, que compara o que
 	// a ANÁLISE pediu com o que a coleta alcançou.
 	LogJanelaEfetiva string `json:"log_window_effective,omitempty"`
-	LogJanelaTudo    bool   `json:"log_window_all,omitempty"`
+
+	// LogSelecaoAmpliada é o `--logs-all`. O nome mudou junto com o significado:
+	// ele já quis dizer "sem janela temporal", e janela temporal na coleta não
+	// existe mais — hoje ele amplia só o teto de SELEÇÃO de arquivos.
+	LogSelecaoAmpliada bool `json:"log_selection_expanded,omitempty"`
+
+	// LogFamiliasCortadas conta, POR FAMÍLIA, as fontes que o teto RÍGIDO
+	// descartou antes de qualquer leitura.
+	//
+	// Existe porque o corte do teto rígido acontece na SELEÇÃO, e o que ele
+	// descarta não vira FonteDeLog — não teria como, é o teto que existe
+	// justamente para a lista não crescer sem limite. Mas a lacuna por família
+	// nasce de FonteDeLog.Lacuna, então aqueles arquivos ficavam invisíveis para
+	// ela: um `--logs-all` com 601 fontes de `auth` lia 500, descartava 101, e o
+	// check de auth saía COMPLETO. O total ainda saía parcial pela chave global,
+	// e a afirmação individual continuava errada.
+	//
+	// São no máximo cinco famílias, então isto é limitado por construção.
+	LogFamiliasCortadas map[string]int `json:"log_families_truncated,omitempty"`
 
 	// Um fato de completude POR FONTE, pela mesma razão que PasswdLido e
 	// ShadowLido são dois: as leituras têm privilégio e destino diferentes, e uma

@@ -98,6 +98,17 @@ func escopoDaFamilia(familias ...string) func(*facts.Facts, *env.Env) (bool, str
 // FonteDeLog delas. Quem reporta a coleta INTEIRA — inclusive os tetos que não
 // pertencem a arquivo nenhum — é o logs.source_coverage.
 func lacunaDeLog(f *facts.Facts, r *check.Result, familias ...string) bool {
+	// O TETO RÍGIDO corta na SELEÇÃO, e o que ele descarta não vira FonteDeLog —
+	// é justamente o teto que existe para a lista não crescer sem limite. A
+	// contagem por família é o que faz aquele corte chegar até aqui.
+	for _, fam := range familias {
+		if n := f.LogFamiliasCortadas[fam]; n > 0 {
+			r.Partial = append(r.Partial, strconv.Itoa(n)+" fonte(s) de log da "+
+				"família "+fam+" foram DESCARTADAS pelo teto rígido de seleção: elas "+
+				"não foram nem consideradas, e ausência de evento nelas não pode ser "+
+				"afirmada")
+		}
+	}
 	for i := range f.FontesDeLog {
 		fonte := &f.FontesDeLog[i]
 		if fonte.Lacuna == "" {
@@ -839,8 +850,11 @@ var coberturaDeLog = check.Check{
 
 		fd := self.F(check.SevInfo, "cobertura de log", "", linhas...)
 		fd.NextSteps = []string{
-			"o que for anterior ao intervalo acima não foi lido: `--logs-all` " +
-				"amplia a seleção, e `--since` amplia a janela",
+			"antes do intervalo acima não há cobertura CONTÍNUA — pode haver trechos " +
+				"mais antigos observados, separados por buracos; o que estiver além " +
+				"do que a coleta alcançou não foi lido",
+			"`--logs-all` amplia quantas GERAÇÕES são coletadas. O `--since` NÃO " +
+				"amplia coleta nenhuma: ele recorta achado já coletado",
 			"para o intervalo não coberto, a via é o servidor de log central, se houver",
 		}
 		r.Findings = append(r.Findings, fd)

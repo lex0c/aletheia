@@ -915,3 +915,85 @@ func TestMessagesSoEhAuthQuandoNaoHaFonteDedicada(t *testing.T) {
 		}
 	})
 }
+
+// A SÉRIE INTEIRA do messages sai de `auth` quando há fonte dedicada, e não só
+// o arquivo vivo.
+//
+// As rotações entram na seleção como caminhos próprios, então tirar `auth` de
+// `/var/log/messages` deixava `messages.1` e `messages-20260820` alimentando
+// CoberturaLog("auth") — que junta as faixas de TODAS as fontes da família. O
+// intervalo de sistema de um messages.1 virava cobertura de autenticação num
+// host onde autenticação vai para o `secure`.
+func TestSerieInteiraDoMessagesSaiDeAuth(t *testing.T) {
+	linha := "Jan 10 03:00:00 h sshd[1]: Accepted password for ana from 10.0.0.1 port 5 ssh2\n"
+	f := raizDeLog(t, map[string]string{
+		"var/log/secure":            linha,
+		"var/log/messages":          linha,
+		"var/log/messages.1":        linha,
+		"var/log/messages-20260820": linha,
+	}, nil)
+
+	for _, s := range f.FontesDeLog {
+		if strings.HasPrefix(s.Path, "/var/log/messages") && contemString(s.Familias, "auth") {
+			t.Errorf("%s continua como autoridade de auth: %v", s.Path, s.Familias)
+		}
+	}
+	// E a família `auth` continua existindo, pelo `secure`.
+	if !f.CoberturaLog("auth").Existe {
+		t.Error("o secure é a fonte dedicada e sumiu da família")
+	}
+}
+
+// ROTAÇÃO DATADA é ordenada por DATA, da mais nova para a mais antiga.
+//
+// Todas são geração 1, e ordenar por caminho põe a mais ANTIGA primeiro. Sem
+// teto isso não muda resultado; com teto, o orçamento seria gasto com as velhas
+// — e o comentário que promete "o corte fica com as gerações MAIS NOVAS" seria
+// falso justamente na família RHEL, onde `dateext` é padrão de fábrica.
+func TestDateextEhOrdenadaDaMaisNovaParaAMaisAntiga(t *testing.T) {
+	linha := "Jan 10 03:00:00 h sshd[1]: Accepted password for ana from 10.0.0.1 port 5 ssh2\n"
+	f := raizDeLog(t, map[string]string{
+		"var/log/secure":          linha,
+		"var/log/secure-20260801": linha,
+		"var/log/secure-20260820": linha,
+		"var/log/secure-20260815": linha,
+	}, nil)
+
+	var ordem []string
+	for _, s := range f.FontesDeLog {
+		ordem = append(ordem, s.Path)
+	}
+	quer := []string{
+		"/var/log/secure",
+		"/var/log/secure-20260820",
+		"/var/log/secure-20260815",
+		"/var/log/secure-20260801",
+	}
+	for i := range quer {
+		if i >= len(ordem) || ordem[i] != quer[i] {
+			t.Fatalf("ordem = %v, quer %v", ordem, quer)
+		}
+	}
+}
+
+// O TETO RÍGIDO precisa chegar à COMPLETUDE DA FAMÍLIA.
+//
+// Ele corta na SELEÇÃO, e o que descarta não vira FonteDeLog — é o teto que
+// existe para a lista não crescer sem limite. Mas a lacuna por família nasce de
+// FonteDeLog.Lacuna, então aqueles arquivos ficavam invisíveis para ela: o total
+// saía parcial pela chave global e o check da família saía COMPLETO.
+func TestTetoRigidoDerrubaACompletudeDaFamilia(t *testing.T) {
+	arquivos := map[string]string{"var/log/auth.log": linhasDeAuth(1)}
+	for i := 1; i <= maxLogArquivosHard+50; i++ {
+		arquivos["var/log/auth.log."+strconv.Itoa(i)] = "x\n"
+	}
+	f := raizDeLog(t, arquivos, nil)
+
+	if f.LogFamiliasCortadas["auth"] == 0 {
+		t.Fatal("o corte precisa ser contado POR FAMÍLIA: é ela que decide se um " +
+			"check pode afirmar ausência")
+	}
+	if f.LogTextoCompleto {
+		t.Error("com fonte de auth descartada, o log em texto não está completo")
+	}
+}

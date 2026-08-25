@@ -107,7 +107,7 @@ func TestImpressaoDoEsquema(t *testing.T) {
 		// diferentes) e FonteDeLog ganhou a confiança das datas da COBERTURA.
 		// Tudo dentro de estruturas que o 23 introduziu, e nenhum artefato
 		// anterior a elas existe.
-		impressaoGravada = "e0cdb7421fab9cc2"
+		impressaoGravada = "e2d7b644746c7da6"
 	)
 	if SchemaVersion != esquemaEsperado {
 		t.Fatalf("SchemaVersion=%d e este teste conhece o %d: atualize os dois "+

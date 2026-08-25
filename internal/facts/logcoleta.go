@@ -137,7 +137,7 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 	// eventos —, que são números da ferramenta. Trocar uma otimização de I/O por
 	// uma semântica defensável é o negócio certo numa ferramenta cuja tese é
 	// dizer "não olhei" em vez de "não aconteceu".
-	f.LogJanelaTudo = e.LogsTudo
+	f.LogSelecaoAmpliada = e.LogsTudo
 
 	tetoArquivos := maxLogArquivosPadrao
 	if e.LogsTudo {
@@ -147,7 +147,7 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 	parcialPorAcesso := false
 
 	alvos, inacessiveis, descartados := alvosDeLog(f, e)
-	if descartados > 0 {
+	if len(descartados) > 0 {
 		// O TETO RÍGIDO VALE SOBRE O QUE É CONSIDERADO, e não só sobre o que é
 		// lido. Medido: um `touch -t 202001010000 /var/log/auth.log.{1..3000}`
 		// põe 3001 fontes no dump — as 3000 velhas nem são abertas (ficam fora
@@ -157,7 +157,12 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 		//
 		// O corte fica com as gerações MAIS NOVAS, que é onde mora o que
 		// interessa numa triagem.
-		f.partial("logeventos", strconv.Itoa(descartados)+" arquivo(s) de log "+
+		total := 0
+		for _, n := range descartados {
+			total += n
+		}
+		f.LogFamiliasCortadas = descartados
+		f.partial("logeventos", strconv.Itoa(total)+" arquivo(s) de log "+
 			"ficaram FORA da seleção pelo teto rígido de "+strconv.Itoa(maxLogArquivosHard)+
 			": as gerações mais antigas não foram nem consideradas, e o que houver "+
 			"nelas não pode ser afirmado nem negado")
@@ -298,12 +303,22 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 
 // alvoDeLog é um arquivo escolhido para leitura.
 type alvoDeLog struct {
-	path     string
+	path string
+	// base é a IDENTIDADE DA SÉRIE de rotação — `/var/log/messages` para
+	// `messages`, `messages.1` e `messages-20260820`. Sem ela, uma decisão sobre
+	// a série só alcançava o arquivo vivo: foi assim que as rotações do
+	// `messages` continuaram sendo autoridade de `auth` num host que tem
+	// `secure`.
+	base     string
 	familias []string
 	geracao  int
-	mod      time.Time
-	tam      int64
-	gz       bool
+	// dataRot é o sufixo de DATA do logrotate (`YYYYMMDD`), quando há. Ele
+	// existe porque toda rotação datada é geração 1, e sem a data a ordenação
+	// secundária cai no caminho — que põe a MAIS ANTIGA primeiro.
+	dataRot string
+	mod     time.Time
+	tam     int64
+	gz      bool
 }
 
 // alvosDeLog escolhe o que abrir, e em que ORDEM.
@@ -320,7 +335,7 @@ type fonteInacessivel struct {
 	motivo   string
 }
 
-func alvosDeLog(f *Facts, e *env.Env) ([]alvoDeLog, []fonteInacessivel, int) {
+func alvosDeLog(f *Facts, e *env.Env) ([]alvoDeLog, []fonteInacessivel, map[string]int) {
 	porPath := map[string]*alvoDeLog{}
 	var ordem []string
 
@@ -342,8 +357,10 @@ func alvosDeLog(f *Facts, e *env.Env) ([]alvoDeLog, []fonteInacessivel, int) {
 						continue
 					}
 					a = &alvoDeLog{
-						path: l.Path, geracao: l.Geracao, mod: fi.ModTime().UTC(),
-						tam: fi.Size(), gz: comprimido(l.Path),
+						path: l.Path, base: l.Base, geracao: l.Geracao,
+						dataRot: dataDeRotacao(l.Path, l.Datada),
+						mod:     fi.ModTime().UTC(),
+						tam:     fi.Size(), gz: comprimido(l.Path),
 					}
 					porPath[l.Path] = a
 					ordem = append(ordem, l.Path)
@@ -402,7 +419,7 @@ func alvosDeLog(f *Facts, e *env.Env) ([]alvoDeLog, []fonteInacessivel, int) {
 			// sem permissão de LISTAR, mas com permissão de atravessar). Entra
 			// como alvo: se a leitura falhar, a lacuna sai de lá.
 			a := &alvoDeLog{
-				path: vivo, geracao: 0, mod: fi.ModTime().UTC(),
+				path: vivo, base: vivo, geracao: 0, mod: fi.ModTime().UTC(),
 				tam: fi.Size(), familias: []string{fam},
 			}
 			porPath[vivo] = a
@@ -429,9 +446,18 @@ func alvosDeLog(f *Facts, e *env.Env) ([]alvoDeLog, []fonteInacessivel, int) {
 	// Quando existe fonte dedicada, o messages sai da família `auth`. Ele
 	// continua sendo lido e continua produzindo evento de auth se uma linha
 	// aparecer lá — o que muda é ele deixar de servir de autoridade de ausência.
-	if dedicada := temFonteDedicadaDeAuth(porPath); dedicada {
-		if a := porPath["/var/log/messages"]; a != nil {
-			a.familias = semFamilia(a.familias, "auth")
+	if temFonteDedicadaDeAuth(porPath) {
+		// A SÉRIE INTEIRA, e não só o arquivo vivo. As rotações entram em
+		// porPath como caminhos próprios, então tirar `auth` de
+		// `/var/log/messages` deixava `messages.1` e `messages-20260820`
+		// alimentando CoberturaLog("auth") — que junta as faixas de TODAS as
+		// fontes da família. O intervalo de sistema de um messages.1 virava
+		// cobertura de autenticação num host onde autenticação vai para o
+		// `secure`.
+		for _, a := range porPath {
+			if a.base == "/var/log/messages" {
+				a.familias = semFamilia(a.familias, "auth")
+			}
 		}
 	}
 
@@ -445,11 +471,26 @@ func alvosDeLog(f *Facts, e *env.Env) ([]alvoDeLog, []fonteInacessivel, int) {
 		if out[i].geracao != out[j].geracao {
 			return out[i].geracao < out[j].geracao
 		}
+		// ROTAÇÃO DATADA é toda geração 1, e ordenar por caminho põe a MAIS
+		// ANTIGA primeiro — `secure-20260801` antes de `secure-20260820`. Quando
+		// um teto morde, o orçamento seria gasto com as velhas, e o comentário
+		// que promete "o corte fica com as gerações MAIS NOVAS" seria falso
+		// justamente na família RHEL, onde `dateext` é padrão de fábrica.
+		if out[i].dataRot != "" && out[j].dataRot != "" && out[i].dataRot != out[j].dataRot {
+			return out[i].dataRot > out[j].dataRot
+		}
 		return out[i].path < out[j].path
 	})
-	descartados := 0
+	// O DESCARTE É CONTADO POR FAMÍLIA, e não só no total: é a família que
+	// decide se um check pode afirmar ausência, e um número global não diz qual
+	// pergunta ficou sem cobertura.
+	descartados := map[string]int{}
 	if len(out) > maxLogArquivosHard {
-		descartados = len(out) - maxLogArquivosHard
+		for _, a := range out[maxLogArquivosHard:] {
+			for _, fam := range a.familias {
+				descartados[fam]++
+			}
+		}
 		out = out[:maxLogArquivosHard]
 	}
 	return out, inacessiveis, descartados
@@ -457,6 +498,22 @@ func alvosDeLog(f *Facts, e *env.Env) ([]alvoDeLog, []fonteInacessivel, int) {
 
 // temFonteDedicadaDeAuth olha as SÉRIES, e não só os arquivos vivos: um host que
 // só tem `auth.log.1` continua tendo fonte dedicada de autenticação.
+// dataDeRotacao devolve o `YYYYMMDD` do sufixo de data, quando o inventário já
+// reconheceu a rotação como datada. Vazio para rotação por contador.
+func dataDeRotacao(path string, datada bool) string {
+	if !datada {
+		return ""
+	}
+	n := path
+	for _, suf := range []string{".gz", ".xz", ".bz2", ".zst"} {
+		n = strings.TrimSuffix(n, suf)
+	}
+	if i := strings.LastIndex(n, "-"); i > 0 {
+		return n[i+1:]
+	}
+	return ""
+}
+
 func temFonteDedicadaDeAuth(porPath map[string]*alvoDeLog) bool {
 	for p := range porPath {
 		if strings.HasPrefix(p, "/var/log/auth.log") || strings.HasPrefix(p, "/var/log/secure") {
@@ -895,6 +952,11 @@ var familiasDeTexto = []string{"auth", "syslog", "kern", "cron"}
 // Alpine, /var/log/messages é as três primeiras ao mesmo tempo. Separá-las em
 // quatro fatos seria fingir uma independência que o disco não tem.
 func completaNasFamiliasDeTexto(f *Facts) bool {
+	for _, fam := range familiasDeTexto {
+		if f.LogFamiliasCortadas[fam] > 0 {
+			return false
+		}
+	}
 	achou := false
 	for i := range f.FontesDeLog {
 		s := &f.FontesDeLog[i]
@@ -921,6 +983,9 @@ func completaNasFamiliasDeTexto(f *Facts) bool {
 // PasswdLido e ShadowLido são dois: um audit.log ilegível não pode suprimir a
 // comparação de um auth.log perfeitamente lido.
 func completaNaFamilia(f *Facts, familia string) bool {
+	if f.LogFamiliasCortadas[familia] > 0 {
+		return false
+	}
 	achou := false
 	for i := range f.FontesDeLog {
 		if !ehDaFamilia(&f.FontesDeLog[i], familia) {

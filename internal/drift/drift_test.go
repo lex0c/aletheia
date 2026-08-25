@@ -979,6 +979,29 @@ func TestTodoFatoEstaClassificado(t *testing.T) {
 		classificado[s.Campo] = s.Nome
 	}
 	tp := reflect.TypeOf(facts.Facts{})
+	existe := map[string]bool{}
+	for i := 0; i < tp.NumField(); i++ {
+		if nome := strings.Split(tp.Field(i).Tag.Get("json"), ",")[0]; nome != "" && nome != "-" {
+			existe[nome] = true
+		}
+	}
+
+	// A GARANTIA VALE NOS DOIS SENTIDOS, e valia só num.
+	//
+	// A tabela cobrava que todo campo de Facts estivesse classificado, e não
+	// cobrava que toda classificação apontasse para um campo existente. Um campo
+	// REMOVIDO deixava a entrada dele viva na tabela, e a entrada morta continuava
+	// passando no teste — dando impressão de cobertura sobre um fato que não
+	// existe mais. Aconteceu com `log_window_requested`, e foi uma revisão humana
+	// que viu, não a catraca.
+	for campo, nome := range classificado {
+		if !existe[campo] {
+			t.Errorf("a tabela classifica o campo `%s` (%q), que NÃO existe mais em "+
+				"facts.Facts: entrada morta dá impressão de cobertura sobre um fato "+
+				"que ninguém coleta. Remova-a junto com o campo.", campo, nome)
+		}
+	}
+
 	for i := 0; i < tp.NumField(); i++ {
 		campo := tp.Field(i)
 		nome := strings.Split(campo.Tag.Get("json"), ",")[0]

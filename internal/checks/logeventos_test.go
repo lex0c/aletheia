@@ -418,3 +418,34 @@ func TestLacunaDeUmaFamiliaNaoContaminaOutra(t *testing.T) {
 		t.Error("o check que depende de `audit` precisa declarar a lacuna dela")
 	}
 }
+
+// O CORTE DO TETO RÍGIDO chega ao check da família.
+//
+// Ele acontece na SELEÇÃO, e o que descarta não vira FonteDeLog. A lacuna por
+// família nasce de FonteDeLog.Lacuna, então sem a contagem por família aqueles
+// arquivos ficavam invisíveis: o total saía parcial pela chave global e o check
+// de auth saía COMPLETO — a granularidade que a feature construiu, contradita
+// no caso em que ela mais importa.
+func TestCorteDoTetoRigidoDerrubaOCheckDaFamilia(t *testing.T) {
+	f := fatosDeLog(facts.EventoDeLog{
+		Kind: "auth.accepted", Metodo: "publickey", Fingerprint: "SHA256:AAA",
+		User: "deploy", File: "/var/log/auth.log",
+	})
+	f.LogFamiliasCortadas = map[string]int{"auth": 101}
+
+	r := rodaLog(t, chaveForaDasLocais, f)
+	if len(r.Coverage.Partial) == 0 {
+		t.Fatal("101 fontes de auth descartadas e o check saiu completo")
+	}
+	if !strings.Contains(strings.Join(r.Coverage.Partial[0].Reasons, " "), "teto rígido") {
+		t.Errorf("motivo = %v", r.Coverage.Partial[0].Reasons)
+	}
+
+	// E uma família NÃO cortada não é contaminada.
+	f.LogFamiliasCortadas = map[string]int{"audit": 101}
+	r = rodaLog(t, chaveForaDasLocais, f)
+	if len(r.Coverage.Partial) != 0 {
+		t.Errorf("o corte em `audit` não pode degradar um check de `auth`: %+v",
+			r.Coverage.Partial)
+	}
+}

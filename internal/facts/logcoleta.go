@@ -74,7 +74,9 @@ const (
 // carrega sistema e kernel enquanto a autenticação vai para o `secure`. O
 // arquivo é lido UMA vez e serve as famílias que o reivindicam.
 var familiasDeLog = map[string][]string{
-	"auth":   {"/var/log/auth.log", "/var/log/secure", "/var/log/messages"},
+	"auth": {"/var/log/auth.log", "/var/log/secure", "/var/log/messages"},
+	// ATENÇÃO ao /var/log/messages em `auth`: ele só vale quando NÃO há fonte
+	// dedicada. Ver authComFonteDedicada.
 	"syslog": {"/var/log/syslog", "/var/log/messages"},
 	"kern":   {"/var/log/kern.log", "/var/log/messages"},
 	"cron":   {"/var/log/cron.log", "/var/log/cron"},
@@ -109,13 +111,32 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 	loc, suposto := fusoDoAlvo(f, e)
 	f.FusoDoAlvoLido = !suposto
 
-	desde := e.LogsDesde
-	if e.LogsTudo {
-		desde = time.Time{}
-	} else if desde.IsZero() {
-		desde = e.Now.Add(-janelaPadraoDeLog)
-	}
-	f.LogJanelaSolicitada = utc(desde)
+	// NÃO HÁ MAIS JANELA TEMPORAL NA COLETA, e a razão é que toda forma dela
+	// acabava decidindo NÃO ABRIR um arquivo a partir de um número que o alvo
+	// escreve.
+	//
+	// A primeira versão comparava o mtime — metadado do host suspeito. A
+	// segunda comparava o CONTEÚDO já lido, e parecia segura: só parava de abrir
+	// gerações mais antigas depois de ler uma que terminava antes do horizonte.
+	// Ela tinha três defeitos, e dois deles nem precisam de atacante:
+	//
+	//	dateext        toda rotação por DATA é geração 1, e a ordenação
+	//	               secundária é por caminho — `secure-20260801` vem ANTES de
+	//	               `secure-20260820`. A primeira examinada é a MAIS ANTIGA, e
+	//	               parar ali pula justamente as mais novas. É o padrão de
+	//	               fábrica da família RHEL
+	//	série          uma família tem VÁRIAS séries de rotação: `auth` cobre
+	//	               auth.log, secure e messages. Um `messages.1` velho fazia
+	//	               `secure.1` não ser aberto, e um não é geração anterior do
+	//	               outro
+	//	ano inferido   o CobertoAte do syslog tradicional carrega ano deduzido da
+	//	               âncora, que no rotacionado é o mtime. O mtime saiu da porta
+	//	               da frente e voltava por esta
+	//
+	// O custo passa a ser controlado só pelos TETOS — arquivos, bytes, linhas,
+	// eventos —, que são números da ferramenta. Trocar uma otimização de I/O por
+	// uma semântica defensável é o negócio certo numa ferramenta cuja tese é
+	// dizer "não olhei" em vez de "não aconteceu".
 	f.LogJanelaTudo = e.LogsTudo
 
 	tetoArquivos := maxLogArquivosPadrao
@@ -167,8 +188,7 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 		return
 	}
 
-	visto := map[string]string{}      // impressão do evento -> arquivo onde apareceu
-	saiuDaJanela := map[string]bool{} // família -> uma geração já acabou antes do horizonte
+	visto := map[string]string{} // impressão do evento -> arquivo onde apareceu
 	parcial := parcialPorAcesso
 	parouEm, motivoDaParada := -1, ""
 	for idx, a := range alvos {
@@ -195,34 +215,6 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 			parouEm = idx
 			orc.marca(strings.TrimPrefix(motivoDaParada, "o teto "))
 			break
-		}
-		// A JANELA PARA DE OLHAR O MTIME.
-		//
-		// Ela decidia se um arquivo era aberto comparando o `mtime` com o
-		// horizonte, e mtime é METADADO DO ALVO. Corrigir só o arquivo vivo
-		// fechou meia porta: a outra metade custa três comandos e some com uma
-		// geração inteira —
-		//
-		//	mv /var/log/auth.log /var/log/auth.log.1
-		//	touch -d '2020-01-01' /var/log/auth.log.1
-		//	: > /var/log/auth.log
-		//
-		// — e como `fora_da_janela` não conta contra a completude, aquilo saía
-		// sem lacuna nenhuma. Falso limpo comprado com um carimbo que o
-		// adversário escreve.
-		//
-		// A seleção passa a ser por ORDEM DE GERAÇÃO (mais nova primeiro) e
-		// pelos TETOS, que são números que a ferramenta controla. A janela
-		// continua limitando custo, mas por CONTEÚDO OBSERVADO: quando uma
-		// geração acaba inteira antes do horizonte, as mais antigas DAQUELA
-		// FAMÍLIA não são abertas — elas só podem ser mais velhas ainda, e isso
-		// se sabe por tê-las lido, não por acreditar no que elas dizem de si.
-		if !desde.IsZero() && familiaJaSaiu(a.familias, saiuDaJanela) {
-			f.FontesDeLog = append(f.FontesDeLog, FonteDeLog{
-				Path: a.path, Familias: a.familias, Estado: FonteForaDaJanela,
-				Lacuna: "", // não é lacuna: uma geração MAIS NOVA já terminava antes do horizonte
-			})
-			continue
 		}
 		orc.arquivos++
 
@@ -265,14 +257,6 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 			visto[imp] = ev.File
 			f.EventosDeLog = append(f.EventosDeLog, ev)
 			fonte.EventosGerados++
-		}
-		// A GERAÇÃO ACABOU ANTES DO HORIZONTE: as mais antigas desta família só
-		// podem ser mais velhas, e aí a janela para de abri-las. A decisão sai do
-		// conteúdo que foi LIDO, e não do que o inode diz.
-		if !desde.IsZero() && fonte.CobertoAte != "" && fonte.CobertoAte < utc(desde) {
-			for _, fam := range a.familias {
-				saiuDaJanela[fam] = true
-			}
 		}
 		f.FontesDeLog = append(f.FontesDeLog, fonte)
 	}
@@ -432,6 +416,25 @@ func alvosDeLog(f *Facts, e *env.Env) ([]alvoDeLog, []fonteInacessivel, int) {
 	// que o drift compara.
 	sort.Slice(inacessiveis, func(i, j int) bool { return inacessiveis[i].path < inacessiveis[j].path })
 
+	// "ARQUIVO QUE PODE CONTER AUTENTICAÇÃO EM ALGUMA DISTRO" não é o mesmo que
+	// "fonte autoritativa de autenticação NESTE host".
+	//
+	// No RHEL a autenticação vai para `secure` e o `messages` recebe o resto; no
+	// Alpine o busybox manda tudo para `messages`. Classificar `messages` como
+	// `auth` sempre fazia CoberturaLog("auth") usar o intervalo dele como
+	// cobertura de autenticação num host onde autenticação não passa por ali —
+	// e cobertura é justamente a afirmação de que "se tivesse acontecido, eu
+	// teria visto".
+	//
+	// Quando existe fonte dedicada, o messages sai da família `auth`. Ele
+	// continua sendo lido e continua produzindo evento de auth se uma linha
+	// aparecer lá — o que muda é ele deixar de servir de autoridade de ausência.
+	if dedicada := temFonteDedicadaDeAuth(porPath); dedicada {
+		if a := porPath["/var/log/messages"]; a != nil {
+			a.familias = semFamilia(a.familias, "auth")
+		}
+	}
+
 	out := make([]alvoDeLog, 0, len(ordem))
 	for _, p := range ordem {
 		a := porPath[p]
@@ -450,6 +453,27 @@ func alvosDeLog(f *Facts, e *env.Env) ([]alvoDeLog, []fonteInacessivel, int) {
 		out = out[:maxLogArquivosHard]
 	}
 	return out, inacessiveis, descartados
+}
+
+// temFonteDedicadaDeAuth olha as SÉRIES, e não só os arquivos vivos: um host que
+// só tem `auth.log.1` continua tendo fonte dedicada de autenticação.
+func temFonteDedicadaDeAuth(porPath map[string]*alvoDeLog) bool {
+	for p := range porPath {
+		if strings.HasPrefix(p, "/var/log/auth.log") || strings.HasPrefix(p, "/var/log/secure") {
+			return true
+		}
+	}
+	return false
+}
+
+func semFamilia(familias []string, fora string) []string {
+	out := familias[:0]
+	for _, f := range familias {
+		if f != fora {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func comprimido(p string) bool {
@@ -575,11 +599,20 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 				fonte.LinhasReconhecidas++
 			}
 			r.Linha = nLinha
+			// O LOTE, e não só o evento: fechaVelhos pode encerrar muitos grupos
+			// de uma vez quando o fluxo dá um salto de tempo, e o teto era
+			// conferido só no TOPO da iteração seguinte. Com cinco mil grupos
+			// incompletos expirando juntos, o orçamento ficava negativo e o
+			// retrato saía acima do teto que ele promete.
 			for _, ev := range mont.Alimenta(r) {
+				if orc.eventos <= 0 {
+					estourouEvento(&fonte, a.path, orc)
+					break
+				}
 				evs = append(evs, comOrigem(ev, a.path))
 				orc.eventos--
 			}
-			if err != nil {
+			if err != nil || orc.eventos <= 0 {
 				break
 			}
 			continue
@@ -626,12 +659,7 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 		// com exceção não é teto.
 		for _, ev := range mont.Fecha() {
 			if orc.eventos <= 0 {
-				fonte.Estado = FonteTruncada
-				fonte.CorteNoFim = true
-				fonte.Lacuna = a.path + ": o teto de " + strconv.Itoa(maxEventosLog) +
-					" eventos foi atingido com eventos de auditoria ainda em aberto — " +
-					"eles NÃO entraram no retrato"
-				orc.marca("de " + strconv.Itoa(maxEventosLog) + " eventos de log")
+				estourouEvento(&fonte, a.path, orc)
 				break
 			}
 			evs = append(evs, comOrigem(ev, a.path))
@@ -676,16 +704,18 @@ func marcaCobertura(fonte *FonteDeLog, c Carimbo) {
 	fonte.CoberturaFusoInferido = fonte.CoberturaFusoInferido || c.FusoInferido
 }
 
-// familiaJaSaiu diz se TODAS as famílias deste arquivo já saíram da janela. Um
-// arquivo compartilhado — o /var/log/messages do Alpine é `auth`, `syslog` e
-// `kern` ao mesmo tempo — continua sendo aberto enquanto UMA delas interessar.
-func familiaJaSaiu(familias []string, saiu map[string]bool) bool {
-	for _, fam := range familias {
-		if !saiu[fam] {
-			return false
-		}
+// estourouEvento marca o arquivo em que o teto de eventos mordeu. A lacuna fica
+// no arquivo — é ela que faz o check da família degradar — e o teto vai para o
+// orçamento, que é quem reporta a coleta inteira.
+func estourouEvento(fonte *FonteDeLog, path string, orc *orcamento) {
+	fonte.Estado = FonteTruncada
+	fonte.CorteNoFim = true
+	if fonte.Lacuna == "" {
+		fonte.Lacuna = path + ": a extração parou no teto de " +
+			strconv.Itoa(maxEventosLog) + " eventos — o resto do arquivo NÃO foi " +
+			"examinado, e a cobertura acima não o alcança"
 	}
-	return len(familias) > 0
+	orc.marca("de " + strconv.Itoa(maxEventosLog) + " eventos de log")
 }
 
 func comOrigem(ev EventoDeLog, path string) EventoDeLog {
@@ -879,9 +909,7 @@ func completaNasFamiliasDeTexto(f *Facts) bool {
 			continue
 		}
 		achou = true
-		// Mesma regra de completaNaFamilia: só `lido` conta como completo, e
-		// `fora_da_janela` não conta contra — ver o comentário lá.
-		if s.Estado != FonteLida && s.Estado != FonteForaDaJanela {
+		if s.Estado != FonteLida {
 			return false
 		}
 	}
@@ -899,13 +927,7 @@ func completaNaFamilia(f *Facts, familia string) bool {
 			continue
 		}
 		achou = true
-		// FORA DA JANELA não é incompletude: é a janela fazendo o trabalho que
-		// o operador pediu, e ela já viaja em LogJanelaSolicitada/Efetiva. Contá-la
-		// aqui deixaria este fato falso em todo host do mundo — sempre há uma
-		// geração mais antiga que o horizonte —, e fato que é sempre falso não
-		// informa nada.
-		st := f.FontesDeLog[i].Estado
-		if st != FonteLida && st != FonteForaDaJanela {
+		if f.FontesDeLog[i].Estado != FonteLida {
 			return false
 		}
 	}

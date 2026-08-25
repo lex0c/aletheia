@@ -114,9 +114,10 @@ FLAGS DE scan
                 Achado por indicador é CRÍTICO — e vale o que a lista valer
   --since S     janela de investigação: instante (2026-04-30T18:00Z,
                 2026-04-30) ou duração (72h, 7d). O que tem data e cai FORA sai
-                do relatório e é CONTADO; o que não tem data FICA.
-                Governa TAMBÉM até onde do passado os LOGS são lidos — e o
-                rodapé avisa quando a janela pede mais do que foi observado
+                do relatório e é CONTADO; o que não tem data FICA, e o que tem
+                data INFERIDA também — o ano do syslog vem do mtime, que um
+                touch reescreve. Ele recorta o RELATÓRIO e NÃO a coleta de
+                log: o rodapé avisa quando pede mais passado do que foi lido
   --only G,G    escopo por subsistema: proc net persist priv integrity kernel app cloud logs ioc
   --fs-budget D teto de tempo da varredura de filesystem num FS grande (ex: 10s).
                 O que não couber vira lacuna DECLARADA — a cobertura cai, e o
@@ -129,10 +130,10 @@ FLAGS DE scan
   --no-logs     NÃO lê o conteúdo dos logs. O inventário de rotação continua; o
                 que sai é a leitura das linhas. Desligado NÃO vira "nada
                 encontrado": o relatório declara que não olhou
-  --logs-all    lê log sem janela temporal e com mais gerações. Os tetos de
-                BYTES, de linhas, de eventos e de descompressão continuam
-                valendo — o host é adversário, e um .gz de 40 KB pode
-                descomprimir para 40 GB
+  --logs-all    abre MAIS gerações de log (o teto de seleção sobe de 40 para
+                500). Os tetos de BYTES, de linhas, de eventos e de
+                descompressão continuam valendo — o host é adversário, e um .gz
+                de 40 KB pode descomprimir para 40 GB
   --mode M      auto | manual
   --coverage    mostrar a seção de cobertura (causas e gaps); o NÚMERO já fica no resumo
   -v, -vv       evidência por achado / + INFO e detalhe de cobertura
@@ -292,7 +293,7 @@ MCP — a pergunta que a IA faz DE VOLTA
 
 
 FLAGS DE collect E analyze
-  collect --out F [--root PATH] [--ignore PATH] [--all-fs] [--since S]
+  collect --out F [--root PATH] [--ignore PATH] [--all-fs]
                [--no-logs] [--logs-all]                     escreve o dump ("-" = stdout)
   analyze DUMP [--ioc F] [--since S] [--only G,G] [--mode M] [--baseline F]
                [--json F] [-v|-vv]
@@ -308,11 +309,12 @@ FLAGS DE collect E analyze
   O --since do analyze é ancorado no instante da COLETA, não no relógio de quem
   analisa: "as 72h anteriores ao retrato" é a pergunta que faz sentido.
 
-  E o --since do COLLECT é outra coisa: ele decide até que ponto do passado os
-  LOGS são LIDOS, que é custo na hora da coleta e não pode ser refeito depois —
-  a VM já não existe. Um analyze com janela maior que a da coleta pergunta sobre
-  dias que ninguém abriu, e o rodapé diz isso em vez de deixar o silêncio passar
-  por observação.
+  A COLETA DE LOG não tem janela temporal, e isso é decisão: toda forma dela
+  acabava decidindo NÃO ABRIR um arquivo a partir de um número que o alvo
+  escreve — o mtime, ou o ano inferido dele. Ela lê da geração mais nova para a
+  mais antiga até um teto morder, e o horizonte ALCANÇADO viaja no dump. Um
+  analyze com janela maior que esse horizonte pergunta sobre dias que ninguém
+  abriu, e o rodapé diz isso em vez de deixar o silêncio passar por observação.
 
   Hash de indicador é a única coisa que o analyze não procura sozinho: hash se
   calcula durante a coleta. Uma lista com hashes sobre um dump que não os
@@ -775,12 +777,10 @@ func runScan(args []string, wtf bool) int {
 	e.CodigoTudo = *allFS
 	e.SemLogs = *noLogs
 	e.LogsTudo = *logsAll
-	// O --since governa DUAS coisas, e elas não são a mesma: aqui ele decide
-	// quais arquivos de log são ABERTOS (custo), e no fim decide o recorte do
-	// relatório. Quem alarga a janela do relatório sem alargar a da coleta
-	// pergunta sobre um intervalo que ninguém leu — e é por isso que o
-	// horizonte EFETIVO viaja no dump e sai no rodapé.
-	e.LogsDesde = janela.Desde
+	// O --since NÃO governa a coleta de log, e isso é decisão: toda forma de
+	// janela temporal na coleta acabava decidindo não abrir um arquivo a partir
+	// de um número que o alvo escreve. Ele recorta o RELATÓRIO, e o rodapé
+	// compara o que ele pediu com o horizonte que a coleta alcançou.
 	aoInterromper()
 	// Num FS grande, quem tem pressa limita a varredura no tempo; o que ela não
 	// terminar vira lacuna declarada, e a cobertura cai — nunca "nada achado".

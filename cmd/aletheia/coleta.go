@@ -36,21 +36,12 @@ func runCollect(args []string) int {
 	fs := flag.NewFlagSet("collect", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var (
-		root    = fs.String("root", "", "coletar de imagem montada em PATH")
-		out     = fs.String("out", "", "arquivo do dump ('-' = stdout) — obrigatório")
-		noProg  = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
-		allFS   = fs.Bool("all-fs", false, "coletar código na FS montada INTEIRA (a partir de /), não só os web roots")
-		noLogs  = fs.Bool("no-logs", false, "não ler o CONTEÚDO dos logs (o inventário de rotação continua)")
-		logsAll = fs.Bool("logs-all", false, "ler log sem janela temporal e com mais gerações (os tetos de bytes e de eventos CONTINUAM valendo)")
-		// O --since do collect é HORIZONTE DE COLETA, e não recorte de
-		// relatório: ele decide até que ponto do passado os logs são lidos.
-		//
-		// Precisa existir aqui porque o dump é escrito UMA vez e analisado
-		// depois, possivelmente semanas depois e com a VM já destruída. Um
-		// `analyze --since 30d` sobre um dump coletado com o padrão de 7 dias
-		// pergunta sobre 23 dias que ninguém abriu — e sem este parâmetro não
-		// haveria como pedir mais na hora que importa.
-		since    = fs.String("since", "", "horizonte da coleta de LOG: instante (2026-04-30T18:00Z) ou duração (72h, 7d). Padrão: 7d")
+		root     = fs.String("root", "", "coletar de imagem montada em PATH")
+		out      = fs.String("out", "", "arquivo do dump ('-' = stdout) — obrigatório")
+		noProg   = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
+		allFS    = fs.Bool("all-fs", false, "coletar código na FS montada INTEIRA (a partir de /), não só os web roots")
+		noLogs   = fs.Bool("no-logs", false, "não ler o CONTEÚDO dos logs (o inventário de rotação continua)")
+		logsAll  = fs.Bool("logs-all", false, "ler log sem janela temporal e com mais gerações (os tetos de bytes e de eventos CONTINUAM valendo)")
 		autoload = fs.Bool("allow-kernel-autoload", false, "permitir consulta por netlink que pode AUTOCARREGAR o módulo de diagnóstico (altera o host)")
 	)
 	var ignore listaCaminhos
@@ -75,15 +66,6 @@ func runCollect(args []string) int {
 		return 3
 	}
 
-	// Validado ANTES da coleta: um formato recusado depois de trinta segundos
-	// tocando um host possivelmente comprometido joga a janela fora. É o mesmo
-	// princípio do openJSONOut logo abaixo — o barato antes do caro.
-	janelaDeLog, err := check.ParseJanela(*since, time.Now().UTC())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "--since %q: %v\n", *since, err)
-		return 3
-	}
-
 	e := env.Probe(env.Options{Root: *root, Version: version, PermitirAutoload: *autoload})
 	defer e.Close()
 	if e.Source == env.SourceImage && !e.Has(env.CapFilesystem) {
@@ -94,7 +76,6 @@ func runCollect(args []string) int {
 	e.CodigoTudo = *allFS
 	e.SemLogs = *noLogs
 	e.LogsTudo = *logsAll
-	e.LogsDesde = janelaDeLog.Desde
 
 	// O destino é ABERTO antes da coleta, e não depois.
 	//

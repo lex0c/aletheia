@@ -169,7 +169,6 @@ const (
 	FonteLida         = "lido"
 	FonteIlegivel     = "ilegivel"
 	FonteTruncada     = "truncado"
-	FonteForaDaJanela = "fora_da_janela"
 	FonteGrandeDemais = "grande_demais"
 	// FonteFormatoNaoLido é o rotacionado em xz, bz2 ou zst: este binário não
 	// tem descompressor para eles, e não pode ganhar dependência externa. É

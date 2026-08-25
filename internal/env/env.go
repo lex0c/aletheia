@@ -255,18 +255,8 @@ type Env struct {
 	// FS montada, ao custo de tempo, com os limites (contêiner, >2 MB) ditos.
 	CodigoTudo bool
 
-	// LogsDesde é o horizonte PEDIDO para a leitura de conteúdo de log: nenhum
-	// arquivo cujo mtime seja anterior a ele é aberto. Zero = o padrão de 7
-	// dias.
-	//
-	// É o `--since`, e ele governa CUSTO aqui e RECORTE no relatório. As duas
-	// coisas não são a mesma: um dump coletado com 7 dias e analisado com
-	// `--since 30d` tem 23 dias que ninguém leu, e é por isso que o horizonte
-	// EFETIVO viaja como fato (Facts.LogJanelaEfetiva).
-	LogsDesde time.Time
-
-	// LogsTudo é o `--logs-all`: sem janela temporal, e o teto de SELEÇÃO de
-	// arquivos sobe para o limite rígido.
+	// LogsTudo é o `--logs-all`: o teto de SELEÇÃO de arquivos sobe para o
+	// limite rígido.
 	//
 	// Ele NÃO desliga teto nenhum de segurança. O host é adversário: um
 	// `touch /var/log/x{000001..999999}` é barato, e um `.gz` de 40 KB pode

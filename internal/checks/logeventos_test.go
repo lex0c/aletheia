@@ -254,21 +254,21 @@ func TestHostSemLogEmTextoSaiComoInformacaoENaoLacuna(t *testing.T) {
 	}
 }
 
-// O horizonte EFETIVO sai no relatório, e ao lado do PEDIDO: é a diferença
-// entre os dois que revela o que ninguém leu.
-func TestCoberturaDizOHorizontePedidoEOAlcancado(t *testing.T) {
+// O horizonte EFETIVO sai no relatório: é ele que diz até onde do passado a
+// coleta chegou, e a coleta não tem mais janela temporal — ela lê da geração
+// mais nova para a mais antiga até um teto morder.
+func TestCoberturaDizOHorizonteAlcancado(t *testing.T) {
 	f := fatosDeLog(facts.EventoDeLog{Kind: "auth.accepted", File: "/var/log/auth.log"})
-	f.LogJanelaSolicitada = "2026-07-25T12:00:00Z"
 
 	r := rodaLog(t, coberturaDeLog, f)
 	if len(r.Findings) != 1 {
 		t.Fatalf("%+v", r.Findings)
 	}
-	if !contemEvidencia(r.Findings[0], "2026-07-25") {
-		t.Errorf("o horizonte PEDIDO precisa aparecer: %v", r.Findings[0].Evidence)
-	}
 	if !contemEvidencia(r.Findings[0], "2026-08-17") {
 		t.Errorf("o horizonte ALCANÇADO precisa aparecer: %v", r.Findings[0].Evidence)
+	}
+	if !contemEvidencia(r.Findings[0], "NÃO tem janela temporal") {
+		t.Errorf("e o relatório precisa dizer COMO a coleta parou: %v", r.Findings[0].Evidence)
 	}
 }
 

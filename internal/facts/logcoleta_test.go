@@ -35,7 +35,6 @@ func raizDeLog(t *testing.T, arquivos map[string]string, prep func(raiz string, 
 	defer e.Close()
 	e.SemLogs = o.semLogs
 	e.LogsTudo = o.tudo
-	e.LogsDesde = o.desde
 
 	f := &Facts{}
 	collectLogs(f, e)
@@ -46,7 +45,6 @@ func raizDeLog(t *testing.T, arquivos map[string]string, prep func(raiz string, 
 type envOpts struct {
 	semLogs bool
 	tudo    bool
-	desde   time.Time
 }
 
 // O CASO BASE: linhas viram eventos, e a fonte diz o que foi lido.
@@ -189,38 +187,6 @@ func TestJanelaNaoConfiaNoMtimeDoRotacionado(t *testing.T) {
 	}
 	if len(f.EventosDeLog) == 0 {
 		t.Error("o conteúdo movido para a geração rotacionada não foi observado")
-	}
-}
-
-// E a janela continua limitando custo, por CONTEÚDO OBSERVADO: quando uma
-// geração acaba inteira antes do horizonte, as mais antigas daquela família não
-// precisam ser abertas — elas só podem ser mais velhas ainda.
-func TestJanelaParaDeAbrirDepoisDeUmaGeracaoAntiga(t *testing.T) {
-	antiga := "Jan 02 01:00:00 h sshd[1]: Accepted password for ana from 10.0.0.1 port 5 ssh2\n"
-	f := raizDeLog(t, map[string]string{
-		"var/log/auth.log":   linhasDeAuth(1),
-		"var/log/auth.log.1": antiga,
-		"var/log/auth.log.2": antiga,
-	}, func(raiz string, o *envOpts) {
-		o.desde = time.Now().Add(-24 * time.Hour)
-		antigo := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
-		for _, n := range []string{"var/log/auth.log.1", "var/log/auth.log.2"} {
-			if err := os.Chtimes(filepath.Join(raiz, n), antigo, antigo); err != nil {
-				t.Fatal(err)
-			}
-		}
-	})
-
-	de := map[string]string{}
-	for _, s := range f.FontesDeLog {
-		de[s.Path] = s.Estado
-	}
-	if de["/var/log/auth.log.1"] != FonteLida {
-		t.Errorf("a primeira geração é lida para SE SABER que ela é antiga: %q",
-			de["/var/log/auth.log.1"])
-	}
-	if de["/var/log/auth.log.2"] != FonteForaDaJanela {
-		t.Errorf("a geração seguinte não precisa ser aberta: %q", de["/var/log/auth.log.2"])
 	}
 }
 
@@ -464,34 +430,16 @@ func TestTetoRigidoValeSobreOsArquivosCONSIDERADOS(t *testing.T) {
 	}
 }
 
-// FORA DA JANELA não é "lido", e não é incompletude.
+// O ARQUIVO QUE A COLETA NÃO ALCANÇOU existe e NÃO foi lido.
 //
-// São dois erros opostos, e os dois estavam presentes: o arquivo que ninguém
-// abriu contava como lido — fazendo o motivo da cobertura afirmar que ele foi
-// examinado — e ao mesmo tempo derrubava o fato de completude, que ficaria falso
-// em todo host do mundo, porque sempre há uma geração mais antiga que o
-// horizonte.
-func TestForaDaJanelaNaoEhLidoNemIncompletude(t *testing.T) {
-	f := raizDeLog(t, map[string]string{
-		"var/log/auth.log":   linhasDeAuth(2),
-		"var/log/auth.log.1": linhasDeAuth(2),
-	}, func(raiz string, _ *envOpts) {
-		velho := time.Now().Add(-90 * 24 * time.Hour)
-		if err := os.Chtimes(filepath.Join(raiz, "var/log/auth.log.1"), velho, velho); err != nil {
-			t.Fatal(err)
-		}
-	})
-
-	if !f.LogTextoCompleto {
-		t.Error("geração fora da janela não pode derrubar a completude: ela é a " +
-			"janela fazendo o trabalho pedido, e já viaja em LogJanelaSolicitada")
-	}
-
-	// E o arquivo que ficou fora não pode contar como lido.
+// É o que sobra depois de um teto global parar a seleção. A distinção decide se
+// o check sai do denominador ("este host não tem log") ou fica nele declarando
+// lacuna — e a segunda é a única honesta sobre um arquivo que está lá.
+func TestFonteNaoVisitadaExisteENaoEhLida(t *testing.T) {
 	so := &Facts{
 		LogEstado: LogColetado,
 		FontesDeLog: []FonteDeLog{
-			{Path: "/var/log/auth.log.9", Familias: []string{"auth"}, Estado: FonteForaDaJanela},
+			{Path: "/var/log/auth.log.9", Familias: []string{"auth"}, Estado: FonteNaoLida},
 		},
 	}
 	c := so.CoberturaLog("auth")
@@ -866,4 +814,104 @@ func TestAuditMovimentadoNaoFabricaLacuna(t *testing.T) {
 	if len(f.EventosDeLog) != 300 {
 		t.Errorf("%d eventos, quer 300", len(f.EventosDeLog))
 	}
+}
+
+// O LOTE que sai de Alimenta também passa pelo orçamento.
+//
+// fechaVelhos pode encerrar MUITOS grupos de uma vez quando o fluxo dá um salto
+// de tempo, e o teto era conferido só no topo da iteração seguinte: com cinco
+// mil grupos incompletos expirando juntos, o orçamento ficava negativo e o
+// retrato saía acima do teto que ele promete.
+func TestLoteDeEventosDoAuditNaoUltrapassaOTeto(t *testing.T) {
+	var b strings.Builder
+	// Quase todo o orçamento gasto com eventos COMPLETOS.
+	for i := 0; i < maxEventosLog-10; i++ {
+		ep := strconv.Itoa(1736500000 + i)
+		b.WriteString("type=SYSCALL msg=audit(" + ep + ".000:" + strconv.Itoa(i) +
+			"): syscall=59 pid=1 uid=0 comm=\"x\"\n")
+		b.WriteString("type=EOE msg=audit(" + ep + ".000:" + strconv.Itoa(i) + "): \n")
+	}
+	// Agora um bolo de grupos INCOMPLETOS no mesmo instante…
+	const t0 = 1736600000
+	for i := 0; i < maxEventosLog; i++ {
+		b.WriteString("type=SYSCALL msg=audit(" + strconv.Itoa(t0) + ".000:" +
+			strconv.Itoa(100000+i) + "): syscall=59 pid=1 uid=0 comm=\"y\"\n")
+	}
+	// …e um registro três segundos à frente, que expira todos de uma vez.
+	b.WriteString("type=SYSCALL msg=audit(" + strconv.Itoa(t0+3) + ".000:999999): syscall=59 pid=1 uid=0 comm=\"z\"\n")
+
+	f := raizDeLog(t, map[string]string{"var/log/audit/audit.log": b.String()}, nil)
+
+	if n := len(f.EventosDeLog); n > maxEventosLog {
+		t.Errorf("%d eventos, teto é %d — o lote furou o orçamento", n, maxEventosLog)
+	}
+	if f.FontesDeLog[0].Lacuna == "" {
+		t.Error("o corte precisa ser declarado no arquivo")
+	}
+}
+
+// ROTAÇÃO POR DATA é toda geração 1, e a ordenação secundária é por caminho —
+// o mais ANTIGO primeiro. Enquanto a janela decidia parar por conteúdo, isso
+// pulava justamente as rotações mais NOVAS, no padrão de fábrica da família
+// RHEL e sem atacante nenhum.
+//
+// Sem janela temporal na coleta, toda a série é lida. Este teste existe para
+// que a otimização não volte sem tratar a ordem.
+func TestSerieDateextEhLidaInteira(t *testing.T) {
+	linha := "Jan 10 03:00:00 h sshd[1]: Accepted password for ana from 10.0.0.1 port 5 ssh2\n"
+	f := raizDeLog(t, map[string]string{
+		"var/log/secure":          linha,
+		"var/log/secure-20260801": linha,
+		"var/log/secure-20260815": linha,
+		"var/log/secure-20260820": linha,
+	}, func(raiz string, _ *envOpts) {
+		// A mais ANTIGA com mtime bem velho: era ela que disparava o
+		// short-circuit, por vir primeiro na ordenação.
+		velho := time.Now().Add(-800 * 24 * time.Hour)
+		if err := os.Chtimes(filepath.Join(raiz, "var/log/secure-20260801"), velho, velho); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	if len(f.FontesDeLog) != 4 {
+		t.Fatalf("%d fontes, quer 4", len(f.FontesDeLog))
+	}
+	for _, s := range f.FontesDeLog {
+		if s.Estado != FonteLida {
+			t.Errorf("%s: estado = %q, quer lido", s.Path, s.Estado)
+		}
+	}
+}
+
+// "ARQUIVO QUE PODE CONTER AUTENTICAÇÃO EM ALGUMA DISTRO" não é "fonte
+// autoritativa de autenticação NESTE host".
+//
+// No RHEL a autenticação vai para `secure` e o `messages` recebe o resto; no
+// Alpine o busybox manda tudo para `messages`. Usar o intervalo do `messages`
+// como cobertura de `auth` num host com fonte dedicada afirmaria "se tivesse
+// acontecido, eu teria visto" sobre um arquivo por onde autenticação não passa.
+func TestMessagesSoEhAuthQuandoNaoHaFonteDedicada(t *testing.T) {
+	linha := "Jan 10 03:00:00 h sshd[1]: Accepted password for ana from 10.0.0.1 port 5 ssh2\n"
+
+	t.Run("com secure ao lado, messages não é auth", func(t *testing.T) {
+		f := raizDeLog(t, map[string]string{
+			"var/log/secure":   linha,
+			"var/log/messages": linha,
+		}, nil)
+		for _, s := range f.FontesDeLog {
+			if s.Path == "/var/log/messages" && contemString(s.Familias, "auth") {
+				t.Errorf("messages não pode ser autoridade de auth aqui: %v", s.Familias)
+			}
+			if s.Path == "/var/log/secure" && !contemString(s.Familias, "auth") {
+				t.Errorf("secure precisa ser auth: %v", s.Familias)
+			}
+		}
+	})
+
+	t.Run("sozinho, messages É a fonte de auth", func(t *testing.T) {
+		f := raizDeLog(t, map[string]string{"var/log/messages": linha}, nil)
+		if !f.CoberturaLog("auth").Existe {
+			t.Error("sem auth.log e sem secure, o messages é a fonte de auth — é o Alpine")
+		}
+	})
 }

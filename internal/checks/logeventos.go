@@ -822,11 +822,9 @@ var coberturaDeLog = check.Check{
 			return r
 		}
 
-		if f.LogJanelaSolicitada != "" {
-			linhas = append(linhas, "o horizonte PEDIDO foi "+f.LogJanelaSolicitada+
-				", e o ALCANÇADO é o que está acima: num arquivo grande a leitura "+
-				"pega a cauda, e a diferença entre os dois é o que ninguém leu")
-		}
+		linhas = append(linhas, "a coleta NÃO tem janela temporal: ela lê da geração "+
+			"mais nova para a mais antiga até um teto morder, e o intervalo acima é "+
+			"o que ela alcançou. O que for anterior a ele não foi lido")
 		linhas = append(linhas,
 			strconv.Itoa(len(f.EventosDeLog))+" evento(s) normalizados de "+
 				strconv.Itoa(len(f.FontesDeLog))+" arquivo(s)",

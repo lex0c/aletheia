@@ -363,3 +363,39 @@ func TestExecveEmVariosRegistrosDoMesmoSerial(t *testing.T) {
 		t.Errorf("o último argumento também se perdeu: %q", ev.Trecho)
 	}
 }
+
+// A ORDEM DE CHEGADA NÃO É A ORDEM DO TEMPO: a documentação do audit diz que os
+// registros podem vir INTERCALADOS e fora de ordem.
+//
+// Com a lista na ordem de chegada, um grupo recente no início bloqueava o
+// fechamento por tempo dos que estavam atrás — o `break` do fechaVelhos olhava
+// só o primeiro. Eles ficavam retidos até o backstop, que conta lacuna:
+// interleaving ruim fabricava lacuna que não existe.
+func TestGrupoAntigoAtrasDeUmRecenteAindaFechaPorTempo(t *testing.T) {
+	m := novoMontadorDeAudit()
+	var saiu []EventoDeLog
+	for _, l := range []string{
+		// Chega primeiro, mas é o mais NOVO.
+		`type=SYSCALL msg=audit(1755990102.000:1): syscall=59 pid=1 uid=0 comm="novo"`,
+		// Estes são bem mais velhos, e chegam depois.
+		`type=SYSCALL msg=audit(1755990090.000:2): syscall=59 pid=2 uid=0 comm="velho1"`,
+		`type=SYSCALL msg=audit(1755990091.000:3): syscall=59 pid=3 uid=0 comm="velho2"`,
+		// E agora um registro que deixa os dois velhos para trás — mas não o
+		// primeiro, que tem só um segundo de idade.
+		`type=SYSCALL msg=audit(1755990103.000:4): syscall=59 pid=4 uid=0 comm="atual"`,
+	} {
+		r, ok := parseRegistroAudit(l)
+		if !ok {
+			t.Fatalf("não parseou: %s", l)
+		}
+		saiu = append(saiu, m.Alimenta(r)...)
+	}
+
+	if len(saiu) != 2 {
+		t.Errorf("%d eventos fecharam por tempo, quer 2 (os dois velhos): a ordem de "+
+			"CHEGADA estava bloqueando o fechamento dos que estavam atrás", len(saiu))
+	}
+	if m.FechadosPorTeto != 0 {
+		t.Errorf("FechadosPorTeto = %d: interleaving não pode fabricar lacuna", m.FechadosPorTeto)
+	}
+}

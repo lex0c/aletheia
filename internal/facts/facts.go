@@ -642,21 +642,20 @@ type Facts struct {
 	// versão, ou coleta que não chegou aqui —, e desconhecido não conclui nada.
 	LogEstado EstadoColetaLog `json:"log_state,omitempty"`
 
-	// LogJanelaSolicitada e LogJanelaEfetiva são DOIS números, e a diferença
-	// entre eles é a parte que mente quando se guarda um só.
+	// LogJanelaEfetiva é o horizonte que a leitura ALCANÇOU — o mais conservador
+	// entre as famílias lidas.
 	//
-	// O pedido é o --since (ou os 7 dias padrão). O efetivo é o que a leitura
-	// ALCANÇOU: num auth.log de 300 MB lido pela cauda de 8 MB, a cauda pode
-	// cobrir catorze horas — e guardar "7 dias" afirmaria seis dias de história
-	// que ninguém leu. É o falso "limpo" que esta ferramenta existe para não
-	// cometer, entrando por um campo mal nomeado.
+	// Não existe mais um "pedido" ao lado dele: a coleta deixou de ter janela
+	// temporal, porque toda forma dela acabava decidindo NÃO ABRIR um arquivo a
+	// partir de um número que o alvo escreve (ver collectEventosDeLog). O custo
+	// é controlado pelos TETOS, que são da ferramenta.
 	//
-	// A AUTORIDADE de um check, porém, não é nenhum dos dois: é
-	// CoberturaLog(família). Um host pode ter sete dias de `auth` e oito horas
-	// de `audit`, e um número global mentiria para um dos lados.
-	LogJanelaSolicitada string `json:"log_window_requested,omitempty"`
-	LogJanelaEfetiva    string `json:"log_window_effective,omitempty"`
-	LogJanelaTudo       bool   `json:"log_window_all,omitempty"`
+	// A AUTORIDADE de um check não é este número: é CoberturaLog(família). Um
+	// host pode ter sete dias de `auth` e oito horas de `audit`, e um número
+	// global mentiria para um dos lados. Este serve ao rodapé, que compara o que
+	// a ANÁLISE pediu com o que a coleta alcançou.
+	LogJanelaEfetiva string `json:"log_window_effective,omitempty"`
+	LogJanelaTudo    bool   `json:"log_window_all,omitempty"`
 
 	// Um fato de completude POR FONTE, pela mesma razão que PasswdLido e
 	// ShadowLido são dois: as leituras têm privilégio e destino diferentes, e uma

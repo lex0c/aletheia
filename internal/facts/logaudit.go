@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -308,7 +309,7 @@ func (m *montadorDeAudit) Alimenta(r RegistroAudit) []EventoDeLog {
 	out = append(out, m.fechaVelhos(r.Epoch)...)
 
 	if _, visto := m.grupos[ch]; !visto {
-		m.ordem = append(m.ordem, ch)
+		m.insere(ch)
 	}
 	if r.Tipo != "EOE" {
 		m.grupos[ch] = append(m.grupos[ch], r)
@@ -331,6 +332,23 @@ func (m *montadorDeAudit) Alimenta(r RegistroAudit) []EventoDeLog {
 		}
 	}
 	return out
+}
+
+// insere mantém `ordem` ordenada por EPOCH, e não por chegada.
+//
+// A documentação do audit é explícita: registros de eventos diferentes podem vir
+// INTERCALADOS e fora de ordem. Com a lista na ordem de chegada, um grupo recente
+// no início bloqueava o fechamento por tempo dos que estavam atrás dele — o
+// `break` do fechaVelhos olhava só o primeiro. Eles ficavam retidos até o
+// backstop, que conta lacuna: interleaving ruim fabricava lacuna que não existe.
+//
+// A inserção é binária, e o caso comum (carimbo que cresce) cai no fim da lista
+// sem mover nada.
+func (m *montadorDeAudit) insere(ch chaveAudit) {
+	i := sort.Search(len(m.ordem), func(i int) bool { return m.ordem[i].epoch >= ch.epoch })
+	m.ordem = append(m.ordem, chaveAudit{})
+	copy(m.ordem[i+1:], m.ordem[i:])
+	m.ordem[i] = ch
 }
 
 // fechaVelhos encerra os grupos que o FLUXO deixou para trás.

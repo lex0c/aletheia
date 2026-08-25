@@ -42,6 +42,7 @@ registro. Abaixo, alguns exemplos:
 | Integridade | arquivo de pacote modificado, sinais de timestomp, executável usado por root mas gravável por usuário menos privilegiado, arquivo cujo dono (uid/gid) não existe em `passwd`/`group` |
 | Código servido | padrão de backdoor/webshell em PHP, JS e Python: sink de execução sobre entrada de request (`eval($_POST)`, `` `$_GET` ``, `system`, `subprocess shell=True`), com micro-taint de fluxo de duas linhas que respeita escopo de função e allowlist (`switch` de literais, `in_array` de lista fixa), e distinção entre entrada remota e local. Varre os web roots por padrão, a FS montada inteira com `--all-fs`, e `--ignore PATH` exclui uma árvore (a exclusão é declarada) |
 | Kernel | divergência entre três visões independentes de módulos (`/proc/modules`, `/sys/module`, ftrace), módulos sem arquivo correspondente, taint inexplicado, hooks ftrace em funções sensíveis, programas BPF sem owner identificado — com o anexo de **tc (filtro e ação), XDP resolvidos por rtnetlink e cgroup por `BPF_PROG_QUERY`** (árvore inteira em BFS, com budget), de modo que só resta sem atribuição o que é segurado por MAPA (struct_ops, sockmap) —, inconsistências na enumeração BPF e cross-views de processos |
+| Logs | o CONTEÚDO dos logs como TESTEMUNHA do passado, e não como lista de regex: eventos normalizados de `auth.log`/`secure`, `syslog`/`messages`, `kern.log`, `cron` e **`audit.log` montado por evento** (os registros `SYSCALL`+`EXECVE`+`CWD`+`PATH` do mesmo serial viram UMA execução, com o caminho resolvido). O que só o log tem: o **fingerprint da chave** que abriu a sessão — cruzado com os `authorized_keys` de agora —, o `COMMAND=` do sudo, e a execução que não existe mais no retrato. Cada arquivo declara **até onde do passado foi observado**, e host sem log em texto (journald-only) é ESCOPO, não lacuna |
 | IOC | IPs, hashes, paths e strings fornecidos pelo investigador |
 
 Um finding isolado nem sempre significa comprometimento. JITs legítimos,
@@ -361,6 +362,8 @@ dump pode conter:
 | BPF | programas, maps, links, referências e owners que as APIs disponíveis permitem observar |
 | ftrace | funções instrumentadas e callbacks visíveis em tracefs/debugfs |
 | Kernel security | lockdown, assinatura obrigatória de módulos, Secure Boot, IMA, `modules_disabled`, `kptr_restrict`, `dmesg_restrict`, unprivileged BPF e Yama |
+| Logs (estrutura) | inventário de `/var/log`: arquivos, gerações de rotação (contador e `dateext`), tamanhos e registros de login do `wtmp`/`btmp`/`utmp` |
+| Logs (conteúdo) | eventos NORMALIZADOS de `auth.log`/`secure`, `syslog`/`messages`, `kern.log`, `cron` e `audit.log` — este montado por EVENTO, juntando os registros `SYSCALL`+`EXECVE`+`CWD`+`PATH` do mesmo serial. Cada arquivo declara o intervalo que foi efetivamente OBSERVADO, quantas linhas o parser entendeu, e o que ficou de fora — sem isso, uma lista vazia de eventos seria indistinguível de host tranquilo, arquivo ilegível e formato desconhecido |
 | Cross-view | fatos usados para comparar visões independentes de processos, threads, módulos e BPF |
 | Cobertura | quais fontes foram observadas, quais estavam parciais, quais não puderam ser verificadas e por quê |
 | Aquisição | instante da coleta, versão/hash da ferramenta, capabilities disponíveis e lacunas encontradas |
@@ -816,6 +819,20 @@ COBERTURA  105/105 completos · 2 fora de escopo
 
 O mesmo vale para o modo `image` (não há kernel vivo para consultar) e para
 contêiner, onde `/sys/kernel` é mascarado pelo runtime de propósito.
+
+E vale para o LOG, onde a distinção decide o resultado de metade da frota. Um
+host que não instala rsyslog — Debian 12, Fedora e derivados — não tem
+`/var/log/auth.log`: o journal é binário, e esta versão não o lê. A pergunta não
+existe ali, então os checks de autenticação por log saem do denominador e a
+cobertura fica intacta. Já um `auth.log` que EXISTE e não abre — ele é 0640
+`root:adm` por desenho no Debian — é lacuna: a pergunta cabia e ficou sem
+resposta. Os dois produzem a mesma lista vazia de eventos, e só a observabilidade
+por fonte os separa.
+
+Este é o primeiro escopo que só os FATOS respondem. Os outros três saem do
+ambiente — modo, capability sem mecanismo, comparação ausente — e são decididos
+antes de o check rodar; nenhum bit de capability diz que uma distribuição não
+instala rsyslog.
 
 ---
 

@@ -261,6 +261,25 @@ func RunWith(checks []Check, f *facts.Facts, e *env.Env, o RunOptions) *Report {
 			continue
 		}
 
+		// A PERGUNTA NÃO EXISTE NESTE HOST, e quem sabe disso são os FATOS.
+		//
+		// Vem DEPOIS da checagem de Requires de propósito: sem CapFilesystem não
+		// se sabe se o arquivo existe, e não saber é LACUNA — a resposta oposta.
+		// Inverter a ordem transformaria "não pude olhar" em "não havia o que
+		// olhar", que é a equivalência que esta ferramenta existe para recusar.
+		//
+		// Ver Check.Escopo para o caso que a motivou (host journald-only).
+		if c.Escopo != nil {
+			if ok, motivo, manual := c.Escopo(f, e); !ok {
+				r.Coverage.NotChecked = append(r.Coverage.NotChecked, NotChecked{
+					ID: c.ID, Ref: c.Ref, Title: c.Title,
+					Reason: motivo, Escopo: true, Manual: manual,
+				})
+				r.Coverage.Total--
+				continue
+			}
+		}
+
 		res, panicked := runGuarded(c, f, e)
 		if panicked != "" {
 			// Sem isto, o panic aborta o processo com status 2 — que o contrato

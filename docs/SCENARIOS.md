@@ -3,7 +3,7 @@
 GERADO de `internal/checks` e `test/scenario`. Não edite à mão:
 `go test ./test/scenario -run TestDocumentoDeCenarios -update`.
 
-128 checks, 239 cenários.
+133 checks, 253 cenários.
 
 Um **check** é uma pergunta que a ferramenta faz ao host. Um **cenário** é um
 host montado de propósito — em contêiner, imagem ou microVM — que prova a
@@ -71,6 +71,14 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `kernel.protection_drift` | 34 | o endurecimento do kernel mudou desde o retrato anterior | `DR6-drift-de-endurecimento-do-kernel` |
 | `kernel.surface_drift` | 34 | o que o kernel executa mudou desde o retrato anterior | `DR4-drift-das-sete-superficies` |
 | `kernel.taint_unexplained` | 35.3 | o kernel registra um módulo que nenhum módulo carregado admite | `P5-taint-sem-modulo-que-admita` |
+
+### `logs` (3)
+
+| check | § | o que acusa | provado por |
+|---|---|---|---|
+| `antiforense.log_time_gap` | 10 | vão de tempo entre duas gerações do log de autenticação | `G4-vao-de-tempo-entre-geracoes` |
+| `logs.audit_records_lost` | 11 | a trilha de auditoria tem buraco | `G3-trilha-de-auditoria-furada`, `G9-auditd-parado-eh-manual` |
+| `logs.source_coverage` | 10 | até onde do passado os logs deste host foram observados | `G11-modo-image-le-o-fuso-do-alvo`, `G13-syslog-de-volume-nao-acusa-nada`, `G14-audit-de-volume-fecha-por-terminador` +3 |
 
 ### `net` (10)
 
@@ -140,7 +148,7 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `persist.unit_socket_unowned` | 7.2 | unit de ativação expõe gatilho para binário que nenhum pacote entregou | `A5-ativacao-por-socket`, `J2-dropin-ao-lado-da-unit-de-verdade` |
 | `persist.unit_unowned` | 7.2 | serviço de systemd executa um binário de sistema que nenhum pacote entregou | `100-azazel-userland`, `J7-nome-nu-path-padrao`, `US1-nome-nu-atras-de-env` +1 |
 
-### `priv` (19)
+### `priv` (21)
 
 | check | § | o que acusa | provado por |
 |---|---|---|---|
@@ -150,6 +158,8 @@ resposta. Check sem cenário não entra no catálogo: o portão em
 | `cred.known_hosts` | 12.4 | alcance deste host: para onde ele já se conectou | `E3-alcance-do-host` |
 | `cred.secret_file` | 12.3 | credencial em arquivo: até onde este host alcança | `E6-credencial-em-arquivo` |
 | `cred.ssh_private_key` | 12.3 | chave SSH privada em disco: para onde este host consegue ir | `E1-chave-privada-sem-senha`, `T6-agente-de-build-como-imagem` |
+| `logs.pubkey_not_in_local_keys` | 12 | login por chave cujo fingerprint não está em nenhum authorized_keys de agora | `G1-chave-usada-fora-das-locais` |
+| `logs.sudo_unusual_target` | 12 | sudo executou programa de diretório de onde o sistema não roda nada | `G2-sudo-para-tmp` |
 | `manual.audit_query` *(manual)* | 11 | o auditd está ligado: a consulta que amarra o vetor | — |
 | `priv.account_drift` | 7.9 | conta ou grupo mudou desde o retrato anterior | `DR4-drift-das-sete-superficies` |
 | `priv.account_no_shadow` | 7.9 | conta existe no passwd e não no shadow: não passou pelo useradd | `H1-conta-sem-shadow` |
@@ -309,10 +319,24 @@ contêiner não alcança — hidepid, sysctl, módulo, cgroup, eBPF.
 | `F1-buraco-na-rotacao` | live | falta uma geração no meio da série de rotação: o logrotate nunca faz isso |
 | `F2-sessao-sem-registro` | live | sessão aberta agora e histórico de login vazio: as duas não podem ser verdade juntas |
 | `F3-rotacao-do-wtmp-nao-eh-achado` | live | a MESMA forma, produzida pelo logrotate: arquivo vivo vazio com sessão aberta |
+| `G1-chave-usada-fora-das-locais` | live | login aceito com chave cujo fingerprint não está em authorized_keys nenhum |
 | `G1-mac-rebaixado` | vm | config pede enforcing e o kernel reporta permissivo: alguém rodou setenforce 0 |
+| `G10-auth-log-sem-privilegio-eh-lacuna` | live | auth.log 0640 root:adm e coleta SEM privilégio: lacuna, e a cobertura cai |
+| `G11-modo-image-le-o-fuso-do-alvo` | image | rootfs montado de fora: o horário do log sai do TZif do ALVO, não do analista |
+| `G12-no-logs-nao-vira-silencio` | live | --no-logs: a escolha do operador é DECLARADA, e não vira 'não encontrei' |
+| `G13-syslog-de-volume-nao-acusa-nada` | live | vinte mil linhas de aplicação e um punhado de auth: silêncio, e sem lacuna de parser |
+| `G14-audit-de-volume-fecha-por-terminador` | live | três mil eventos completos de auditoria: nada fica em aberto, e nada vira lacuna |
 | `G2-mac-permissivo-declarado` | vm | config PEDE permissivo: é escolha do administrador e não pode virar achado |
+| `G2-sudo-para-tmp` | live | sudo executou binário de /tmp: o COMMAND só existe no log |
 | `G3-hook-de-ftrace-em-vm` | vm | hook de enumeração com tracefs montado pelo próprio guest, sem contêiner privilegiado |
+| `G3-trilha-de-auditoria-furada` | live | audit_lost e DAEMON_ABORT: o que não foi registrado não volta |
 | `G4-montagem-que-esconde-em-vm` | vm | bind por cima de /etc num kernel próprio, sem privilégio emprestado de contêiner |
+| `G4-vao-de-tempo-entre-geracoes` | live | dias sem uma linha de autenticação entre duas gerações consecutivas |
+| `G5-journald-only-eh-escopo` | live | host sem log em TEXTO: a pergunta não cabe, e a cobertura NÃO cai |
+| `G6-auth-log-desviado-eh-lacuna` | live | o auth.log foi trocado por um fifo: existe, não se lê, e NÃO é fora de escopo |
+| `G7-host-limpo-fica-calado` | live | auth.log de rotina: sudo de administração e logins normais, e nenhum achado |
+| `G8-mesma-linha-em-dois-arquivos` | live | o rsyslog duplica a mensagem do sshd: um evento, não dois |
+| `G9-auditd-parado-eh-manual` | live | DAEMON_END sozinho: parada administrativa não é evasão |
 | `GB1-binfmt-interpretador-sem-dono` | live | config de binfmt aponta para um interpretador sem dono: o systemd-binfmt o recria no boot |
 | `GB2-initramfs-hook-sem-dono` | live | script de geração do initramfs sem dono de pacote: roda como root ANTES do userland |
 | `GB3-cmdline-enfraquecido` | live | GRUB_CMDLINE_LINUX desliga o confinamento: enfraquece a defesa desde o próximo boot |

@@ -40,6 +40,8 @@ func runCollect(args []string) int {
 		out      = fs.String("out", "", "arquivo do dump ('-' = stdout) — obrigatório")
 		noProg   = fs.Bool("no-progress", false, "não mostrar o progresso da coleta")
 		allFS    = fs.Bool("all-fs", false, "coletar código na FS montada INTEIRA (a partir de /), não só os web roots")
+		noLogs   = fs.Bool("no-logs", false, "não ler o CONTEÚDO dos logs (o inventário de rotação continua)")
+		logsAll  = fs.Bool("logs-all", false, "ler log sem janela temporal e com mais gerações (os tetos de bytes e de eventos CONTINUAM valendo)")
 		autoload = fs.Bool("allow-kernel-autoload", false, "permitir consulta por netlink que pode AUTOCARREGAR o módulo de diagnóstico (altera o host)")
 	)
 	var ignore listaCaminhos
@@ -72,6 +74,8 @@ func runCollect(args []string) int {
 	}
 	e.Ignorar(ignore)
 	e.CodigoTudo = *allFS
+	e.SemLogs = *noLogs
+	e.LogsTudo = *logsAll
 
 	// O destino é ABERTO antes da coleta, e não depois.
 	//
@@ -513,7 +517,7 @@ func emitir(r *check.Report, f *facts.Facts, e *env.Env, o saida) int {
 	if code != 0 {
 		return code
 	}
-	jn := aplicarJanela(r, o.janela, e.Now)
+	jn := aplicarJanela(r, f, o.janela, e.Now)
 
 	humanOut := io.Writer(os.Stdout)
 	if o.jsonOut == "-" {

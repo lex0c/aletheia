@@ -82,11 +82,24 @@ type JanelaInfo struct {
 	MaisRecente string
 	// SemData são os achados sem data, que FICARAM.
 	SemData int
+	// Inferidos são os que tinham data, caíram fora, e ficaram porque a data
+	// foi DEDUZIDA e não lida.
+	Inferidos int
 
 	// Ancora é a data de referência da investigação (§9), com a origem dela.
 	Ancora       string
 	AncoraOrigem string
 	AncoraDe     string
+
+	// LogHorizonte é até onde do passado os LOGS foram efetivamente lidos, e
+	// LogAquemDaJanela diz que a janela pedida vai MAIS FUNDO que isso.
+	//
+	// Sem esta ressalva, `analyze --since 30d` sobre um dump que leu sete dias
+	// apresenta 23 dias de silêncio com a mesma cara de 23 dias observados. É a
+	// forma mais cara do falso "limpo" desta feature, e ela entra justamente
+	// aqui: no lugar onde o operador lê o que o recorte fez.
+	LogHorizonte     string
+	LogAquemDaJanela bool
 }
 
 // IOCInfo é o que o relatório precisa dizer sobre a lista de indicadores.
@@ -684,6 +697,21 @@ func writeJanela(w io.Writer, j *JanelaInfo) {
 		if j.SemData > 0 {
 			fmt.Fprintf(w, "            %d achado(s) SEM data foram MANTIDOS: descartá-los "+
 				"seria esconder por ignorância, não por escolha\n", j.SemData)
+		}
+		if j.Inferidos > 0 {
+			fmt.Fprintf(w, "            %d achado(s) com data INFERIDA ficaram apesar de "+
+				"caírem fora: o ano do syslog vem do mtime, que um `touch` reescreve\n",
+				j.Inferidos)
+		}
+	}
+	if j.LogAquemDaJanela {
+		if j.LogHorizonte != "" {
+			fmt.Fprintf(w, "            ⚠ os LOGS só foram lidos a partir de %s: o que "+
+				"a janela pede antes disso NÃO foi observado, e a ausência de evento "+
+				"ali não significa nada\n", Safe(j.LogHorizonte))
+		} else {
+			fmt.Fprintln(w, "            ⚠ NENHUM evento de log pôde ser datado nesta "+
+				"coleta: o silêncio dos logs nesta janela não significa nada")
 		}
 	}
 	if j.Ancora != "" {

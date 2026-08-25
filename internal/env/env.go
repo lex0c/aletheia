@@ -255,6 +255,27 @@ type Env struct {
 	// FS montada, ao custo de tempo, com os limites (contêiner, >2 MB) ditos.
 	CodigoTudo bool
 
+	// LogsTudo é o `--logs-all`: o teto de SELEÇÃO de arquivos sobe para o
+	// limite rígido.
+	//
+	// Ele NÃO desliga teto nenhum de segurança. O host é adversário: um
+	// `touch /var/log/x{000001..999999}` é barato, e um `.gz` de 40 KB pode
+	// descomprimir para 40 GB. Bytes, linhas, eventos e descompressão continuam
+	// valendo, e o que estourar vira lacuna declarada.
+	LogsTudo bool
+
+	// SemLogs é o `--no-logs`, e é o que o wtf liga SEMPRE.
+	//
+	// O wtf roda a coleta inteira dentro de ~2s, e LacunasDeColeta despeja todo
+	// f.Partial na cobertura sem filtrar por seleção — um coletor de log que
+	// estourasse o prazo daria ao wtf uma lacuna PERMANENTE, e uma lacuna que
+	// nunca fecha é uma que as pessoas aprendem a ignorar.
+	//
+	// Desligado NÃO é lacuna: é escolha declarada, e ela viaja em
+	// Facts.LogEstado para que um analyze sobre esse dump responda NÃO
+	// VERIFICADO em vez de "não achei".
+	SemLogs bool
+
 	// ignorados são prefixos de caminho absoluto que NENHUMA varredura de
 	// filesystem percorre — o --ignore. Excluir uma árvore gigante e
 	// irrelevante (/data/xmls) do custo é escolha do operador, e como o --root,

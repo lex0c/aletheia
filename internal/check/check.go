@@ -120,6 +120,21 @@ type Finding struct {
 	// frases mandam o operador para lugares diferentes.
 	QuandoFonte string `json:"when_source,omitempty"`
 
+	// QuandoInferido marca a data que não foi LIDA, e sim deduzida — e ela NÃO
+	// recorta: um achado assim fica no relatório mesmo caindo fora da janela.
+	//
+	// O caso que a exige é o syslog tradicional, que não carrega ano nem fuso. O
+	// ano sai do mtime do arquivo, e mtime é falsificável com um `touch`; o fuso
+	// sai do /etc/localtime, e sem ele o horário pode estar catorze horas fora.
+	// Com data inferida entrando no recorte, um `touch -d` de um ano atrás
+	// empurra o achado para fora de `--since 7d` e o relatório passa a mostrar
+	// só a CONTAGEM dele — o adversário escolhendo o que o operador lê.
+	//
+	// A regra é a mesma que a janela já aplica ao achado SEM data: descartar por
+	// uma data em que não se confia é esconder por ignorância, não por escolha.
+	// A data continua no achado, porque ela informa; ela só não decide.
+	QuandoInferido bool `json:"when_inferred,omitempty"`
+
 	// Irreversible marca o achado cujo passo seguinte se perde para sempre se
 	// for pulado — matar um processo memfd destrói a única cópia do binário.
 	// O relatório promove estes ao passo 1 por ESTE campo, não por casar o
@@ -203,6 +218,32 @@ type Check struct {
 	// VERIFICADO na cobertura — que é a resposta honesta — e o `aletheia drift`
 	// o usa como seleção.
 	Drift bool
+
+	// Escopo responde, DEPOIS da coleta e a partir dos FATOS, se a pergunta deste
+	// check existe neste host. `false` tira o check do DENOMINADOR, como já
+	// acontece com o drift sem comparação.
+	//
+	// # A distinção que ele carrega
+	//
+	// "esta pergunta não cabe aqui" (escopo, cobertura intacta) nunca é "eu não
+	// consegui responder" (lacuna, cobertura cai). As três decisões de escopo que
+	// o motor já tomava saem do AMBIENTE — modo, capability sem mecanismo,
+	// comparação ausente. Esta é a quarta, e é a única que só os FATOS respondem.
+	//
+	// O caso que a obrigou: num host journald-only não existe /var/log/auth.log,
+	// porque a distribuição não instala rsyslog. Nenhum bit de capability e nenhum
+	// modo dizem isso, e um check de log sairia COMPLETO tendo olhado o vazio — a
+	// forma mais convincente de falso "limpo", porque nada falhou. Um auth.log
+	// INEXISTENTE e um auth.log ILEGÍVEL produzem a mesma lista vazia, e só o
+	// coletor sabe qual dos dois foi.
+	//
+	// REGRA: a função lê FATOS. O `e` entra para modo e capability; ir ao disco
+	// aqui quebraria a pureza de que a suíte inteira depende (pureza_test.go).
+	//
+	// `manual` é o que o operador faz quando a pergunta não cabe — mesmo campo do
+	// NotChecked, e pelo mesmo motivo: escopo sem saída deixa o leitor sem o que
+	// fazer com a informação.
+	Escopo func(f *facts.Facts, e *env.Env) (aplicavel bool, motivo string, manual []string)
 
 	// Run recebe o próprio Check para poder montar Findings com o ID, o Ref
 	// e os FalsePositives dele — sem referenciar a var de pacote, o que

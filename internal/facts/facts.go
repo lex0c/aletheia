@@ -344,7 +344,31 @@ import (
 //	     tokenizer passou a respeitar aspas: `echo "a | /bin/x"` afirmava
 //	     `/bin/x` como programa, que é uma pergunta de propriedade sobre TEXTO.
 //	     Num dump v21 esses dois casos vêm com o alvo falso e sem lacuna.
-const SchemaVersion = 22
+//	23 O CONTEÚDO dos logs passou a ser lido, e com ele entram os fatos que
+//	   dizem ATÉ ONDE do passado alguém olhou. Num dump v22 todos vêm no
+//	   zero-value, e o zero-value aqui mente na direção mais cara — a do falso
+//	   "limpo" sobre o passado.
+//
+//	   EventosDeLog  as alegações do host sobre o próprio passado. Vazia num
+//	     dump v22, e vazia é indistinguível de "este host não fez nada".
+//	   FontesDeLog  quais arquivos foram lidos, quanto de cada um, e o que o
+//	     parser entendeu. É o fato que impede a lista acima de ser lida como
+//	     ausência: sem ele, arquivo ilegível, formato desconhecido, cauda curta e
+//	     host tranquilo produzem exatamente o mesmo JSON.
+//	   LogEstado  "" num dump v22, e "" é DESCONHECIDO por desenho — nenhum
+//	     check conclui a partir dele. As quatro respostas (desligado, fora de
+//	     escopo, coletado, parcial) mandam o leitor para lugares diferentes, e um
+//	     bool as juntaria.
+//	   LogJanelaSolicitada e LogJanelaEfetiva  o horizonte PEDIDO e o
+//	     ALCANÇADO. São dois campos porque guardar um só mente: num auth.log de
+//	     300 MB lido pela cauda de 8 MB, o pedido é "7 dias" e o alcançado pode
+//	     ser catorze horas — e um `analyze --since 30d` sobre esse dump leria os
+//	     dias que ninguém abriu como dias sem evento.
+//	   LogTextoCompleto, AuditLogCompleto, FusoDoAlvoLido  completude POR FONTE,
+//	     pela mesma razão que PasswdLido e ShadowLido são dois. O terceiro decide
+//	     se as datas foram lidas com o offset do alvo ou supostas em UTC, e um
+//	     offset errado desloca toda correlação temporal.
+const SchemaVersion = 23
 
 // Facts é o retrato do host.
 type Facts struct {
@@ -603,10 +627,67 @@ type Facts struct {
 	Historicos     []HistoricoShell        `json:"shell_history,omitempty"`
 	Audit          Auditoria               `json:"audit"`
 	Logs           []ArquivoDeLog          `json:"logs,omitempty"`
-	MAC            MAC                     `json:"mac"`
-	Segredos       []Segredo               `json:"secret_files,omitempty"`
-	ExecOculto     []string                `json:"hidden_exec,omitempty"`
-	MetaAcesso     []ArquivoMeta           `json:"access_meta,omitempty"`
+
+	// EventosDeLog são as ALEGAÇÕES que o host faz sobre o próprio passado —
+	// o CONTEÚDO dos logs, normalizado. Logs (acima) é a ESTRUTURA: inventário,
+	// rotação, tamanho. As duas respondem perguntas diferentes e não se
+	// substituem.
+	EventosDeLog []EventoDeLog `json:"log_events,omitempty"`
+	// FontesDeLog é a observabilidade por arquivo, e sem ela a lista acima não
+	// significa nada: vazia pode ser host tranquilo, arquivo ilegível, formato
+	// desconhecido ou cauda curta, e as quatro conclusões são diferentes.
+	FontesDeLog []FonteDeLog `json:"log_sources,omitempty"`
+
+	// LogEstado é o resumo da coleta. "" é DESCONHECIDO — dump anterior a esta
+	// versão, ou coleta que não chegou aqui —, e desconhecido não conclui nada.
+	LogEstado EstadoColetaLog `json:"log_state,omitempty"`
+
+	// LogJanelaEfetiva é o horizonte que a leitura ALCANÇOU — o mais conservador
+	// entre as famílias lidas.
+	//
+	// Não existe mais um "pedido" ao lado dele: a coleta deixou de ter janela
+	// temporal, porque toda forma dela acabava decidindo NÃO ABRIR um arquivo a
+	// partir de um número que o alvo escreve (ver collectEventosDeLog). O custo
+	// é controlado pelos TETOS, que são da ferramenta.
+	//
+	// A AUTORIDADE de um check não é este número: é CoberturaLog(família). Um
+	// host pode ter sete dias de `auth` e oito horas de `audit`, e um número
+	// global mentiria para um dos lados. Este serve ao rodapé, que compara o que
+	// a ANÁLISE pediu com o que a coleta alcançou.
+	LogJanelaEfetiva string `json:"log_window_effective,omitempty"`
+
+	// LogSelecaoAmpliada é o `--logs-all`. O nome mudou junto com o significado:
+	// ele já quis dizer "sem janela temporal", e janela temporal na coleta não
+	// existe mais — hoje ele amplia só o teto de SELEÇÃO de arquivos.
+	LogSelecaoAmpliada bool `json:"log_selection_expanded,omitempty"`
+
+	// LogFamiliasCortadas conta, POR FAMÍLIA, as fontes que o teto RÍGIDO
+	// descartou antes de qualquer leitura.
+	//
+	// Existe porque o corte do teto rígido acontece na SELEÇÃO, e o que ele
+	// descarta não vira FonteDeLog — não teria como, é o teto que existe
+	// justamente para a lista não crescer sem limite. Mas a lacuna por família
+	// nasce de FonteDeLog.Lacuna, então aqueles arquivos ficavam invisíveis para
+	// ela: um `--logs-all` com 601 fontes de `auth` lia 500, descartava 101, e o
+	// check de auth saía COMPLETO. O total ainda saía parcial pela chave global,
+	// e a afirmação individual continuava errada.
+	//
+	// São no máximo cinco famílias, então isto é limitado por construção.
+	LogFamiliasCortadas map[string]int `json:"log_families_truncated,omitempty"`
+
+	// Um fato de completude POR FONTE, pela mesma razão que PasswdLido e
+	// ShadowLido são dois: as leituras têm privilégio e destino diferentes, e uma
+	// não pode suprimir a comparação da outra.
+	LogTextoCompleto bool `json:"log_text_complete,omitempty"`
+	AuditLogCompleto bool `json:"audit_log_complete,omitempty"`
+	// FusoDoAlvoLido diz que /etc/localtime do ALVO foi lido. Falso significa que
+	// as datas de log foram interpretadas como UTC por suposição, e um offset
+	// errado desloca toda correlação temporal.
+	FusoDoAlvoLido bool          `json:"target_tz_read,omitempty"`
+	MAC            MAC           `json:"mac"`
+	Segredos       []Segredo     `json:"secret_files,omitempty"`
+	ExecOculto     []string      `json:"hidden_exec,omitempty"`
+	MetaAcesso     []ArquivoMeta `json:"access_meta,omitempty"`
 	// HashesIOC só existe quando a execução trouxe hash na lista de
 	// indicadores: é o hash dos arquivos que ESTA varredura examinou.
 	HashesIOC []ArquivoHash `json:"ioc_hashes,omitempty"`
@@ -858,6 +939,17 @@ func Collect(e *env.Env) *Facts {
 		// justifica o batimento.
 		e.Stage("varredura de filesystem")
 		rodarColetor(f, "persist", "collectPersist", func() { collectPersist(f, e) })
+		// DEPOIS de collectPersist, que é quem inventaria /var/log: a escolha
+		// de quais gerações abrir sai do inventário de rotação dele — e ler o
+		// diretório uma segunda vez, com regras próprias, é como nasce o falso
+		// negativo que ninguém encontra.
+		//
+		// É a terceira dimensão da ferramenta. Os fatos respondem "o que existe
+		// AGORA?" e o drift responde "o que MUDOU?"; nenhum dos dois alcança o
+		// que aconteceu e não deixou objeto — o binário rodado às 03:00 e
+		// apagado às 03:05.
+		e.Stage("logs")
+		rodarColetor(f, "logeventos", "collectEventosDeLog", func() { collectEventosDeLog(f, e) })
 		// Depois da persistência: a varredura de código reusa os web roots e
 		// procura backdoor em PHP/JS/Python. Peneira declarada, com teto.
 		e.Stage("varredura de código")

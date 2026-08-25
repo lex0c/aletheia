@@ -33,7 +33,7 @@ import (
 // teste: daria uma sensação de cobertura que não existe.
 func TestImpressaoDoEsquema(t *testing.T) {
 	const (
-		esquemaEsperado = 22
+		esquemaEsperado = 23
 		// Atualizada sem subir o SchemaVersion, e a razão fica aqui porque a
 		// catraca manda escrevê-la.
 		//
@@ -82,7 +82,32 @@ func TestImpressaoDoEsquema(t *testing.T) {
 		// separa logrotate de antiforense) e por log_rotation_gap. Zerado
 		// significa "esta rotação é por contador", e é exatamente a leitura que
 		// fazia o wtmp_cleared acusar toda a família RHEL.
-		impressaoGravada = "7201c90aa50a7e2b"
+		// Sobe de novo (22→23), e aqui a regra manda subir pelo motivo mais
+		// direto de todos: os fatos novos descrevem ATÉ ONDE DO PASSADO alguém
+		// olhou, e num dump v22 eles vêm no zero-value.
+		//
+		// EventosDeLog vazia é indistinguível de "este host não fez nada".
+		// FontesDeLog vazia apaga a diferença entre arquivo ilegível, formato
+		// desconhecido, cauda curta e host tranquilo — quatro conclusões, um só
+		// JSON. E LogJanelaEfetiva vazia faz um `analyze --since 30d` sobre uma
+		// coleta de 7 dias ler 23 dias que ninguém abriu como dias sem evento.
+		//
+		// LogEstado é o único cujo zero-value é seguro por desenho: "" significa
+		// DESCONHECIDO, e nenhum check conclui a partir dele.
+		//
+		// Atualizada DENTRO do 23, sem subir para 24, e a razão é a que a regra
+		// manda perguntar: existe dump v23 no mundo? Não — o 23 nasceu nesta
+		// branch e ela não foi mergeada. FonteDeLog.Lacuna entra na MESMA
+		// estrutura que o 23 introduziu, e nenhum artefato anterior a ela
+		// existe para ser lido torto. Subir para 24 aqui carimbaria uma
+		// incompatibilidade com um formato que ninguém tem.
+		//
+		// Atualizada de novo, pelo mesmo motivo e ainda dentro do 23:
+		// AtInferido virou DOIS bits (ano e fuso, que erram em escalas
+		// diferentes) e FonteDeLog ganhou a confiança das datas da COBERTURA.
+		// Tudo dentro de estruturas que o 23 introduziu, e nenhum artefato
+		// anterior a elas existe.
+		impressaoGravada = "e2d7b644746c7da6"
 	)
 	if SchemaVersion != esquemaEsperado {
 		t.Fatalf("SchemaVersion=%d e este teste conhece o %d: atualize os dois "+

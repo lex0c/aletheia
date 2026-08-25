@@ -133,6 +133,20 @@ func TestColetorIlegivelDeclaraLacuna(t *testing.T) {
 		{nome: "users/sudoers", legiveis: map[string]string{"etc/passwd": passwdDeTeste},
 			arquivos: []string{"etc/sudoers"}, rodar: collectUsers},
 		{nome: "logins", arquivos: []string{"var/log/wtmp", "var/log/btmp", "run/utmp"}, rodar: collectLogins},
+		// O CONTEÚDO do log, que é outra pergunta que não a do inventário: aqui
+		// o arquivo EXISTE e não abre. É a fronteira entre lacuna e escopo — em
+		// Debian o auth.log é 0640 root:adm, então sem root (ou sem estar no
+		// grupo adm) esta é a resposta honesta, e ela não pode ser confundida
+		// com o host journald-only, onde o arquivo não existe.
+		//
+		// collectLogs roda antes porque é ele quem inventaria as gerações: sem
+		// o inventário, o coletor de eventos não teria o que abrir e o teste
+		// mediria o silêncio errado.
+		{nome: "logeventos", arquivos: []string{"var/log/auth.log"},
+			rodar: func(f *Facts, e *env.Env) {
+				collectLogs(f, e)
+				collectEventosDeLog(f, e)
+			}},
 		{nome: "boot", dirs: []string{"boot"}, arquivos: []string{"etc/default/grub"}, rodar: collectBoot},
 		// Só /etc/selinux: collectMAC lê o config do SELinux e o selinuxfs, e
 		// NÃO consulta o estado do AppArmor (aa-status / apparmorfs). Injetar um

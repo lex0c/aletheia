@@ -18,6 +18,8 @@ package scenario
 //	G10 auth.log 0640 sem privilégio  a forma de campo da lacuna
 //	G11 modo IMAGE                    o fuso vem do TZif do ALVO
 //	G12 --no-logs                     escolha declarada, nunca silêncio
+//	G13 syslog de VOLUME              ruído de aplicação não é parser quebrado
+//	G14 audit de VOLUME               o ciclo de vida sob milhares de eventos
 //
 // # Por que data FIXA e --logs-all
 //
@@ -281,6 +283,64 @@ func init() {
 		MustBeIncomplete: true,
 		Exit:             1,
 	})
+
+	Register(Scenario{
+		ID:   "G13-syslog-de-volume-nao-acusa-nada",
+		Desc: "vinte mil linhas de aplicação e um punhado de auth: silêncio, e sem lacuna de parser",
+		// O G7 prova silêncio com catorze linhas. Um /var/log real tem outra
+		// ordem de grandeza e outros produtores — postgres, docker, nginx,
+		// systemd —, e é sobre ELES que a razão candidatas/reconhecidas pode
+		// disparar por engano: medir contra o total de linhas acusaria todo host
+		// saudável de ter o parser quebrado.
+		//
+		// Também exerce os tetos com um arquivo de verdade: ~1,8 MB e 20 mil
+		// linhas passam longe dos limites, e nenhum deles pode morder aqui.
+		Images: matriz,
+		Args:   []string{"--only", "logs", "--logs-all"},
+		Plant:  syslogDeVolume,
+		Expect: []Expect{
+			{ID: "logs.source_coverage", Evidence: "auth: contínuo de"},
+		},
+		ForbidGap: []string{
+			// A catraca do parser não pode disparar: ruído de aplicação é
+			// produtor que nunca prometemos entender, não formato desconhecido.
+			"compreendidas",
+			"NÃO é do formato",
+			// E nenhum teto pode morder num arquivo deste tamanho.
+			"teto",
+		},
+		MaxWarn: SemAvisos,
+		Exit:    -1,
+	})
+
+	Register(Scenario{
+		ID:   "G14-audit-de-volume-fecha-por-terminador",
+		Desc: "três mil eventos completos de auditoria: nada fica em aberto, e nada vira lacuna",
+		// O G3 tem cinco registros. Um audit.log com regra de execve carregada
+		// tem milhares por minuto, e o que este cenário prova é o CAMINHO INTEIRO
+		// nessa escala: dezoito mil linhas viram três mil eventos montados, sem
+		// lacuna, sem ruído, e com a família `audit` reportando cobertura.
+		//
+		// O que ele NÃO prova é o ciclo de vida em si, e vale dizer por quê: o
+		// backstop de grupos abertos e o teto de eventos são o MESMO número
+		// (5000). Abaixo dele, fechar por terminador e fechar só no EOF dão o
+		// mesmo resultado observável; acima, o teto de eventos morde primeiro e
+		// a lacuna aparece de qualquer jeito. A diferença entre os dois
+		// mecanismos só é visível dentro do montador, e está travada lá
+		// (TestTetoDeGruposEhBackstopENaoFinalizacaoNormal).
+		Images: matriz,
+		Args:   []string{"--only", "logs", "--logs-all"},
+		Plant:  auditDeVolume,
+		Expect: []Expect{
+			{ID: "logs.source_coverage", Evidence: "audit: contínuo de"},
+		},
+		ForbidGap: []string{
+			"em aberto",
+			"teto",
+		},
+		MaxWarn: SemAvisos,
+		Exit:    -1,
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -426,4 +486,50 @@ cat > /var/log/audit/audit.log <<'EOF'
 type=DAEMON_END msg=audit(1736500200.000:4100): op=terminate auid=0 pid=1 res=success
 EOF
 touch -t 202501120000 /var/log/audit/audit.log
+`
+
+// syslogDeVolume é o /var/log de um host que trabalha: quatro produtores que
+// este parser NÃO promete entender, e algumas linhas de autenticação no meio.
+//
+// O awk gera tudo de uma vez — um laço de shell com redirecionamento por
+// iteração levaria dezenas de segundos em contêiner.
+const syslogDeVolume = `
+mkdir -p /var/log
+awk 'BEGIN{
+  for (i = 0; i < 20000; i++) {
+    h = i % 24; m = i % 60; s = i % 60
+    printf "Jan 10 %02d:%02d:%02d h postgres[%d]: connection authorized: user=app database=prod\n", h, m, s, 2000 + i % 40
+    if (i % 3 == 0) printf "Jan 10 %02d:%02d:%02d h dockerd[900]: level=info msg=\"container %d health status: healthy\"\n", h, m, s, i
+    if (i % 5 == 0) printf "Jan 10 %02d:%02d:%02d h nginx[1200]: 10.0.0.%d - - GET /health 200\n", h, m, s, i % 250
+    if (i % 7 == 0) printf "Jan 10 %02d:%02d:%02d h systemd[1]: Started Session %d of user app.\n", h, m, s, i
+  }
+}' > /var/log/syslog
+cat > /var/log/auth.log <<'EOF'
+Jan 10 08:00:01 h sshd[100]: Accepted publickey for ana from 10.0.0.5 port 5100 ssh2: ED25519 SHA256:chaveDaAna
+Jan 10 08:02:11 h sudo[110]:      ana : TTY=pts/0 ; PWD=/home/ana ; USER=root ; COMMAND=/usr/bin/apt-get install -y nginx
+Jan 10 08:05:00 h sshd[100]: Received disconnect from 10.0.0.5 port 5100:11: disconnected by user
+Jan 10 09:13:22 h sshd[201]: Invalid user admin from 203.0.113.7 port 40001
+Jan 10 10:17:01 h CRON[300]: (root) CMD (   cd / && run-parts --report /etc/cron.hourly)
+EOF
+touch -t 202601120000 /var/log/syslog /var/log/auth.log
+`
+
+// auditDeVolume são três mil eventos COMPLETOS, cada um com o terminador que o
+// kernel emite. Um por segundo, para que o fechamento por tempo também tenha o
+// que fazer.
+const auditDeVolume = `
+mkdir -p /var/log/audit
+awk 'BEGIN{
+  base = 1736500000
+  for (i = 0; i < 3000; i++) {
+    id = sprintf("%d.000:%d", base + i, i)
+    printf "type=SYSCALL msg=audit(%s): arch=c000003e syscall=59 success=yes exit=0 ppid=900 pid=%d auid=1001 uid=1001 euid=0 comm=\"sh\" exe=\"/bin/dash\"\n", id, 1000 + i
+    printf "type=EXECVE msg=audit(%s): argc=2 a0=\"/usr/bin/find\" a1=\"/srv\"\n", id
+    printf "type=CWD msg=audit(%s): cwd=\"/srv\"\n", id
+    printf "type=PATH msg=audit(%s): item=0 name=\"/usr/bin/find\" inode=%d dev=fd:01 mode=0100755 ouid=0 ogid=0\n", id, 100 + i
+    printf "type=PROCTITLE msg=audit(%s): proctitle=2F7573722F62696E2F66696E64002F737276\n", id
+    printf "type=EOE msg=audit(%s): \n", id
+  }
+}' > /var/log/audit/audit.log
+touch -t 202601120000 /var/log/audit/audit.log
 `

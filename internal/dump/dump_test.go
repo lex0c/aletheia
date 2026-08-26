@@ -10,6 +10,7 @@ import (
 
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
+	"github.com/lex0c/aletheia/internal/safeio"
 )
 
 func ambienteDeTeste() *env.Env {
@@ -228,5 +229,29 @@ func TestDumpAcimaDoTetoEhRecusado(t *testing.T) {
 	}
 	if _, err := Carregar(p); err == nil {
 		t.Error("dump acima de MaxDump devia ser recusado, não carregado")
+	}
+}
+
+// O ARTEFATO QUE É UM DEVICE NÃO PODE SER ABERTO PARA DESCOBRIR QUE É UM DEVICE.
+//
+// AbrirArtefato já recusava fifo, socket e device — mas com O_NONBLOCK e fstat
+// DEPOIS, o que fecha o fifo e não fecha o device: o open() do driver roda antes
+// da recusa. Um `--snapshot` apontado para um link plantado chegava lá.
+func TestArtefatoDeviceEhRecusadoSemAbrir(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "incident.json")
+	if err := os.Symlink("/dev/zero", p); err != nil {
+		t.Skipf("sem symlink: %v", err)
+	}
+	var reais []string
+	safeio.ObservarAberturaReal = func(c string) { reais = append(reais, c) }
+	t.Cleanup(func() { safeio.ObservarAberturaReal = nil })
+
+	fh, err := AbrirArtefato(p)
+	if err == nil {
+		fh.Close()
+		t.Fatal("um device não é dump: tinha de ser recusado")
+	}
+	if len(reais) > 0 {
+		t.Errorf("o device foi ABERTO antes da recusa: %v", reais)
 	}
 }

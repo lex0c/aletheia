@@ -31,6 +31,7 @@ package dump
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -39,12 +40,12 @@ import (
 	"io"
 	"os"
 	"reflect"
-	"syscall"
 	"time"
 
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
 	"github.com/lex0c/aletheia/internal/redact"
+	"github.com/lex0c/aletheia/internal/safeio"
 )
 
 // Schema muda quando a FORMA do artefato muda. Um dump de esquema diferente é
@@ -528,33 +529,23 @@ var MaxDump int64 = 512 << 20
 // AbrirArtefato abre um arquivo que veio de FORA — dump ou sidecar — tratando-o
 // como entrada hostil.
 //
-// O `env` já evoluiu para isto do lado do host investigado: abre com O_NONBLOCK,
-// faz fstat no DESCRITOR realmente aberto e recusa o que não é arquivo comum.
-// A razão está escrita lá: um `mkfifo` no caminho que a ferramenta sempre lê
-// pendura a varredura para sempre, e decidir pelo CAMINHO em vez de pelo
-// descritor deixa uma janela de troca que não precisa de privilégio nenhum.
-//
-// O artefato tinha a mesma exposição e nenhuma dessas defesas: `os.Open` seco.
 // Um `mkfifo incident.json` travava o servidor MCP antes de ele responder a
-// primeira mensagem — e o arquivo vem de um host comprometido, de um pendrive,
-// de um caso de IR. É a mesma classe de entrada, e agora tem a mesma porta.
+// primeira mensagem, e o arquivo vem de um host comprometido, de um pendrive,
+// de um caso de IR.
+//
+// # Por que ela é uma linha agora
+//
+// Esta função abria com O_NONBLOCK e fazia fstat DEPOIS. Isso fecha o fifo e
+// não fecha o device: para um device node o open() do driver já rodou quando o
+// fstat responde. Era a segunda de três implementações da mesma fronteira nesta
+// árvore — a terceira, em `ioc`, nem O_NONBLOCK tinha —, e a que diverge é
+// sempre a que ninguém está olhando.
+//
+// safeio é a fronteira, uma vez só: O_PATH, fstat no descritor, e a abertura de
+// verdade só depois de provado que é arquivo comum. O nome fica porque os
+// chamadores dele descrevem o que estão abrindo, e isso é informação.
 func AbrirArtefato(caminho string) (*os.File, error) {
-	fh, err := os.OpenFile(caminho, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, err
-	}
-	fi, err := fh.Stat()
-	if err != nil {
-		fh.Close()
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		fh.Close()
-		return nil, fmt.Errorf("%s não é arquivo comum (fifo, socket ou "+
-			"dispositivo): RECUSADO, porque abrir isto bloqueia ou consome sem fim",
-			caminho)
-	}
-	return fh, nil
+	return safeio.AbrirArtefato(caminho)
 }
 
 // CarregarComDigest lê o dump UMA VEZ e devolve o digest DOS MESMOS BYTES.
@@ -632,24 +623,232 @@ func lerComTeto(r io.Reader) ([]byte, error) {
 	return b, nil
 }
 
+// interpretar decodifica em TRÊS fases, e a ordem delas é a correção.
+//
+//	forma      cabe no orçamento? — conta contêineres SEM alocar por eles
+//	esquema    este binário lê este artefato? — decodifica DOIS inteiros
+//	fatos      só então a estrutura inteira
+//
+// # Por que o portão de esquema subiu
+//
+// Ele era a última linha, depois do json.Unmarshal completo. O portão que
+// existe para dizer "este binário não lê este arquivo" só respondia depois de o
+// arquivo inteiro já ter virado estrutura na memória — um dump declarando
+// `"schema": 0` era integralmente decodificado para então ser recusado por dois
+// bytes que estavam no começo dele.
+//
+// Com a fase de forma na frente isso deixou de ser um risco de memória, mas
+// continuava sendo trabalho feito para nada sobre um artefato de procedência
+// desconhecida. O portão agora lê só o cabeçalho: um struct raso faz o
+// decodificador PULAR todo campo que não conhece, sem construir valor nenhum.
 func interpretar(b []byte) (*Dump, error) {
+	if err := medirForma(b); err != nil {
+		return nil, err
+	}
+	if err := portaoDeEsquema(b); err != nil {
+		return nil, err
+	}
 	var d Dump
 	if err := json.Unmarshal(b, &d); err != nil {
 		return nil, err
 	}
-	if d.Schema != Schema {
-		return nil, fmt.Errorf("%w: o arquivo é do esquema %d e este binário lê o %d — "+
-			"recolete com esta versão, ou analise com a versão que coletou",
-			ErrEsquema, d.Schema, Schema)
-	}
 	if d.Facts == nil {
+		// O portão já garantiu isto; a repetição é barata e o campo é
+		// desreferenciado pelo chamador na linha seguinte.
 		return nil, ErrVazio
 	}
-	if d.Facts.SchemaVersion != facts.SchemaVersion {
-		return nil, fmt.Errorf("%w: os fatos são do esquema %d e este binário lê o %d",
-			ErrEsquema, d.Facts.SchemaVersion, facts.SchemaVersion)
-	}
 	return &d, nil
+}
+
+// portaoDeEsquema decide se este binário lê este artefato, lendo dois inteiros
+// e PARANDO ali.
+//
+// # Por que não um json.Unmarshal num struct raso
+//
+// Porque ele parece barato e não é. Um struct sem os campos de Facts faz o
+// decodificador PULAR os valores desconhecidos sem construí-los — a memória
+// fica no tamanho do cabeçalho, que era o ponto —, mas a VARREDURA continua
+// sendo do documento inteiro. Medido num dump real de 1,97 MiB:
+//
+//	medirForma          1,9 ms
+//	portão raso        11,0 ms
+//	Unmarshal completo 22,3 ms
+//
+// Onze milissegundos em todo carregamento legítimo para tornar barata uma
+// recusa que acontece quando alguém usa o binário errado. É a troca ao
+// contrário: o custo cai no caso comum para aliviar o raro.
+//
+// # Onde os dois inteiros estão
+//
+// No começo. `schema` é o primeiro campo do Dump e `schema_version` é o
+// primeiro de Facts, então num dump real o segundo deles mora no byte 787 de
+// 2.069.968 — 0,04% do arquivo. Um decodificador em fluxo que para assim que
+// encontra os dois lê essa fração e devolve o resto para quem vier depois.
+//
+// A ordem dos campos não é garantia, e por isso não é premissa: se `facts`
+// aparecer ANTES de `schema`, o fluxo não tem mais como voltar, e a função cai
+// no caminho raso — correto, mais caro, e nunca tomado por artefato que este
+// binário escreveu.
+func portaoDeEsquema(b []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if err := esperaDelim(dec, '{'); err != nil {
+		return err
+	}
+
+	temSchema := false
+	for dec.More() {
+		chave, err := proximaChave(dec)
+		if err != nil {
+			return err
+		}
+		switch chave {
+		case "schema":
+			var n int
+			if err := dec.Decode(&n); err != nil {
+				return err
+			}
+			if n != Schema {
+				return fmt.Errorf("%w: o arquivo é do esquema %d e este binário lê o %d — "+
+					"recolete com esta versão, ou analise com a versão que coletou",
+					ErrEsquema, n, Schema)
+			}
+			temSchema = true
+		case "facts":
+			v, err := versaoDosFatos(dec)
+			if err != nil {
+				return err
+			}
+			if v != facts.SchemaVersion {
+				return fmt.Errorf("%w: os fatos são do esquema %d e este binário lê o %d",
+					ErrEsquema, v, facts.SchemaVersion)
+			}
+			if !temSchema {
+				// `facts` veio primeiro: o fluxo parou no meio dele e o
+				// `schema` está adiante, fora de alcance. Recomeça do jeito
+				// caro, que é correto para qualquer ordem.
+				return portaoRaso(b)
+			}
+			return nil
+		default:
+			if err := pularValor(dec); err != nil {
+				return err
+			}
+		}
+	}
+	// O documento acabou sem `facts`. É a mesma resposta que um `"facts": null`
+	// dá, porque a consequência é a mesma: não há retrato a analisar.
+	return ErrVazio
+}
+
+// versaoDosFatos entra no objeto `facts` e devolve o schema_version, sem ler o
+// resto dele — que é onde moram os megabytes.
+func versaoDosFatos(dec *json.Decoder) (int, error) {
+	tk, err := dec.Token()
+	if err != nil {
+		return 0, err
+	}
+	if tk == nil {
+		return 0, ErrVazio // "facts": null
+	}
+	if d, ok := tk.(json.Delim); !ok || d != '{' {
+		return 0, fmt.Errorf("%w: o campo `facts` não é um objeto", ErrEsquema)
+	}
+	for dec.More() {
+		chave, err := proximaChave(dec)
+		if err != nil {
+			return 0, err
+		}
+		if chave == "schema_version" {
+			var v int
+			if err := dec.Decode(&v); err != nil {
+				return 0, err
+			}
+			return v, nil
+		}
+		if err := pularValor(dec); err != nil {
+			return 0, err
+		}
+	}
+	// Sem o campo: zero, que é o que um struct daria, e a mesma recusa sai do
+	// chamador com o número que o arquivo (não) declarou.
+	return 0, nil
+}
+
+// portaoRaso é o caminho de qualquer-ordem. Ele varre o documento inteiro, e
+// por isso não é o padrão.
+func portaoRaso(b []byte) error {
+	var cab struct {
+		Schema int `json:"schema"`
+		Facts  *struct {
+			SchemaVersion int `json:"schema_version"`
+		} `json:"facts"`
+	}
+	if err := json.Unmarshal(b, &cab); err != nil {
+		return err
+	}
+	if cab.Schema != Schema {
+		return fmt.Errorf("%w: o arquivo é do esquema %d e este binário lê o %d — "+
+			"recolete com esta versão, ou analise com a versão que coletou",
+			ErrEsquema, cab.Schema, Schema)
+	}
+	if cab.Facts == nil {
+		return ErrVazio
+	}
+	if cab.Facts.SchemaVersion != facts.SchemaVersion {
+		return fmt.Errorf("%w: os fatos são do esquema %d e este binário lê o %d",
+			ErrEsquema, cab.Facts.SchemaVersion, facts.SchemaVersion)
+	}
+	return nil
+}
+
+func esperaDelim(dec *json.Decoder, d json.Delim) error {
+	tk, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if got, ok := tk.(json.Delim); !ok || got != d {
+		return fmt.Errorf("%w: o artefato não começa com %q", ErrEsquema, d)
+	}
+	return nil
+}
+
+func proximaChave(dec *json.Decoder) (string, error) {
+	tk, err := dec.Token()
+	if err != nil {
+		return "", err
+	}
+	s, ok := tk.(string)
+	if !ok {
+		return "", fmt.Errorf("%w: chave de objeto que não é string", ErrEsquema)
+	}
+	return s, nil
+}
+
+// pularValor consome o próximo valor sem construí-lo.
+//
+// Token() e não Decode(&json.RawMessage{}): o segundo COPIA os bytes do valor,
+// e um campo de 500 MB antes de `facts` faria o portão alocar exatamente o que
+// ele existe para evitar. Contêiner nenhum é materializado aqui; o único valor
+// que ainda custa memória é uma string gigante, e essa já está limitada por
+// MaxDump.
+func pularValor(dec *json.Decoder) error {
+	prof := 0
+	for {
+		tk, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if d, ok := tk.(json.Delim); ok {
+			if d == '{' || d == '[' {
+				prof++
+			} else {
+				prof--
+			}
+		}
+		if prof == 0 {
+			return nil
+		}
+	}
 }
 
 // Env reconstrói o ambiente DA COLETA.

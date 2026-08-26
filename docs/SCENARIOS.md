@@ -3,7 +3,7 @@
 GERADO de `internal/checks` e `test/scenario`. Não edite à mão:
 `go test ./test/scenario -run TestDocumentoDeCenarios -update`.
 
-133 checks, 253 cenários.
+133 checks, 261 cenários.
 
 Um **check** é uma pergunta que a ferramenta faz ao host. Um **cenário** é um
 host montado de propósito — em contêiner, imagem ou microVM — que prova a
@@ -277,17 +277,25 @@ contêiner não alcança — hidepid, sysctl, módulo, cgroup, eBPF.
 | `97-modulo-no-boot` | live | módulo de kernel carregado no boot por configuração: a camada mais funda da persistência |
 | `98-retencao-de-root` | live | SUID plantado: a volta que não deixa processo, conexão nem agendamento |
 | `99-minerador-fala-com-pool` | live | criptominerador em tmpfs, disfarçado de kthread, abrindo a conexão stratum para o pool |
+| `A1-btmp-fechado-e-lacuna-nunca-zero-recusas` | live | sem root o btmp é ilegível: o bloco de atividade do wtf diz NÃO EXAMINADAS, jamais nenhuma tentativa |
 | `A1-implante-empacotado` | live | o invasor REGISTRA o implante no gerenciador de pacotes: derrota a pergunta de propriedade |
 | `A10-run-parts-para-diretorio-proprio` | live | run-parts apontando para /etc/cron.backup: a isenção casava por PREFIXO e a coleta por lista fechada |
 | `A11-jit-em-usr-local-nao-herda-isencao` | live | binário chamado `node` em /usr/local/bin: a isenção de JIT casava "/usr/" inteiro, e /usr/local está dentro |
 | `A12-bind-troca-o-arquivo-sob-caminho-limpo` | live | a unit monta um implante por cima de /usr/bin: o host mostra o binário da distribuição, e a unit executa outro |
 | `A12-pacote-malicioso-de-verdade` | live | o invasor CONSTRÓI e INSTALA um .deb real: propriedade, hash e base ficam TODOS válidos ⚠ lacuna conhecida: pacote do invasor instalado corretamente (propriedade/hash/base/caminho válidos) é indistinguível de um legítimo sem verificar origem/assinatura/repositório |
 | `A12b-bind-de-endurecimento-nao-vira-achado` | live | o contrapeso: BindReadOnlyPaths entre caminhos de sistema é o uso para o qual a diretiva existe |
+| `A1b-btmp-ausente-e-escopo-nao-lacuna` | live | onde o btmp não existe, o bloco diz que o host não registra tentativa recusada — escopo, não lacuna |
+| `A2-journald-only-e-escopo-com-a-via-nomeada` | live | sem auth.log, a família sai FORA DE ESCOPO e o comando nomeia por onde ir — nunca silêncio com cara de resposta |
 | `A2-sem-binario` | live | persistência sem depositar binário: só o que a distribuição já entregou |
 | `A3-ativacao-adiada` | live | nada em execução no instante da varredura: a volta está agendada para depois |
+| `A3-mesmo-login-em-duas-fontes-e-um-evento` | live | o registro binário e a linha de texto do MESMO login viram um evento com duas testemunhas, ligadas pelo pid |
+| `A4-around-recorta-a-vizinhanca-do-alerta` | live | --around centra a janela no horário do alerta: traz o que aconteceu perto e deixa fora o que não |
 | `A4-data-forjada` | live | timestomping: o implante recebe a data de um arquivo vizinho e a janela do incidente some |
+| `A5-agregados-contam-o-que-a-timeline-mostra` | live | --summary conta o que a linha do tempo mostra, e traz a cobertura junto |
 | `A5-ativacao-por-socket` | live | backdoor que só existe quando alguém conecta: no retrato, não há processo nem porta suspeita |
 | `A6-dentro-de-runtime-com-jit` | live | o implante roda DENTRO de um runtime com JIT: a isenção some com o achado, e precisa aparecer como LACUNA |
+| `A6-from-reconstroi-a-partir-do-retrato` | live | collect e depois activity --from: o caminho que consome artefato de origem não confiável, de ponta a ponta |
+| `A7-relogio-alterado-nao-afirma-alcance` | live | com OLD_TIME/NEW_TIME no histórico, os carimbos dos dois lados vêm de relógios diferentes e nenhum alcance é afirmado |
 | `A8-listener-fechado-inverte-a-direcao` | live | serviço que fecha o listener depois do accept: a inferência de direção invertia, e o §17 acusava uma conexão de ENTRADA |
 | `A9-allowlist-do-sshd-em-usr-local` | live | backdoor com nome de integração conhecida em /usr/local/bin: a isenção do AuthorizedKeysCommand era dada de graça |
 | `B1-baseline-cala-o-conhecido` | live | servidor legítimo com baseline: o acúmulo de dois anos cala e o implante novo grita |

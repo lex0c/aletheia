@@ -327,7 +327,14 @@ func Register(s Scenario) {
 	// demonstrado sem que nada o tivesse demonstrado — o invariante "todo check
 	// tem cenário" passaria a mentir. É a mesma armadilha do MaxWarn: 0, num
 	// lugar novo: parece proteção, e não confere nada.
-	if s.Cmd == "mcp" {
+	//
+	// O `activity` cai na MESMA armadilha por outro caminho: ele não produz
+	// achado nenhum — o `--json -` dele emite UM documento com a linha do tempo
+	// e a cobertura, não o JSONL de achados que o harness lê. Um Expect ali
+	// nunca casaria, e ainda creditaria cobertura de check que ninguém
+	// demonstrou. O que um cenário de activity afirma vai em ExpectOutput,
+	// ForbidOutput e Exit.
+	if s.Cmd == "mcp" || s.Cmd == "activity" {
 		inertes := map[string]bool{
 			"Expect": len(s.Expect) > 0, "Forbid": len(s.Forbid) > 0,
 			"ForbidFinding": len(s.ForbidFinding) > 0,
@@ -337,10 +344,12 @@ func Register(s Scenario) {
 		}
 		for campo, usado := range inertes {
 			if usado {
-				panic("cenário " + s.ID + ": " + campo + " não é lido no modo mcp — " +
-					"o contrato ali é a resposta JSON-RPC (ver o campo MCP). " +
-					"Uma asserção que ninguém avalia é pior que nenhuma, e um " +
-					"Expect aqui ainda creditaria cobertura que ninguém demonstrou")
+				panic("cenário " + s.ID + ": " + campo + " não é lido no modo " +
+					s.Cmd + " — aquele modo não produz o JSONL de achados que o " +
+					"harness lê. Uma asserção que ninguém avalia é pior que " +
+					"nenhuma, e um Expect aqui ainda creditaria cobertura que " +
+					"ninguém demonstrou. Afirme pelo canal do modo: ExpectOutput, " +
+					"ForbidOutput e Exit (ou o campo MCP)")
 			}
 		}
 	}
@@ -364,7 +373,8 @@ func Register(s Scenario) {
 // muda, e a contagem depende do ritmo da amostragem; o `preserve` não conta
 // nada, porque não produz achado.
 func orcamentoDeRuidoFazSentido(cmd string) bool {
-	return cmd != "watch" && cmd != "preserve" && cmd != "info" && cmd != "mcp"
+	return cmd != "watch" && cmd != "preserve" && cmd != "info" &&
+		cmd != "mcp" && cmd != "activity"
 }
 
 // Varredura diz se o cenário ANALISA o host. Só quem analisa tem cobertura a
@@ -373,8 +383,10 @@ func orcamentoDeRuidoFazSentido(cmd string) bool {
 // afirmaria uma conclusão que ninguém tirou.
 // Varredura diz se este cenário produz um relatório com cobertura.
 //
-// `preserve` COPIA e `info` RESPONDE — nenhum dos dois roda check, e uma linha
-// de cobertura ali afirmaria uma conclusão que ninguém tirou.
+// `preserve` COPIA, `info` RESPONDE e `activity` RECONSTRÓI — nenhum dos três
+// roda check, e uma linha de cobertura ali afirmaria uma conclusão que ninguém
+// tirou. O `activity` tem cobertura PRÓPRIA, das testemunhas que ele leu, e ela
+// não é a cobertura de catálogo que este campo mede.
 //
 // `mcp` NÃO entra nesta lista, e a ausência dele é deliberada: aquele modo tem
 // um caminho de asserção próprio (assertMCP), e nunca chega em assertScenario,
@@ -382,7 +394,7 @@ func orcamentoDeRuidoFazSentido(cmd string) bool {
 // seria um braço que nenhum teste alcança — a mesma decoração que a conferência
 // de newline do transporte era antes de sair.
 func (s Scenario) Varredura() bool {
-	return s.Cmd != "preserve" && s.Cmd != "info"
+	return s.Cmd != "preserve" && s.Cmd != "info" && s.Cmd != "activity"
 }
 
 // Orcamento devolve o teto de avisos e se ele foi DECLARADO. É a função que

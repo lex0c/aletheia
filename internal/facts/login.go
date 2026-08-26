@@ -57,6 +57,20 @@ const (
 // Tipos de registro do utmp que interessam. Exportados porque quem decide o
 // que cada um significa é o check, não o coletor.
 const (
+	// TipoVazio é o slot NUNCA USADO do arquivo: registro todo zerado. É o
+	// único que o coletor descarta por conta própria — ele não é registro de
+	// coisa nenhuma.
+	TipoVazio = 0
+
+	// TipoRunLevel é a mudança de runlevel — e na prática o DESLIGAMENTO: o
+	// `shutdown` escreve um destes a cada parada limpa. Como o de boot, o campo
+	// de origem dele carrega a versão do kernel, e não um endereço.
+	//
+	// O intervalo entre um desligamento e o boot seguinte é justamente o que
+	// alguém precisa delimitar numa investigação — é o tempo em que o host
+	// comprovadamente não estava observando nada.
+	TipoRunLevel = 1
+
 	// TipoBoot marca o início de um boot. O campo de origem dele carrega a
 	// VERSÃO DO KERNEL, não um endereço — quem confundir os dois passa a tratar
 	// texto de kernel como origem de conexão.
@@ -66,6 +80,13 @@ const (
 	TipoLoginUsuario = 7
 	// TipoSaida é o encerramento da sessão.
 	TipoSaida = 8
+
+	// TipoTempoNovo e TipoTempoAntigo cercam uma mudança do RELÓGIO: o utmp
+	// grava o antes e o depois. Numa reconstrução histórica isso não é
+	// detalhe — é o ponto em que toda data dos dois lados deixa de ser
+	// comparável.
+	TipoTempoAntigo = 3
+	TipoTempoNovo   = 4
 )
 
 // Login é um registro de entrada, saída ou tentativa.
@@ -87,6 +108,88 @@ type Login struct {
 	Agora bool `json:"current,omitempty"`
 }
 
+// OrigemDeRede descarta o que não é um endereço de onde alguém possa tentar
+// entrar: `:0` é o display do X, `~` é o marcador de boot e vazio é tty física.
+//
+// O registro de BOOT também tem texto no campo de origem — a versão do kernel —
+// e a primeira versão disto o descartava procurando "MANJARO" na string. Isso
+// funcionava num host e em nenhum outro. Quem separa boot de login é o TIPO do
+// registro, e é o chamador que o filtra.
+//
+// Mora aqui, e não no check que a usava, porque é uma pergunta sobre a FORMA de
+// Login.Origem. Dois consumidores com duas cópias dela produziriam dois números
+// para um fato só — o mesmo motivo pelo qual chaveDoEvento é única.
+func OrigemDeRede(o string) bool {
+	return o != "" && o != "~" && !strings.HasPrefix(o, ":")
+}
+
+// Papéis de FonteDeLogin. O PAPEL, e não o caminho, é o que diz qual pergunta
+// o arquivo responde: o caminho muda entre distribuições e o papel não.
+const (
+	PapelHistorico = "historico" // /var/log/wtmp — quem entrou
+	PapelRecusadas = "recusadas" // /var/log/btmp — quem tentou e falhou
+	PapelSessoes   = "sessoes"   // /run/utmp — quem está logado agora
+)
+
+// Estados de FonteDeLogin.
+const (
+	FonteLoginLida    = "lido"
+	FonteLoginAusente = "ausente"
+	// FonteLoginIlegivel é o arquivo que EXISTE e não abriu. Diferente de
+	// ausente, e a diferença é a que separa "este host não tem btmp" de "eu não
+	// sou root".
+	FonteLoginIlegivel = "ilegivel"
+	// FonteLoginNaoInterpretada é o arquivo cujo tamanho não divide nenhum dos
+	// dois layouts de registro utmp: existe, abriu, e não foi decodificado.
+	FonteLoginNaoInterpretada = "nao_interpretado"
+)
+
+// FonteDeLogin é a observabilidade POR ARQUIVO da coleta de login, e existe
+// para impedir uma pergunta que os fatos não conseguiam responder.
+//
+// A leitura é da CAUDA, com teto de maxRegistrosLogin. Depois de collectLogins,
+// um wtmp com exatamente 2000 registros ficava indistinguível de um wtmp com
+// 57.000 do qual se leu o fim — e quem quisesse dizer "observado desde X" teria
+// de adivinhar por len(f.Logins) == 2000, que afirma cobertura sobre um arquivo
+// que ninguém mediu. É a mesma classe do falso "limpo" que FonteDeLog resolve
+// para o conteúdo dos logs.
+//
+// Ela é barata: lerUtmp já calcula o total de registros ANTES de truncar, e o
+// laço de decodificação já visita cada um.
+type FonteDeLogin struct {
+	Path   string `json:"path"`
+	Papel  string `json:"role"`
+	Estado string `json:"state"`
+
+	// Registros é quantos o arquivo TINHA no stat; Lidos, quantos foram
+	// decodificados. Iguais em arquivo pequeno, e o par dá a MAGNITUDE do que
+	// ficou de fora.
+	//
+	// Quem pergunta "o teto mordeu?" lê Truncada, e não a diferença: o arquivo
+	// pode encolher entre o stat e a leitura (rotação no meio da coleta), e ali
+	// os dois números divergem sem teto nenhum ter agido.
+	Registros int  `json:"records_total"`
+	Lidos     int  `json:"records_read"`
+	Truncada  bool `json:"truncated,omitempty"`
+
+	// SemData conta os registros que ENTRARAM no inventário e não puderam ser
+	// datados. Sem ele, "wtmp observado desde 10h atrás" afirma um intervalo
+	// CONTÍNUO sobre uma leitura que pode ter buracos no meio.
+	SemData int `json:"records_undated,omitempty"`
+
+	// TamRegistro é o layout escolhido: 384 ou 400. Ler um wtmp de 400 com
+	// passo de 384 não falha — produz registro desalinhado, usuário vindo do
+	// meio de outro campo e timestamp zero, SEM lacuna declarada. Registrar a
+	// escolha é o que torna esse erro auditável depois do incidente, quando a
+	// VM não existe mais para repetir a medição.
+	TamRegistro int `json:"record_size,omitempty"`
+
+	// Motivo é a causa da leitura não ter acontecido, curta. A frase inteira
+	// para o operador continua saindo em PersistDenied — este campo é o lado
+	// estruturado dela, para quem lê o dump.
+	Motivo string `json:"reason,omitempty"`
+}
+
 func collectLogins(f *Facts, e *env.Env) {
 	// O wtmp costuma ser legível por todos, mas o CIS Benchmark manda pôr 0640
 	// nele, e essa recomendação é seguida. Quando ela foi seguida, uma
@@ -94,12 +197,12 @@ func collectLogins(f *Facts, e *env.Env) {
 	// sessão aberta agora é a forma EXATA do achado antiforense de histórico
 	// zerado. A ferramenta fabricava um CRITICAL irreversível de permissão
 	// negada: acusava o defensor endurecido de ter apagado o próprio rastro.
-	if f.HistoricoDeLoginLido = lerUtmp(f, e, "/var/log/wtmp", false, false); !f.HistoricoDeLoginLido {
+	if f.HistoricoDeLoginLido = lerUtmp(f, e, "/var/log/wtmp", PapelHistorico, false, false); !f.HistoricoDeLoginLido {
 		f.denyPersist("login", "/var/log/wtmp não pôde ser lido: o HISTÓRICO de "+
 			"login não foi examinado, e sem ele não se pode afirmar nada sobre "+
 			"ele estar vazio")
 	}
-	if !lerUtmp(f, e, "/run/utmp", false, true) {
+	if !lerUtmp(f, e, "/run/utmp", PapelSessoes, false, true) {
 		f.denyPersist("login", "/run/utmp não pôde ser lido: as sessões ABERTAS "+
 			"agora não foram examinadas")
 	}
@@ -107,7 +210,7 @@ func collectLogins(f *Facts, e *env.Env) {
 	// btmp é 0600 de root em toda distribuição, e a diferença precisa aparecer
 	// como lacuna quando a varredura roda sem privilégio — sem isso, "nenhuma
 	// força bruta" sairia igual a "não pude olhar as tentativas".
-	if !lerUtmp(f, e, "/var/log/btmp", true, false) {
+	if !lerUtmp(f, e, "/var/log/btmp", PapelRecusadas, true, false) {
 		f.denyPersist("login", "/var/log/btmp ilegível (é 0600 de root): "+
 			"tentativas de login RECUSADAS não foram examinadas, e força bruta "+
 			"não pode ser distinguida de ausência dela")
@@ -121,7 +224,13 @@ func collectLogins(f *Facts, e *env.Env) {
 // que interessa é o recente, e o wtmp de um servidor de anos passa do teto de
 // leitura do env — o que devolveria zero registro com cara de histórico
 // zerado, que é precisamente o achado que este arquivo alimenta.
-func lerUtmp(f *Facts, e *env.Env, caminho string, falhou, agora bool) bool {
+func lerUtmp(f *Facts, e *env.Env, caminho, papel string, falhou, agora bool) bool {
+	// A fonte é registrada em TODA saída, inclusive nas de erro: é justamente o
+	// caminho que não leu nada que precisa constar, porque é dele que sai a
+	// diferença entre "não havia registro" e "eu não pude olhar".
+	src := FonteDeLogin{Path: caminho, Papel: papel, Estado: FonteLoginIlegivel}
+	defer func() { f.FontesDeLogin = append(f.FontesDeLogin, src) }()
+
 	fi, err := e.Lstat(caminho)
 	if err != nil {
 		// Só a AUSÊNCIA é ausência de fonte. Qualquer outro erro — e o que
@@ -132,16 +241,24 @@ func lerUtmp(f *Facts, e *env.Env, caminho string, falhou, agora bool) bool {
 		// CRITICAL irreversível de histórico zerado, fabricado a partir de
 		// permissão negada. É o mesmo falso positivo que collectLogins
 		// descreve acima, reintroduzido uma camada abaixo dele.
-		return errors.Is(err, os.ErrNotExist)
+		src.Motivo = env.MotivoDoErro(err)
+		if errors.Is(err, os.ErrNotExist) {
+			src.Estado = FonteLoginAusente
+			return true
+		}
+		return false
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
 		if fi, err = e.Stat(caminho); err != nil {
+			src.Motivo = env.MotivoDoErro(err)
 			return false
 		}
 	}
 
 	tam, ok := tamanhoDoRegistroCom(fi.Size(), nativoDeUtmp(f.Host.Libc))
 	if !ok {
+		src.Estado = FonteLoginNaoInterpretada
+		src.Motivo = itoa(int(fi.Size())) + " bytes não é múltiplo de 384 nem de 400"
 		// Nem 384 nem 400 dividem o arquivo: é outro layout, ou o arquivo está
 		// truncado. Adivinhar aqui produziria um inventário de login inventado,
 		// que é pior que nenhum.
@@ -159,21 +276,37 @@ func lerUtmp(f *Facts, e *env.Env, caminho string, falhou, agora bool) bool {
 		return false
 	}
 
+	src.TamRegistro = tam
 	n := int(fi.Size() / int64(tam))
+	src.Registros = n
 	pular := 0
+	cortou := false
 	if n > maxRegistrosLogin {
 		pular = n - maxRegistrosLogin
 		n = maxRegistrosLogin
+		cortou = true
+	}
+	b, err := lerFatia(e, caminho, int64(pular)*int64(tam), n*tam)
+	if err != nil {
+		src.Motivo = env.MotivoDoErro(err)
+		return false
+	}
+	n = len(b) / tam // o arquivo pode ter encolhido entre o stat e a leitura
+	src.Estado = FonteLoginLida
+	src.Lidos = n
+	// DEPOIS da leitura, e não antes: o `open` acima falha com EACCES no caso
+	// mais comum de todos — um btmp grande, numa execução sem root. Marcar o
+	// truncamento antes gravava no dump `{"state":"ilegivel","truncated":true,
+	// "records_read":0}` e declarava ao operador que 2000 registros tinham sido
+	// lidos de um arquivo que ninguém chegou a abrir. Justamente o campo que
+	// existe para responder "o teto mordeu?" mentia para quem o consultasse.
+	if cortou {
+		src.Truncada = true
 		f.denyPersist("login", baseNome(caminho)+" tem mais de "+
 			itoa(maxRegistrosLogin)+" registros e foram lidos os "+
 			itoa(maxRegistrosLogin)+" mais recentes: o que veio antes NÃO foi "+
 			"examinado")
 	}
-	b, err := lerFatia(e, caminho, int64(pular)*int64(tam), n*tam)
-	if err != nil {
-		return false
-	}
-	n = len(b) / tam // o arquivo pode ter encolhido entre o stat e a leitura
 
 	for i := 0; i < n; i++ {
 		r := b[i*tam : (i+1)*tam]
@@ -191,12 +324,39 @@ func lerUtmp(f *Facts, e *env.Env, caminho string, falhou, agora bool) bool {
 		if sec := segundoDoRegistro(r, tam); sec > 0 {
 			l.QuandoU = time.Unix(sec, 0).UTC().Format("2006-01-02T15:04:05Z")
 		}
-		if l.User == "" && l.Tipo != TipoBoot {
+		// O TIPO decide o que entra, e não o campo de usuário.
+		//
+		// O guarda anterior era `User == "" && Tipo != TipoBoot`, e ele
+		// descartava — ANTES de qualquer consumidor ver — justamente os
+		// registros que não têm conta POR NATUREZA: RUN_LVL (o desligamento),
+		// OLD_TIME/NEW_TIME (a mudança de relógio) e o DEAD_PROCESS cujo slot
+		// já foi zerado. O coletor não decide o que um tipo significa — quem
+		// decide é quem lê —, e ele estava decidindo por omissão.
+		//
+		// O desligamento é o que mais custava: o intervalo entre ele e o boot
+		// seguinte é o tempo em que o host comprovadamente não observou nada, e
+		// é o que uma investigação precisa delimitar.
+		if l.Tipo == TipoVazio || (l.User == "" && !tipoSemUsuario(l.Tipo)) {
 			continue
+		}
+		// Contado só sobre o que ENTRA no inventário: o registro descartado
+		// acima é slot vazio do arquivo, e não um evento cuja data se perdeu.
+		if l.QuandoU == "" {
+			src.SemData++
 		}
 		f.Logins = append(f.Logins, l)
 	}
 	return true
+}
+
+// tipoSemUsuario são os tipos de registro que não carregam conta por natureza.
+// Exigir usuário deles é exigir um campo que o formato não preenche.
+func tipoSemUsuario(t int) bool {
+	switch t {
+	case TipoBoot, TipoRunLevel, TipoTempoAntigo, TipoTempoNovo, TipoSaida:
+		return true
+	}
+	return false
 }
 
 // lerFatia lê `quanto` bytes a partir de `de`. Existe porque o utmp é o único

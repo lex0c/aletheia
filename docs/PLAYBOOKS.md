@@ -15,12 +15,14 @@ A forma mais simples de pensar na CLI é:
 preciso de uma visão rápida?             -> wtf
 quero uma triagem completa agora?        -> scan
 quero entender um processo/arquivo/IP?   -> info
+o que ACONTECEU aqui recentemente?       -> activity (Cenário 21)
 a evidência pode desaparecer?            -> preserve
 quero sair rápido do host?               -> collect
 quero analisar depois/offline?           -> analyze
 suspeito que o host esteja escondendo?   -> scan --root
 o comportamento aparece e some?          -> watch
 tenho um estado conhecido anterior?       -> baseline
+o que MUDOU desde um retrato que eu tinha? -> drift (Cenário 13)
 quero saber exatamente quais regras há?  -> checks
 não confio no binário que está no host?  -> mídia read-only (Cenário 14)
 quero um agente investigando?            -> mcp (Cenários 16-19)
@@ -990,3 +992,110 @@ Os mesmos fatos alimentam os checks `cross.hidden_pid`, `cross.socket_view`,
 `cross.module_view` e `cross.thread_count` (§35). A tool não conclui nada que o
 motor já não conclua — ela dá acesso ao **detalhe** que o veredito comprime num
 booleano.
+
+---
+
+## Cenário 21: "Não achei implante nenhum, e mesmo assim algo aconteceu aqui"
+
+É o caso mais comum de todos, e o que os outros vinte fluxos não cobrem:
+credencial roubada, ferramenta legítima, e uma sequência operacional que não
+deveria ter acontecido. Não há binário para achar nem hash para comparar — o
+`scan` sai limpo e o host foi usado assim mesmo.
+
+O que sobra é o rastro do USO, e ele mora em duas testemunhas que não falam a
+mesma língua: o registro binário (`wtmp`/`btmp`/`utmp`) tem o instante exato e a
+tty; o log em texto tem o método, o fingerprint da chave, o `COMMAND=` do sudo e
+a conta criada. O `activity` junta as duas.
+
+Comece pelo quadro das últimas 24h:
+
+```sh
+sudo ./aletheia activity
+```
+
+Descobriu a hora do alerta? Recorte a vizinhança dela, que é a pergunta que se
+faz de verdade num incidente:
+
+```sh
+sudo ./aletheia activity --around 2026-08-25T03:15Z --window 30m
+```
+
+Achou uma conta ou uma origem que não reconhece? Siga por ela:
+
+```sh
+sudo ./aletheia activity --since 7d --user deploy
+sudo ./aletheia activity --since 7d --ip 185.44.1.7
+sudo ./aletheia activity --since 7d --group-by ip
+```
+
+Use este fluxo para perguntas como:
+
+```text
+"quem entrou aqui, de onde, e quando?"
+"quantas tentativas recusadas este host recebeu, e de quantas origens?"
+"o que aconteceu em volta do horário do alerta?"
+"esta origem já tinha aparecido antes?"
+"há alguém logado agora que eu não reconheço?"
+```
+
+### A parte que decide: leia o rodapé
+
+Toda saída do comando termina com a cobertura POR FONTE, e é ela que separa
+"não aconteceu" de "não olhei":
+
+```text
+cobertura
+  wtmp   2026-08-11T09:12Z → 2026-08-26T14:31Z · 2000 de 57412 registros (TRUNCADO…)
+  btmp   NÃO EXAMINADO — permission denied
+  auth   FORA DE ESCOPO — não há arquivo de log da família auth neste host
+         via: journalctl --utc --since "2026-08-25 14:31:00"
+  pedido --since 7d: wtmp alcança 2h16m (há rotacionado fechado ao lado) ·
+                     audit alcança 8h32m
+```
+
+Três leituras que mudam o que você conclui:
+
+```text
+NÃO EXAMINADO       rode com sudo. Sem root o btmp é ilegível, e "nenhuma
+                    recusa" ali seria sobre um arquivo que ninguém abriu
+FORA DE ESCOPO      o host é journald-only (Debian 12, Fedora, RHEL moderno,
+                    Arch). Metade rica do comando não existe ali, e a via está
+                    nomeada — o comando ao lado roda
+pedido … alcança    você pediu mais passado do que foi lido. Afirmar ausência
+                    fora desse intervalo é afirmar sobre o que ninguém observou
+```
+
+O quarto caso é o mais sutil, e aparece assim:
+
+```text
+  wtmp   [intervalo NÃO comparável] … · RELÓGIO ALTERADO nesta faixa
+                                        (ver sistema.clock_changed)
+```
+
+O `wtmp` registrou uma mudança de relógio, então os carimbos dos dois lados do
+salto vêm de réguas diferentes e nenhum alcance é afirmável — no `wtf` a mesma
+coisa sai como `alcance indeterminado (relógio alterado)`. `date -s`, salto de
+NTP e restore de snapshot de VM produzem isso, sem precisar de atacante.
+
+### O que o comando NÃO faz
+
+Ele **reconstrói**; não conclui. Sai 0 sempre, salvo erro de invocação — quem
+acusa é o `scan`, que traz os falsos positivos junto. Se você quer o veredito
+sobre força bruta que teve sucesso, ele é um check (`auth.bruteforce_success`) e
+aparece no `wtf` e no `scan`.
+
+E ele lê só a geração VIVA de `wtmp`/`btmp`. A cobertura declara quantas
+rotacionadas ficaram fechadas ao lado; para alcançá-las, hoje, é `last -f
+/var/log/wtmp.1` à mão (§12 do runbook).
+
+### Sobre um retrato, do lado limpo
+
+O fluxo do Cenário 5 vale aqui igual: colete rápido no host, investigue fora.
+
+```sh
+sudo ./aletheia collect --out /mnt/ir/host-01/retrato.json
+./aletheia activity --from /mnt/ir/host-01/retrato.json --since 7d
+```
+
+A janela conta do relógio **do retrato**, e não do de hoje: `--since 24h` sobre
+um dump de três semanas atrás significa as 24 horas anteriores àquele retrato.

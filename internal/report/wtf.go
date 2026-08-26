@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lex0c/aletheia/internal/activity"
 	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/facts"
@@ -15,6 +16,11 @@ import (
 // maxWtfLinhas mantém a promessa de UMA TELA. O que não couber vira uma linha
 // dizendo quanto ficou de fora — nunca corte silencioso.
 const maxWtfLinhas = 8
+
+// janelaDeAtividade é o recorte do bloco de atividade. Vinte e quatro horas é o
+// que o operador quer dizer quando pergunta "o que aconteceu aqui?" no começo
+// de um plantão, e é curto o bastante para o número caber numa linha.
+const janelaDeAtividade = 24 * time.Hour
 
 // Wtf responde uma pergunta diferente do scan: acabei de ser acionado, este
 // host está pegando fogo? (SPEC 6.1)
@@ -29,6 +35,17 @@ const maxWtfLinhas = 8
 func Wtf(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, elapsed time.Duration, catalogo int, bl *BaselineInfo, cor bool) {
 	t := temaPara(cor)
 	writeWtfHeader(w, t, f, e)
+	// O bloco de ATIVIDADE vem antes dos achados, e é de propósito: ele é o
+	// DENOMINADOR. "47 falhas seguidas de sucesso" é uma frase diferente num
+	// host que recebeu 12.000 tentativas e num que recebeu 50, e quem lê o
+	// achado primeiro já decidiu antes de ver o contexto.
+	//
+	// A janela é FIXA em 24h e não tem flag. O `--since` do scan já significa
+	// outra coisa — ele recorta o RELATÓRIO —, e dar dois sentidos à mesma flag
+	// custa mais do que a flag vale. Quem quer outra janela tem destino
+	// nomeado, que é o `activity`.
+	atv := activity.Resumir(f, e.Now, janelaDeAtividade)
+	writeAtividade(w, t, atv, e.Now)
 	writeBaseline(w, bl)
 
 	sobra := catalogo - r.Coverage.Total
@@ -43,6 +60,13 @@ func Wtf(w io.Writer, r *check.Report, f *facts.Facts, e *env.Env, elapsed time.
 	}
 
 	writeWtfGaps(w, t, r)
+	// O destino nomeado do que não coube. O `wtf` decide POR ONDE COMEÇAR e
+	// cabe numa tela; quem quer outra janela, outra conta ou a linha do tempo
+	// inteira tem um comando para isso, e mandar o operador adivinhar qual
+	// seria desperdiçar a única linha que ele lê depois do veredito.
+	if atv.Coletado() {
+		fmt.Fprintln(w, t.fraco("atividade em detalhe: `aletheia activity --since 24h`"))
+	}
 	writeWtfResult(w, t, r, elapsed, sobra)
 }
 

@@ -238,7 +238,20 @@ func ActivityCobertura(w io.Writer, fontes []activity.Fonte, f *facts.Facts,
 		fmt.Fprintln(w, t.fraco("  "+pad(nomeDoPapel(s.Papel), 7)+Safe(coberturaBinaria(s))))
 	}
 
+	// A linha do PEDIDO cobre as fontes BINÁRIAS também.
+	//
+	// Ela nasceu olhando só para as famílias de log, e o efeito era o silêncio
+	// justamente onde a leitura de login é mais curta: um `--since 7d` contra
+	// um wtmp que alcança duas horas não produzia aviso nenhum. A informação
+	// estava nas linhas de cima, e a linha que existe para RESUMIR o
+	// descompasso pulava metade das fontes.
 	var curtas []string
+	for _, s := range fontes {
+		if s.Papel == facts.PapelSessoes || !s.Lida() || s.CobreJanela || desde == "" {
+			continue
+		}
+		curtas = append(curtas, nomeDoPapel(s.Papel)+" "+motivoDoCurto(s, agora))
+	}
 	for _, fam := range familiasDeAtividade {
 		c := f.CoberturaLog(fam)
 		fmt.Fprintln(w, t.fraco("  "+pad(fam, 7)+Safe(coberturaDeFamilia(f, c))))
@@ -328,6 +341,23 @@ func notaDoAuditd(f *facts.Facts) string {
 			"configuração, não o host"
 	}
 	return ""
+}
+
+// motivoDoCurto diz POR QUE aquela fonte não sustenta a janela pedida. As três
+// razões mandam o operador para lugares diferentes: rodar com sudo, abrir a
+// geração rotacionada, ou desconfiar do relógio.
+func motivoDoCurto(s activity.Fonte, agora time.Time) string {
+	switch {
+	case s.RelogioAlterado:
+		return "não demonstrável (relógio alterado)"
+	case s.Desde == "":
+		return "sem registro datável"
+	}
+	alc := s.Alcance(agora)
+	if s.GeracoesNaoLidas > 0 {
+		return "alcança " + alc + " (há rotacionado fechado ao lado)"
+	}
+	return "alcança " + alc
 }
 
 func coberturaBinaria(s activity.Fonte) string {

@@ -164,3 +164,56 @@ func TestTimelineIsolaOSemDataENaoQuebraComDataCurta(t *testing.T) {
 			"próprio:\n%s", out)
 	}
 }
+
+// A linha do PEDIDO precisa cobrir as fontes BINÁRIAS também.
+//
+// Ela nasceu olhando só para as famílias de log, e o silêncio caía justamente
+// onde a leitura de login é mais curta: um `--since 7d` contra um wtmp que
+// alcança duas horas não produzia aviso nenhum. A informação estava nas linhas
+// de cima, e a linha que existe para RESUMIR o descompasso pulava metade das
+// fontes.
+func TestPedidoNomeiaTambemAFonteBinariaCurta(t *testing.T) {
+	casos := []struct {
+		nome  string
+		fonte activity.Fonte
+		quer  string
+	}{
+		{"alcance curto com rotacionado ao lado", activity.Fonte{
+			Papel: facts.PapelHistorico, Estado: facts.FonteLoginLida,
+			Desde: "2026-08-26T10:00:00Z", Ate: "2026-08-26T12:00:00Z",
+			Lidos: 3, GeracoesNaoLidas: 1,
+		}, "wtmp alcança 2h (há rotacionado fechado ao lado)"},
+
+		{"relógio alterado", activity.Fonte{
+			Papel: facts.PapelHistorico, Estado: facts.FonteLoginLida,
+			Desde: "2026-08-20T10:00:00Z", Ate: "2026-08-26T12:00:00Z",
+			Lidos: 4, RelogioAlterado: true,
+		}, "wtmp não demonstrável (relógio alterado)"},
+
+		{"lida e sem registro datável", activity.Fonte{
+			Papel: facts.PapelHistorico, Estado: facts.FonteLoginLida, Lidos: 2,
+		}, "wtmp sem registro datável"},
+	}
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			out := rodape(&facts.Facts{LogEstado: facts.LogColetado},
+				[]activity.Fonte{c.fonte}, "2026-08-19T12:00:00Z")
+			if !strings.Contains(out, c.quer) {
+				t.Errorf("a linha do pedido não citou %q:\n%s", c.quer, out)
+			}
+		})
+	}
+
+	// E a fonte que COBRE a janela não entra na lista: um aviso que aparece
+	// sempre é um aviso que ninguém lê.
+	cobre := activity.Fonte{
+		Papel: facts.PapelHistorico, Estado: facts.FonteLoginLida,
+		Desde: "2026-08-01T00:00:00Z", Ate: "2026-08-26T12:00:00Z",
+		Lidos: 90, CobreJanela: true,
+	}
+	out := rodape(&facts.Facts{LogEstado: facts.LogColetado},
+		[]activity.Fonte{cobre}, "2026-08-19T12:00:00Z")
+	if strings.Contains(out, "pedido") {
+		t.Errorf("fonte que cobre a janela apareceu como curta:\n%s", out)
+	}
+}

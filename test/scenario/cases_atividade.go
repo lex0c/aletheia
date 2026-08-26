@@ -13,6 +13,8 @@ package scenario
 //	A3  o mesmo login em duas fontes  UM evento, com as duas testemunhas
 //	A4  --around                    a vizinhança do alerta, e só ela
 //	A5  --summary                   os agregados contam o que a timeline mostra
+//	A6  --from                      o retrato reconstrói, e o campo hostil não escapa
+//	A7  relógio alterado            a régua quebrou: nenhum alcance é afirmado
 
 func init() {
 	Register(Scenario{
@@ -192,5 +194,62 @@ func init() {
 			"btmp",
 		},
 		Exit: 0,
+	})
+
+	Register(Scenario{
+		ID:   "A6-from-reconstroi-a-partir-do-retrato",
+		Desc: "collect e depois activity --from: o caminho que consome artefato de origem não confiável, de ponta a ponta",
+		// O `--from` era o único caminho do comando sem teste NENHUM — e é
+		// justamente o que lê um arquivo que a ferramenta não produziu nesta
+		// execução. Um bump de esquema ou uma mudança no dump o quebrariam em
+		// silêncio.
+		//
+		// O plantio roda o próprio binário: o harness monta /aletheia no
+		// contêiner, então o retrato nasce aqui dentro e é lido aqui dentro.
+		Images: []string{"debian:12"},
+		Cmd:    "activity",
+		Args:   []string{"--from", "/tmp/retrato.json", "--since", "24h"},
+		Plant: `/helper utmp /var/log/wtmp 7 deploy 185.44.1.7 2
+			printf '%s alvo sshd[1000]: Accepted publickey for deploy from 185.44.1.7 port 55123 ssh2: RSA SHA256:DoRetrato\n' \
+				"$(date -u '+%b %e %H:%M:%S')" > /var/log/auth.log
+			/aletheia collect --out /tmp/retrato.json --no-progress >/dev/null 2>&1`,
+		ExpectOutput: []string{
+			// A reconstrução sai do RETRATO, com a fusão intacta.
+			"SHA256:DoRetrato",
+			"wtmp+log:/var/log/auth.log",
+			// E a cobertura viaja junto: uma linha do tempo sem o alcance de
+			// quem a testemunhou não sustenta afirmação nenhuma, e num dump
+			// isso vale ainda mais — quem lê já não tem o host.
+			"cobertura",
+			"wtmp",
+		},
+		ForbidOutput: []string{
+			"activity --from:",
+			"nenhum evento no recorte pedido",
+		},
+		Exit: 0,
+	})
+
+	Register(Scenario{
+		ID:   "A7-relogio-alterado-nao-afirma-alcance",
+		Desc: "com OLD_TIME/NEW_TIME no histórico, os carimbos dos dois lados vêm de relógios diferentes e nenhum alcance é afirmado",
+		// `date -s`, salto de NTP, restore de snapshot de VM e relógio de
+		// hardware quebrado produzem esta forma — não precisa de atacante. O
+		// utmp registra o par, então o fato está lá; o que faltava era a
+		// cobertura consultá-lo antes de calcular alcance por min(timestamp).
+		Images: []string{"debian:12"},
+		Cmd:    "wtf",
+		Plant: `/helper utmp /var/log/wtmp 7 deploy 185.44.1.7 1
+			/helper utmp /var/log/wtmp 3 "" "" 1
+			/helper utmp /var/log/wtmp 4 "" "" 1`,
+		ExpectOutput: []string{
+			"alcance indeterminado (relógio alterado)",
+		},
+		ForbidOutput: []string{
+			// A afirmação que a guarda existe para impedir.
+			"wtmp ≥24h",
+		},
+		MaxWarn: SemAvisos,
+		Exit:    -1,
 	})
 }

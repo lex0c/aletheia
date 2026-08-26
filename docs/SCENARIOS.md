@@ -3,7 +3,7 @@
 GERADO de `internal/checks` e `test/scenario`. Não edite à mão:
 `go test ./test/scenario -run TestDocumentoDeCenarios -update`.
 
-133 checks, 259 cenários.
+133 checks, 261 cenários.
 
 Um **check** é uma pergunta que a ferramenta faz ao host. Um **cenário** é um
 host montado de propósito — em contêiner, imagem ou microVM — que prova a
@@ -294,6 +294,8 @@ contêiner não alcança — hidepid, sysctl, módulo, cgroup, eBPF.
 | `A5-agregados-contam-o-que-a-timeline-mostra` | live | --summary conta o que a linha do tempo mostra, e traz a cobertura junto |
 | `A5-ativacao-por-socket` | live | backdoor que só existe quando alguém conecta: no retrato, não há processo nem porta suspeita |
 | `A6-dentro-de-runtime-com-jit` | live | o implante roda DENTRO de um runtime com JIT: a isenção some com o achado, e precisa aparecer como LACUNA |
+| `A6-from-reconstroi-a-partir-do-retrato` | live | collect e depois activity --from: o caminho que consome artefato de origem não confiável, de ponta a ponta |
+| `A7-relogio-alterado-nao-afirma-alcance` | live | com OLD_TIME/NEW_TIME no histórico, os carimbos dos dois lados vêm de relógios diferentes e nenhum alcance é afirmado |
 | `A8-listener-fechado-inverte-a-direcao` | live | serviço que fecha o listener depois do accept: a inferência de direção invertia, e o §17 acusava uma conexão de ENTRADA |
 | `A9-allowlist-do-sshd-em-usr-local` | live | backdoor com nome de integração conhecida em /usr/local/bin: a isenção do AuthorizedKeysCommand era dada de graça |
 | `B1-baseline-cala-o-conhecido` | live | servidor legítimo com baseline: o acúmulo de dois anos cala e o implante novo grita |

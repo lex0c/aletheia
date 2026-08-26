@@ -128,6 +128,12 @@ func alcance(s activity.Fonte, r activity.Resumo, agora time.Time) string {
 
 	var alc string
 	switch {
+	case s.RelogioAlterado:
+		// NENHUM número aqui. O intervalo entre o carimbo mais antigo e o mais
+		// recente atravessa o salto, então ele é a diferença entre dois
+		// relógios — imprimi-lo com uma ressalva ao lado ainda oferece ao
+		// operador um número que não mede nada.
+		return "alcance indeterminado (relógio alterado)"
 	case s.CobreJanela && s.Desde != "":
 		alc = "≥" + r.JanelaSolicitada
 	case s.Desde != "":

@@ -345,11 +345,21 @@ func coberturaBinaria(s activity.Fonte) string {
 		return strconv.Itoa(s.Lidos) + " registro(s), nenhum datável"
 	}
 	out := s.Desde + " → " + s.Ate + " · " + strconv.Itoa(s.Lidos)
+	if s.RelogioAlterado {
+		// O intervalo continua impresso — ele é o que os carimbos DIZEM, e o
+		// operador precisa vê-lo —, mas com a ressalva colada, porque as duas
+		// pontas vêm de relógios diferentes.
+		out = "[intervalo NÃO comparável] " + out
+	}
 	if s.Truncada {
 		out += " de " + strconv.Itoa(s.Total) + " registros (TRUNCADO: o que veio " +
 			"antes não foi examinado)"
 	} else {
 		out += " registro(s), lido inteiro"
+	}
+	if s.RelogioAlterado {
+		out += " · RELÓGIO ALTERADO nesta faixa (ver sistema.clock_changed): o " +
+			"alcance não é demonstrável"
 	}
 	if s.SemData > 0 {
 		out += " · " + strconv.Itoa(s.SemData) + " sem data"

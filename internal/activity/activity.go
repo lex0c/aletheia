@@ -70,6 +70,17 @@ type Fonte struct {
 	// destruída, que alguém precisa poder conferir qual foi.
 	TamRegistro int `json:"record_size,omitempty"`
 
+	// RelogioAlterado marca que há registro de MUDANÇA DE RELÓGIO entre os que
+	// esta fonte entregou.
+	//
+	// Ele destrói a comparabilidade das datas dos dois lados do salto — e é o
+	// próprio utmp que registra o par OLD_TIME/NEW_TIME, então a informação
+	// está ali. Sem consultá-la, o alcance era calculado como min(timestamp), e
+	// um relógio que voltou três dias fazia um arquivo de poucas horas afirmar
+	// `wtmp ≥24h`. Não precisa de atacante: `date -s`, salto de NTP, restore de
+	// snapshot de VM e relógio de hardware quebrado produzem a mesma forma.
+	RelogioAlterado bool `json:"clock_changed,omitempty"`
+
 	// GeracoesNaoLidas conta os arquivos ROTACIONADOS desta série que existem
 	// ao lado e que a coleta de login não abre.
 	//
@@ -180,6 +191,12 @@ func Resumir(f *facts.Facts, agora time.Time, janela time.Duration) Resumo {
 	// origensAntes é o histórico ANTERIOR à janela, e é ele que dá sentido a
 	// "não observada antes".
 	origensAntes := map[string]bool{}
+	// origensSemData são as que apareceram em registro que não pôde ser datado.
+	// Elas NÃO podem ser chamadas de não-observadas-antes: elas FORAM
+	// observadas, e o que falta é saber se foi antes ou dentro da janela. A
+	// incerteza já está contada em Fonte.SemData; aqui ela precisa ser
+	// respeitada em vez de virar uma afirmação temporal que o registro impede.
+	origensSemData := map[string]bool{}
 	recusasPorOrigem := map[string]int{}
 
 	for i := range f.Logins {
@@ -202,6 +219,9 @@ func Resumir(f *facts.Facts, agora time.Time, janela time.Duration) Resumo {
 		// não some: está contado em Fonte.SemData, que é onde a ausência fica
 		// declarada em vez de virar silêncio.
 		if l.QuandoU == "" {
+			if facts.OrigemDeRede(l.Origem) {
+				origensSemData[l.Origem] = true
+			}
 			continue
 		}
 		naJanela := l.QuandoU >= r.Desde
@@ -252,7 +272,7 @@ func Resumir(f *facts.Facts, agora time.Time, janela time.Duration) Resumo {
 	if h, ok := r.Fonte(facts.PapelHistorico); ok && h.Lida() && h.Desde != "" && h.Desde < r.Desde {
 		r.OrigensNaoObservadasAntesCalc = true
 		for o := range origens {
-			if !origensAntes[o] {
+			if !origensAntes[o] && !origensSemData[o] {
 				r.OrigensNaoObservadasAntes++
 			}
 		}
@@ -292,12 +312,16 @@ func Cobertura(f *facts.Facts, desde string) []Fonte {
 	// de onde ele veio é o que diz se aquilo foi entrada, tentativa recusada ou
 	// sessão aberta.
 	extremos := map[string][2]string{}
+	saltou := map[string]bool{}
 	for i := range f.Logins {
 		l := &f.Logins[i]
+		p := papelDoLogin(l)
+		if l.Tipo == facts.TipoTempoAntigo || l.Tipo == facts.TipoTempoNovo {
+			saltou[p] = true
+		}
 		if l.QuandoU == "" {
 			continue
 		}
-		p := papelDoLogin(l)
 		e, ok := extremos[p]
 		if !ok {
 			extremos[p] = [2]string{l.QuandoU, l.QuandoU}
@@ -324,6 +348,7 @@ func Cobertura(f *facts.Facts, desde string) []Fonte {
 		if e, ok := extremos[s.Papel]; ok {
 			fo.Desde, fo.Ate = e[0], e[1]
 		}
+		fo.RelogioAlterado = saltou[s.Papel]
 		// As sessões abertas são o AGORA por construção: a pergunta de janela
 		// não se aplica a elas.
 		// A ÚNICA prova positiva de alcance é uma ÂNCORA OBSERVADA anterior ao
@@ -349,6 +374,17 @@ func Cobertura(f *facts.Facts, desde string) []Fonte {
 			// janela não se aplica a elas.
 			fo.CobreJanela = fo.Lida()
 		case !fo.Lida() || desde == "" || fo.Desde == "":
+			fo.CobreJanela = false
+		case fo.RelogioAlterado:
+			// O RELÓGIO SALTOU dentro do que esta fonte entregou, e com ele o
+			// mínimo dos timestamps deixou de significar alcance: os registros
+			// dos dois lados do salto foram carimbados por relógios diferentes,
+			// e compará-los com o começo da janela é somar duas réguas.
+			//
+			// A recusa é do bloco inteiro, e não de um segmento: decidir QUAL
+			// lado do salto ainda vale exigiria confiar nos mesmos carimbos que
+			// o salto tornou incomparáveis. O evento fica na linha do tempo
+			// (sistema.clock_changed) dizendo por que a resposta é essa.
 			fo.CobreJanela = false
 		default:
 			fo.CobreJanela = fo.Desde <= desde

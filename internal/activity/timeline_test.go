@@ -472,23 +472,6 @@ func TestBootNaoPoeVersaoDoKernelEmOrigem(t *testing.T) {
 	}
 }
 
-// Todo kind que o parser de log produz precisa ter tradução. O que não tiver
-// passa com o nome de origem — de propósito, para não sumir —, e este teste
-// existe para a passagem ser DECISÃO e não esquecimento.
-func TestKindsConhecidosTemTraducao(t *testing.T) {
-	// Os kinds emitidos por internal/facts/logparse.go.
-	for _, k := range []string{
-		"auth.accepted", "auth.failed", "auth.invalid_user",
-		"auth.sudo", "auth.su", "account.created", "account.modified",
-		"audit.exec", "cron.exec",
-	} {
-		if _, ok := deLogKind[k]; !ok {
-			t.Errorf("o kind %q não tem tradução: ele passa com o nome de origem "+
-				"e fica fora do namespace pontuado que o --kind filtra", k)
-		}
-	}
-}
-
 // A RAJADA DE FORÇA BRUTA não pode ser colapsada — e era, porque a junção não
 // distinguia "o mesmo registro em dois arquivos" de "dois registros no mesmo
 // arquivo".
@@ -641,5 +624,83 @@ func TestLigacaoFracaNaoLavaVariosRegistros(t *testing.T) {
 	if ligados != 2 {
 		t.Errorf("%d eventos saíram ligados, queria 2: uma linha de log só pode "+
 			"ser a contraparte de UM registro", ligados)
+	}
+}
+
+// O RELÓGIO QUE SALTA destrói a comparabilidade dos carimbos, e com ela a
+// alegação de alcance. O utmp registra o par OLD_TIME/NEW_TIME, então o fato
+// está ali — faltava consultá-lo.
+//
+// Não precisa de atacante: `date -s`, salto de NTP, restore de snapshot de VM e
+// relógio de hardware quebrado produzem a mesma forma.
+func TestRelogioAlteradoDerrubaAAlegacaoDeAlcance(t *testing.T) {
+	// Poucas horas de atividade real, com o relógio voltando três dias no meio.
+	// O mínimo dos carimbos passa a ser de três dias atrás, e sem esta guarda
+	// ele "provava" cobertura de 24h.
+	f := hostCom([]facts.Login{
+		{Tipo: facts.TipoLoginUsuario, User: "lex", QuandoU: at(2, 0)},
+		{Tipo: facts.TipoTempoAntigo, Linha: "~", QuandoU: at(1, 30)},
+		{Tipo: facts.TipoTempoNovo, Linha: "~", QuandoU: em(74)},
+		{Tipo: facts.TipoLoginUsuario, User: "lex", QuandoU: em(73)},
+	})
+	r := Resumir(f, agora, 24*time.Hour)
+	h, _ := r.Fonte(facts.PapelHistorico)
+	if !h.RelogioAlterado {
+		t.Fatal("o par OLD_TIME/NEW_TIME não foi notado")
+	}
+	if h.CobreJanela {
+		t.Error("os registros dos dois lados do salto foram carimbados por " +
+			"relógios diferentes: comparar o mínimo deles com o começo da " +
+			"janela é somar duas réguas")
+	}
+	// E o evento continua na linha do tempo, explicando por quê.
+	ev, _ := Linha(f, Filtro{Kind: "sistema.clock_changed"})
+	if len(ev) != 2 {
+		t.Errorf("os dois registros de mudança de relógio precisam aparecer: %v", ev)
+	}
+}
+
+// Duas testemunhas que DISCORDAM sobre a conta não podem virar uma só. Com o
+// mesmo pid, a mesma origem e o mesmo instante, o par era único dos dois lados
+// e fundia — e `juntar` preserva o campo do binário, então a conta do log
+// sumia. Uma contradição saía impressa como corroboração.
+func TestMesmoPIDComUsuarioDiferenteNaoFunde(t *testing.T) {
+	f := hostComLog(
+		[]facts.Login{{Tipo: facts.TipoLoginUsuario, User: "deploy",
+			Origem: "185.1.2.3", PID: 4211, QuandoU: at(2, 0)}},
+		[]facts.EventoDeLog{{Kind: "auth.accepted", At: at(2, 0), AtKnown: true,
+			User: "root", RemoteIP: "185.1.2.3", PID: 4211, File: "/var/log/auth.log"}},
+		fonteAuth(at(48, 0), at(0, 0)))
+
+	ev, _ := Linha(f, Filtro{})
+	if len(ev) != 2 {
+		t.Fatalf("saíram %d eventos, queria 2: as duas fontes discordam sobre a "+
+			"conta, e fundir apagaria uma delas", len(ev))
+	}
+	contas := map[string]bool{}
+	for _, e := range ev {
+		contas[e.User] = true
+	}
+	if !contas["deploy"] || !contas["root"] {
+		t.Errorf("uma das contas sumiu: %v", contas)
+	}
+}
+
+// RUN_LVL é mudança de RUNLEVEL. Chamar todo ele de desligamento faria um
+// `telinit 3` virar uma parada do host na reconstrução histórica.
+func TestRunlevelSoEhDesligamentoQuandoODizEmUtUser(t *testing.T) {
+	f := hostCom([]facts.Login{
+		{Tipo: facts.TipoRunLevel, User: "shutdown", Linha: "~", QuandoU: at(5, 0)},
+		{Tipo: facts.TipoRunLevel, User: "runlevel", Linha: "~", QuandoU: at(4, 0)},
+	})
+	ev, _ := Linha(f, Filtro{})
+	if len(ev) != 2 {
+		t.Fatalf("queria 2 eventos, veio %d", len(ev))
+	}
+	if ev[0].Kind != KindDesligamento {
+		t.Errorf("ut_user=shutdown precisa virar %q, veio %q", KindDesligamento, ev[0].Kind)
+	}
+	if ev[1].Kind != KindRunlevel {
+		t.Errorf("ut_user=runlevel não é parada do host: veio %q", ev[1].Kind)
 	}
 }

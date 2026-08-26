@@ -51,6 +51,14 @@ const (
 
 	KindExecAudit Kind = "exec.audit"
 	KindExecCron  Kind = "exec.cron"
+
+	KindRunlevel      Kind = "sistema.runlevel"
+	KindServicoFalhou Kind = "sistema.service_failed"
+	KindAuditPerdido  Kind = "sistema.audit_lost"
+
+	KindSegfault        Kind = "kernel.segfault"
+	KindOOM             Kind = "kernel.oom"
+	KindModuloCarregado Kind = "kernel.module_loaded"
 )
 
 // deLogKind traduz o kind do fato para o desta linha do tempo.
@@ -60,15 +68,20 @@ const (
 // de atualizar esta tabela. Sumir de uma reconstrução histórica por causa de um
 // mapa desatualizado é pior que aparecer com o nome errado.
 var deLogKind = map[string]Kind{
-	"auth.accepted":     KindLoginAceito,
-	"auth.failed":       KindLoginRecusado,
-	"auth.invalid_user": KindLoginRecusado,
-	"auth.sudo":         KindSudo,
-	"auth.su":           KindSu,
-	"account.created":   KindContaCriada,
-	"account.modified":  KindContaModificada,
-	"audit.exec":        KindExecAudit,
-	"cron.exec":         KindExecCron,
+	"auth.accepted":        KindLoginAceito,
+	"auth.failed":          KindLoginRecusado,
+	"auth.invalid_user":    KindLoginRecusado,
+	"auth.sudo":            KindSudo,
+	"auth.su":              KindSu,
+	"account.created":      KindContaCriada,
+	"account.modified":     KindContaModificada,
+	"audit.exec":           KindExecAudit,
+	"cron.exec":            KindExecCron,
+	"service.failed":       KindServicoFalhou,
+	"audit.lost":           KindAuditPerdido,
+	"kernel.segfault":      KindSegfault,
+	"kernel.oom":           KindOOM,
+	"kernel.module_loaded": KindModuloCarregado,
 }
 
 // ForcaDaFusao ordena a EVIDÊNCIA da ligação entre duas testemunhas.
@@ -272,14 +285,21 @@ func PrefixoValido(prefixo string) bool {
 	return false
 }
 
-// TodosOsKinds é o namespace publicado. Kind que o parser produza e que não
-// esteja aqui continua aparecendo na linha do tempo — ver deLogKind —, mas não
-// é oferecido como filtro.
+// TodosOsKinds é o namespace publicado, e ele precisa cobrir TUDO que aparece
+// na linha do tempo.
+//
+// Kind não mapeado continua passando com o nome de origem — ver deLogKind, e é
+// decisão —, mas quando ele passa E não está aqui, o comando fica incoerente
+// consigo mesmo: `activity` imprime `kernel.oom`, e `activity --kind kernel`
+// responde que o tipo não existe. A catraca em TestKindsDoParserTemTraducao
+// trava os dois lados.
 var TodosOsKinds = []Kind{
 	KindLoginAceito, KindLoginRecusado, KindSessaoAberta, KindSessaoFechada,
-	KindBoot, KindDesligamento, KindRelogioAlterado,
+	KindBoot, KindDesligamento,
 	KindSudo, KindSu, KindContaCriada, KindContaModificada,
 	KindExecAudit, KindExecCron,
+	KindRunlevel, KindRelogioAlterado, KindServicoFalhou, KindAuditPerdido,
+	KindSegfault, KindOOM, KindModuloCarregado,
 }
 
 func casaKind(k Kind, prefixo string) bool {
@@ -335,9 +355,20 @@ func deRegistros(f *facts.Facts) ([]Evento, map[string]int) {
 		}
 		switch {
 		case l.Tipo == facts.TipoBoot, l.Tipo == facts.TipoRunLevel:
+			// RUN_LVL é literalmente MUDANÇA DE RUNLEVEL. O desligamento é o
+			// caso que interessa, e não é o único: chamar todo RUN_LVL de
+			// `auth.shutdown` faria a linha do tempo contar uma história
+			// histórica errada — um `telinit 3` viraria uma parada do host.
+			//
+			// Quem separa é o ut_user, que o init preenche com "shutdown" ou
+			// "runlevel". O par de runlevels vive codificado no ut_pid, e
+			// decodificá-lo é trabalho para quando alguém precisar dele.
 			e.Kind = KindBoot
 			if l.Tipo == facts.TipoRunLevel {
-				e.Kind = KindDesligamento
+				e.Kind = KindRunlevel
+				if l.User == "shutdown" {
+					e.Kind = KindDesligamento
+				}
 			}
 			// O campo de origem destes registros carrega a VERSÃO DO KERNEL, e
 			// não um endereço. Deixá-lo em Origem faria um filtro por IP casar
@@ -652,9 +683,22 @@ func compativel(b, t *Evento, guarda time.Duration) bool {
 	if t.At == "" {
 		return false
 	}
-	// A chave por PID não exige acordo sobre a origem, e sem esta recusa dois
-	// eventos com endereços DIFERENTES podiam virar um só por reciclagem de
-	// pid — apagando um dos dois endereços da investigação.
+	// A chave por PID não exige acordo sobre CONTA nem sobre ORIGEM, e sem
+	// estas duas recusas duas testemunhas que DISCORDAM viravam uma só.
+	//
+	// O caso da conta é o mais grave, e é adversarialmente interessante: com
+	//
+	//	wtmp      03:15  deploy@185.1.2.3  pid=4211
+	//	auth.log  03:15  Accepted publickey for root from 185.1.2.3  sshd[4211]
+	//
+	// o par é único dos dois lados, fundia, e `juntar` preserva o campo do
+	// registro binário — então o `root` do log simplesmente sumia. Uma
+	// CONTRADIÇÃO entre visões saía impressa como corroboração
+	// (`⇄pid`), que é o oposto do que a fusão existe para produzir. Quem edita
+	// uma das duas testemunhas não pode conseguir isso.
+	if b.User != "" && t.User != "" && b.User != t.User {
+		return false
+	}
 	if b.Origem != "" && t.Origem != "" && b.Origem != t.Origem {
 		return false
 	}

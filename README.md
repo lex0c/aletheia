@@ -716,8 +716,10 @@ força sai impressa (`⇄pid`). Mas fundir REMOVE um registro da linha do tempo,
 então a fusão só acontece no par **mutuamente único**: se dois registros
 disputam a mesma linha de log — dois logins do mesmo usuário e origem a 50s um
 do outro cabem os dois em ±90s —, a resposta é "ligação plausível, identidade
-ambígua", e os dois eventos ficam. E sem o `/etc/localtime` do alvo não há
-fusão nenhuma, nem por pid: a igualdade do número não depende do relógio, mas a
+ambígua", e os dois eventos ficam. Testemunhas que **discordam** — mesmo pid e
+mesma origem, contas diferentes — nunca fundem: apagar a contradição a
+transformaria em corroboração. E sem o `/etc/localtime` do alvo não há fusão
+nenhuma, nem por pid: a igualdade do número não depende do relógio, mas a
 garantia de **não-reciclagem** depende.
 
 **A cobertura exige âncora observada.** A leitura de login é da cauda, com teto
@@ -727,8 +729,15 @@ fora — o logrotate roda no wtmp e no btmp. Então a única prova positiva de
 alcance é um registro **observado** anterior ao começo da janela: "li o arquivo
 inteiro e não há rotacionado ao lado hoje" não prova nada sobre trinta dias
 atrás, e arquivo vazio não cobre janela nenhuma (`: > /var/log/wtmp` deixa
-exatamente essa forma). Sem root o btmp é ilegível, e ali sai `NÃO EXAMINADO` —
+exatamente essa forma). Se o **relógio saltou** dentro do que foi lido — o utmp
+registra o par `OLD_TIME`/`NEW_TIME`, e `date -s`, NTP e restore de snapshot
+produzem isso —, os carimbos dos dois lados vêm de réguas diferentes e nenhum
+alcance é afirmado. Sem root o btmp é ilegível, e ali sai `NÃO EXAMINADO` —
 nunca "0 recusas".
+
+As gerações rotacionadas (`wtmp.1`, `btmp.1`) **ainda não são lidas** — só a
+viva. A cobertura declara quantas ficaram fechadas ao lado; abri-las é o
+próximo passo natural do comando.
 
 **Divergência é estreita de propósito.** "O wtmp viu e o auth.log não" tem a
 forma da manipulação de log — e tem, idêntica, a forma de várias coisas

@@ -267,3 +267,24 @@ func TestRecusaLocalContaNaTotalizacao(t *testing.T) {
 			r.TopOrigensRecusa)
 	}
 }
+
+// Origem vista num registro SEM DATA não pode ser chamada de "não observada
+// anteriormente": ela FOI observada, e o que falta é saber se foi antes ou
+// dentro da janela. Preferir não classificar a fazer uma afirmação temporal que
+// o registro impede.
+func TestOrigemVistaSemDataNaoEhNaoObservadaAntes(t *testing.T) {
+	f := hostCom([]facts.Login{
+		entrada("deploy", "10.0.0.1", 30),
+		{Tipo: facts.TipoLoginUsuario, User: "deploy", Origem: "185.44.1.7"},
+		entrada("deploy", "185.44.1.7", 2),
+	})
+	r := Resumir(f, agora, 24*time.Hour)
+	if !r.OrigensNaoObservadasAntesCalc {
+		t.Fatal("há âncora de 30h atrás: a pergunta pode ser feita")
+	}
+	if r.OrigensNaoObservadasAntes != 0 {
+		t.Errorf("= %d, queria 0: 185.44.1.7 aparece num registro sem data, e "+
+			"esse registro impede a afirmação em vez de sustentá-la",
+			r.OrigensNaoObservadasAntes)
+	}
+}

@@ -399,3 +399,69 @@ func TestManifestoRecusaSymlinkPlantado(t *testing.T) {
 		t.Errorf("o alvo do symlink foi escrito através do link: %q", b)
 	}
 }
+
+// O PRODUTO ESTOURAVA E O ESTOURO APAGAVA O TETO.
+//
+// `--pcap-max 9223372036854G` fazia n*mult passar de MaxInt64 e voltar
+// NEGATIVO. O consumidor confere `o.MaxBytes > 0` antes de aplicar o teto,
+// então um número negativo não é um teto pequeno: é teto NENHUM, numa captura
+// que grava tráfego bruto em disco até o disco acabar.
+func TestTamanhoRecusaEmVezDeEstourar(t *testing.T) {
+	casos := []struct {
+		entrada string
+		quer    int64
+		ok      bool
+	}{
+		{"64M", 64 << 20, true},
+		{"1G", 1 << 30, true},
+		{"1024", 1024, true},
+		// O estouro, nas três unidades.
+		{"9223372036854G", 0, false},
+		{"9223372036854776K", 0, false},
+		{"99999999999999999999M", 0, false},
+		// E o maior valor que ainda cabe continua aceito: recusar demais seria
+		// trocar um defeito por outro.
+		{"8589934591G", 8589934591 << 30, true},
+		{"0", 0, false},
+		{"-1G", 0, false},
+		{"", 0, false},
+		{"abc", 0, false},
+	}
+	for _, c := range casos {
+		got, ok := tamanho(c.entrada)
+		if ok != c.ok || (ok && got != c.quer) {
+			t.Errorf("tamanho(%q) = %d,%v; quer %d,%v", c.entrada, got, ok, c.quer, c.ok)
+		}
+		if got < 0 {
+			t.Errorf("tamanho(%q) devolveu NEGATIVO (%d): o consumidor lê isso "+
+				"como ausência de teto", c.entrada, got)
+		}
+	}
+}
+
+// O SNAPLEN VIRAVA UMA ALOCAÇÃO DIRETA.
+//
+// `buf := make([]byte, snap)` com o que o operador digitasse: `--snaplen
+// 2000000000` pedia 2 GB de uma vez. E o cabeçalho pcap guarda o snaplen num
+// uint32, então acima do teto o arquivo declararia um corte que não foi o
+// corte — um pcap com o rótulo errado é decodificado com confiança total a
+// partir do byte errado.
+func TestSnaplenForaDaFaixaEhRecusado(t *testing.T) {
+	casos := []struct {
+		snaplen int
+		quer    int
+	}{
+		{0, 0},                   // pacote inteiro
+		{1500, 0},                // típico
+		{pcap.MaxSnaplen, 0},     // o limite exato passa
+		{pcap.MaxSnaplen + 1, 3}, // um a mais não
+		{2000000000, 3},          // os 2 GB
+		{-1, 3},
+	}
+	for _, c := range casos {
+		_, code := montarCaptura(true, "lo", "", 0, "", true, time.Second, c.snaplen, "64M")
+		if code != c.quer {
+			t.Errorf("--snaplen %d: código %d, quer %d", c.snaplen, code, c.quer)
+		}
+	}
+}

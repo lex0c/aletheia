@@ -349,7 +349,7 @@ FLAGS DE preserve
                 credencial em claro de terceiros, e o arquivo não tem como ser
                 redigido depois
   --duration D  duração da captura (padrão 60s)
-  --snaplen N   bytes por pacote (0 = pacote inteiro)
+  --snaplen N   bytes por pacote (0 = pacote inteiro; máx 262144)
   --pcap-max S  teto do arquivo (padrão 256M)
 
   O filtro roda em ESPAÇO DE USUÁRIO. Um filtro de kernel errado descarta o que

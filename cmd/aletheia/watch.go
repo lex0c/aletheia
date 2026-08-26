@@ -168,6 +168,7 @@ func runWatch(args []string) int {
 		jsonW:    jw,
 		visto:    map[string]check.Finding{},
 		presente: map[string]bool{},
+		eventos:  novoRegistro(),
 		am:       novoAmostrador(),
 	}
 
@@ -234,9 +235,18 @@ type vigia struct {
 	// exit code — ver escreveJSON e exit.
 	jsonQuebrado bool
 
-	ciclos    int
-	amostras  int
-	eventos   []evento
+	ciclos   int
+	amostras int
+	// eventos é CONTAGEM mais exemplos, e não a lista inteira.
+	//
+	// Ela era um slice que crescia a cada transição, numa vigília que `--for 0`
+	// deixa indefinida. Um host que produz identidade nova continuamente —
+	// /tmp/x-1, /tmp/x-2, ... — fazia a memória e o tempo do resumo final
+	// crescerem sem teto, no comando cujo caso de uso é justamente ficar horas
+	// ligado. O evento já FOI emitido quando aconteceu, no humano e no JSONL:
+	// guardá-lo de novo só serve ao resumo, e o resumo não fica melhor com dez
+	// mil linhas.
+	eventos   registroDeEventos
 	pior      check.Severity
 	cobertura string
 	// semChave conta o que não pôde ser diferenciado entre ciclos.
@@ -245,6 +255,102 @@ type vigia struct {
 	// desliga: se a vigília ficou cega às 03:00, o exit não pode dizer que a
 	// noite foi tranquila só porque o último ciclo enxergou.
 	coberturaFalhou bool
+
+	// estadoEsgotado marca que o conjunto de identidades encheu, e com ele a
+	// vigília PERDEU a capacidade de distinguir "novo" de "já visto".
+	//
+	// É a mesma família de coberturaFalhou e jsonQuebrado: uma coisa que a
+	// ferramenta sabe que deixou de conseguir fazer, e que não pode terminar em
+	// exit 0.
+	estadoEsgotado bool
+	// naoClassificadas conta as OBSERVAÇÕES cuja novidade não pôde ser decidida
+	// depois disso. Não é contagem de identidades distintas: distingui-las
+	// exigiria guardá-las, que é exatamente o que o teto impede.
+	naoClassificadas int
+}
+
+// maxIdentidadesVigiadas é o teto do conjunto que responde "isto é novidade?".
+//
+// Cada identidade custa a chave mais um check.Finding (232 bytes), então
+// cinquenta mil são cerca de 15 MB — e cinquenta mil achados DISTINTOS num só
+// host é ordens de grandeza acima de qualquer varredura real, onde a conta fica
+// em dezenas.
+//
+// Ele não existe para hosts reais: existe porque `watch --for 0` é indefinido
+// por desenho, e um alvo que cria identidade nova a cada ciclo fazia o conjunto
+// crescer enquanto o comando estivesse ligado.
+const maxIdentidadesVigiadas = 50_000
+
+// maxExemplosPorTipo limita o que o resumo IMPRIME de cada tipo de transição. A
+// contagem continua exata; o que fica limitado é a lista, porque um resumo de
+// dez mil linhas não é lido por ninguém.
+const maxExemplosPorTipo = 100
+
+// registroDeEventos guarda contagem exata e exemplos limitados.
+type registroDeEventos struct {
+	total    map[string]int
+	exemplos map[string][]string
+}
+
+func novoRegistro() registroDeEventos {
+	return registroDeEventos{total: map[string]int{}, exemplos: map[string][]string{}}
+}
+
+func (r *registroDeEventos) anota(kind, linha string) {
+	if r.total == nil {
+		*r = novoRegistro()
+	}
+	r.total[kind]++
+	if len(r.exemplos[kind]) < maxExemplosPorTipo {
+		r.exemplos[kind] = append(r.exemplos[kind], linha)
+	}
+}
+
+func (r *registroDeEventos) vazio() bool {
+	for _, n := range r.total {
+		if n > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// lembra guarda a identidade e diz se ela COUBE no orçamento.
+//
+// Uma chave que já está lá é sempre atualizada — isso não faz o conjunto
+// crescer. Uma chave nova só entra se houver espaço; sem espaço, a resposta é
+// não, e quem chama para de emitir veredito de novidade sobre ela.
+//
+// Não é um LRU de propósito. Descartar a identidade mais antiga faria a
+// pergunta "isto é novo?" voltar a ser respondida — com "sim", sobre algo que a
+// vigília já tinha visto e esqueceu. Um teto que transforma a resposta certa em
+// resposta errada é pior que um teto que recusa a responder.
+func (w *vigia) lembra(k string, fd check.Finding) bool {
+	if _, ja := w.visto[k]; ja {
+		w.visto[k] = fd
+		return true
+	}
+	if len(w.visto) >= maxIdentidadesVigiadas {
+		w.naoClassificadas++
+		if !w.estadoEsgotado {
+			w.estadoEsgotado = true
+			agora := time.Now()
+			fmt.Fprintf(w.humano, "%s  ⚠ ESTADO ESGOTADO: %d identidades vigiadas, "+
+				"que é o teto.\n   A partir daqui a vigília não consegue mais dizer "+
+				"se um achado é NOVO ou se já tinha aparecido — os achados continuam "+
+				"sendo avaliados e continuam pesando no exit, o que se perdeu é o "+
+				"delta.\n", agora.Format("15:04:05"), maxIdentidadesVigiadas)
+			w.escreveJSON(map[string]string{
+				"ts":    agora.UTC().Format(time.RFC3339),
+				"event": "estado_esgotado",
+				"title": "o conjunto de identidades vigiadas encheu: novidade não " +
+					"pode mais ser determinada",
+			})
+		}
+		return false
+	}
+	w.visto[k] = fd
+	return true
 }
 
 func (w *vigia) carregarBaseline(caminho string) int {
@@ -315,11 +421,25 @@ func (w *vigia) ciclo(primeiro bool) {
 		// vigília começou" sobre exatamente as coisas que estavam aqui quando
 		// ela começou.
 		if primeiro {
-			w.visto[k] = fd
+			w.lembra(k, fd)
 			continue
 		}
 
-		if _, jaViu := w.visto[k]; !jaViu {
+		// jaViu é lido ANTES de lembrar: lembra() insere, e perguntar depois
+		// responderia sempre que sim.
+		_, jaViu := w.visto[k]
+		if !w.lembra(k, fd) {
+			// Orçamento de identidades esgotado. NÃO emitir veredito é a
+			// resposta certa: "novo" sairia verdadeiro na primeira vez e
+			// falso em todas as seguintes, porque sem guardar a chave não há
+			// como saber que ela já apareceu. Um delta que se repete a cada
+			// ciclo afoga o delta que importa.
+			//
+			// O achado em si já contou para w.pior lá em cima, então o exit
+			// continua enxergando a severidade dele.
+			continue
+		}
+		if !jaViu {
 			w.registra(evento{Kind: "novo", Fd: fd, Quando: agora})
 		} else if !w.presente[k] {
 			// VOLTOU não é o mesmo que novo, e é mais interessante: algo que
@@ -327,13 +447,25 @@ func (w *vigia) ciclo(primeiro bool) {
 			// que é a forma exata do implante agendado, e o motivo deste comando.
 			w.registra(evento{Kind: "voltou", Fd: fd, Quando: agora})
 		}
-		w.visto[k] = fd
 	}
 
 	for k := range w.presente {
-		if !atual[k] {
-			w.registra(evento{Kind: "sumiu", Fd: w.visto[k], Quando: agora})
+		if atual[k] {
+			continue
 		}
+		// A identidade que não coube no orçamento está em `presente` — ela foi
+		// vista no ciclo anterior — e NÃO está em `visto`, porque o teto a
+		// recusou. Emitir "sumiu" com o que o mapa devolve ali seria uma linha
+		// de achado VAZIO: sem título, sem referência, sem assunto.
+		//
+		// E não é só cosmético: dizer que algo sumiu é uma afirmação sobre ele
+		// ter estado lá, e é exatamente essa afirmação que o esgotamento tirou.
+		fd, conhecida := w.visto[k]
+		if !conhecida {
+			w.naoClassificadas++
+			continue
+		}
+		w.registra(evento{Kind: "sumiu", Fd: fd, Quando: agora})
 	}
 	w.presente = atual
 	// A quantidade de achados indiferenciáveis mudando é evento: se ela sobe, a
@@ -408,13 +540,20 @@ func (w *vigia) amostra() {
 }
 
 func (w *vigia) registra(ev evento) {
-	w.eventos = append(w.eventos, ev)
-
 	marca := map[string]string{"novo": "＋", "voltou": "↻", "sumiu": "－"}[ev.Kind]
 	nome := ev.Fd.Subject
 	if ev.Fd.Ator != "" {
 		nome = ev.Fd.Ator
 	}
+	// A linha do resumo é montada AQUI, e o evento não é guardado.
+	//
+	// Guardar o check.Finding inteiro para reformatá-lo no fim era o que fazia
+	// a memória crescer com a duração da vigília. A linha é o que o resumo
+	// precisa, e ela é curta.
+	w.eventos.anota(ev.Kind, fmt.Sprintf("  %s %s %s §%s",
+		ev.Quando.Format("15:04:05"), report.Safe(nome),
+		report.Safe(ev.Fd.Title), ev.Fd.Ref))
+
 	fmt.Fprintf(w.humano, "%s %s %s %-12s %s §%s\n",
 		ev.Quando.Format("15:04:05"), marca, ev.Fd.Sev.Mark(),
 		report.Safe(nome), report.Safe(ev.Fd.Title), ev.Fd.Ref)
@@ -451,20 +590,38 @@ func (w *vigia) escreveJSON(campos map[string]string) {
 	if err == nil {
 		_, err = fmt.Fprintf(w.jsonW, "%s\n", linha)
 	}
-	if err != nil && !w.jsonQuebrado {
-		w.jsonQuebrado = true
-		fmt.Fprintf(os.Stderr, "watch: o JSONL parou de ser gravado (%v): "+
-			"o arquivo está INCOMPLETO a partir daqui\n", err)
+	w.erroDeJSON(err)
+}
+
+// erroDeJSON é o ÚNICO ponto que marca o JSONL como quebrado.
+//
+// Havia dois caminhos de escrita e só um deles marcava. O relatório inicial —
+// o ciclo 0, que é o retrato inteiro — imprimia o erro no stderr e seguia com
+// jsonQuebrado em false. A sequência que sai disso é a pior possível:
+//
+//	a primeira escrita falha       o arquivo já nasce truncado
+//	as seguintes funcionam         nada mais falha
+//	jsonQuebrado continua false    exit() não tem o que reportar
+//	a vigília termina 0            "olhei a noite toda e não vi nada"
+//
+// sobre um registro que a ferramenta SABE estar incompleto. É a mesma razão
+// pela qual coberturaFalhou existe, entrando por uma porta que não passava por
+// ela — e um erro de escrita no relatório inicial não é hipótese: é a partição
+// enchendo às 03:00, que é justamente quando a vigília importa.
+func (w *vigia) erroDeJSON(err error) {
+	if err == nil || w.jsonQuebrado {
+		return
 	}
+	w.jsonQuebrado = true
+	fmt.Fprintf(os.Stderr, "watch: o JSONL parou de ser gravado (%v): "+
+		"o arquivo está INCOMPLETO a partir daqui\n", err)
 }
 
 func (w *vigia) emiteJSON(r *check.Report, f *facts.Facts, e *env.Env) {
 	if w.jsonW == nil {
 		return
 	}
-	if err := report.JSONL(w.jsonW, r, f, e, nil, nil, nil); err != nil {
-		fmt.Fprintf(os.Stderr, "erro ao escrever JSONL: %v\n", err)
-	}
+	w.erroDeJSON(report.JSONL(w.jsonW, r, f, e, nil, nil, nil))
 }
 
 func (w *vigia) resumo(decorrido time.Duration, motivo string) {
@@ -472,7 +629,16 @@ func (w *vigia) resumo(decorrido time.Duration, motivo string) {
 		motivo, w.ciclos, w.amostras, decorrido.Round(time.Second))
 	fmt.Fprint(w.humano, w.am.resumo(w.intervalo))
 
-	if len(w.eventos) == 0 {
+	if w.estadoEsgotado {
+		// ANTES da lista, porque muda como ela deve ser lida.
+		fmt.Fprintf(w.humano, "\n⚠ o conjunto de identidades encheu (%d) e %d "+
+			"observação(ões) ficaram SEM classificação de novidade.\n"+
+			"  A lista abaixo é o que a vigília conseguiu classificar, e não o que "+
+			"aconteceu. Os achados em si continuam contando para o resultado.\n",
+			maxIdentidadesVigiadas, w.naoClassificadas)
+	}
+
+	if w.eventos.vazio() {
 		fmt.Fprintf(w.humano, "nada mudou. Isto NÃO prova que nada aconteceu: "+
 			"o que roda e sai entre dois ciclos não é visto por nenhum dos dois — "+
 			"o intervalo é o tamanho do buraco.\n")
@@ -482,26 +648,22 @@ func (w *vigia) resumo(decorrido time.Duration, motivo string) {
 	// Agrupado por tipo, porque as três perguntas são diferentes: o que
 	// apareceu, o que voltou (gatilho!) e o que saiu de cena.
 	for _, kind := range []string{"novo", "voltou", "sumiu"} {
-		var linhas []string
-		for _, ev := range w.eventos {
-			if ev.Kind != kind {
-				continue
-			}
-			nome := ev.Fd.Subject
-			if ev.Fd.Ator != "" {
-				nome = ev.Fd.Ator
-			}
-			linhas = append(linhas, fmt.Sprintf("  %s %s %s §%s",
-				ev.Quando.Format("15:04:05"), report.Safe(nome),
-				report.Safe(ev.Fd.Title), ev.Fd.Ref))
-		}
-		if len(linhas) == 0 {
+		total := w.eventos.total[kind]
+		if total == 0 {
 			continue
 		}
+		linhas := append([]string(nil), w.eventos.exemplos[kind]...)
 		sort.Strings(linhas)
-		fmt.Fprintf(w.humano, "\n%s (%d)\n", rotuloEvento(kind), len(linhas))
+		fmt.Fprintf(w.humano, "\n%s (%d)\n", rotuloEvento(kind), total)
 		for _, l := range linhas {
 			fmt.Fprintln(w.humano, l)
+		}
+		// A CONTAGEM é exata e a LISTA não: dizer quantas ficaram de fora
+		// impede que o tamanho da lista seja lido como o tamanho do que houve.
+		if n := total - len(linhas); n > 0 {
+			fmt.Fprintf(w.humano, "  … e mais %d não listada(s): o resumo mostra "+
+				"as %d primeiras de cada tipo. O JSONL tem todas.\n",
+				n, maxExemplosPorTipo)
 		}
 	}
 	fmt.Fprintln(w.humano)
@@ -540,6 +702,12 @@ func (w *vigia) exit() int {
 		// Pela mesma razão: o JSONL é o produto que a frota consome, e um
 		// arquivo truncado com exit 0 é a ferramenta afirmando completude sobre
 		// um registro que ela sabe estar incompleto.
+		return 1
+	case w.estadoEsgotado:
+		// E pela mesma razão de novo. O comando existe para responder "o que
+		// MUDOU", e a partir do teto ele deixou de conseguir responder isso
+		// para parte do que viu. Terminar em zero seria dizer "nada mudou"
+		// quando a resposta honesta é "não sei mais dizer".
 		return 1
 	}
 	return 0

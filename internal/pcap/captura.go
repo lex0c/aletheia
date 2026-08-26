@@ -17,11 +17,22 @@ import (
 // Opcoes é o que a captura precisa saber. Tudo tem teto: uma coleta que enche o
 // disco do respondedor no meio do incidente é pior que uma coleta parcial
 // declarada — a mesma regra do dump de memória.
+// MaxSnaplen é o teto de bytes capturados POR PACOTE, e é o teto do próprio
+// AF_PACKET: 256 KiB. Um quadro Ethernet não passa de 64 KiB nem com jumbo e
+// GRO; o resto é folga.
+//
+// Ele existe porque o número virava uma alocação direta — `make([]byte, snap)`
+// com o que o operador digitasse — e porque o cabeçalho pcap guarda o snaplen
+// num uint32: acima disso o arquivo sairia declarando um corte que não foi o
+// corte, e um pcap com o rótulo errado é decodificado com confiança total a
+// partir do byte errado.
+const MaxSnaplen = 262144
+
 type Opcoes struct {
 	Iface    string
 	Filtro   Filtro
 	Duracao  time.Duration
-	Snaplen  int   // 0 = pacote inteiro
+	Snaplen  int   // 0 = pacote inteiro (ver MaxSnaplen)
 	MaxBytes int64 // teto do arquivo
 
 	// Parar interrompe a captura antes do prazo. É o Ctrl-C: o arquivo é
@@ -180,8 +191,17 @@ func Capturar(w io.Writer, h hash.Hash, iface Interface, o Opcoes) (Estatisticas
 	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &espera)
 
 	snap := o.Snaplen
-	if snap <= 0 {
-		snap = 262144 // "pacote inteiro": o teto do próprio AF_PACKET
+	if snap <= 0 || snap > MaxSnaplen {
+		// O teto vale AQUI também, e não só na CLI.
+		//
+		// `buf := make([]byte, snap)` logo abaixo aloca o que este número
+		// mandar: `--snaplen 2000000000` pedia 2 GB de uma vez. A validação da
+		// linha de comando é a mensagem boa para o operador; esta linha é a que
+		// garante que nenhum outro chamador da biblioteca consiga o mesmo por
+		// engano — e o cabeçalho pcap carrega o snaplen num uint32, então um
+		// valor maior sairia TRUNCADO no arquivo, descrevendo um corte que não
+		// foi o corte.
+		snap = MaxSnaplen
 	}
 	esc, err := NovoEscritor(w, h, uint32(snap), iface.TipoEnlace)
 	if err != nil {

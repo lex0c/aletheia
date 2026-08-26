@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -425,6 +426,18 @@ func tamanho(s string) (int64, bool) {
 	if err != nil || n <= 0 {
 		return 0, false
 	}
+	// O PRODUTO PODE ESTOURAR, e o estouro apagava o teto em vez de recusá-lo.
+	//
+	// `--pcap-max 9223372036854G` faz n*mult passar de MaxInt64 e voltar
+	// NEGATIVO. O consumidor confere `o.MaxBytes > 0` antes de aplicar o teto,
+	// então um número negativo não é um teto pequeno: é teto NENHUM, numa
+	// captura que grava tráfego bruto em disco até o disco acabar.
+	//
+	// Recusar é a resposta certa e não custa nada — quem digitou isso não quis
+	// dizer nada de sensato.
+	if n > math.MaxInt64/mult {
+		return 0, false
+	}
 	return n * mult, true
 }
 
@@ -471,6 +484,14 @@ func montarCaptura(ligada bool, iface, host string, porta int, proto string,
 	if duracao <= 0 {
 		fmt.Fprintln(os.Stderr, "preserve --pcap: --duration precisa ser positiva. "+
 			"Uma captura sem prazo num incidente é um arquivo que ninguém fecha")
+		return nil, 3
+	}
+	if snaplen < 0 || snaplen > pcap.MaxSnaplen {
+		fmt.Fprintf(os.Stderr, "preserve --pcap: --snaplen fora da faixa (0 a %d).\n"+
+			"O número vira uma alocação de uma vez só — `--snaplen 2000000000` "+
+			"pedia 2 GB —, e o cabeçalho pcap guarda o snaplen num uint32: acima "+
+			"do teto o arquivo declararia um corte que não foi o corte.\n"+
+			"0 é pacote inteiro, que já é o máximo do AF_PACKET.\n", pcap.MaxSnaplen)
 		return nil, 3
 	}
 

@@ -12,14 +12,28 @@
 # pedido de uma vez: gofmt, `go vet`, os testes unitários e a CONFIRMAÇÃO de
 # que o binário saiu estático — não a presunção.
 #
-# # O que ele NÃO roda, e por quê
+# # A suíte de cenários: fora do PR, DENTRO da main e da noite
 #
-# A suíte de cenários (`make scenarios`, e a segunda linha de `make race`) fica
-# de fora. Ela puxa quatro imagens do Docker Hub e tem 22 casos que sobem uma
-# microVM com qemu. Num portão de pull request isso é um gate que falha por
-# rate limit de terceiro ou por ausência de KVM no runner, sem nada de errado
-# com o código — e um gate que falha sozinho é um gate que as pessoas aprendem
-# a ignorar.
+# Ela puxa quatro imagens do Docker Hub e tem casos que sobem uma microVM com
+# qemu. Num portão de pull request isso é um gate que falha por rate limit de
+# terceiro ou por ausência de KVM no runner, sem nada de errado com o código —
+# e um gate que falha sozinho é um gate que as pessoas aprendem a ignorar.
+#
+# Só que a alternativa que estava valendo era não rodar em lugar NENHUM, e o
+# preço disso foi medido: a suíte ficou vermelha por volta de noventa commits
+# sem ninguém saber. Um gate ruidoso é ruim; um gate ausente é pior, porque a
+# regressão não fica sem veredito — ela fica com o veredito errado.
+#
+# Então ela roda no tier de CONTÊINER (sem KVM: os casos de microVM se pulam
+# sozinhos, com o motivo dito), no push da main e toda noite. É onde a
+# flakiness não bloqueia ninguém e a regressão aparece em até um dia, em vez de
+# em três meses.
+#
+# O que continua fora: o tier de microVM, que exige KVM que o runner não tem, e
+# o gate de pull request. Um subconjunto HERMÉTICO — que rodasse no PR sem
+# puxar imagem nem subir VM — não existe hoje: todo cenário executável ou usa
+# uma imagem de contêiner ou é `Mode: VM`. Criá-lo é decidir uma feature nova
+# no arcabouço de cenários, e não configurar CI.
 #
 # A consequência precisa ficar dita, e não descoberta: o detector de corrida
 # aqui roda sobre `internal/` e `cmd/`, e NÃO sobre os cenários — que foi
@@ -31,6 +45,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A noite é para a suíte de cenários. 04:17 UTC e não 04:00: horário redondo é
+  # onde o agendador do GitHub acumula fila.
+  schedule:
+    - cron: "17 4 * * *"
 
 permissions:
   contents: read
@@ -111,3 +129,47 @@ jobs:
               exit 1
             }
           done
+
+  # A suíte de cenários, no tier que cabe num runner: contêiner, sem KVM.
+  #
+  # NÃO roda em pull request — ver o cabeçalho deste arquivo. Roda no push da
+  # main e no agendamento noturno, que é o que impede a suíte de ficar vermelha
+  # por meses sem veredito.
+  scenarios:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # Ela sobe contêineres e exporta rootfs; o teto do `go test` é 10m, e este é
+    # o do job inteiro, com folga para os pulls.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # O PULL É UM PASSO SEPARADO, e com retry, para que "o Docker Hub limitou"
+      # não se pareça com "o código quebrou".
+      #
+      # As duas falhas exigem coisas diferentes de quem olha: uma se resolve
+      # rodando de novo, a outra é uma regressão. Deixá-las sair pelo mesmo
+      # vermelho, no meio da saída da suíte, é o que faz as pessoas pararem de
+      # ler o vermelho.
+      - name: puxar as imagens do tier de contêiner
+        run: |
+          for img in debian:12 debian:9 centos:7 alpine:3.20; do
+            for tentativa in 1 2 3; do
+              if docker pull --quiet "$img"; then
+                continue 2
+              fi
+              echo "pull de $img falhou (tentativa $tentativa/3)" >&2
+              sleep $((tentativa * 15))
+            done
+            echo "INFRAESTRUTURA: não foi possível puxar $img do Docker Hub." >&2
+            echo "Isto NÃO é uma falha do código — é limite de taxa ou rede." >&2
+            exit 1
+          done
+
+      - name: cenários (tier de contêiner; os de microVM se pulam sem KVM)
+        run: make scenarios-container

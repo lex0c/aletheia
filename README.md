@@ -1112,13 +1112,20 @@ make test-386
 make cap-proof
 ```
 
-- `scenarios` executa a CLI contra ambientes Linux reais/isolados;
+- `scenarios` executa a CLI contra ambientes Linux reais/isolados. O tier de
+  **contêiner** (`scenarios-container`, sem KVM) roda na CI a cada push na `main`
+  e todo dia de madrugada; o tier de **microVM** e o gate de pull request
+  continuam fora, e o cabeçalho de `.github/workflows/ci.yml` diz por quê;
 - `race` roda o detector de data races, incluindo a suíte de cenários;
 - `mutacao` injeta mutações em decisões dos checks para verificar se os testes
   detectam regressões semânticas;
 - `fuzz` busca no codec MCP, que é escrito à mão, o que ninguém imaginou — a
   mensagem e o **framing**, onde mora a drenagem que impede a cauda de uma linha
-  gigante de virar mensagem nova;
+  gigante de virar mensagem nova. E busca no parser de **dump**, que é a
+  fronteira do `--snapshot`: um alvo carrega o artefato inteiro, outro confere
+  que o contador de forma — o que decide o orçamento de decodificação — conta
+  as mesmas aberturas que o `encoding/json` conta, sobre toda entrada que ele
+  aceita;
 - `test-386` **roda** a suíte em 32 bits, e não só compila: em i386 o `Timespec`
   do syscall é `int32`, e é por ele que passa a comparação de tempo e de tamanho
   de arquivo;

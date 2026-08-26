@@ -152,6 +152,33 @@ jobs:
       # As duas não competem: a proveniência responde "de qual workflow e de
       # qual commit veio", a assinatura responde "quem publicou isto, e dá para
       # conferir sem rede". Um release quer as duas.
+      # A FERRAMENTA É INSTALADA SEM O SEGREDO NO AMBIENTE.
+      #
+      # `apt-get update && apt-get install` roda uma quantidade de código de
+      # terceiros que ninguém deste repositório revisou — listas, scripts de
+      # pacote, hooks do dpkg —, e no passo anterior a chave privada de
+      # assinatura estava exportada em `env` durante tudo isso. Não é um
+      # ataque conhecido: é superfície que não precisava existir, e separá-la
+      # custa um passo.
+      #
+      # A condição é só a de publicar, e NÃO a presença da chave.
+      #
+      # A tentação é pular a instalação quando não há chave, e ela cai numa
+      # armadilha do GitHub Actions: `secrets` não está disponível no `if` de um
+      # passo, e o `env` do próprio passo também não vale para o `if` dele. A
+      # expressão compilaria, avaliaria vazio e o passo simplesmente nunca
+      # rodaria — deixando a assinatura falhar por "minisign não encontrado" num
+      # release em que a chave existe.
+      #
+      # Instalar minisign num release sem chave custa alguns segundos. Uma
+      # condição sutilmente errada num caminho que só executa em tag custa
+      # descobrir na tag.
+      - name: instalar minisign (SEM segredo no ambiente)
+        if: steps.ver.outputs.publicar == 'tag'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          minisign -v
+
       - name: assinar as somas (minisign)
         id: assinar
         if: steps.ver.outputs.publicar == 'tag'
@@ -172,7 +199,15 @@ jobs:
             echo "Sem a pública versionada ninguém tem contra o que verificar." >&2
             exit 1
           fi
-          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          # A ferramenta veio do passo anterior, que rodou sem o segredo no
+          # ambiente. Se ela não está aqui, a condição dos dois passos divergiu
+          # e é melhor falhar alto do que assinar com um binário inesperado.
+          command -v minisign >/dev/null || {
+            echo "FALHA: minisign não foi instalado, e a chave existe." >&2
+            echo "Os dois passos são condicionados pela MESMA presença de chave:" >&2
+            echo "divergirem significa que a condição de um deles mudou." >&2
+            exit 1
+          }
 
           # '%s\n' e não '%s': o arquivo de chave do minisign tem duas linhas
           # (comentário + base64), e um segredo colado sem quebra final deixaria

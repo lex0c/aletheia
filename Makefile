@@ -104,12 +104,21 @@ race-unit:
 # escolhe o que ele diz. A redação de ingresso do MCP é uma caminhada REFLEXIVA
 # sobre essa estrutura, e ela acontece antes de qualquer check rodar.
 #
+# O quarto é DIFERENCIAL, e é o único cuja falha não teria sintoma: o contador
+# de forma do dump decide o orçamento de decodificação contando `{` e `[` fora
+# de string, e se ele acreditar estar dentro de uma string quando não está, as
+# aberturas de verdade somem da conta e o artefato que o orçamento existe para
+# recusar passa por ele — com a decodificação seguinte funcionando normalmente.
+# A asserção é contra o próprio encoding/json, sobre toda entrada que ele
+# aceita: as duas gramáticas têm de concordar exatamente.
+#
 # FUZZTIME sobrescreve: `make fuzz FUZZTIME=10m` antes de tag.
 FUZZTIME ?= 60s
 fuzz:
 	go test ./internal/mcp/  -run FuzzDecodificar -fuzz FuzzDecodificar -fuzztime $(FUZZTIME)
 	go test ./internal/mcp/  -run FuzzLeitor      -fuzz FuzzLeitor      -fuzztime $(FUZZTIME)
 	go test ./internal/dump/ -run FuzzCarregar    -fuzz FuzzCarregar    -fuzztime $(FUZZTIME)
+	go test ./internal/dump/ -run FuzzFormaConcordaComOParser -fuzz FuzzFormaConcordaComOParser -fuzztime $(FUZZTIME)
 
 # test-386 RODA a suíte em 32 bits, e não só compila.
 #

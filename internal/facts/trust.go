@@ -97,10 +97,13 @@ func collectTrust(f *Facts, e *env.Env) {
 			if env.EhLacuna(err) {
 				f.CACertsCompleto = false
 				f.denyPersist("trust", "o diretório de âncoras de confiança "+dir+
-					" não pôde ser LISTADO (permissão): uma CA plantada ali NÃO foi "+
-					"vista — e uma CA raiz sozinha já dá MITM de todo o TLS")
+					" não pôde ser LISTADO (permissão ou teto de entradas): uma CA "+
+					"plantada ali NÃO foi vista — e uma CA raiz sozinha já dá MITM "+
+					"de todo o TLS")
 			}
-			continue
+			if !env.ListagemCortada(err) {
+				continue
+			}
 		}
 		for _, ent := range ents {
 			p := dir + "/" + ent.Name()
@@ -319,7 +322,9 @@ func procurarHooks(f *Facts, e *env.Env, dir string, prof int, vistos *int, trun
 		if env.EhLacuna(err) {
 			*ilegivel++
 		}
-		return
+		if !env.ListagemCortada(err) {
+			return
+		}
 	}
 	for _, ent := range ents {
 		n := ent.Name()

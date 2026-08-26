@@ -469,7 +469,12 @@ func (v *varredura) visitar(t tarefaDir) {
 			v.negados = append(v.negados, t.dir)
 			v.mu.Unlock()
 		}
-		return
+		// Cortado pelo teto é lacuna DECLARADA e entradas VÁLIDAS: um SUID
+		// escondido atrás de cem mil arquivos vazios continua sendo procurado
+		// entre os cem mil que deu para ler.
+		if !env.ListagemCortada(err) {
+			return
+		}
 	}
 
 	var novos []tarefaDir

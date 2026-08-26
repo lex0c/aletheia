@@ -2088,7 +2088,12 @@ func varrerCodigo(f *Facts, e *env.Env, raiz string, prof int, st *varreduraCodi
 			if env.EhLacuna(err) {
 				st.dirsIlegiveis++
 			}
-			continue
+			// Cortado pelo teto: a lacuna já está contada, e as entradas que
+			// vieram continuam valendo. Descartá-las faria de um diretório
+			// inflado a forma mais barata de apagar a varredura de código dali.
+			if !env.ListagemCortada(err) {
+				continue
+			}
 		}
 		var subdirs []string
 		for _, ent := range ents {

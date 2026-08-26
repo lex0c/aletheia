@@ -294,6 +294,10 @@ func envAllowed(k string) bool {
 // mapeamento entra em MapsOdd (runbook §7.8).
 var libDirs = []string{"/usr/lib", "/lib", "/usr/lib64", "/lib64", "/usr/local/lib", "/usr/libexec"}
 
+// maxProcessos é o teto de PIDs considerados numa coleta. Ver o comentário no
+// laço que o aplica.
+const maxProcessos = 50_000
+
 func collectProcesses(f *Facts, e *env.Env) {
 	ents, err := os.ReadDir("/proc")
 	if err != nil {
@@ -304,10 +308,29 @@ func collectProcesses(f *Facts, e *env.Env) {
 	self := os.Getpid()
 
 	pids := make([]int, 0, len(ents))
+	cortouPids := false
 	for _, ent := range ents {
 		if pid, err := strconv.Atoi(ent.Name()); err == nil {
+			// O TETO EXISTE E É DECLARADO.
+			//
+			// O número de entradas de /proc não é escolhido pela ferramenta, e
+			// uma fork bomb ou um servidor patológico o levam a dezenas de
+			// milhares. Cada pid custa várias leituras — status, maps, fd, ns —,
+			// então o scanner passa a somar carga a um host que já está em
+			// apuros. Cinquenta mil está acima de qualquer host real e abaixo
+			// do que faz a coleta virar parte do problema.
+			if len(pids) >= maxProcessos {
+				cortouPids = true
+				break
+			}
 			pids = append(pids, pid)
 		}
+	}
+	if cortouPids {
+		f.partial("proc", "mais de "+strconv.Itoa(maxProcessos)+" processos "+
+			"listados em /proc: os demais NÃO foram lidos, e nada pode ser "+
+			"afirmado sobre eles — um número desses num host que não é de "+
+			"build é por si só algo a olhar")
 	}
 	// O que o readdir LISTOU, independente de termos conseguido ler. É um
 	// conjunto diferente de f.Processes, e a diferença é permissão — usar a
@@ -345,6 +368,7 @@ func collectProcesses(f *Facts, e *env.Env) {
 	}
 	slots := make([]slot, len(pids))
 	var next atomic.Int64
+	var expirou atomic.Bool
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
@@ -355,11 +379,28 @@ func collectProcesses(f *Facts, e *env.Env) {
 				if i >= len(pids) {
 					return
 				}
+				// O PRAZO É CONFERIDO POR PROCESSO, e não só antes do laço.
+				//
+				// `wtf --budget 2s` calculava um WalkDeadline que a leitura de
+				// /proc não olhava: num host com dezenas de milhares de
+				// processos, a coleta passava do orçamento inteiro aqui dentro
+				// sem nada poder interrompê-la. O slot fica com readIndefinido,
+				// e a agregação conta isso como lacuna em vez de ausência.
+				if e.WalkExpired() {
+					expirou.Store(true)
+					return
+				}
 				slots[i].p, slots[i].outcome, slots[i].panicked = readProcessGuarded(pids[i], e.Segredos)
 			}
 		}()
 	}
 	wg.Wait()
+
+	if expirou.Load() {
+		f.partial("proc", "a leitura de /proc parou pelo teto de TEMPO da "+
+			"varredura: os processos que sobraram NÃO foram lidos, e o silêncio "+
+			"sobre eles é da ferramenta, não do host")
+	}
 
 	// A agregação volta a ser serial: a ordem do relatório não pode depender de
 	// qual worker terminou primeiro.

@@ -474,7 +474,21 @@ func hashesApk(f *Facts, e *env.Env, porPacote map[string][]string) map[string]h
 // `sha256digest=`, e o caminho vem com `./` na frente e com escapes de octal.
 func hashesPacman(f *Facts, e *env.Env, porPacote map[string][]string) map[string]hashRef {
 	out := map[string]hashRef{}
+	expirou := false
 	for pkg, caminhos := range porPacote {
+		// O PRAZO ENTRA AQUI, e a razão está escrita no laço de baixo.
+		//
+		// O comentário do teto de descompressão dizia, com todas as letras,
+		// "este caminho não passa por WalkExpired() e não há deadline global de
+		// coleta" — e descrevia o efeito: 2,6 MB de mtree plantado rendendo
+		// 7,1 s POR PACOTE, com trezentos pacotes fazendo a coleta girar por
+		// horas. O teto de bytes limitava cada arquivo; nada limitava o
+		// AGREGADO, e como o dump só é escrito no fim, o operador mata a
+		// ferramenta e perde tudo de uma máquina que pode não existir amanhã.
+		if e.WalkExpired() {
+			expirou = true
+			break
+		}
 		// Lista, pelo mesmo motivo dos outros dois backends.
 		quer := map[string][]string{}
 		cache := map[string]string{}
@@ -502,8 +516,12 @@ func hashesPacman(f *Facts, e *env.Env, porPacote map[string][]string) map[strin
 		// Trezentos diretórios em /var/lib/pacman/local com o mesmo arquivo
 		// fazem a coleta girar por horas — e como o dump só é escrito no fim, o
 		// operador mata a ferramenta e perde TUDO, de uma máquina que pode não
-		// existir amanhã. Este caminho não passa por WalkExpired() e não há
-		// deadline global de coleta.
+		// existir amanhã.
+		//
+		// O agregado passou a ter prazo: o laço de fora confere WalkExpired()
+		// por pacote e declara a lacuna. Este teto continua sendo o de UM
+		// arquivo, que é o que impede um único mtree de consumir o prazo
+		// inteiro antes de o laço poder olhar o relógio de novo.
 		lim := &io.LimitedReader{R: zr, N: maxMtreeDescomprimido + 1}
 		sc := bufio.NewScanner(lim)
 		sc.Buffer(make([]byte, 0, 4096), 256*1024)
@@ -539,6 +557,11 @@ func hashesPacman(f *Facts, e *env.Env, porPacote map[string][]string) map[strin
 				"dos arquivos deste pacote não pôde ser avaliada")
 		}
 		zr.Close()
+	}
+	if expirou {
+		f.partial("hash", "a leitura dos mtree do pacman parou pelo teto de "+
+			"TEMPO: os pacotes restantes não tiveram hash de referência, e um "+
+			"binário deles NÃO pode ser dito íntegro nem adulterado")
 	}
 	return out
 }

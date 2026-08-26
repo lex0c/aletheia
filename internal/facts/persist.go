@@ -2228,7 +2228,9 @@ func (f *Facts) listarNegando(e *env.Env, cat, dir string) []string {
 			f.denyPersist(cat, dir+" não pôde ser listado ("+env.MotivoDoErro(err)+
 				"): o que estiver lá dentro NÃO entrou na varredura")
 		}
-		return nil
+		if !env.ListagemCortada(err) {
+			return nil
+		}
 	}
 	nomes := make([]string, 0, len(ents))
 	for _, ent := range ents {

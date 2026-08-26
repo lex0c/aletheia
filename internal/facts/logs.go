@@ -1,6 +1,9 @@
 package facts
 
 import (
+	"errors"
+	"io/fs"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,11 +53,35 @@ type ArquivoDeLog struct {
 
 const maxLogDirs = 200
 
+// maxLogArquivosInventario é o teto de ARQUIVOS do inventário, e ele existe
+// porque maxLogDirs não era teto nenhum.
+//
+// Duzentos diretórios sem teto de arquivo é ilimitado: a lista de /var/log é
+// escrita por quem tem root no alvo, e o threat model deste coletor É esse — o
+// comentário de alvosDeLog já cita `touch /var/log/auth.log.{1..3000}` como
+// caso medido. Meio milhão de arquivos vazios produzia meio milhão de
+// ArquivoDeLog, meio milhão de entradas no dump e um milhão de syscalls, e o
+// único teto da família agia DEPOIS de tudo isso, cortando a saída em 500.
+//
+// Vinte mil é uma ordem de grandeza acima de qualquer /var/log real e limita o
+// que o inventário pode custar antes de qualquer decisão: 20 mil registros são
+// cerca de 1 MB de fatos.
+//
+// Quando ele morde, o conjunto que sobrevive é o que a ordem do readdir
+// entregou primeiro — arbitrário, e declarado como tal. Num host que NÃO o
+// atinge, e é todo host real, o conjunto é o mesmo de sempre e a saída continua
+// ordenada no fim: o drift não vê diferença.
+const maxLogArquivosInventario = 20_000
+
 func collectLogs(f *Facts, e *env.Env) {
 	var anda func(dir string, prof int)
 	visitados := 0
 	truncou := false
+	estourouArquivos := false
+	expirou := false
 	var ilegiveis []string
+	var cortados []string
+
 	anda = func(dir string, prof int) {
 		if visitados > maxLogDirs {
 			truncou = true
@@ -64,42 +91,103 @@ func collectLogs(f *Facts, e *env.Env) {
 			return
 		}
 		visitados++
-		nomes, err := e.ReadDirNamesErr(dir)
-		if env.EhLacuna(err) {
+
+		// EM LOTES, e não ReadDirNamesErr.
+		//
+		// A versão anterior materializava o diretório inteiro — nomes, e depois
+		// um ArquivoDeLog por nome — para só então algum teto agir. Contra um
+		// diretório inflado de propósito, o teto que age depois da alocação
+		// protege o tamanho da saída e não o custo de chegar nela.
+		var subdirs []string
+		err := e.ReadDirBatch(dir, func(ent fs.DirEntry) error {
+			if len(f.Logs) >= maxLogArquivosInventario {
+				estourouArquivos = true
+				return env.ErrPararDeListar
+			}
+			if e.WalkExpired() {
+				expirou = true
+				return env.ErrPararDeListar
+			}
+			p := dir + "/" + ent.Name()
+
+			// UM Lstat, e não um Stat mais um Lstat.
+			//
+			// A versão anterior perguntava e.IsDir(p) e DEPOIS e.Lstat(p): duas
+			// syscalls por entrada, num laço cujo tamanho o alvo escolhe. O
+			// Lstat responde as duas perguntas, e o Stat só volta a ser
+			// necessário no caso raro em que a entrada é um symlink — que
+			// continua sendo seguido, porque deixar de segui-lo mudaria o que
+			// esta função enxerga.
+			fi, err := e.Lstat(p)
+			if err != nil {
+				return nil
+			}
+			switch {
+			case fi.IsDir():
+				subdirs = append(subdirs, p)
+			case fi.Mode()&os.ModeSymlink != 0:
+				if e.IsDir(p) {
+					subdirs = append(subdirs, p)
+				}
+			case fi.Mode().IsRegular():
+				base, ger, datada := separaRotacao(ent.Name())
+				f.Logs = append(f.Logs, ArquivoDeLog{
+					Path: p, Base: dir + "/" + base, Geracao: ger,
+					Datada: datada, Tamanho: fi.Size(),
+				})
+			}
+			return nil
+		})
+		switch {
+		case errors.Is(err, env.ErrDiretorioCortado):
+			// O teto do próprio env mordeu antes do nosso: o diretório tem mais
+			// de cem mil entradas. É lacuna pelo mesmo motivo que um diretório
+			// ilegível é, e não pode virar "não havia mais nada ali".
+			cortados = append(cortados, dir)
+		case env.EhLacuna(err):
 			// antiforense.log_rotation_gap e wtmp_cleared perguntam se alguém
 			// APAGOU registro. Diretório de log ilegível produzia a mesma
 			// observação — "não há log ali" — que apagar tudo.
 			ilegiveis = append(ilegiveis, dir)
 			return
 		}
-		for _, ent := range nomes {
-			p := dir + "/" + ent
-			if e.IsDir(p) {
-				anda(p, prof+1)
-				continue
-			}
-			fi, err := e.Lstat(p)
-			if err != nil || !fi.Mode().IsRegular() {
-				continue
-			}
-			base, ger, datada := separaRotacao(ent)
-			f.Logs = append(f.Logs, ArquivoDeLog{
-				Path: p, Base: dir + "/" + base, Geracao: ger,
-				Datada: datada, Tamanho: fi.Size(),
-			})
+		// A recursão sai FORA do laço de listagem: descer com o descritor do
+		// pai ainda aberto multiplica descritores pela profundidade, e o
+		// diretório de log de um alvo pode ser fundo.
+		//
+		// E ela não acontece depois de o orçamento estourar: descer para
+		// reencontrar o mesmo teto na primeira entrada de cada subdiretório
+		// gasta o teto de DIRETÓRIOS sem inventariar nada.
+		if estourouArquivos || expirou {
+			return
+		}
+		for _, sub := range subdirs {
+			anda(sub, prof+1)
 		}
 	}
 	if e.IsDir("/var/log") {
 		anda("/var/log", 0)
 	}
 	if n := len(ilegiveis); n > 0 {
-		amostra := ilegiveis
-		if len(amostra) > 3 {
-			amostra = amostra[:3]
-		}
 		f.partial("logs", strconv.Itoa(n)+" diretório(s) de log não puderam ser "+
 			"listados: o que há neles NÃO entrou no inventário, e buraco de rotação "+
-			"não pode ser distinguido de diretório ilegível — "+strings.Join(amostra, ", "))
+			"não pode ser distinguido de diretório ilegível — "+amostraDe(ilegiveis))
+	}
+	if n := len(cortados); n > 0 {
+		f.partial("logs", strconv.Itoa(n)+" diretório(s) de log passaram de "+
+			strconv.Itoa(env.MaxEntradasPorDiretorio)+" entradas e foram lidos só "+
+			"até ali: um diretório inflado é a forma barata de esconder um arquivo "+
+			"entre cem mil — "+amostraDe(cortados))
+	}
+	if estourouArquivos {
+		f.partial("logs", "o inventário parou em "+strconv.Itoa(maxLogArquivosInventario)+
+			" arquivos: o que estiver além NÃO foi inventariado, e a seleção que "+
+			"sobrou é a que o readdir entregou primeiro, não a mais recente")
+	}
+	if expirou {
+		f.partial("logs", "a varredura de log parou pelo teto de TEMPO: o "+
+			"inventário está incompleto, e buraco de rotação não pôde ser "+
+			"distinguido de diretório não visitado")
 	}
 	if truncou {
 		// O inventário de log alimenta o buraco de rotação (§10), e "nenhum
@@ -110,12 +198,37 @@ func collectLogs(f *Facts, e *env.Env) {
 			strconv.Itoa(maxLogDirs)+": o que estiver além NÃO foi inventariado, "+
 			"e buraco de rotação lá dentro não pôde ser visto")
 	}
+	// A ORDEM PRECISA SER TOTAL, e (base, geração) não é.
+	//
+	// Toda rotação DATADA é geração 1, então `secure-20260801`,
+	// `secure-20260810` e `secure-20260820` empatam nas duas chaves — e
+	// sort.Slice não é estável. Enquanto a entrada vinha de ReadDir, que
+	// ordenava por nome, o empate era desfeito do mesmo jeito toda vez. A
+	// leitura em LOTES entrega na ordem do readdir, que muda a cada arquivo
+	// criado no diretório, e aí o desempate passou a variar entre execuções.
+	//
+	// Isso vaza: antiforense.log_rotation_gap monta a evidência "presentes: ..."
+	// percorrendo f.Logs, e uma evidência que muda de ordem sozinha faz o drift
+	// acusar mudança onde não houve — sobre o host que ninguém tocou.
 	sort.Slice(f.Logs, func(i, j int) bool {
-		if f.Logs[i].Base != f.Logs[j].Base {
-			return f.Logs[i].Base < f.Logs[j].Base
+		a, b := f.Logs[i], f.Logs[j]
+		if a.Base != b.Base {
+			return a.Base < b.Base
 		}
-		return f.Logs[i].Geracao < f.Logs[j].Geracao
+		if a.Geracao != b.Geracao {
+			return a.Geracao < b.Geracao
+		}
+		return a.Path < b.Path
 	})
+}
+
+// amostraDe corta a lista para a mensagem: uma lacuna com duzentos caminhos
+// dentro não é lida por ninguém.
+func amostraDe(xs []string) string {
+	if len(xs) > 3 {
+		xs = xs[:3]
+	}
+	return strings.Join(xs, ", ")
 }
 
 // separaRotacao devolve o nome vivo e o número da geração.

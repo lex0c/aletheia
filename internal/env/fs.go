@@ -2,9 +2,11 @@ package env
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"sort"
 	"strings"
 	"syscall"
 )
@@ -101,23 +103,26 @@ func (e *Env) raizIndisponivel() error {
 //	           varredura nunca termina
 //	tamanho    arquivo esparso de 8 GB derruba o processo por falta de memória
 //
-// As duas são decididas no DESCRITOR, nunca no caminho. A versão anterior fazia
-// Lstat, Stat e open como três resoluções independentes do mesmo caminho, e a
-// janela entre elas era vencível sem privilégio nenhum: um usuário alternando o
-// próprio ~/.ssh/authorized_keys entre arquivo comum e fifo num laço fazia a
-// guarda ver "comum, 100 bytes" e o open pegar o fifo. Um open com O_NONBLOCK
-// seguido de fstat responde as duas perguntas sobre o objeto que foi REALMENTE
-// aberto, e não sobra janela para trocar nada no meio.
+// As duas são decididas no DESCRITOR, nunca no caminho. A versão mais antiga
+// fazia Lstat, Stat e open como três resoluções independentes do mesmo caminho,
+// e a janela entre elas era vencível sem privilégio nenhum: um usuário
+// alternando o próprio ~/.ssh/authorized_keys entre arquivo comum e fifo num
+// laço fazia a guarda ver "comum, 100 bytes" e o open pegar o fifo.
+//
+// A seguinte trocou isso por um open com O_NONBLOCK e fstat DEPOIS, o que fecha
+// o fifo e a corrida — e deixa passar o device, porque para ele o estrago está
+// no próprio open. Hoje quem decide é abrirVerificado, e a decisão acontece
+// sobre um descritor O_PATH, que identifica sem abrir. Ver o comentário dela.
 func (e *Env) ReadFile(p string) ([]byte, error) {
-	fh, fi, err := e.abrirVerificado(p)
+	fh, tam, err := e.abrirVerificado(p)
 	if err != nil {
 		return nil, err
 	}
 	defer fh.Close()
-	if fi.Size() > MaxLeitura {
+	if tam > MaxLeitura {
 		return nil, ErrGrandeDemais
 	}
-	b := make([]byte, 0, fi.Size())
+	b := make([]byte, 0, tam)
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := fh.Read(buf)
@@ -134,97 +139,61 @@ func (e *Env) ReadFile(p string) ([]byte, error) {
 	}
 }
 
-// abrirSemTocarAtime abre para leitura preservando o ATIME do arquivo.
+// abrirVerificado é a porta ÚNICA por onde ReadFile, Open e OpenFD passam.
 //
-// Ler um arquivo MOVE o atime dele, e num filesystem montado com `relatime` —
-// o padrão de toda distribuição — isso apaga a data em que o arquivo foi lido
-// pela última vez. Medido: um `authorized_keys` com atime de 1º de junho saía
-// da varredura com o atime de HOJE.
+// # O que ela deixou de fazer
 //
-// A ferramenta usa data como evidência (§9) e não pode destruir uma das três
-// que existem. Quem leu o `authorized_keys` da conta invadida, e quando, é
-// pergunta de incidente — e a resposta estava sendo apagada por quem foi
-// investigar.
+// Ela abria com O_RDONLY|O_NONBLOCK e só ENTÃO perguntava ao fstat se aquilo
+// devia ter sido aberto. Para um fifo o O_NONBLOCK resolvia — o open volta na
+// hora em vez de pendurar a varredura. Para um DEVICE NODE não resolvia nada: o
+// open() do driver já rodou quando a recusa é montada.
 //
-// O_NOATIME exige ser DONO do arquivo ou ter CAP_FOWNER: como root funciona
-// para tudo, e sem root falha com EPERM em arquivo alheio. Aí a leitura
-// acontece do jeito normal, porque não ler é pior que mover o atime — e a
-// varredura sem root já é degradada por motivos maiores.
+// O ataque é de uma linha, e roda sobre um caminho que esta ferramenta SEMPRE
+// lê:
 //
-// O_NONBLOCK vai junto e não é detalhe: num arquivo comum ele não tem efeito
-// nenhum, e num fifo é a diferença entre retornar na hora e pendurar a
-// varredura para sempre — `open(2)` de um fifo para leitura bloqueia até
-// aparecer um escritor, e não existe timeout nem cancelamento nesse caminho.
-// Quem decide o tipo do objeto é quem escreve no disco do alvo, então a decisão
-// tem que ser tomada DEPOIS de abrir, sobre o descritor.
-func (e *Env) abrirSemTocarAtime(p string) (*os.File, error) {
-	return e.abrirComExtras(p, 0)
-}
-
-// abrirComExtras é o abrirSemTocarAtime com flags a mais.
+//	ln -sf /dev/watchdog /etc/ld.so.preload
 //
-// As flags eram `const` dentro dele, e a leitura direcionada do perfil completo
-// precisa de O_NOFOLLOW. Um segundo abridor copiado seria a segunda
-// implementação da mesma fronteira — a raiz travada, o O_NOATIME que degrada em
-// silêncio quando não se é dono, o O_NONBLOCK que impede o fifo de prender a
-// varredura para sempre. Duas cópias disso divergem, e a que diverge é sempre a
-// que ninguém está olhando.
-// observarAberturaReal é o gancho que permite a um teste PROVAR que nenhum
-// caminho da família de inspeção chega aqui com um objeto que ainda não foi
-// provado regular.
+// A varredura segue o link, abre o device, e o driver faz o que faz — armar um
+// temporizador, rebobinar uma fita, o que for. Depois o fstat responde "não era
+// arquivo comum" e a função devolve uma recusa impecável sobre um host que já
+// foi alterado. Uma ferramenta cuja propriedade central é observar sem tocar
+// não pode ter isso na sua primitive de leitura.
 //
-// Ele existe porque a asserção óbvia não distingue nada: uma recusa com
-// ErrNaoEhArquivo sai igual no código que abre-depois-verifica e no que
-// verifica-antes-de-abrir. O que separa os dois é se o open() do driver rodou —
-// e isso não aparece no valor de retorno.
+// Medido com o gancho de safeio.ObservarAberturaReal: as duas implementações
+// devolviam ErrNaoEhArquivo, e só uma delas tinha executado o open().
 //
-// nil em produção; o custo é uma comparação por abertura.
-var observarAberturaReal func(caminho string)
-
-func (e *Env) abrirComExtras(p string, extras int) (*os.File, error) {
-	if observarAberturaReal != nil {
-		observarAberturaReal(p)
-	}
-	flags := os.O_RDONLY | syscall.O_NONBLOCK | extras
-	if err := e.raizIndisponivel(); err != nil {
-		return nil, err
-	}
-	if e.root == nil {
-		if fh, err := os.OpenFile(p, flags|syscall.O_NOATIME, 0); err == nil {
-			return fh, nil
-		}
-		return os.OpenFile(p, flags, 0)
-	}
-	if fh, err := e.root.OpenFile(rel(p), flags|syscall.O_NOATIME, 0); err == nil {
-		return fh, nil
-	}
-	return e.root.OpenFile(rel(p), flags, 0)
-}
-
-// abrirVerificado abre e só então decide se aquilo devia ter sido aberto.
+// # O que ela faz agora
 //
-// É o único ponto onde ReadFile e Open concordam sobre o que é legível, e ele
-// existe porque os dois divergiam: ReadFile gastava um Lstat para recusar fifo
-// e Open não recusava nada. Um `mkfifo /var/log/wtmp` travava lerUtmp em
-// open(2), e um arquivo com dono de pacote trocado por fifo travava
-// hashDoArquivo DENTRO de um worker — com o wg.Wait() do chamador esperando
-// para sempre. Sem timeout e sem lacuna declarada: a varredura simplesmente
-// não terminava.
-func (e *Env) abrirVerificado(p string) (*os.File, fs.FileInfo, error) {
-	fh, err := e.abrirSemTocarAtime(p)
+// O mesmo que AbrirParaInspecao sempre fez, e pelo mesmo motivo escrito lá:
+// O_PATH em cada componente, fstat no descritor, e a reabertura só depois de
+// provado que é arquivo comum. seguirLink=true porque é a semântica que
+// ReadFile sempre teve e que o host precisa — /etc/os-release apontando para
+// /usr/lib/os-release é rootfs normal, não evasão.
+//
+// # E ela devolve int64, não fs.FileInfo
+//
+// Porque o tamanho sai do fstat que PROVOU o tipo, em vez de um segundo fstat
+// sobre o descritor reaberto. Os dois descrevem o mesmo inode — a reabertura é
+// por /proc/self/fd/N, que não resolve caminho de novo —, e o segundo custava
+// uma syscall por arquivo. Medido: 11,3 µs por ReadFile com ele, 10,2 µs sem.
+//
+// O número serve para o teto e para dimensionar o buffer; o laço de leitura tem
+// o próprio teto e não confia nele. Nenhum dos três chamadores queria mais que
+// isso, e devolver um fs.FileInfo obrigaria a pagar a syscall para todos.
+//
+// # O preço, dito por inteiro
+//
+// A porta segura custa 3 syscalls (O_PATH, fstat, reabertura) contra as 2 da
+// insegura: 10,2 µs contra 6,4 µs por ReadFile, 1,6×. Num scan real disso sobra
+// ~1% da varredura de filesystem, porque o custo dela é dominado por hash e
+// readdir. É o preço de a ferramenta não poder alterar o host ao olhar, e ele
+// está medido para que ninguém precise adivinhá-lo antes de mexer aqui.
+func (e *Env) abrirVerificado(p string) (*os.File, int64, error) {
+	fh, id, err := e.abrirPorDescritor(p, true)
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, err
 	}
-	fi, err := fh.Stat()
-	if err != nil {
-		fh.Close()
-		return nil, nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		fh.Close()
-		return nil, nil, ErrNaoEhArquivo
-	}
-	return fh, fi, nil
+	return fh, id.Tamanho, nil
 }
 
 // Stat segue symlink, mas nunca para fora da raiz.
@@ -287,28 +256,165 @@ func (e *Env) OpenFD(p string) (*os.File, error) {
 	return fh, err
 }
 
-// ReadDir lista um diretório dentro da raiz.
-func (e *Env) ReadDir(p string) ([]fs.DirEntry, error) {
+// MaxEntradasPorDiretorio é o teto de UM diretório, e ele é um PISO de defesa,
+// não a defesa.
+//
+// A lista de um diretório é escolhida por quem escreve nele, e `os.ReadDir`
+// materializa a lista inteira antes de devolver a primeira entrada. Um
+// `for i in $(seq 1 500000); do touch /var/log/auth.log.$i; done` fazia meio
+// milhão de DirEntry existirem ao mesmo tempo, e o teto do coletor de log agia
+// depois disso — sobre a lista já construída, já ordenada, já convertida em
+// registro. O teto protegia o TAMANHO DA SAÍDA e não o custo de chegar nela.
+//
+// Cem mil é 24× o maior diretório real deste host (/usr/lib, 4.126 entradas) e
+// está acima do teto próprio de todo coletor que caminha árvore. Ele não existe
+// para ser atingido por host nenhum: existe para que NENHUM chamador desta
+// biblioteca — são mais de sessenta — possa ser ilimitado por esquecimento.
+//
+// Quem precisa de teto MENOR (o inventário de log precisa) o impõe em cima
+// deste, com lacuna própria. Este aqui é o que sobra quando ninguém pensou no
+// assunto.
+const MaxEntradasPorDiretorio = 100_000
+
+// maxEntradasParaTeste existe para o teste do teto não precisar criar cem mil
+// arquivos: criar é lento, e um teste lento é um teste que alguém desliga.
+var maxEntradasParaTeste = MaxEntradasPorDiretorio
+
+// ErrDiretorioCortado diz que a listagem PAROU no teto, e o que houver depois
+// não foi visto.
+//
+// Ele é erro, e não um booleano de retorno, por um motivo: EhLacuna já
+// classifica todo erro que não seja "não existe" como lacuna, e os trinta
+// chamadores que perguntam `EhLacuna(err)` passam a declarar a lacuna certa
+// sem uma linha de mudança. Um campo novo teria de ser lido em cada um deles,
+// e o que não fosse lido viraria silêncio.
+//
+// As entradas lidas VOLTAM junto com ele: recusar tudo faria um atacante
+// esconder o backdoor dele atrás de cem mil arquivos vazios e apagar a
+// varredura inteira daquele diretório.
+var ErrDiretorioCortado = errors.New("a listagem do diretório parou no teto de " +
+	"entradas: o que houver além NÃO foi visto")
+
+// ListagemCortada diz se o erro é SÓ o teto de entradas — ou seja, se o
+// chamador ainda tem entradas válidas na mão.
+//
+// Ele existe porque o padrão desta base é `if err != nil { declara; return }`,
+// e para um diretório cortado esse `return` joga fora cem mil entradas que
+// foram lidas. Um atacante que criasse cem mil arquivos vazios ao lado do
+// backdoor dele apagaria a varredura daquele diretório inteiro — trocando um
+// custo alto por uma cegueira barata.
+//
+// Nos caminhos onde perder as entradas custa DETECÇÃO, o chamador declara a
+// lacuna e segue com o que tem. Nos demais — diretórios de configuração
+// pequenos, /proc, /sys — a lacuna declarada basta: eles não chegam a cem mil
+// entradas sem alguém ter enchido, e ter enchido já é a resposta.
+func ListagemCortada(err error) bool { return errors.Is(err, ErrDiretorioCortado) }
+
+// ErrPararDeListar interrompe ReadDirBatch sem virar erro do chamador.
+var ErrPararDeListar = errors.New("listagem interrompida pelo chamador")
+
+// ReadDirBatch entrega as entradas de um diretório UMA A UMA, sem nunca
+// materializar a lista inteira.
+//
+// É a diferença entre um teto que limita o que se GUARDA e um teto que limita
+// o que se ALOCA. `os.ReadDir(p)` lê o diretório todo, ordena e devolve; a
+// leitura em lotes de 256 entrega a primeira entrada depois de 256, e o
+// chamador decide se quer a próxima. Contra um diretório inflado de propósito é
+// a única forma de o teto agir ANTES do custo.
+//
+// A ordem não é garantida — `os.ReadDir` ordena por nome e esta função não.
+// Quem depende de ordem estável entre execuções (o drift depende) ordena o que
+// GUARDOU, que é um conjunto pequeno, em vez de ordenar o que leu.
+func (e *Env) ReadDirBatch(p string, fn func(fs.DirEntry) error) error {
+	fh, err := e.abrirDiretorio(p)
+	if err != nil {
+		return err
+	}
+	defer fh.Close()
+	for {
+		lote, err := fh.ReadDir(256)
+		for _, ent := range lote {
+			if erroFn := fn(ent); erroFn != nil {
+				if errors.Is(erroFn, ErrPararDeListar) {
+					return nil
+				}
+				return erroFn
+			}
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if len(lote) == 0 {
+			// Sem entradas e sem EOF não deveria acontecer; sair é melhor que
+			// girar para sempre num filesystem que se comporte diferente.
+			return nil
+		}
+	}
+}
+
+// abrirDiretorio abre p para LISTAGEM, e o O_DIRECTORY não é cosmético.
+//
+// Sem ele, `os.Open` de um `/var/log` trocado por fifo bloqueia para sempre —
+// é o mesmo caminho que abrirVerificado fecha para arquivo, entrando pela porta
+// da listagem. Medido: com O_DIRECTORY o kernel devolve ENOTDIR na hora, SEM
+// O_NONBLOCK, o que prova que a checagem de tipo acontece antes de o objeto ser
+// aberto. Para diretório isso dá a mesma garantia que o percurso O_PATH de
+// safeio dá para arquivo, por uma syscall só — e são centenas de milhares de
+// diretórios numa varredura de código.
+func (e *Env) abrirDiretorio(p string) (*os.File, error) {
 	if err := e.raizIndisponivel(); err != nil {
 		return nil, err
 	}
+	const flags = os.O_RDONLY | syscall.O_DIRECTORY | syscall.O_CLOEXEC
 	if e.root == nil {
-		return os.ReadDir(p)
+		return os.OpenFile(p, flags, 0)
 	}
-	f, err := e.root.Open(rel(p))
+	return e.root.OpenFile(rel(p), flags, 0)
+}
+
+// ReadDir lista um diretório dentro da raiz, até MaxEntradasPorDiretorio.
+//
+// Devolve o que leu MAIS ErrDiretorioCortado quando o teto mordeu — os dois
+// juntos, porque descartar as entradas transformaria "inflei o diretório" numa
+// forma barata de apagar a varredura dele.
+func (e *Env) ReadDir(p string) ([]fs.DirEntry, error) {
+	out := make([]fs.DirEntry, 0, 64)
+	cortou := false
+	err := e.ReadDirBatch(p, func(ent fs.DirEntry) error {
+		if len(out) >= maxEntradasParaTeste {
+			cortou = true
+			return ErrPararDeListar
+		}
+		out = append(out, ent)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	return f.ReadDir(-1)
+	// A ordem por nome é o que os chamadores herdaram de os.ReadDir, e o drift
+	// compara saída contra saída: perdê-la faria duas coletas do mesmo host
+	// produzirem listas em ordens diferentes.
+	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
+	if cortou {
+		return out, fmt.Errorf("%w: %s parou em %d entradas",
+			ErrDiretorioCortado, p, maxEntradasParaTeste)
+	}
+	return out, nil
 }
 
 // ReadDirNames lista os nomes de um diretório, ou nada. Existe porque a metade
 // dos usos aqui só quer os nomes e trata "diretório ausente" como resposta
 // legítima — persistência é feita de diretórios que costumam não existir.
+//
+// Uma listagem CORTADA devolve o que deu, e não nada: o contrato desta função
+// já diz que ela serve onde a diferença não decide cobertura, e ali examinar
+// cem mil entradas é estritamente melhor que examinar zero.
 func (e *Env) ReadDirNames(p string) []string {
 	ents, err := e.ReadDir(p)
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrDiretorioCortado) {
 		return nil
 	}
 	out := make([]string, 0, len(ents))
@@ -324,14 +430,14 @@ func (e *Env) ReadDirNames(p string) []string {
 // decide cobertura — nunca numa fonte que responde por integridade.
 func (e *Env) ReadDirNamesErr(p string) ([]string, error) {
 	ents, err := e.ReadDir(p)
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrDiretorioCortado) {
 		return nil, err
 	}
 	out := make([]string, 0, len(ents))
 	for _, ent := range ents {
 		out = append(out, ent.Name())
 	}
-	return out, nil
+	return out, err
 }
 
 // Estado de um ponto de montagem de filesystem virtual.
@@ -356,7 +462,10 @@ const (
 func (e *Env) EstadoDeMontagem(p string) Montagem {
 	ents, err := e.ReadDir(p)
 	switch {
-	case err == nil && len(ents) > 0:
+	// Um diretório CORTADO tem entradas de sobra — cem mil delas. Deixá-lo cair
+	// no indeterminado abaixo diria "não consegui listar" sobre o ponto mais
+	// obviamente montado que existe.
+	case len(ents) > 0 && (err == nil || errors.Is(err, ErrDiretorioCortado)):
 		return MontagemAtiva
 	case err == nil:
 		return MontagemVazia

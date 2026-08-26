@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/lex0c/aletheia/internal/safeio"
 )
 
 // A leitura DIRECIONADA de um arquivo, para o perfil completo do servidor MCP.
@@ -92,66 +94,28 @@ const MaxLeituraDirecionada = 64 << 10
 // AbrirParaInspecao abre p e devolve o descritor e a identidade do que foi
 // EFETIVAMENTE aberto.
 //
-// seguirLink=false traduz para O_NOFOLLOW, e o erro vira ErrEhLink — que é
-// resposta, e não falha: "isto é um link" é exatamente o que quem investiga
-// quer saber.
+// seguirLink=false traduz para a recusa de atravessar symlink em QUALQUER
+// posição, e o erro vira ErrEhLink — que é resposta, e não falha: "isto é um
+// link" é exatamente o que quem investiga quer saber.
 //
 // Só arquivo COMUM. Fifo, socket e dispositivo são recusados no descritor, pelo
 // mesmo motivo de sempre: `mkfifo /etc/ld.so.preload` faz o open bloquear para
 // sempre, e /dev/zero não tem fim.
+//
+// # Ela deixou de ser um caminho especial
+//
+// Esta função era a ÚNICA do pacote que abria direito. ReadFile, Open e OpenFD
+// faziam um O_RDONLY real e só depois perguntavam ao fstat o que era aquilo —
+// e para um device node isso é tarde. Hoje as quatro entram pela mesma porta,
+// e a diferença entre elas voltou a ser só o que devolvem.
+//
+// A resolução de symlink também mudou de lugar. Ela era feita aqui, por
+// CadeiaDeLinks, e o caminho resolvido era aberto num segundo percurso: duas
+// resoluções independentes, com a troca de um link cabendo no meio. Agora o
+// link é lido do DESCRITOR dele, dentro do mesmo percurso — a cadeia que sai em
+// path_binding continua sendo observação, e a abertura deixou de depender dela.
 func (e *Env) AbrirParaInspecao(p string, seguirLink bool) (*os.File, Identidade, error) {
-	// SEM SEGUIR LINK, O CAMINHO É PERCORRIDO POR DESCRITOR.
-	//
-	// É a diferença entre observar e garantir. A versão anterior resolvia a
-	// cadeia com uma série de Lstat e DEPOIS abria o caminho de novo: duas
-	// resoluções independentes, e entre elas cabia a troca de um link. A
-	// resposta trazia a identidade real do fd — isso estava certo —, mas
-	// afirmava junto uma link_chain e um resolved_path que podiam pertencer a
-	// outra resolução. Num host comprometido, que é o threat model, a cadeia é
-	// justamente a defesa escolhida.
-	//
-	// Agora cada componente é aberto com openat + O_NOFOLLOW a partir do
-	// descritor do anterior. Nenhum symlink é atravessado, em nenhuma posição —
-	// nem o final nem os do meio. É o que openat2(RESOLVE_NO_SYMLINKS) faria, e
-	// funciona no piso de kernel que esta ferramenta declara, porque openat com
-	// O_NOFOLLOW é de sempre.
-	//
-	// A garantia que sai daqui é MAIS FORTE que a anterior, e mais forte que a
-	// do kernel para um open comum: com follow_symlinks:false, o arquivo aberto
-	// está exatamente no caminho pedido. A cadeia vazia deixa de ser "não vi
-	// link" e passa a ser "não há link", e resolved_path deixa de ser
-	// observação e vira o próprio caminho.
-	if !seguirLink {
-		return e.abrirPorDescritor(p)
-	}
-
-	// SEGUINDO LINK, O PERCURSO SEGURO CONTINUA SENDO O MESMO.
-	//
-	// Esta branch chamava abrirComExtras, que faz um O_RDONLY real e só DEPOIS
-	// pergunta ao fstat se aquilo era arquivo comum. Para um device node isso é
-	// tarde: o open() do driver já rodou. E a branch não é a exótica —
-	// file.hash e file.capabilities existem com --profile full mesmo sem
-	// --allow-secrets, e um `/tmp/suspeito -> /dev/algo` chega nelas.
-	//
-	// A cadeia é resolvida como OBSERVAÇÃO — é o que path_binding:"followed" já
-	// declara — e o caminho resolvido é aberto pelo mesmo walker de O_PATH, que
-	// prova o tipo antes de abrir para leitura. Nenhum caminho desta família
-	// executa open() sobre objeto que ainda não foi provado regular.
-	//
-	// Se o resolvido for um link quando o walker chegar nele, a resolução mudou
-	// no meio: a recusa é o lado seguro, e ela diz isso.
-	_, resolvido, err := e.CadeiaDeLinks(p)
-	if err != nil {
-		return nil, Identidade{}, err
-	}
-	fh, id, err := e.abrirPorDescritor(resolvido)
-	if errors.Is(err, ErrEhLink) {
-		return nil, id, errors.New("o caminho resolvia para " + resolvido +
-			", e ele já era outro symlink quando a abertura chegou lá: a " +
-			"resolução mudou no meio, e a leitura foi RECUSADA em vez de seguir " +
-			"uma cadeia que ninguém observou")
-	}
-	return fh, id, err
+	return e.abrirPorDescritor(p, seguirLink)
 }
 
 // identidadeDe extrai a identidade de um FileInfo, indo ao Stat_t por baixo.
@@ -420,183 +384,60 @@ func (e *Env) CadeiaDeLinks(p string) (cadeia []string, resolvido string, err er
 		" saltos, que é o mesmo teto do kernel"), atual, nil
 }
 
-// oPath é O_PATH. O Go não o exporta em syscall, e o valor é 010000000 no
-// asm-generic do kernel — o mesmo em x86, arm, arm64 e mips. Um teste o
-// verifica em tempo de execução em vez de confiar: ele abre um diretório com a
-// flag e exige que a LEITURA falhe, que é a propriedade que importa.
-const oPath = 0x200000
-
-// abrirPorDescritor percorre o caminho componente a componente, sem atravessar
-// symlink nenhum, e sem ACORDAR driver de dispositivo.
+// abrirPorDescritor é a ponte deste pacote para safeio.
 //
-// Cada componente é aberto com O_PATH: o kernel devolve uma referência ao
-// objeto e NÃO chama o open() do driver. É isso que separa "descobri que era um
-// device node" de "abri um device node para descobrir". Num host comprometido
-// com root — que é o threat model desta entrega — um caminho de aparência banal
-// pode ser um /dev/qualquer-coisa que faz algo ao ser aberto.
+// Ela carrega as duas coisas que só o Env sabe — a raiz travada do modo image e
+// a preferência por preservar o atime do alvo — e traduz as recusas de volta
+// para os sentinelas que os chamadores de env já conferem.
 //
-// O symlink é detectado pelo TIPO no fstat, e não por errno: O_PATH com
-// O_NOFOLLOW devolve um descritor para o PRÓPRIO link, em vez de ELOOP. Medido.
+// O percurso em si mora em safeio porque a regra não é sobre o alvo: um dump,
+// uma baseline e uma lista de indicadores precisam da mesma disciplina. Havia
+// CINCO implementações dela nesta árvore, em três estados de acerto:
 //
-// Só depois de provado regular o arquivo é reaberto para leitura, por
-// /proc/self/fd/N — que reabre o MESMO inode, sem uma segunda resolução de
-// caminho. A raiz do percurso é "/" no host vivo e a raiz da imagem em modo
-// image, e a contenção é por construção — mas o mecanismo é o path.Clean("/"+p)
-// LOGO ABAIXO, e não o validarCaminho do pacote mcp.
+//	abrirPorDescritor / preserve   certas, e separadas uma da outra
+//	abrirComExtras / dump          fechavam o fifo e deixavam passar o device
+//	baseline / ioc                 os.Open seco: nem o fifo
 //
-// A distinção importa: uma garantia que depende de validação em OUTRO pacote é
-// uma garantia que o próximo chamador quebra sem saber. Clean sobre caminho
-// absoluto absorve todo "..", porque não há como subir acima da raiz — medido
-// contra uma imagem montada, com /../fora.txt e /etc/../../fora.txt.
-func (e *Env) abrirPorDescritor(p string) (*os.File, Identidade, error) {
+// A que diverge é sempre a que ninguém está olhando, e a que estava mais errada
+// era a menos visível: `ioc`, que travava para SEMPRE num fifo.
+//
+// # A contenção continua sendo por construção
+//
+// safeio.Opcoes.Raiz vira o descritor de onde o percurso parte, e todo caminho
+// é normalizado contra "/" antes de ser andado. Um symlink absoluto para
+// /etc/shadow dentro de uma imagem resolve para o /etc/shadow DA IMAGEM, que é
+// o que o kernel faria num chroot. Medido contra uma imagem montada, com
+// /../fora.txt e /etc/../../fora.txt.
+func (e *Env) abrirPorDescritor(p string, seguirLink bool) (*os.File, Identidade, error) {
 	if err := e.raizIndisponivel(); err != nil {
 		return nil, Identidade{}, err
 	}
-	raiz := "/"
-	if e.Root != "" {
-		raiz = e.Root
+	fh, st, err := safeio.Abrir(p, safeio.Opcoes{
+		Raiz:       e.Root,
+		SeguirLink: seguirLink,
+		// O atime é EVIDÊNCIA: quando um arquivo foi lido pela última vez é
+		// fato sobre o host investigado, e uma ferramenta de resposta a
+		// incidente que o apaga ao olhar destrói o que veio buscar.
+		PreservarAtime: true,
+	})
+	var id Identidade
+	if st.Mode != 0 {
+		// Mode zero é a falha que aconteceu ANTES de qualquer fstat — abrir a
+		// própria raiz. Montar uma identidade a partir dela devolveria zeros
+		// com cara de fato.
+		id = identidadeDeStat(&st)
 	}
-	// A raiz é aberta SEGUINDO link de propósito: ela é o caminho que o
-	// OPERADOR deu na linha de comando, não um componente que o alvo escolheu.
-	dirfd, err := syscall.Open(raiz,
-		syscall.O_RDONLY|oPath|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, Identidade{}, &os.PathError{Op: "open", Path: raiz, Err: err}
+	switch {
+	case errors.Is(err, safeio.ErrEhLink):
+		return nil, id, ErrEhLink
+	case errors.Is(err, safeio.ErrNaoRegular):
+		// A identidade sai completa mesmo na recusa: "isto é um device node,
+		// dev tal, inode tal" é o que quem investiga queria saber.
+		return nil, id, ErrNaoEhArquivo
+	case err != nil:
+		return nil, id, err
 	}
-	defer syscall.Close(dirfd)
-
-	partes := strings.Split(strings.Trim(path.Clean("/"+p), "/"), "/")
-	atual := dirfd
-	// pai é o descritor do diretório que contém o componente atual. Ele fica
-	// vivo até o fim porque a reabertura sem /proc precisa dele — reabrir pelo
-	// NOME a partir do pai pinado não é uma segunda resolução do caminho.
-	pai := dirfd
-	fechar := func(fd int) {
-		if fd != dirfd {
-			syscall.Close(fd)
-		}
-	}
-	defer func() { fechar(pai) }()
-	for i, parte := range partes {
-		if parte == "" {
-			continue
-		}
-		fd, err := syscall.Openat(atual, parte,
-			syscall.O_RDONLY|oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-		if err != nil {
-			return nil, Identidade{}, &os.PathError{Op: "openat", Path: parte, Err: err}
-		}
-		if atual != pai {
-			fechar(pai)
-		}
-		pai, atual = atual, fd
-
-		var st syscall.Stat_t
-		if err := syscall.Fstat(atual, &st); err != nil {
-			syscall.Close(atual)
-			return nil, Identidade{}, err
-		}
-		id := identidadeDeStat(&st)
-
-		// Um link em QUALQUER posição encerra o percurso. Não é erro do kernel:
-		// é a decisão desta função, e é mais forte do que um open comum daria.
-		if st.Mode&syscall.S_IFMT == syscall.S_IFLNK {
-			syscall.Close(atual)
-			return nil, id, ErrEhLink
-		}
-		if i < len(partes)-1 {
-			if st.Mode&syscall.S_IFMT != syscall.S_IFDIR {
-				syscall.Close(atual)
-				return nil, id, &os.PathError{
-					Op: "openat", Path: parte, Err: syscall.ENOTDIR}
-			}
-			continue
-		}
-		if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
-			syscall.Close(atual)
-			// A identidade sai completa mesmo na recusa: "isto é um device
-			// node, dev tal, inode tal" é o que quem investiga queria saber.
-			return nil, id, ErrNaoEhArquivo
-		}
-		fh, err := reabrirParaLeitura(atual, pai, parte, id)
-		syscall.Close(atual)
-		if err != nil {
-			return nil, id, err
-		}
-		return fh, id, nil
-	}
-	// Só "/" sobrou depois do Clean, e "/" não é arquivo comum.
-	return nil, Identidade{Tipo: "dir"}, ErrNaoEhArquivo
-}
-
-// reabrirParaLeitura converte o descritor O_PATH num descritor de leitura.
-//
-// # O atime é evidência, e esta função é onde ele quase morreu
-//
-// O percurso por descritor substituiu abrirComExtras, e com ele foi embora o
-// O_NOATIME — que existe neste pacote inteiro por um motivo: quando um arquivo
-// foi lido pela última vez é FATO sobre o host investigado, e uma ferramenta de
-// resposta a incidente que o apaga ao olhar destrói a evidência que veio buscar.
-//
-// Medido num filesystem que rastreia atime (btrfs, relatime): ReadFile
-// preservava, e file.read passou a destruir — igual a um `cat`. Um agente
-// paginando dez arquivos apagava o atime dos dez.
-//
-// O O_NOATIME exige ser DONO do arquivo ou ter CAP_FOWNER, então ele DEGRADA:
-// tenta com, e cai para sem. É a mesma escada de abrirComExtras.
-//
-// # E por que existe um segundo caminho
-//
-// /proc/self/fd/N reabre o MESMO inode sem resolver caminho de novo, e é o
-// caminho preferido. Mas /proc pode não estar montado — um shell de resgate, um
-// initramfs — e ali `file.read` falhava inteiro, com um erro que fala de
-// /proc/self/fd/3 para quem pediu /etc/shadow.
-//
-// O segundo caminho reabre pelo NOME a partir do descritor do diretório pai,
-// que continua pinado, e então CONFERE o inode contra o que o percurso
-// identificou. Se alguém trocou o arquivo entre as duas aberturas, os inodes
-// divergem e a leitura é recusada — a corrida vira recusa, não resposta errada.
-func reabrirParaLeitura(fd, pai int, nome string, esperado Identidade) (*os.File, error) {
-	const flags = os.O_RDONLY | syscall.O_NONBLOCK
-	viaProc := "/proc/self/fd/" + strconv.Itoa(fd)
-	if fh, err := os.OpenFile(viaProc, flags|syscall.O_NOATIME, 0); err == nil {
-		return fh, nil
-	}
-	if fh, err := os.OpenFile(viaProc, flags, 0); err == nil {
-		return fh, nil
-	}
-	return reabrirPeloPai(pai, nome, esperado, flags)
-}
-
-func reabrirPeloPai(pai int, nome string, esperado Identidade, flags int) (*os.File, error) {
-	abrir := func(f int) (int, error) {
-		return syscall.Openat(pai, nome, f|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-	}
-	novo, err := abrir(flags | syscall.O_NOATIME)
-	if err != nil {
-		if novo, err = abrir(flags); err != nil {
-			return nil, err
-		}
-	}
-	var st syscall.Stat_t
-	if err := syscall.Fstat(novo, &st); err != nil {
-		syscall.Close(novo)
-		return nil, err
-	}
-	// A identidade do Linux é o PAR (st_dev, st_ino), e não o inode sozinho.
-	//
-	// Num host onde o atacante pode montar filesystem, outro dispositivo pode
-	// aparecer naquele nome e trazer um inode de mesmo número — números de
-	// inode só são únicos DENTRO de um filesystem. Comparar só o inode
-	// aceitaria a troca.
-	if uint64(st.Dev) != esperado.Dev || uint64(st.Ino) != esperado.Inode {
-		syscall.Close(novo)
-		return nil, errors.New("o arquivo foi TROCADO entre a identificação e a " +
-			"leitura: o par (dev, inode) mudou. A leitura foi recusada em vez de " +
-			"devolver o conteúdo de outro objeto com o nome pedido")
-	}
-
-	return os.NewFile(uintptr(novo), nome), nil
+	return fh, id, nil
 }
 
 func identidadeDeStat(st *syscall.Stat_t) Identidade {

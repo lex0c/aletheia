@@ -33,8 +33,13 @@ func TestEnvSeladoRecusaTodoAcessoAFilesystem(t *testing.T) {
 		"ReadDir":         "recusa",
 		"ReadDirNamesErr": "recusa",
 		"ReadDirNames":    "vazio",
-		"IsDir":           "vazio",
-		"Exists":          "vazio",
+		// A listagem em LOTES, que existe para o teto de entradas agir antes da
+		// alocação. Ela abre descritor de diretório, então recusa pelo mesmo
+		// motivo que ReadDir recusa — e o `fn` nulo que este teste passa nunca
+		// chega a ser chamado, porque a recusa vem antes da abertura.
+		"ReadDirBatch": "recusa",
+		"IsDir":        "vazio",
+		"Exists":       "vazio",
 
 		// EstadoDeMontagem é o único que NÃO pode responder o zero: ali o zero
 		// é MontagemAusente, "o ponto não existe neste host". Um ambiente selado

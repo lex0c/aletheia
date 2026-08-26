@@ -21,6 +21,7 @@ import (
 	"github.com/lex0c/aletheia/internal/ioc"
 	"github.com/lex0c/aletheia/internal/progress"
 	"github.com/lex0c/aletheia/internal/report"
+	"github.com/lex0c/aletheia/internal/safeio"
 )
 
 // runCollect tira o retrato e vai embora.
@@ -571,7 +572,10 @@ func conferirSoma(w io.Writer, caminho string) {
 	// pequeno não — um `truncate -s 8G dump.jsonl.sha256` derrubava o
 	// ANALISADOR por falta de memória, na máquina limpa, depois de o dump já
 	// ter carregado. 64 bytes de hex mais um nome é tudo que o formato admite.
-	sfh, err := os.Open(caminho + ".sha256")
+	// safeio: o sidecar e o dump vieram do mesmo pendrive e do mesmo host, e
+	// `mkfifo dump.jsonl.sha256` pendurava a conferência antes de qualquer teto
+	// agir. Um teto de leitura não protege contra um open que não retorna.
+	sfh, err := safeio.AbrirArtefato(caminho + ".sha256")
 	if err != nil {
 		return // sem arquivo de soma: dump de outra versão, ou de stdout
 	}
@@ -584,7 +588,7 @@ func conferirSoma(w io.Writer, caminho string) {
 	if len(campos) == 0 {
 		return
 	}
-	fh, err := os.Open(caminho)
+	fh, err := safeio.AbrirArtefato(caminho)
 	if err != nil {
 		return
 	}

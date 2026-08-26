@@ -30,9 +30,10 @@ package ioc
 import (
 	"errors"
 	"io"
-	"os"
 	"strings"
 	"sync"
+
+	"github.com/lex0c/aletheia/internal/safeio"
 )
 
 // MaxLista é o teto do arquivo de indicadores, pela mesma razão que
@@ -103,7 +104,13 @@ var chavesDeLista = map[string]Tipo{
 // Carregar lê o arquivo. Falha quando ele não abre e quando não produz
 // indicador nenhum; linhas soltas que não foram entendidas viram aviso.
 func Carregar(caminho string) (*Lista, error) {
-	fh, err := os.Open(caminho)
+	// safeio, e não os.Open: o caminho é do operador e o CONTEÚDO não é. Num IR
+	// real a lista vem no mesmo pendrive que o dump, ou de um share que o host
+	// investigado escreve. `mkfifo indicators.yml` fazia o os.Open pendurar o
+	// `scan` para SEMPRE — antes de o teto abaixo ter qualquer chance de agir,
+	// porque um teto de leitura não protege contra um open que não retorna.
+	// Medido: 3 segundos de espera viravam infinito.
+	fh, err := safeio.AbrirArtefato(caminho)
 	if err != nil {
 		return nil, err
 	}

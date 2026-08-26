@@ -49,6 +49,7 @@ import (
 	"github.com/lex0c/aletheia/internal/env"
 	"github.com/lex0c/aletheia/internal/kbpf"
 	"github.com/lex0c/aletheia/internal/pcap"
+	"github.com/lex0c/aletheia/internal/safeio"
 )
 
 // Item é uma linha do manifesto: uma peça de evidência guardada, com a cadeia
@@ -761,7 +762,7 @@ func (c *Coletor) Integro() []string {
 }
 
 func hashDoArquivo(p string) (string, error) {
-	fh, err := os.Open(p)
+	fh, err := safeio.AbrirArtefato(p)
 	if err != nil {
 		return "", err
 	}
@@ -801,10 +802,6 @@ func nomeSeguro(p string) string {
 	return s
 }
 
-// oPath é O_PATH. O Go não o exporta em syscall, e o valor é 010000000 no
-// Linux — igual em todas as arquiteturas que este projeto constrói.
-const oPath = 0o10000000
-
 // abrirRegularProvado abre para leitura SÓ depois de provar que o objeto é
 // arquivo comum, e a prova acontece sem chamar o open do driver.
 //
@@ -817,54 +814,38 @@ const oPath = 0o10000000
 // operador roda o comando que o relatório imprimiu sobre
 // `/tmp/suspeito -> /dev/watchdog`, e o host investigado reinicia.
 //
-// Este é o mesmo raciocínio que env.AbrirParaInspecao já tinha escrito para o
-// caminho do MCP, com todas as letras: "faz um O_RDONLY real e só DEPOIS
-// pergunta ao fstat se aquilo era arquivo comum. Para um device node isso é
-// tarde: o open() do driver já rodou." A lição existia no projeto e este
-// arquivo a reaprendeu do jeito caro.
+// # E por que a sequência não mora mais aqui
 //
-// A sequência:
+// Porque este arquivo a reaprendeu do jeito caro, e não foi o único: env, dump,
+// baseline e ioc tinham cada um a sua versão, em três estados diferentes de
+// acerto. A lição já estava escrita em env.AbrirParaInspecao quando este pacote
+// precisou dela, e mesmo assim virou a quinta cópia. Uma regra que cada chamador
+// reimplementa é uma regra que um deles vai errar — e o que errou foi o `ioc`,
+// que travava para sempre num fifo, no caminho que carrega os indicadores ANTES
+// de a varredura começar.
 //
-//	O_PATH      referência ao objeto SEM invocar o open do driver
-//	fstat       o TIPO, tirado do descritor e não do caminho — entre um Lstat
-//	            e um open cabe a troca do link, e quem escolhe a hora de trocar
-//	            é o host investigado
-//	reabertura  /proc/self/fd/N reabre o MESMO inode sem resolver caminho de
-//	            novo, então nem a corrida nem uma segunda resolução entram
+// A sequência agora é safeio.Abrir. O que fica aqui é o que é DESTE pacote: a
+// recusa vira uma linha `preserve_failed` no manifesto, então ela precisa dizer
+// o que encontrou — o diretório de incidente não pode simplesmente não ter a
+// peça.
 //
 // A reabertura por /proc/self/fd é o que preserva o caso mais valioso deste
 // pacote: um exe APAGADO continua legível pelo descritor, porque o inode segue
 // pinado mesmo sem nome no diretório.
 func abrirRegularProvado(origem string) (*os.File, error) {
-	fd, err := syscall.Open(origem, oPath|syscall.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer syscall.Close(fd)
-
-	var st syscall.Stat_t
-	if err := syscall.Fstat(fd, &st); err != nil {
-		return nil, err
-	}
-	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
-		// Recusa DECLARADA: quem chama transforma isto em linha preserve_failed,
-		// então o manifesto diz que o alvo existia e não foi preservado — em vez
-		// de o diretório simplesmente não ter a peça.
+	// PreservarAtime é falso aqui, e era falso antes: `preserve` copia o
+	// conteúdo, então o atime da origem se move de qualquer jeito na leitura.
+	// env pede o contrário porque só OLHA. Ligar aqui é uma decisão separada,
+	// não um efeito colateral desta unificação.
+	fh, st, err := safeio.Abrir(origem, safeio.Opcoes{SeguirLink: true})
+	switch {
+	case errors.Is(err, safeio.ErrNaoRegular):
 		return nil, fmt.Errorf("%s não é arquivo comum (%s): preservar um fifo, "+
 			"device ou socket não copia conteúdo nenhum — e ABRIR um device já "+
 			"altera o host (um /dev/watchdog arma o temporizador no open). NÃO foi "+
 			"preservado, e nada foi aberto", origem, tipoDeArquivo(os.FileMode(st.Mode)))
-	}
-
-	// O_NONBLOCK também na reabertura: o tipo já está provado, mas a flag custa
-	// nada e fecha a janela de um objeto trocado entre o fstat e esta linha —
-	// o /proc/self/fd/N reabre o inode pinado, não o caminho, então a troca não
-	// alcança; a flag é cinto de segurança.
-	fh, err := os.OpenFile("/proc/self/fd/"+strconv.Itoa(fd),
-		os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, fmt.Errorf("%s: o objeto foi provado regular mas não reabriu "+
-			"por descritor (%v) — /proc montado?", origem, err)
+	case err != nil:
+		return nil, err
 	}
 	return fh, nil
 }

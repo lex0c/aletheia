@@ -32,7 +32,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +39,7 @@ import (
 
 	"github.com/lex0c/aletheia/internal/check"
 	"github.com/lex0c/aletheia/internal/facts"
+	"github.com/lex0c/aletheia/internal/safeio"
 )
 
 // Schema muda quando a forma da chave muda. Uma baseline de esquema anterior é
@@ -162,7 +162,12 @@ var ErrGrandeDemais = errors.New("baseline maior que o teto de leitura: NÃO foi
 
 // Carregar lê uma baseline do disco.
 func Carregar(caminho string) (*Baseline, error) {
-	fh, err := os.Open(caminho)
+	// safeio pelo mesmo motivo do teto logo abaixo: o arquivo mora no diretório
+	// de incidente DO HOST INVESTIGADO, e quem tem escrita ali escolhe o que ele
+	// é. O teto defende contra tamanho; ele não defende contra um fifo, que faz
+	// o open não voltar nunca — e a baseline é carregada ANTES da varredura,
+	// então o `scan` inteiro não sai do lugar.
+	fh, err := safeio.AbrirArtefato(caminho)
 	if err != nil {
 		return nil, err
 	}

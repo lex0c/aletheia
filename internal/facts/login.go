@@ -57,6 +57,11 @@ const (
 // Tipos de registro do utmp que interessam. Exportados porque quem decide o
 // que cada um significa é o check, não o coletor.
 const (
+	// TipoVazio é o slot NUNCA USADO do arquivo: registro todo zerado. É o
+	// único que o coletor descarta por conta própria — ele não é registro de
+	// coisa nenhuma.
+	TipoVazio = 0
+
 	// TipoRunLevel é a mudança de runlevel — e na prática o DESLIGAMENTO: o
 	// `shutdown` escreve um destes a cada parada limpa. Como o de boot, o campo
 	// de origem dele carrega a versão do kernel, e não um endereço.
@@ -319,7 +324,19 @@ func lerUtmp(f *Facts, e *env.Env, caminho, papel string, falhou, agora bool) bo
 		if sec := segundoDoRegistro(r, tam); sec > 0 {
 			l.QuandoU = time.Unix(sec, 0).UTC().Format("2006-01-02T15:04:05Z")
 		}
-		if l.User == "" && l.Tipo != TipoBoot {
+		// O TIPO decide o que entra, e não o campo de usuário.
+		//
+		// O guarda anterior era `User == "" && Tipo != TipoBoot`, e ele
+		// descartava — ANTES de qualquer consumidor ver — justamente os
+		// registros que não têm conta POR NATUREZA: RUN_LVL (o desligamento),
+		// OLD_TIME/NEW_TIME (a mudança de relógio) e o DEAD_PROCESS cujo slot
+		// já foi zerado. O coletor não decide o que um tipo significa — quem
+		// decide é quem lê —, e ele estava decidindo por omissão.
+		//
+		// O desligamento é o que mais custava: o intervalo entre ele e o boot
+		// seguinte é o tempo em que o host comprovadamente não observou nada, e
+		// é o que uma investigação precisa delimitar.
+		if l.Tipo == TipoVazio || (l.User == "" && !tipoSemUsuario(l.Tipo)) {
 			continue
 		}
 		// Contado só sobre o que ENTRA no inventário: o registro descartado
@@ -330,6 +347,16 @@ func lerUtmp(f *Facts, e *env.Env, caminho, papel string, falhou, agora bool) bo
 		f.Logins = append(f.Logins, l)
 	}
 	return true
+}
+
+// tipoSemUsuario são os tipos de registro que não carregam conta por natureza.
+// Exigir usuário deles é exigir um campo que o formato não preenche.
+func tipoSemUsuario(t int) bool {
+	switch t {
+	case TipoBoot, TipoRunLevel, TipoTempoAntigo, TipoTempoNovo, TipoSaida:
+		return true
+	}
+	return false
 }
 
 // lerFatia lê `quanto` bytes a partir de `de`. Existe porque o utmp é o único

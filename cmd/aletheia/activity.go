@@ -79,6 +79,26 @@ func runActivity(args []string) int {
 		fmt.Fprintln(os.Stderr, "activity --window: o raio precisa ser positivo")
 		return 3
 	}
+	// A MESMA disciplina do --around com --since: par ambíguo é RECUSADO, e não
+	// resolvido por precedência silenciosa. Quem escreveu os dois quis um dos
+	// dois, e adivinhar qual devolve uma resposta que ninguém pediu.
+	usadas := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { usadas[f.Name] = true })
+	for _, par := range [][2]string{
+		{"from", "root"},
+		{"summary", "group-by"},
+	} {
+		if usadas[par[0]] && usadas[par[1]] {
+			fmt.Fprintf(os.Stderr, "activity: --%s e --%s não combinam — "+
+				"escolha um\n", par[0], par[1])
+			return 3
+		}
+	}
+	if usadas["window"] && !usadas["around"] {
+		fmt.Fprintln(os.Stderr, "activity --window: só faz sentido com --around, "+
+			"que é quem define o centro da janela")
+		return 3
+	}
 	if *root != "" {
 		if fi, err := os.Stat(*root); err != nil || !fi.IsDir() {
 			fmt.Fprintf(os.Stderr, "--root: %s não é um diretório acessível\n", *root)
@@ -117,7 +137,7 @@ func runActivity(args []string) int {
 
 	fmt.Fprintf(w, "%s · %s · %s\n\n",
 		report.Safe(nz(f.Host.Hostname, "host-desconhecido")),
-		report.Safe(nz(f.CollectedAt, "sem data")), f.Source)
+		report.Safe(nz(f.CollectedAt, "sem data")), report.Safe(f.Source))
 
 	var grupos []activity.Grupo
 	sumario := activity.Sumarizar(ev)

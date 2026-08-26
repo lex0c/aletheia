@@ -170,7 +170,10 @@ func varrerRede(b *caçaIOC, f *facts.Facts) {
 	}
 	for i := range f.Logins {
 		l := &f.Logins[i]
-		if l.Origem == "" {
+		// O campo de origem do registro de BOOT e do de RUNLEVEL carrega a
+		// VERSÃO DO KERNEL, e o de sessão local carrega `:0` ou `~`. Nenhum é
+		// endereço, e casá-los contra uma lista de IPs é perguntar sobre texto.
+		if !facts.OrigemDeRede(l.Origem) {
 			continue
 		}
 		b.casar(ioc.IP, l.Origem, "login "+l.User, "registro de login de "+l.User+

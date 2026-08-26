@@ -339,7 +339,8 @@ func coberturaBinaria(s activity.Fonte) string {
 	case s.Papel == facts.PapelSessoes:
 		return "agora · " + strconv.Itoa(s.Lidos) + " registro(s)"
 	case s.Desde == "" && s.Lidos == 0:
-		return "vazio — não havia registro para esconder"
+		return "VAZIO — a fonte foi lida e não entregou registro; isso não " +
+			"afirma que não houve registro (ver antiforense.wtmp_cleared)"
 	case s.Desde == "":
 		return strconv.Itoa(s.Lidos) + " registro(s), nenhum datável"
 	}

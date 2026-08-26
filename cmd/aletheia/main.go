@@ -228,14 +228,16 @@ ACTIVITY — o que ACONTECEU aqui
   junta      o registro binário e o log em texto do MESMO login viram um evento
              só, com as duas testemunhas nomeadas. A ligação é por PID — o
              ut_pid do wtmp é o pid do sshd, e o envelope do syslog carrega o
-             mesmo número —, e a FORÇA dela sai impressa. Ligação fraca
-             (mesma conta e origem no mesmo dia) RELACIONA e não funde: dois
-             logins legítimos cabem num dia
-  declara    toda saída traz a cobertura POR FONTE. A leitura de login é da
-             cauda, com teto de 2000 registros por arquivo: num host que recebe
-             400 tentativas por hora o btmp alcança uma tarde, e pedir 7d não
-             faz a leitura alcançar 7d. Sem root o btmp é ilegível, e ali sai
-             NÃO EXAMINADO — nunca "0 recusas"
+             mesmo número —, e a FORÇA dela sai impressa. Fundir REMOVE um
+             registro, então só o par MUTUAMENTE único funde: com dois
+             candidatos a identidade é ambígua, e a ligação fraca mantém os
+             dois eventos. Sem o fuso do alvo lido não há fusão nenhuma
+  declara    toda saída traz a cobertura POR FONTE, e afirmar alcance exige
+             ÂNCORA OBSERVADA: um registro anterior ao começo da janela. A
+             leitura é da cauda, com teto de 2000 por arquivo, e o logrotate
+             roda no wtmp e no btmp — "li tudo que encontrei" não é "observei o
+             intervalo". Sem root o btmp é ilegível, e ali sai NÃO EXAMINADO —
+             nunca "0 recusas"
   divergência  quando o registro binário viu um login aceito e o log em texto,
              cobrindo aquele instante e sem lacuna declarada, NÃO registrou. É
              a forma da manipulação de log — e a regra é estreita porque

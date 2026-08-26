@@ -104,6 +104,27 @@ func (f ForcaDaFusao) String() string {
 	return ""
 }
 
+// MarshalJSON publica o NOME, e não o número.
+//
+// Sem isto o documento saía com `"correlation_strength": 3` — ilegível, e uma
+// API acidental amarrada à ORDEM das constantes: inserir um tier no meio
+// mudaria o significado de todo JSON já escrito, em silêncio.
+func (f ForcaDaFusao) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + f.nome() + `"`), nil
+}
+
+func (f ForcaDaFusao) nome() string {
+	switch f {
+	case FusaoIdentidade:
+		return "identity"
+	case FusaoTemporal:
+		return "temporal"
+	case FusaoRelacionada:
+		return "related"
+	}
+	return "none"
+}
+
 const (
 	// guardaDePID é a janela em que dois registros com o mesmo pid podem ser o
 	// mesmo processo.
@@ -118,12 +139,17 @@ const (
 	// noventa segundos é folga para relógio e para buffer de syslog.
 	guardaTemporal = 90 * time.Second
 
-	// guardaSemFuso é a guarda de pid quando o /etc/localtime do ALVO não pôde
-	// ser lido: a data do log foi suposta em UTC, e o erro real pode chegar a
-	// catorze horas (a faixa de offsets em uso vai de −12 a +14). A ligação por
-	// pid sobrevive porque a igualdade do número não depende do relógio; o que
-	// se alarga é só a guarda contra reciclagem.
-	guardaSemFuso = 14 * time.Hour
+// SEM FUSO CONFIÁVEL NÃO SE FUNDE — nem por pid.
+//
+// A primeira versão alargava a guarda de pid para catorze horas (a faixa de
+// offsets em uso vai de −12 a +14), com o argumento de que a igualdade do
+// número não depende do relógio. O argumento está certo e é irrelevante: o que
+// depende do relógio é a garantia de NÃO-RECICLAGEM. Num bastion com muito SSH,
+// o pid 4211 de manhã e o pid 4211 da noite são dois processos, e as duas
+// sessões podem ser do mesmo usuário e da mesma origem.
+//
+// E fundir REMOVE a segunda representação da linha do tempo: o erro não seria
+// "confiança um pouco alta", seria dois eventos reais virando um.
 )
 
 // Confiança da data de um evento.
@@ -465,11 +491,9 @@ func fundir(f *facts.Facts, bin, txt []Evento) []Evento {
 	// legítimos do mesmo usuário e da mesma origem, um de manhã e outro à noite,
 	// colapsariam num evento só. Então a fusão por tempo é REBAIXADA a ligação.
 	fusoLido := f.FusoDoAlvoLido
-	guardaPID := guardaDePID
 	nota := ""
 	if !fusoLido {
-		guardaPID = guardaSemFuso
-		nota = "guarda temporal ampliada — o fuso do alvo não foi lido"
+		nota = "fuso do alvo não lido: ligação, não identidade"
 	}
 
 	porPID := map[chavePID][]int{}
@@ -493,28 +517,32 @@ func fundir(f *facts.Facts, bin, txt []Evento) []Evento {
 	ligado := make([]bool, len(txt))
 	fundido := make([]*Evento, len(bin))
 
-	// PASSO 1 — as fusões FORTES.
-	for i := range bin {
-		b := &bin[i]
-		if !fundivel(b.Kind) {
-			continue
+	// PASSO 1 — as fusões FORTES, em dois tiers e por casamento MUTUAMENTE
+	// único. Nenhuma delas acontece sem o fuso do alvo lido: as duas dependem
+	// de comparar instantes, e o pid depende disso pela garantia de
+	// não-reciclagem (ver o bloco de guardas acima).
+	if fusoLido {
+		porTier := []struct {
+			guarda time.Duration
+			forca  ForcaDaFusao
+			cand   func(b *Evento) []int
+		}{
+			{guardaDePID, FusaoIdentidade, func(b *Evento) []int {
+				if b.PID <= 0 {
+					return nil
+				}
+				return porPID[chavePID{b.Kind, b.PID}]
+			}},
+			{guardaTemporal, FusaoTemporal, func(b *Evento) []int {
+				return porFraca[chaveFraca{b.Kind, b.User, b.Origem}]
+			}},
 		}
-		if b.PID > 0 {
-			if j := melhor(txt, consumido, porPID[chavePID{b.Kind, b.PID}], b, guardaPID); j >= 0 {
+		for _, tier := range porTier {
+			for i, j := range casar(bin, txt, consumido, fundido, tier.cand, tier.guarda) {
 				consumido[j] = true
-				e := juntar(*b, txt[j], FusaoIdentidade, nota)
+				e := juntar(bin[i], txt[j], tier.forca, nota)
 				fundido[i] = &e
-				continue
 			}
-		}
-		// Só com o fuso do alvo lido — ver acima.
-		if !fusoLido {
-			continue
-		}
-		if j := melhor(txt, consumido, porFraca[chaveFraca{b.Kind, b.User, b.Origem}], b, guardaTemporal); j >= 0 {
-			consumido[j] = true
-			e := juntar(*b, txt[j], FusaoTemporal, "")
-			fundido[i] = &e
 		}
 	}
 
@@ -580,34 +608,62 @@ func fundivel(k Kind) bool {
 // melhor escolhe, entre os candidatos livres, o mais próximo no tempo dentro da
 // guarda. Sem data dos dois lados não há como avaliar a guarda, e a ligação cai
 // para a força de baixo.
-func melhor(txt []Evento, usado []bool, cand []int, b *Evento, guarda time.Duration) int {
-	if b.At == "" || len(cand) == 0 {
-		return -1
+func casar(bin, txt []Evento, consumido []bool, fundido []*Evento,
+	cand func(*Evento) []int, guarda time.Duration) map[int]int {
+
+	compat := map[int][]int{}
+	pretendentes := map[int]int{}
+	for i := range bin {
+		b := &bin[i]
+		if fundido[i] != nil || !fundivel(b.Kind) || b.At == "" {
+			continue
+		}
+		for _, j := range cand(b) {
+			if consumido[j] || !compativel(b, &txt[j], guarda) {
+				continue
+			}
+			compat[i] = append(compat[i], j)
+			pretendentes[j]++
+		}
+	}
+
+	// AMBIGUIDADE SE DECLARA, NÃO SE RESOLVE — e ela é BIDIRECIONAL.
+	//
+	// A versão anterior escolhia o candidato mais PRÓXIMO, o que fazia a
+	// identidade forense depender da ordem de varredura. A correção óbvia —
+	// exigir um único candidato por registro binário — resolve só metade: dois
+	// logins do mesmo usuário e da mesma origem a 50s um do outro têm UM
+	// candidato de texto cada, e é o texto que tem dois pretendentes. O
+	// primeiro a ser varrido consumia, e o segundo ficava órfão.
+	//
+	// Só o par mutuamente único é identidade. O resto cai para a ligação
+	// fraca, que RELACIONA e mantém os dois eventos.
+	out := map[int]int{}
+	for i, js := range compat {
+		if len(js) == 1 && pretendentes[js[0]] == 1 {
+			out[i] = js[0]
+		}
+	}
+	return out
+}
+
+// compativel diz se dois registros podem ser o mesmo evento.
+func compativel(b, t *Evento, guarda time.Duration) bool {
+	if t.At == "" {
+		return false
+	}
+	// A chave por PID não exige acordo sobre a origem, e sem esta recusa dois
+	// eventos com endereços DIFERENTES podiam virar um só por reciclagem de
+	// pid — apagando um dos dois endereços da investigação.
+	if b.Origem != "" && t.Origem != "" && b.Origem != t.Origem {
+		return false
 	}
 	t0, ok := instante(b.At)
 	if !ok {
-		return -1
+		return false
 	}
-	escolhido, menor := -1, time.Duration(1<<62)
-	for _, j := range cand {
-		if usado[j] || txt[j].At == "" {
-			continue
-		}
-		// A chave por PID não exige acordo sobre a origem, e sem esta recusa
-		// dois eventos com endereços DIFERENTES podiam virar um só por
-		// reciclagem de pid — apagando um dos dois endereços da investigação.
-		if b.Origem != "" && txt[j].Origem != "" && b.Origem != txt[j].Origem {
-			continue
-		}
-		d := diferenca(t0, txt[j].At)
-		if d < 0 {
-			continue
-		}
-		if d <= guarda && d < menor {
-			escolhido, menor = j, d
-		}
-	}
-	return escolhido
+	d := diferenca(t0, t.At)
+	return d >= 0 && d <= guarda
 }
 
 // diferenca é |t0 - at|, e devolve -1 quando não dá para medir.
@@ -764,21 +820,24 @@ func nzs(s, padrao string) string {
 // cada evento de um host cujo wtmp guarda mais passado que o auth.log, que é
 // todo host.
 func marcarDivergencia(f *facts.Facts, ev []Evento, fontes []Fonte) {
-	cob := f.CoberturaLog("auth")
-	parserOK := parserConfiavel(f, "auth")
-
-	// A chave inclui a FORMA da origem, e não só o tipo. Sem ela, um auth.log
-	// cheio de login de rede "provava" que ele registraria o login de console
-	// que falta — que é a acusação errada mais fácil de produzir.
-	type forma struct {
+	// A prova é por (ARQUIVO, tipo, forma da origem).
+	//
+	// O arquivo entra porque a capacidade de registrar precisa vir da MESMA
+	// fonte que cobre o instante: com a chave só por tipo, um auth.log que
+	// registrou logins ontem "provava" a capacidade de um secure rotacionado
+	// que cobre hoje, e a afirmação passava a se apoiar em dois arquivos
+	// diferentes. A forma da origem entra porque um arquivo que só registra
+	// login de REDE não diz nada sobre a falta de um login de CONSOLE.
+	type prova struct {
+		file   string
 		kind   Kind
 		emRede bool
 	}
-	vistoNoLog := map[forma]bool{}
+	visto := map[prova]bool{}
 	for i := range ev {
 		for _, w := range ev[i].Testemunhas {
-			if strings.HasPrefix(w, "log:") {
-				vistoNoLog[forma{ev[i].Kind, facts.OrigemDeRede(ev[i].Origem)}] = true
+			if file, ok := strings.CutPrefix(w, "log:"); ok {
+				visto[prova{file, ev[i].Kind, facts.OrigemDeRede(ev[i].Origem)}] = true
 			}
 		}
 	}
@@ -797,43 +856,62 @@ func marcarDivergencia(f *facts.Facts, ev []Evento, fontes []Fonte) {
 		if len(e.Relacionados) > 0 {
 			continue
 		}
-		if !cob.Existe || !cob.Lida || !dentro(e.At, cob.ContinuoDesde, cob.ContinuoAte) {
+
+		coberto, confiaveis := fontesQueObservaram(f, "auth", e.At)
+		if !coberto {
+			// Fora da cobertura não há pergunta. Marcar aqui poria ressalva em
+			// cada evento de um host cujo wtmp guarda mais passado que o
+			// auth.log — ou seja, em todo host.
 			continue
 		}
-		if parserOK && vistoNoLog[forma{e.Kind, facts.OrigemDeRede(e.Origem)}] {
-			e.Divergente = DivergenteAusente
-		} else {
-			e.Divergente = DivergenteNaoConfirmado
+		emRede := facts.OrigemDeRede(e.Origem)
+		e.Divergente = DivergenteNaoConfirmado
+		for _, file := range confiaveis {
+			if visto[prova{file, e.Kind, emRede}] {
+				e.Divergente = DivergenteAusente
+				break
+			}
 		}
 	}
 }
 
-// parserConfiavel pergunta à camada de FATOS se ela declarou lacuna nos
-// arquivos desta família.
+// fontesQueObservaram responde duas coisas sobre um instante: alguma fonte da
+// família o observou, e quais delas sustentam uma afirmação de AUSÊNCIA.
 //
-// A primeira versão media `reconhecidas/candidatas` aqui mesmo, com um limiar
-// próprio de 50% e sem piso de amostra — e a mesma pergunta já estava
-// respondida em facts.declaraCapacidadeDoParser, com 20% e piso de 50
-// candidatas, calibrados contra hosts reais. Dois números para um fato só é
-// exatamente o que AgregadoDeLog documenta ter recusado, e aqui o número não
-// calibrado decidia a afirmação mais forte que este arquivo faz.
+// A segunda lista é menor, e a diferença é a confiança da DATA. A cobertura de
+// um syslog tradicional pode ter o ano inferido do mtime do arquivo — que um
+// `touch -d` reescreve — e o fuso suposto em UTC. O primeiro erra em MESES.
 //
-// Qualquer lacuna na fonte desqualifica, e não só a de capacidade do parser:
-// se a camada de fatos disse que aquele arquivo não entregou o que promete, a
-// acusação de adulteração não pode se apoiar nele.
-func parserConfiavel(f *facts.Facts, familia string) bool {
-	viu := false
+// Afirmar "esta fonte cobria o instante e não registrou" a partir de um
+// intervalo cujas pontas o alvo escolhe é entregar a afirmação mais forte deste
+// arquivo para quem se quer acusar. Ela continua contando como OBSERVAÇÃO — o
+// evento sai `nao_confirmado`, e não sem marca nenhuma.
+func fontesQueObservaram(f *facts.Facts, familia, at string) (bool, []string) {
+	coberto := false
+	var confiaveis []string
 	for i := range f.FontesDeLog {
 		s := &f.FontesDeLog[i]
 		if !temFamilia(s, familia) {
 			continue
 		}
-		if s.Lacuna != "" {
-			return false
+		if s.Estado != facts.FonteLida && s.Estado != facts.FonteTruncada {
+			continue
 		}
-		viu = true
+		if !dentro(at, s.CobertoDesde, s.CobertoAte) {
+			continue
+		}
+		coberto = true
+		if s.Lacuna != "" || s.CoberturaAnoInferido || s.CoberturaFusoInferido {
+			continue
+		}
+		// Duas pontas com o miolo fora não são um intervalo: o que está entre a
+		// cabeça e a cauda não foi observado.
+		if s.LeituraDescontinua {
+			continue
+		}
+		confiaveis = append(confiaveis, s.Path)
 	}
-	return viu
+	return coberto, confiaveis
 }
 
 func temFamilia(s *facts.FonteDeLog, familia string) bool {

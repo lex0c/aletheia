@@ -372,6 +372,18 @@ func (f *Facts) CoberturaLog(familia string) CoberturaDeLog {
 			out.Buraco = true
 		}
 	}
+	// O TETO RÍGIDO corta na SELEÇÃO, e o que ele descarta nunca vira
+	// FonteDeLog. Sem esta consulta, uma família cujas fontes foram TODAS
+	// cortadas saía como inexistente — e "não há arquivo desta família neste
+	// host" é uma afirmação sobre o alvo, feita a partir de uma decisão da
+	// ferramenta. Quem lê isso é mandado para outra ferramenta, num host que
+	// tinha o arquivo.
+	if !out.Existe && f.LogFamiliasCortadas[familia] > 0 {
+		out.Existe = true
+		out.Motivo = "todas as fontes da família " + familia + " ficaram fora da " +
+			"seleção pelo teto rígido de arquivos: elas existem e não foram lidas"
+		return out
+	}
 	if !out.Existe {
 		out.Motivo = "não há arquivo de log da família " + familia + " neste host"
 		return out

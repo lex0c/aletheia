@@ -133,10 +133,11 @@ func alcance(s activity.Fonte, r activity.Resumo, agora time.Time) string {
 	case s.Desde != "":
 		alc = s.Alcance(agora)
 	case s.Lidos == 0:
-		// Lido e vazio: não havia registro nenhum ali para esconder. É o estado
-		// normal de instalação nova e de contêiner, e chamá-lo de lacuna poria
-		// um alerta em toda varredura do mundo.
-		alc = "vazio"
+		// VAZIO, e nada além disso. A frase anterior aqui era "não havia
+		// registro para esconder" — uma afirmação sobre o passado tirada de um
+		// arquivo de zero byte, que é exatamente a forma que um `: > wtmp`
+		// deixa. Vazio prova que a fonte foi lida e não entregou registro.
+		alc = "vazio (alcance indeterminado)"
 	default:
 		// Lido, com registros, e nenhum deles datável: a fonte não sustenta
 		// afirmação temporal nenhuma.

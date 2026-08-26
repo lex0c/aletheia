@@ -155,3 +155,92 @@ func TestRegistroSemDataEhContadoENaoAncoraAJanela(t *testing.T) {
 		t.Fatalf("Logins = %d, queria 3", len(f.Logins))
 	}
 }
+
+// A IDENTIDADE DA SÉRIE, provada contra o collectLogs de verdade.
+//
+// Este teste existe porque a versão anterior do consumidor (activity) montava a
+// fixture à mão com `Base: "wtmp"` e comparava contra isso — uma representação
+// que este coletor não produz. O código passava no teste e não funcionava em
+// produção, que é o pior resultado possível de um teste.
+func TestBaseDaSerieEhCaminhoCompleto(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "var", "log")
+	if err := os.MkdirAll(log, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"wtmp", "wtmp.1", "wtmp-20260801", "btmp"} {
+		if err := os.WriteFile(filepath.Join(log, n), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	f := &Facts{}
+	collectLogs(f, env.Probe(env.Options{Root: dir}))
+
+	achou := 0
+	for i := range f.Logs {
+		a := &f.Logs[i]
+		if a.Base == "wtmp" {
+			t.Fatalf("Base = %q: se algum dia virar o nome nu, todo consumidor "+
+				"que compara com caminho completo passa a casar zero em "+
+				"silêncio — que foi o defeito que este teste trava", a.Base)
+		}
+		if a.Path == "/var/log/wtmp.1" || a.Path == "/var/log/wtmp-20260801" {
+			if a.Base != "/var/log/wtmp" {
+				t.Errorf("%s: Base = %q, queria /var/log/wtmp", a.Path, a.Base)
+			}
+			achou++
+		}
+	}
+	if achou != 2 {
+		t.Errorf("as duas gerações rotacionadas precisam ser reconhecidas como "+
+			"da MESMA série; achei %d", achou)
+	}
+}
+
+// Registro sem conta POR NATUREZA não pode ser descartado pelo guarda de
+// usuário vazio: com ele iam o desligamento (RUN_LVL), a mudança de relógio
+// (OLD_TIME/NEW_TIME) e o encerramento de sessão cujo slot já foi zerado — e o
+// intervalo entre um desligamento e o boot seguinte é o tempo em que o host
+// comprovadamente não observou nada.
+func TestRegistroSemContaPorNaturezaSobrevive(t *testing.T) {
+	tam := tamanhoNativoDeUtmp
+	semUser := func(tipo int) []byte {
+		r := make([]byte, tam)
+		r[0] = byte(tipo)
+		copy(r[8:40], "~")
+		copy(r[76:332], "6.12.0-arch1")
+		if tam == tamUtmp64 {
+			r[344] = 1
+		} else {
+			r[340] = 1
+		}
+		return r
+	}
+	var b []byte
+	for _, tipo := range []int{TipoRunLevel, TipoTempoAntigo, TipoTempoNovo, TipoSaida} {
+		b = append(b, semUser(tipo)...)
+	}
+	b = append(b, make([]byte, tam)...) // slot NUNCA usado: este sim é descartado
+
+	dir := t.TempDir()
+	caminho := filepath.Join(dir, "wtmp")
+	if err := os.WriteFile(caminho, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f := &Facts{}
+	if !lerUtmp(f, &env.Env{}, caminho, PapelHistorico, false, false) {
+		t.Fatal("a leitura falhou")
+	}
+	if len(f.Logins) != 4 {
+		t.Fatalf("Logins = %d, queria 4: os quatro tipos não têm conta por "+
+			"natureza, e exigir usuário deles é exigir um campo que o formato "+
+			"não preenche", len(f.Logins))
+	}
+	for _, l := range f.Logins {
+		if l.Tipo == TipoVazio {
+			t.Error("o slot nunca usado entrou no inventário")
+		}
+	}
+}

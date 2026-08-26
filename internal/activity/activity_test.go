@@ -171,45 +171,75 @@ func TestDuracaoUsaHorasAteDoisDias(t *testing.T) {
 	}
 }
 
-// O teto de 2000 registros NÃO é o único jeito de o passado ficar de fora — o
-// logrotate roda no wtmp e no btmp por padrão em toda distribuição, e a coleta
-// de login só abre a geração VIVA.
+// A COBERTURA EXIGE ÂNCORA OBSERVADA. Nenhum outro fato a substitui.
 //
-// Sem contar o que existe ao lado, no dia 2 do mês um wtmp de duas horas com
-// wtmp.1 fechado ao lado saía como `≥24h`: o falso "limpo" produzido pelo campo
-// que existe para impedi-lo.
-func TestGeracaoRotacionadaAoLadoDerrubaACobertura(t *testing.T) {
-	logins := []facts.Login{entrada("deploy", "10.0.0.9", 2)}
-	f := hostCom(logins)
-	// Leitura completa da geração viva: o teto não mordeu.
-	f.FontesDeLogin[0].Truncada = false
+// Duas versões anteriores deste teste afirmaram o contrário e passaram:
+//
+//	"li o arquivo inteiro"        não prova alcance: a retenção do logrotate é
+//	                              finita, e a geração que tinha o passado
+//	                              expira. Ausência de rotacionado hoje é
+//	                              ausência de rotacionado hoje
+//	Base: "wtmp"                  não é o que collectLogs escreve (ele grava o
+//	                              caminho COMPLETO), então a contagem de
+//	                              gerações saía zero em produção e o teste
+//	                              provava que o código lia o que ele mesmo
+//	                              tinha escrito
+func TestCoberturaExigeAncoraObservadaAnteriorAJanela(t *testing.T) {
+	// Arquivo lido inteiro, sem rotacionado ao lado, cujo registro mais antigo
+	// é de 2h atrás. Ele NÃO cobre 24h.
+	f := hostCom([]facts.Login{entrada("deploy", "10.0.0.9", 2)})
+	h, _ := Resumir(f, agora, 24*time.Hour).Fonte(facts.PapelHistorico)
+	if h.CobreJanela {
+		t.Error("arquivo completo com 2h de dados não cobre 24h: a retenção do " +
+			"logrotate é finita, e a geração que tinha o passado pode ter " +
+			"expirado — ausência de rotacionado não é prova de idade")
+	}
 
-	t.Run("sem rotacionado ao lado", func(t *testing.T) {
-		r := Resumir(f, agora, 24*time.Hour)
-		h, _ := r.Fonte(facts.PapelHistorico)
-		if !h.CobreJanela {
-			t.Error("o arquivo foi lido inteiro e não há geração ao lado: se " +
-				"algo tivesse acontecido nas 24h, estaria ali")
-		}
+	// Com uma âncora anterior à janela, aí sim.
+	g := hostCom([]facts.Login{
+		entrada("antigo", "10.0.0.1", 30),
+		entrada("deploy", "10.0.0.9", 2),
 	})
+	h, _ = Resumir(g, agora, 24*time.Hour).Fonte(facts.PapelHistorico)
+	if !h.CobreJanela {
+		t.Error("há registro observado de 30h atrás: se algo tivesse acontecido " +
+			"nas últimas 24h, estaria neste arquivo")
+	}
+}
 
-	t.Run("com rotacionado ao lado", func(t *testing.T) {
-		g := hostCom(logins)
-		g.Logs = []facts.ArquivoDeLog{
-			{Path: "/var/log/wtmp", Base: "wtmp", Geracao: 0},
-			{Path: "/var/log/wtmp.1", Base: "wtmp", Geracao: 1},
-		}
-		r := Resumir(g, agora, 24*time.Hour)
-		h, _ := r.Fonte(facts.PapelHistorico)
-		if h.GeracoesNaoLidas != 1 {
-			t.Fatalf("GeracoesNaoLidas = %d, queria 1", h.GeracoesNaoLidas)
-		}
-		if h.CobreJanela {
-			t.Error("o wtmp.1 existe e não foi aberto: a leitura alcança 2h, " +
-				"e afirmar cobertura de 24h aqui é o falso 'limpo' que esta " +
-				"feature existe para não cometer")
-		}
+// Arquivo VAZIO não cobre janela nenhuma, e a razão é adversarial: `: > wtmp`
+// produz exatamente a forma de um wtmp legitimamente novo. Existe um check
+// inteiro sobre esse estado (antiforense.wtmp_cleared) — a cobertura não pode
+// tratá-lo como prova de que nada aconteceu.
+func TestArquivoVazioNaoCobreJanela(t *testing.T) {
+	f := hostCom(nil)
+	h, _ := Resumir(f, agora, 24*time.Hour).Fonte(facts.PapelHistorico)
+	if h.CobreJanela {
+		t.Error("wtmp vazio saiu como cobertura de 24h")
+	}
+}
+
+// A GERAÇÃO ROTACIONADA ao lado, na representação que collectLogs produz de
+// verdade: `Base` é o caminho COMPLETO do arquivo vivo da série.
+func TestGeracaoRotacionadaAoLadoEhContada(t *testing.T) {
+	f := hostCom([]facts.Login{
+		entrada("antigo", "10.0.0.1", 30),
+		entrada("deploy", "10.0.0.9", 2),
 	})
+	f.Logs = []facts.ArquivoDeLog{
+		{Path: "/var/log/wtmp", Base: "/var/log/wtmp", Geracao: 0},
+		{Path: "/var/log/wtmp.1", Base: "/var/log/wtmp", Geracao: 1},
+		// Datada: a rotação por sufixo de data do logrotate (dateext).
+		{Path: "/var/log/wtmp-20260801", Base: "/var/log/wtmp", Geracao: 1, Datada: true},
+		// Outra série: não conta.
+		{Path: "/var/log/btmp.1", Base: "/var/log/btmp", Geracao: 1},
+	}
+	h, _ := Resumir(f, agora, 24*time.Hour).Fonte(facts.PapelHistorico)
+	if h.GeracoesNaoLidas != 2 {
+		t.Errorf("GeracoesNaoLidas = %d, queria 2 — a coleta de login abre só a "+
+			"geração viva, e o rodapé precisa dizer o que ficou fechado ao lado",
+			h.GeracoesNaoLidas)
+	}
 }
 
 // A CONTAGEM de recusa é sobre o btmp inteiro; o TOPO é que é sobre origem de

@@ -710,17 +710,25 @@ cobertura
 
 Três decisões carregam o comando:
 
-**A ligação é por identidade, não por proximidade.** O `ut_pid` do wtmp *é* o
-pid do sshd da sessão, e o envelope do syslog carrega o mesmo número. A força
-da ligação sai impressa (`⇄pid`), e a ligação FRACA — mesma conta e origem no
-mesmo dia — *relaciona* sem fundir: dois logins legítimos cabem num dia, e
-colapsá-los apagaria um evento real.
+**A ligação é por identidade, e a ambiguidade se declara.** O `ut_pid` do wtmp
+*é* o pid do sshd da sessão, e o envelope do syslog carrega o mesmo número. A
+força sai impressa (`⇄pid`). Mas fundir REMOVE um registro da linha do tempo,
+então a fusão só acontece no par **mutuamente único**: se dois registros
+disputam a mesma linha de log — dois logins do mesmo usuário e origem a 50s um
+do outro cabem os dois em ±90s —, a resposta é "ligação plausível, identidade
+ambígua", e os dois eventos ficam. E sem o `/etc/localtime` do alvo não há
+fusão nenhuma, nem por pid: a igualdade do número não depende do relógio, mas a
+garantia de **não-reciclagem** depende.
 
-**A cobertura é por fonte, e ela nunca some.** A leitura de login é da cauda,
-com teto de 2000 registros por arquivo: num host que recebe 400 tentativas por
-hora, o btmp alcança uma tarde. Pedir `--since 7d` não faz a leitura alcançar
-sete dias, e o rodapé diz isso. Sem root o btmp é ilegível, e ali sai
-`NÃO EXAMINADO` — nunca "0 recusas".
+**A cobertura exige âncora observada.** A leitura de login é da cauda, com teto
+de 2000 registros por arquivo: num host que recebe 400 tentativas por hora, o
+btmp alcança uma tarde. E o teto não é o único jeito de o passado ficar de
+fora — o logrotate roda no wtmp e no btmp. Então a única prova positiva de
+alcance é um registro **observado** anterior ao começo da janela: "li o arquivo
+inteiro e não há rotacionado ao lado hoje" não prova nada sobre trinta dias
+atrás, e arquivo vazio não cobre janela nenhuma (`: > /var/log/wtmp` deixa
+exatamente essa forma). Sem root o btmp é ilegível, e ali sai `NÃO EXAMINADO` —
+nunca "0 recusas".
 
 **Divergência é estreita de propósito.** "O wtmp viu e o auth.log não" tem a
 forma da manipulação de log — e tem, idêntica, a forma de várias coisas
@@ -736,10 +744,12 @@ ssh não-interativo scp, rsync, git e ansible produzem "Accepted publickey" sem
 ```
 
 Então a acusação vale só para **login aceito**, só na direção **binário →
-texto**, e só quando a fonte ausente cobria o instante, não tem lacuna
-declarada pela camada de fatos, e já produziu evento daquele tipo **com a mesma
-forma de origem** — um auth.log que só registra login de rede não diz nada
-sobre a falta de um login de console. Falhando qualquer uma: `não confirmado`.
+texto**, e a decisão é por **arquivo**, não pela família: o mesmo arquivo que
+cobre o instante precisa não ter lacuna declarada, ter datas confiáveis — o ano
+de um syslog tradicional sai do mtime, que um `touch -d` reescreve, e erra em
+*meses* — e já ter produzido evento daquele tipo **com a mesma forma de
+origem**. Um auth.log que só registra login de rede não diz nada sobre a falta
+de um login de console. Falhando qualquer uma: `não confirmado`.
 
 O `wtf` traz um resumo disso em quatro linhas, com janela fixa de 24h. Ele
 decide *por onde começar*; o `activity` investiga.

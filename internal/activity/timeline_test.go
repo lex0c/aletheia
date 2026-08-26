@@ -200,6 +200,125 @@ func TestDivergenciaExigeAsCondicoes(t *testing.T) {
 	})
 }
 
+// A CONFIANÇA DA DATA da cobertura decide se a ausência é afirmável.
+//
+// O ano de uma linha de syslog tradicional é inferido do mtime do arquivo, e um
+// `touch -d` no rotacionado reescreve o mtime: o intervalo de cobertura passa a
+// ter as pontas escolhidas por quem se quer acusar, e o erro é de MESES.
+// Afirmar "esta fonte cobria o instante e não registrou" sobre isso é entregar
+// a afirmação mais forte do comando ao alvo.
+func TestCoberturaComDataInferidaNaoSustentaAcusacao(t *testing.T) {
+	base := func(inferido bool) *facts.Facts {
+		s := fonteAuth(at(48, 0), at(0, 0))
+		s.CoberturaAnoInferido = inferido
+		return hostComLog(
+			[]facts.Login{
+				{Tipo: facts.TipoLoginUsuario, User: "outro", Origem: "10.0.0.1",
+					PID: 900, QuandoU: at(20, 0)},
+				{Tipo: facts.TipoLoginUsuario, User: "deploy", Origem: "10.0.0.9",
+					PID: 4211, QuandoU: at(2, 0)},
+			},
+			[]facts.EventoDeLog{{Kind: "auth.accepted", At: at(20, 0), AtKnown: true,
+				User: "outro", RemoteIP: "10.0.0.1", PID: 900, File: "/var/log/auth.log"}},
+			s)
+	}
+	pega := func(t *testing.T, f *facts.Facts) string {
+		t.Helper()
+		ev, _ := Linha(f, Filtro{User: "deploy"})
+		if len(ev) != 1 {
+			t.Fatalf("queria 1 evento, veio %d", len(ev))
+		}
+		return ev[0].Divergente
+	}
+	if got := pega(t, base(false)); got != DivergenteAusente {
+		t.Errorf("com data exata: %q, queria %q", got, DivergenteAusente)
+	}
+	if got := pega(t, base(true)); got != DivergenteNaoConfirmado {
+		t.Errorf("com ano INFERIDO: %q, queria %q — o intervalo tem as pontas "+
+			"escolhidas pelo alvo", got, DivergenteNaoConfirmado)
+	}
+}
+
+// A capacidade de registrar tem de vir da MESMA fonte que cobre o instante.
+// Com a chave só por tipo, um auth.log que registrou logins ontem "provava" a
+// capacidade de outro arquivo que cobre hoje.
+func TestCapacidadeVemDaFonteQueCobreOInstante(t *testing.T) {
+	// O arquivo que COBRE o instante nunca registrou login aceito; quem
+	// registrou foi outro, que não cobre.
+	velho := fonteAuth(at(200, 0), at(100, 0))
+	velho.Path = "/var/log/auth.log.1"
+	f := hostComLog(
+		[]facts.Login{
+			{Tipo: facts.TipoLoginUsuario, User: "outro", Origem: "10.0.0.1",
+				QuandoU: at(150, 0)},
+			{Tipo: facts.TipoLoginUsuario, User: "deploy", Origem: "10.0.0.9",
+				QuandoU: at(2, 0)},
+		},
+		[]facts.EventoDeLog{{Kind: "auth.accepted", At: at(150, 0), AtKnown: true,
+			User: "outro", RemoteIP: "10.0.0.1", File: "/var/log/auth.log.1"}},
+		fonteAuth(at(48, 0), at(0, 0)), velho)
+
+	ev, _ := Linha(f, Filtro{User: "deploy"})
+	if len(ev) != 1 {
+		t.Fatalf("queria 1 evento, veio %d", len(ev))
+	}
+	if ev[0].Divergente == DivergenteAusente {
+		t.Error("a acusação se apoiou em dois arquivos: a capacidade veio do " +
+			"rotacionado e a cobertura do vivo")
+	}
+}
+
+// AMBIGUIDADE SE DECLARA, NÃO SE RESOLVE. Dois logins do mesmo usuário e da
+// mesma origem a 50s um do outro cabem os dois em ±90s de uma linha de log, e a
+// versão anterior escolhia o mais próximo — deixando a identidade forense
+// depender da ordem de iteração.
+func TestFusaoTemporalAmbiguaNaoEscolhe(t *testing.T) {
+	f := hostComLog(
+		[]facts.Login{
+			{Tipo: facts.TipoLoginUsuario, User: "deploy", Origem: "10.0.0.9", QuandoU: at(2, 0)},
+			{Tipo: facts.TipoLoginUsuario, User: "deploy", Origem: "10.0.0.9", QuandoU: at(2, 1)},
+		},
+		[]facts.EventoDeLog{{Kind: "auth.accepted", At: at(2, 0), AtKnown: true,
+			User: "deploy", RemoteIP: "10.0.0.9", File: "/var/log/auth.log"}},
+		fonteAuth(at(48, 0), at(0, 0)))
+
+	ev, _ := Linha(f, Filtro{})
+	if len(ev) != 3 {
+		t.Fatalf("saíram %d eventos, queria 3: com dois candidatos compatíveis a "+
+			"identidade é ambígua, e escolher um apagaria o outro", len(ev))
+	}
+	for _, e := range ev {
+		if e.Fusao == FusaoIdentidade || e.Fusao == FusaoTemporal {
+			t.Errorf("houve fusão sobre par ambíguo: %+v", e)
+		}
+	}
+}
+
+// Sem o fuso do ALVO lido não há fusão NENHUMA — nem por pid. A igualdade do
+// número não depende do relógio, mas a garantia de NÃO-RECICLAGEM depende: num
+// bastion, o pid 4211 de manhã e o da noite são dois processos.
+func TestSemFusoNemMesmoOPIDFunde(t *testing.T) {
+	f := hostComLog(
+		[]facts.Login{{Tipo: facts.TipoLoginUsuario, User: "deploy",
+			Origem: "10.0.0.9", PID: 4211, QuandoU: at(2, 0)}},
+		[]facts.EventoDeLog{{Kind: "auth.accepted", At: at(2, 0), AtKnown: true,
+			AtFusoInferido: true, User: "deploy", RemoteIP: "10.0.0.9", PID: 4211,
+			File: "/var/log/auth.log"}},
+		fonteAuth(at(48, 0), at(0, 0)))
+	f.FusoDoAlvoLido = false
+
+	ev, _ := Linha(f, Filtro{})
+	if len(ev) != 2 {
+		t.Fatalf("saíram %d eventos, queria 2: fundir removeria a segunda "+
+			"representação da linha do tempo", len(ev))
+	}
+	for _, e := range ev {
+		if e.Fusao == FusaoIdentidade {
+			t.Errorf("fusão por identidade sem relógio confiável: %+v", e)
+		}
+	}
+}
+
 // RECUSA NUNCA É DIVERGÊNCIA, e este é o falso positivo mais caro que a
 // primeira versão produzia.
 //

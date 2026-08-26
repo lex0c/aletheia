@@ -27,7 +27,6 @@ package activity
 
 import (
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/lex0c/aletheia/internal/facts"
@@ -327,26 +326,32 @@ func Cobertura(f *facts.Facts, desde string) []Fonte {
 		}
 		// As sessões abertas são o AGORA por construção: a pergunta de janela
 		// não se aplica a elas.
+		// A ÚNICA prova positiva de alcance é uma ÂNCORA OBSERVADA anterior ao
+		// começo da janela.
+		//
+		// "Li o arquivo vivo inteiro e não há rotacionado ao lado AGORA" não
+		// prova nada sobre trinta dias atrás: a retenção do logrotate é
+		// finita, e uma semana depois o wtmp.1 que tinha o passado já expirou.
+		// Ausência de geração antiga é ausência de geração antiga.
+		//
+		// E arquivo VAZIO não cobre janela nenhuma. `: > /var/log/wtmp`
+		// produz exatamente a forma de um wtmp legitimamente novo, e é o
+		// estado que o atacante que apagou o rastro e saiu deixa para trás —
+		// tanto que existe um check inteiro sobre ele
+		// (antiforense.wtmp_cleared). Um arquivo vazio prova que a fonte foi
+		// lida e não entregou registro; nunca que não houve registro.
+		//
+		// Truncada e GeracoesNaoLidas continuam sendo metadado útil no rodapé,
+		// mas "não truncado" não é prova positiva de idade.
 		switch {
 		case s.Papel == facts.PapelSessoes:
+			// As sessões abertas são o AGORA por construção: a pergunta de
+			// janela não se aplica a elas.
 			fo.CobreJanela = fo.Lida()
-		case !fo.Lida() || desde == "":
+		case !fo.Lida() || desde == "" || fo.Desde == "":
 			fo.CobreJanela = false
-		case fo.Desde == "":
-			// Lida e sem nenhum registro datado: um arquivo vazio cobre a
-			// janela trivialmente (não houve evento nenhum a esconder), um
-			// arquivo cheio de registros sem data não cobre coisa alguma.
-			fo.CobreJanela = fo.Lidos == 0 && !fo.Truncada
 		default:
-			// A cobertura alcança a janela quando o registro mais antigo que
-			// entrou é ANTERIOR ao começo dela.
-			//
-			// O ramo "não foi truncado, então cobre qualquer janela" só vale
-			// quando NÃO HÁ GERAÇÃO ROTACIONADA ao lado: o teto desta
-			// ferramenta não é o único jeito de o passado ficar de fora, e o
-			// logrotate é o mais comum dos dois.
-			completa := !fo.Truncada && fo.GeracoesNaoLidas == 0
-			fo.CobreJanela = completa || fo.Desde <= desde
+			fo.CobreJanela = fo.Desde <= desde
 		}
 		out = append(out, fo)
 	}
@@ -360,15 +365,20 @@ func Cobertura(f *facts.Facts, desde string) []Fonte {
 // abre. Ela lê apenas a geração viva de cada arquivo; o inventário de /var/log
 // (collectLogs) é quem sabe o que existe ao lado.
 func geracoesAoLado(f *facts.Facts, path string) int {
-	base := path
-	if i := strings.LastIndexByte(base, '/'); i >= 0 {
-		base = base[i+1:]
-	}
+	// `ArquivoDeLog.Base` é o caminho COMPLETO do arquivo vivo da série
+	// (`/var/log/wtmp`), e não o nome nu. A primeira versão disto recortava o
+	// diretório do lado esquerdo e comparava "wtmp" com "/var/log/wtmp": nunca
+	// casava, a contagem saía sempre zero, e a cobertura voltava a afirmar
+	// `wtmp ≥24h` sobre duas horas de dados com o wtmp.1 fechado ao lado.
+	//
+	// O teste não pegou porque montava a fixture à mão, com `Base: "wtmp"` —
+	// uma representação que collectLogs não produz. Ele provava que o código
+	// lia o que o teste escrevia.
 	n := 0
 	for i := range f.Logs {
 		a := &f.Logs[i]
 		// Geração 0 é o arquivo vivo, que é justamente o que foi lido.
-		if a.Base == base && a.Path != path && (a.Geracao > 0 || a.Datada) {
+		if a.Base == path && a.Path != path && (a.Geracao > 0 || a.Datada) {
 			n++
 		}
 	}

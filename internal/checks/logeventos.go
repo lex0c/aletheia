@@ -664,11 +664,24 @@ var buracoTemporalNoLog = check.Check{
 			return r
 		}
 
-		type faixa struct {
-			path       string
-			desde, ate string
-		}
-		var faixas []faixa
+		// POR SÉRIE, e não num slice só.
+		//
+		// A família `auth` cobre auth.log, secure e messages, e cada um é uma
+		// SÉRIE de rotação independente. Juntar os três e comparar vizinhos no
+		// tempo fazia o check chamar de "duas gerações consecutivas" um par como
+		//
+		//	/var/log/auth.log.3  →  /var/log/secure.1
+		//
+		// que não são geração um do outro: o vão entre eles não é tempo sem
+		// registro, é o intervalo entre dois arquivos que nunca foram a mesma
+		// coisa. Num host com as duas séries vivas — migração de convenção,
+		// rsyslog escrevendo nos dois — isso é achado MANUAL fabricado, e achado
+		// fabricado é o que faz o operador parar de ler a seção.
+		//
+		// A identidade da série vem de FonteDeLog.Base, que passou a viajar no
+		// dump para este check poder agrupar por ela.
+		porSerie := map[string][]faixaDeCobertura{}
+		var series []string
 		for i := range f.FontesDeLog {
 			s := &f.FontesDeLog[i]
 			if !ehFamilia(s, "auth") || s.CobertoDesde == "" || s.CobertoAte == "" {
@@ -680,53 +693,89 @@ var buracoTemporalNoLog = check.Check{
 			if s.LeituraDescontinua {
 				continue
 			}
-			faixas = append(faixas, faixa{s.Path, s.CobertoDesde, s.CobertoAte})
+			// Base vazia não vem de dump antigo — Carregar RECUSA esquema que
+			// não casa, então nenhum artefato sem este campo chega aqui. Vem de
+			// um fato montado sem identidade de série, hoje só em teste e
+			// amanhã talvez num coletor novo que esqueça de preenchê-la.
+			//
+			// O padrão então é o SILÊNCIO, e não o comportamento antigo: cada
+			// arquivo vira a própria série e nenhum par é comparado. Um check
+			// que se cala por falta de identidade é recuperável; um que compara
+			// séries diferentes inventa achado MANUAL, e achado inventado é o
+			// que ensina o operador a pular a seção.
+			serie := s.Base
+			if serie == "" {
+				serie = s.Path
+			}
+			if _, visto := porSerie[serie]; !visto {
+				series = append(series, serie)
+			}
+			porSerie[serie] = append(porSerie[serie],
+				faixaDeCobertura{s.Path, s.CobertoDesde, s.CobertoAte})
 		}
-		if len(faixas) < 2 {
-			return r
-		}
-		sort.Slice(faixas, func(i, j int) bool { return faixas[i].ate < faixas[j].ate })
+		// Ordem estável entre execuções: é saída contra saída que o drift compara.
+		sort.Strings(series)
 
-		for i := 0; i+1 < len(faixas); i++ {
-			fim, err1 := time.Parse(time.RFC3339, faixas[i].ate)
-			ini, err2 := time.Parse(time.RFC3339, faixas[i+1].desde)
-			if err1 != nil || err2 != nil {
+		for _, serie := range series {
+			faixas := porSerie[serie]
+			if len(faixas) < 2 {
 				continue
 			}
-			vao := ini.Sub(fim)
-			if vao < buracoMinimoNoLog {
-				continue
-			}
-			dias := int(vao.Hours() / 24)
-			ev := []string{
-				faixas[i].path + " termina em " + faixas[i].ate,
-				faixas[i+1].path + " começa em " + faixas[i+1].desde,
-				"são " + strconv.Itoa(dias) + " dia(s) sem UMA linha de autenticação " +
-					"entre duas gerações consecutivas",
-				"a rotação encosta uma geração na outra em segundos: um vão aqui é " +
-					"tempo sem registro, e apagar linhas produz exatamente esta forma",
-				"NÃO é prova de remoção: host desligado, servidor ocioso e `minsize` " +
-					"do logrotate produzem a mesma coisa — por isso isto é MANUAL",
-			}
-			fd := self.F(check.SevManual, faixas[i+1].path, "", ev...)
-			fd.Chave = faixas[i].path + "→" + faixas[i+1].path
-			fd.Quando, fd.QuandoFonte = faixas[i].ate, "última linha antes do vão"
-			// A cobertura é datada como as LINHAS são, e as do syslog tradicional
-			// dependem do mtime para o ano. Se a família tem evento inferido, a
-			// data deste achado não recorta.
-			fd.QuandoInferido = familiaTemDataInferida(f, "auth")
-			fd.NextSteps = []string{
-				"o wtmp é testemunha INDEPENDENTE: `last -F` mostra se houve login " +
-					"dentro do vão. Se houve, o silêncio do auth.log deixa de ter " +
-					"explicação inocente",
-				"`last -x reboot` diz se o host esteve desligado no período",
-				"o ctime das gerações data a última escrita em cada uma",
-				"se houver servidor de log central, compare o mesmo intervalo lá",
-			}
-			r.Findings = append(r.Findings, fd)
+			sort.Slice(faixas, func(i, j int) bool { return faixas[i].ate < faixas[j].ate })
+			r.Findings = append(r.Findings, buracosDaSerie(self, f, faixas)...)
 		}
 		return r
 	},
+}
+
+// faixaDeCobertura é o intervalo que UM arquivo comprovadamente entregou.
+type faixaDeCobertura struct {
+	path       string
+	desde, ate string
+}
+
+// buracosDaSerie compara as gerações VIZINHAS de uma série — e só de uma série.
+func buracosDaSerie(self check.Check, f *facts.Facts, faixas []faixaDeCobertura) []check.Finding {
+	var out []check.Finding
+	for i := 0; i+1 < len(faixas); i++ {
+		fim, err1 := time.Parse(time.RFC3339, faixas[i].ate)
+		ini, err2 := time.Parse(time.RFC3339, faixas[i+1].desde)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		vao := ini.Sub(fim)
+		if vao < buracoMinimoNoLog {
+			continue
+		}
+		dias := int(vao.Hours() / 24)
+		ev := []string{
+			faixas[i].path + " termina em " + faixas[i].ate,
+			faixas[i+1].path + " começa em " + faixas[i+1].desde,
+			"são " + strconv.Itoa(dias) + " dia(s) sem UMA linha de autenticação " +
+				"entre duas gerações consecutivas",
+			"a rotação encosta uma geração na outra em segundos: um vão aqui é " +
+				"tempo sem registro, e apagar linhas produz exatamente esta forma",
+			"NÃO é prova de remoção: host desligado, servidor ocioso e `minsize` " +
+				"do logrotate produzem a mesma coisa — por isso isto é MANUAL",
+		}
+		fd := self.F(check.SevManual, faixas[i+1].path, "", ev...)
+		fd.Chave = faixas[i].path + "→" + faixas[i+1].path
+		fd.Quando, fd.QuandoFonte = faixas[i].ate, "última linha antes do vão"
+		// A cobertura é datada como as LINHAS são, e as do syslog tradicional
+		// dependem do mtime para o ano. Se a família tem evento inferido, a
+		// data deste achado não recorta.
+		fd.QuandoInferido = familiaTemDataInferida(f, "auth")
+		fd.NextSteps = []string{
+			"o wtmp é testemunha INDEPENDENTE: `last -F` mostra se houve login " +
+				"dentro do vão. Se houve, o silêncio do auth.log deixa de ter " +
+				"explicação inocente",
+			"`last -x reboot` diz se o host esteve desligado no período",
+			"o ctime das gerações data a última escrita em cada uma",
+			"se houver servidor de log central, compare o mesmo intervalo lá",
+		}
+		out = append(out, fd)
+	}
+	return out
 }
 
 // familiaTemDataInferida diz se as datas da COBERTURA daquela família foram

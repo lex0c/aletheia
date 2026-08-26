@@ -114,6 +114,30 @@ type FonteDeLog struct {
 	Familias []string `json:"families"`
 	Estado   string   `json:"state"`
 
+	// A IDENTIDADE DA SÉRIE, e ela morria antes de chegar aqui.
+	//
+	// `alvoDeLog` sabe a que série de rotação um arquivo pertence — é o campo
+	// que faz a remoção de `auth` do `/var/log/messages` alcançar `messages.1`
+	// e `messages-20260820` —, e a fonte pública não carregava nada disso. O
+	// resultado é que todo consumidor a jusante voltava a tratar a família como
+	// um saco de caminhos, e reaprendia o mesmo erro:
+	//
+	//	log_time_gap        juntava auth.log.3 e secure.1 num só slice e
+	//	                    chamava vizinhos no tempo de "gerações
+	//	                    consecutivas" — dois arquivos que não são geração
+	//	                    um do outro
+	//	seleção sob teto    a ordenação secundária comparava data quando os
+	//	                    dois eram datados e caminho quando só um era, o que
+	//	                    não é ordem total: três elementos fecham ciclo
+	//
+	// Base é o arquivo VIVO da série (`/var/log/secure` para `secure`,
+	// `secure.1` e `secure-20260820`). Geracao é 0 para o vivo e cresce para
+	// trás; toda rotação DATADA é geração 1 por convenção, e Datada é o que
+	// distingue as duas formas — contador tem sucessor definido, data não.
+	Base    string `json:"series,omitempty"`
+	Geracao int    `json:"generation,omitempty"`
+	Datada  bool   `json:"date_suffix,omitempty"`
+
 	BytesLidos int64 `json:"bytes_read"`
 
 	// Os quatro contadores medem CAPACIDADE DO PARSER, e não frequência de
@@ -345,6 +369,21 @@ func (f *Facts) CoberturaLog(familia string) CoberturaDeLog {
 		return out
 	}
 
+	// FAMÍLIA CORTADA PELO TETO RÍGIDO EXISTE, mesmo sem fonte materializada.
+	//
+	// out.Existe só era ligado dentro do laço abaixo, sobre FontesDeLog. Se
+	// TODAS as fontes de uma família ficassem fora da seleção — e um host sem
+	// `auth.log` vivo, com o /var/log/audit inflado, chega lá —, a resposta
+	// virava "não há arquivo de log da família auth neste host": uma afirmação
+	// de ESCOPO construída a partir de um teto NOSSO.
+	//
+	// LogFamiliasCortadas conta exatamente isso, por família, e já era
+	// consultado por completaNaFamilia. Faltava a metade que responde "a
+	// pergunta cabe neste host?".
+	if f.LogFamiliasCortadas[familia] > 0 {
+		out.Existe = true
+	}
+
 	type faixa struct{ de, ate string }
 	var faixas []faixa
 	for i := range f.FontesDeLog {
@@ -374,6 +413,12 @@ func (f *Facts) CoberturaLog(familia string) CoberturaDeLog {
 	}
 	if !out.Existe {
 		out.Motivo = "não há arquivo de log da família " + familia + " neste host"
+		return out
+	}
+	if !out.Lida && f.LogFamiliasCortadas[familia] > 0 {
+		out.Motivo = "as fontes da família " + familia + " ficaram FORA da seleção " +
+			"pelo teto rígido de arquivos: elas existem e não foram abertas, e " +
+			"isto NÃO é o mesmo que o host não ter essa fonte"
 		return out
 	}
 	if len(faixas) == 0 {

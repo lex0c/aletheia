@@ -33,7 +33,7 @@ import (
 // teste: daria uma sensação de cobertura que não existe.
 func TestImpressaoDoEsquema(t *testing.T) {
 	const (
-		esquemaEsperado = 23
+		esquemaEsperado = 24
 		// Atualizada sem subir o SchemaVersion, e a razão fica aqui porque a
 		// catraca manda escrevê-la.
 		//
@@ -107,7 +107,17 @@ func TestImpressaoDoEsquema(t *testing.T) {
 		// diferentes) e FonteDeLog ganhou a confiança das datas da COBERTURA.
 		// Tudo dentro de estruturas que o 23 introduziu, e nenhum artefato
 		// anterior a elas existe.
-		impressaoGravada = "e2d7b644746c7da6"
+		//
+		// E agora o SchemaVersion SOBE (23→24), porque o raciocínio acima
+		// deixou de valer: o 23 foi MERGEADO e lançado, então existe dump v23
+		// no mundo. FonteDeLog.Base/Geracao/Datada carregam a identidade da
+		// série de rotação, e num artefato v23 elas vêm no zero-value — Base
+		// vazia em toda fonte. O consumidor novo agrupa por Base, e um
+		// agrupamento em que todas as chaves são "" junta a família inteira
+		// num grupo só: é exatamente o defeito que o campo existe para
+		// consertar, reproduzido em silêncio sobre um artefato que o operador
+		// acha que está lendo com a versão corrigida.
+		impressaoGravada = "30b966b4f8441c52"
 	)
 	if SchemaVersion != esquemaEsperado {
 		t.Fatalf("SchemaVersion=%d e este teste conhece o %d: atualize os dois "+

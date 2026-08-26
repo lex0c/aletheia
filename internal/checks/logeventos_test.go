@@ -197,10 +197,14 @@ func TestSemAuditdAPerguntaNaoCabe(t *testing.T) {
 
 func TestVaoEntreGeracoesEhManual(t *testing.T) {
 	f := fatosDeLog()
+	// Base é a IDENTIDADE DA SÉRIE, e o check só compara dentro dela: as duas
+	// entradas abaixo são geração 0 e 1 do MESMO auth.log.
 	f.FontesDeLog = []facts.FonteDeLog{
-		{Path: "/var/log/auth.log", Familias: []string{"auth"}, Estado: facts.FonteLida,
+		{Path: "/var/log/auth.log", Base: "/var/log/auth.log", Geracao: 0,
+			Familias: []string{"auth"}, Estado: facts.FonteLida,
 			CobertoDesde: "2026-08-22T08:00:00Z", CobertoAte: "2026-08-24T12:00:00Z"},
-		{Path: "/var/log/auth.log.1", Familias: []string{"auth"}, Estado: facts.FonteLida,
+		{Path: "/var/log/auth.log.1", Base: "/var/log/auth.log", Geracao: 1,
+			Familias: []string{"auth"}, Estado: facts.FonteLida,
 			CobertoDesde: "2026-08-18T00:00:00Z", CobertoAte: "2026-08-20T12:30:00Z"},
 	}
 	r := rodaLog(t, buracoTemporalNoLog, f)
@@ -447,5 +451,69 @@ func TestCorteDoTetoRigidoDerrubaOCheckDaFamilia(t *testing.T) {
 	if len(r.Coverage.Partial) != 0 {
 		t.Errorf("o corte em `audit` não pode degradar um check de `auth`: %+v",
 			r.Coverage.Partial)
+	}
+}
+
+// SÉRIES DIFERENTES NÃO SÃO GERAÇÕES CONSECUTIVAS.
+//
+// A família `auth` cobre auth.log, secure e messages, e o check juntava os três
+// num slice ordenado por tempo para comparar vizinhos. Num host com duas séries
+// vivas — migração de convenção, rsyslog escrevendo nos dois —, o par
+//
+//	/var/log/auth.log.1  →  /var/log/secure
+//
+// virava "N dias sem UMA linha de autenticação entre duas gerações
+// consecutivas". Os dois arquivos nunca foram a mesma coisa: o intervalo entre
+// eles não é tempo sem registro, e o achado é fabricado.
+func TestVaoNaoAtravessaSeries(t *testing.T) {
+	f := fatosDeLog()
+	// Duas séries, cada uma contínua em si. Entre o fim de uma e o começo da
+	// outra há 30 dias — que o check NÃO pode chamar de vão.
+	f.FontesDeLog = []facts.FonteDeLog{
+		{Path: "/var/log/auth.log.1", Base: "/var/log/auth.log", Geracao: 1,
+			Familias: []string{"auth"}, Estado: facts.FonteLida,
+			CobertoDesde: "2026-06-01T00:00:00Z", CobertoAte: "2026-06-10T00:00:00Z"},
+		{Path: "/var/log/auth.log", Base: "/var/log/auth.log", Geracao: 0,
+			Familias: []string{"auth"}, Estado: facts.FonteLida,
+			CobertoDesde: "2026-06-10T00:01:00Z", CobertoAte: "2026-06-20T00:00:00Z"},
+		{Path: "/var/log/secure.1", Base: "/var/log/secure", Geracao: 1,
+			Familias: []string{"auth"}, Estado: facts.FonteLida,
+			CobertoDesde: "2026-07-20T00:00:00Z", CobertoAte: "2026-07-25T00:00:00Z"},
+		{Path: "/var/log/secure", Base: "/var/log/secure", Geracao: 0,
+			Familias: []string{"auth"}, Estado: facts.FonteLida,
+			CobertoDesde: "2026-07-25T00:01:00Z", CobertoAte: "2026-08-01T00:00:00Z"},
+	}
+	r := rodaLog(t, buracoTemporalNoLog, f)
+	if len(r.Findings) != 0 {
+		t.Fatalf("%d achado(s) atravessando séries: %+v\n"+
+			"O vão de 30 dias é ENTRE as duas séries, e séries diferentes não "+
+			"são geração uma da outra.", len(r.Findings), r.Findings)
+	}
+
+	// E o vão DENTRO de uma série continua sendo achado — sem isto, agrupar
+	// teria simplesmente desligado o check.
+	f.FontesDeLog[1].CobertoDesde = "2026-06-25T00:00:00Z"
+	f.FontesDeLog[1].CobertoAte = "2026-06-30T00:00:00Z"
+	r = rodaLog(t, buracoTemporalNoLog, f)
+	if len(r.Findings) != 1 {
+		t.Fatalf("o vão dentro da série sumiu: %d achados", len(r.Findings))
+	}
+}
+
+// SEM IDENTIDADE DE SÉRIE, O CHECK SE CALA.
+//
+// Um fato montado sem Base não pode ser agrupado, e o padrão então é o silêncio
+// e não o comportamento antigo: um check que se cala por falta de identidade é
+// recuperável, e um que compara séries diferentes inventa achado MANUAL.
+func TestVaoSemBaseNaoCompara(t *testing.T) {
+	f := fatosDeLog()
+	f.FontesDeLog = []facts.FonteDeLog{
+		{Path: "/var/log/auth.log", Familias: []string{"auth"}, Estado: facts.FonteLida,
+			CobertoDesde: "2026-08-22T08:00:00Z", CobertoAte: "2026-08-24T12:00:00Z"},
+		{Path: "/var/log/auth.log.1", Familias: []string{"auth"}, Estado: facts.FonteLida,
+			CobertoDesde: "2026-08-18T00:00:00Z", CobertoAte: "2026-08-20T12:30:00Z"},
+	}
+	if r := rodaLog(t, buracoTemporalNoLog, f); len(r.Findings) != 0 {
+		t.Errorf("%d achado(s) sem identidade de série: %+v", len(r.Findings), r.Findings)
 	}
 }

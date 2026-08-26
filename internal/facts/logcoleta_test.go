@@ -997,3 +997,87 @@ func TestTetoRigidoDerrubaACompletudeDaFamilia(t *testing.T) {
 		t.Error("com fonte de auth descartada, o log em texto não está completo")
 	}
 }
+
+// UM `messages` INACESSÍVEL NÃO PODE DERRUBAR A COBERTURA DE `auth`.
+//
+// Quando existe fonte dedicada de autenticação, o /var/log/messages sai da
+// família `auth`: ele continua sendo lido, mas deixa de ser autoridade de
+// ausência. A remoção era feita sobre `porPath`, e as fontes INACESSÍVEIS eram
+// construídas em outro laço — então escapavam dela.
+//
+// O efeito é um falso rebaixamento: num RHEL com `secure` saudável, um
+// /var/log/messages transformado em fifo entra como fonte ILEGÍVEL da família
+// `auth`, e a completude de autenticação de um host cuja autenticação foi lida
+// por inteiro cai por causa de um arquivo que não responde por ela ali.
+func TestMessagesInacessivelNaoContaminaAuth(t *testing.T) {
+	raiz := t.TempDir()
+	dir := filepath.Join(raiz, "var/log")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Fonte dedicada, saudável, com uma linha datável.
+	conteudo := "Aug 24 10:00:00 host sshd[1]: Accepted password for root from 10.0.0.1 port 1 ssh2\n"
+	if err := os.WriteFile(filepath.Join(dir, "secure"), []byte(conteudo), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// E o messages trocado por fifo: existe, não é arquivo comum.
+	if err := syscall.Mkfifo(filepath.Join(dir, "messages"), 0o600); err != nil {
+		t.Skipf("mkfifo indisponível: %v", err)
+	}
+
+	f := &Facts{}
+	e := env.Probe(env.Options{Root: raiz, Version: "test"})
+	collectLogs(f, e)
+	collectEventosDeLog(f, e)
+
+	for i := range f.FontesDeLog {
+		s := &f.FontesDeLog[i]
+		if !strings.HasSuffix(s.Path, "/messages") {
+			continue
+		}
+		for _, fam := range s.Familias {
+			if fam == "auth" {
+				t.Errorf("o messages inacessível continua na família auth (%v)\n"+
+					"Existe fonte dedicada (%s) e ela foi lida: a autoridade de "+
+					"ausência de autenticação é dela.", s.Familias, "secure")
+			}
+		}
+	}
+	if !completaNaFamilia(f, "auth") {
+		t.Errorf("auth ficou incompleta com um secure saudável: %v",
+			resumoDasFontes(f))
+	}
+}
+
+// UMA FAMÍLIA INTEIRA CORTADA PELO TETO EXISTE — ela só não foi olhada.
+//
+// out.Existe só era ligado dentro do laço sobre FontesDeLog. Se TODAS as fontes
+// de uma família ficassem fora da seleção pelo teto rígido, a resposta virava
+// "não há arquivo de log da família auth neste host": escopo construído a
+// partir de um teto NOSSO, que é a confusão que o coletor inteiro recusa.
+func TestFamiliaCortadaPeloTetoNaoViraAusencia(t *testing.T) {
+	f := &Facts{LogFamiliasCortadas: map[string]int{"auth": 3}}
+
+	c := f.CoberturaLog("auth")
+	if !c.Existe {
+		t.Fatalf("a família cortada foi reportada como inexistente: %q", c.Motivo)
+	}
+	if c.Lida {
+		t.Error("nada foi lido: Lida tem de ser falso")
+	}
+	if strings.Contains(c.Motivo, "não há arquivo de log") {
+		t.Errorf("o motivo afirma ausência sobre um teto nosso: %q", c.Motivo)
+	}
+	if !strings.Contains(c.Motivo, "teto") {
+		t.Errorf("o motivo precisa dizer que foi o teto: %q", c.Motivo)
+	}
+}
+
+func resumoDasFontes(f *Facts) []string {
+	var out []string
+	for i := range f.FontesDeLog {
+		s := &f.FontesDeLog[i]
+		out = append(out, s.Path+"["+s.Estado+"]"+strings.Join(s.Familias, "+"))
+	}
+	return out
+}

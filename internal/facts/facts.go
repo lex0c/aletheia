@@ -368,7 +368,27 @@ import (
 //	     pela mesma razão que PasswdLido e ShadowLido são dois. O terceiro decide
 //	     se as datas foram lidas com o offset do alvo ou supostas em UTC, e um
 //	     offset errado desloca toda correlação temporal.
-const SchemaVersion = 23
+//	24 A IDENTIDADE DA SÉRIE de rotação passou a viajar até FonteDeLog.
+//
+//	   Base, Geracao e Datada existiam no coletor (alvoDeLog) e morriam antes
+//	   do fato público. Sem eles, todo consumidor a jusante voltava a tratar a
+//	   família como um saco de caminhos, e reaprendia o mesmo erro — foi assim
+//	   que antiforense.log_time_gap passou a comparar `auth.log.3` com
+//	   `secure.1` como se fossem gerações consecutivas.
+//
+//	   O bump é obrigatório porque o zero-value MENTE na direção do achado
+//	   fabricado: num dump v23, Base vem vazia em toda fonte, e um agrupamento
+//	   por Base juntaria a família inteira num grupo só — exatamente o defeito
+//	   que este campo existe para consertar, agora em silêncio e sobre um
+//	   artefato que o operador acha que está lendo com a versão corrigida.
+//
+//	   Junto, e no mesmo bump porque tocam a mesma leitura:
+//	   CoberturaLog(familia).Existe passou a ser verdadeiro quando a família
+//	   inteira ficou fora da seleção pelo teto rígido. Antes, um host cujas
+//	   fontes de `auth` fossem todas cortadas respondia "não há arquivo de log
+//	   da família auth neste host" — escopo construído a partir de um teto
+//	   NOSSO, que é a confusão que o coletor inteiro existe para recusar.
+const SchemaVersion = 24
 
 // Facts é o retrato do host.
 type Facts struct {

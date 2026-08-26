@@ -177,8 +177,8 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 	// lugar, entrando por um caminho que só aparece sem privilégio.
 	for _, ina := range inacessiveis {
 		f.FontesDeLog = append(f.FontesDeLog, FonteDeLog{
-			Path: ina.path, Familias: ina.familias, Estado: FonteIlegivel,
-			Lacuna: ina.motivo,
+			Path: ina.path, Base: ina.base, Familias: ina.familias,
+			Estado: FonteIlegivel, Lacuna: ina.motivo,
 		})
 		f.partial("logeventos", ina.motivo)
 		parcialPorAcesso = true
@@ -269,7 +269,9 @@ func collectEventosDeLog(f *Facts, e *env.Env) {
 	if parouEm >= 0 {
 		for _, a := range alvos[parouEm:] {
 			f.FontesDeLog = append(f.FontesDeLog, FonteDeLog{
-				Path: a.path, Familias: a.familias, Estado: FonteNaoLida,
+				Path: a.path, Base: a.base, Geracao: a.geracao,
+				Datada:   a.dataRot != "",
+				Familias: a.familias, Estado: FonteNaoLida,
 				Lacuna: a.path + " NÃO foi visitado: a coleta parou antes dele por " +
 					motivoDaParada + ". O arquivo existe, e nada pode ser afirmado " +
 					"sobre o que há nele",
@@ -316,9 +318,14 @@ type alvoDeLog struct {
 	// existe porque toda rotação datada é geração 1, e sem a data a ordenação
 	// secundária cai no caminho — que põe a MAIS ANTIGA primeiro.
 	dataRot string
-	mod     time.Time
-	tam     int64
-	gz      bool
+	// rank é a posição deste arquivo na recência da PRÓPRIA SÉRIE: 0 é o mais
+	// recente, 1 o seguinte. Para rotação por contador a geração já responde
+	// isso e o rank é 0; para rotação DATADA, que é toda geração 1, é o rank que
+	// distingue `secure-20260820` de `secure-20260801`.
+	rank int
+	mod  time.Time
+	tam  int64
+	gz   bool
 }
 
 // alvosDeLog escolhe o que abrir, e em que ORDEM.
@@ -330,7 +337,13 @@ type alvoDeLog struct {
 // fonteInacessivel é o arquivo que EXISTE (ou cujo diretório existe) e não pôde
 // ser visto. Ele não vira alvo, e não pode virar silêncio.
 type fonteInacessivel struct {
-	path     string
+	path string
+	// base é a série a que ela pertence. Uma fonte inacessível é sempre o
+	// arquivo VIVO — o inventário não a trouxe justamente porque não conseguiu
+	// listar o diretório —, então base é o próprio caminho. Ela viaja mesmo
+	// assim: sem isso, a fonte pública nasce sem identidade de série e o
+	// consumidor volta a tratar a família como um saco de caminhos.
+	base     string
 	familias []string
 	motivo   string
 }
@@ -386,7 +399,7 @@ func alvosDeLog(f *Facts, e *env.Env) ([]alvoDeLog, []fonteInacessivel, map[stri
 			if err != nil {
 				if env.EhLacuna(err) {
 					inacessiveis = append(inacessiveis, fonteInacessivel{
-						path: vivo, familias: []string{fam},
+						path: vivo, base: vivo, familias: []string{fam},
 						motivo: vivo + " não pôde ser examinado (" + env.MotivoDoErro(err) +
 							"): ele pode existir e conter eventos, e nada pode ser " +
 							"afirmado sobre o que os logs deste host registraram — " +
@@ -407,7 +420,7 @@ func alvosDeLog(f *Facts, e *env.Env) ([]alvoDeLog, []fonteInacessivel, map[stri
 				// vazio é a forma mais barata de anti-forense que existe, e ela
 				// não pode virar escopo.
 				inacessiveis = append(inacessiveis, fonteInacessivel{
-					path: vivo, familias: []string{fam},
+					path: vivo, base: vivo, familias: []string{fam},
 					motivo: vivo + " existe e NÃO é arquivo comum (" + tipoDeObjeto(fi.Mode()) +
 						"): o conteúdo dele não foi lido, e um log apontado para " +
 						"outro lugar é anti-forense barato — isto NÃO é o mesmo que " +
@@ -459,6 +472,34 @@ func alvosDeLog(f *Facts, e *env.Env) ([]alvoDeLog, []fonteInacessivel, map[stri
 				a.familias = semFamilia(a.familias, "auth")
 			}
 		}
+		// E AS INACESSÍVEIS TAMBÉM, que eram construídas em outro laço e
+		// escapavam desta remoção.
+		//
+		// O efeito era um falso rebaixamento: num RHEL com `secure` saudável,
+		// um `/var/log/messages` transformado em fifo entrava como fonte
+		// ILEGÍVEL da família `auth`, e completaNaFamilia("auth") passava a
+		// responder false. A cobertura de autenticação de um host cuja
+		// autenticação foi lida por inteiro caía por causa de um arquivo que
+		// não é autoridade de autenticação naquele host.
+		//
+		// É o mesmo raciocínio de cima aplicado ao conjunto que ficou de fora
+		// dele — e é o tipo de divergência que só existe porque a decisão era
+		// tomada sobre uma das duas listas.
+		for i := range inacessiveis {
+			if inacessiveis[i].base == "/var/log/messages" {
+				inacessiveis[i].familias = semFamilia(inacessiveis[i].familias, "auth")
+			}
+		}
+		// Uma inacessível que perdeu TODAS as famílias não é mais fonte de
+		// nada: mantê-la faria a lacuna dela ser cobrada de uma família que ela
+		// não responde.
+		vivas := inacessiveis[:0]
+		for _, ina := range inacessiveis {
+			if len(ina.familias) > 0 {
+				vivas = append(vivas, ina)
+			}
+		}
+		inacessiveis = vivas
 	}
 
 	out := make([]alvoDeLog, 0, len(ordem))
@@ -467,19 +508,46 @@ func alvosDeLog(f *Facts, e *env.Env) ([]alvoDeLog, []fonteInacessivel, map[stri
 		sort.Strings(a.familias)
 		out = append(out, *a)
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].geracao != out[j].geracao {
-			return out[i].geracao < out[j].geracao
+	rankearNaSerie(out)
+
+	// A ORDEM É UMA TUPLA FIXA, e antes não era uma ordem.
+	//
+	// A versão anterior comparava a DATA quando os dois lados eram datados e o
+	// CAMINHO quando só um era. Isso não é ordem total, e três elementos bastam
+	// para fechar ciclo — verificado com um host que tem rotação datada e
+	// rotação por contador ao mesmo tempo, que é o que acontece quando alguém
+	// muda a configuração do logrotate e os arquivos velhos ficam:
+	//
+	//	A = /var/log/secure-20260820    (ger 1, datada)
+	//	B = /var/log/messages-20260101  (ger 1, datada)
+	//	C = /var/log/messages.1         (ger 1, contador)
+	//
+	//	menor(A,B) por data      = true
+	//	menor(B,C) por caminho   = true
+	//	menor(C,A) por caminho   = true      → A < B < C < A
+	//
+	// O sort do Go tolera comparador inconsistente (ele não entra em laço nem
+	// corrompe), mas devolve uma permutação arbitrária — e aí a promessa de que
+	// "o corte fica com as gerações MAIS NOVAS" deixa de valer justamente no
+	// host onde há mais o que cortar.
+	//
+	// A tupla agora é (geração, rank na série, base, caminho), e todos os
+	// quatro são totalmente ordenados. `rank` é o que faz a promessa ser
+	// verdade: ele diz "esta é a N-ésima mais recente DA SUA SÉRIE", então a
+	// segunda chave intercala as séries pela recência delas em vez de esgotar
+	// uma série antes de olhar a próxima.
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.geracao != b.geracao {
+			return a.geracao < b.geracao
 		}
-		// ROTAÇÃO DATADA é toda geração 1, e ordenar por caminho põe a MAIS
-		// ANTIGA primeiro — `secure-20260801` antes de `secure-20260820`. Quando
-		// um teto morde, o orçamento seria gasto com as velhas, e o comentário
-		// que promete "o corte fica com as gerações MAIS NOVAS" seria falso
-		// justamente na família RHEL, onde `dateext` é padrão de fábrica.
-		if out[i].dataRot != "" && out[j].dataRot != "" && out[i].dataRot != out[j].dataRot {
-			return out[i].dataRot > out[j].dataRot
+		if a.rank != b.rank {
+			return a.rank < b.rank
 		}
-		return out[i].path < out[j].path
+		if a.base != b.base {
+			return a.base < b.base
+		}
+		return a.path < b.path
 	})
 	// O DESCARTE É CONTADO POR FAMÍLIA, e não só no total: é a família que
 	// decide se um check pode afirmar ausência, e um número global não diz qual
@@ -553,7 +621,10 @@ func contemString(hay []string, s string) bool {
 
 // leFonteDeLog lê UM arquivo e devolve os eventos mais a observabilidade dele.
 func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *orcamento) (FonteDeLog, []EventoDeLog) {
-	fonte := FonteDeLog{Path: a.path, Familias: a.familias, Estado: FonteLida}
+	fonte := FonteDeLog{
+		Path: a.path, Base: a.base, Geracao: a.geracao, Datada: a.dataRot != "",
+		Familias: a.familias, Estado: FonteLida,
+	}
 
 	if a.gz && !strings.HasSuffix(a.path, ".gz") {
 		// xz, bz2 e zst exigiriam dependência externa, e este binário não tem
@@ -564,7 +635,7 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 		return fonte, nil
 	}
 
-	cabeca, corpo, err := abreConteudoDeLog(e, a, orc, &fonte)
+	cabeca, corpo, obs, err := abreConteudoDeLog(e, a, orc, &fonte)
 	if err != nil {
 		fonte.Estado = FonteIlegivel
 		if env.EhLacuna(err) {
@@ -577,6 +648,20 @@ func leFonteDeLog(f *Facts, e *env.Env, a alvoDeLog, ctx contextoDeTempo, orc *o
 				"neste intervalo não pode ser afirmada")
 		}
 		return fonte, nil
+	}
+
+	// A ÂNCORA DO ANO É REANCORADA NO DESCRITOR.
+	//
+	// O chamador a montou com `a.mod`, que veio do Lstat de alvosDeLog. Se o
+	// arquivo foi rotacionado ou trocado entre aquele Lstat e este open, aquele
+	// mtime descreve outro inode — e o ano de TODAS as linhas do syslog
+	// tradicional sai daí. Um ano a menos empurra o achado para fora de
+	// `--since 7d`, onde o relatório passa a mostrar só a contagem dele.
+	//
+	// O arquivo VIVO continua ancorado em e.Now e não é tocado aqui: para ele o
+	// mtime é escolha do adversário, e essa porta já foi fechada.
+	if a.geracao != 0 && !obs.mod.IsZero() {
+		ctx.Ancora = obs.mod
 	}
 
 	// A CABEÇA data a rotação e NÃO é cobertura: entre ela e a cauda há um miolo
@@ -829,21 +914,62 @@ func anota(f *Facts, fonte *FonteDeLog, motivo string) {
 // CAUDA — as horas mais recentes. Num rotacionado comprimido não há como pular
 // para o fim sem descomprimir tudo, então lê-se do começo, com teto, e o corte
 // sai declarado no outro lado.
-func abreConteudoDeLog(e *env.Env, a alvoDeLog, orc *orcamento, fonte *FonteDeLog) (string, string, error) {
+// observado é o que o DESCRITOR disse, e não o que o caminho dizia antes.
+type observado struct {
+	tam int64
+	mod time.Time
+}
+
+// abreConteudoDeLog abre o arquivo e devolve cabeça, corpo e o que o descritor
+// observou sobre ele.
+//
+// # A METADATA VINHA DE OUTRA LEITURA
+//
+// `a.tam` e `a.mod` saem do Lstat que alvosDeLog fez, e entre aquele Lstat e
+// este open cabe tudo: o logrotate rodando, o arquivo crescendo, o alvo
+// trocando o inode. A função decidia COMO ler a partir de um número que
+// descrevia outro estado — e, em dois casos, mentia sobre o resultado:
+//
+//	cresceu e passou do teto   `a.tam` dizia 7,9 MiB, o arquivo tinha 12 MiB.
+//	                           O ramo "cabe inteiro" lia 8 MiB sem testar o
+//	                           byte seguinte e devolvia FonteLida: os últimos
+//	                           4 MiB não foram observados, e a fonte saía
+//	                           declarando completude
+//	cresceu acima do teto      o seek ia para `a.tam - teto`, que num arquivo
+//	                           maior é o MIOLO. A fonte dizia "só a CAUDA foi
+//	                           lida" sobre bytes do meio — o rótulo certo sobre
+//	                           a região errada, que é a falha mais cara numa
+//	                           ferramenta cuja tese é a honestidade da cobertura
+//
+// Agora o fstat é do descritor que vai ser lido, e a cauda é localizada a
+// partir do FIM em vez de a partir de um tamanho anterior: o que for lido é o
+// fim do arquivo no instante da leitura, qualquer que seja o tamanho dele.
+//
+// O mtime sai junto pelo mesmo motivo. Ele é a âncora do ano do arquivo
+// rotacionado, e ancorar num mtime que descreve outro inode desloca o ano de
+// todas as linhas dele.
+func abreConteudoDeLog(e *env.Env, a alvoDeLog, orc *orcamento, fonte *FonteDeLog) (string, string, observado, error) {
 	teto := int64(maxLogBytesArquivo)
 	if orc.bytes < teto {
 		teto = orc.bytes
 	}
 
+	fh, err := e.OpenFD(a.path)
+	if err != nil {
+		return "", "", observado{}, err
+	}
+	defer fh.Close()
+
+	fi, err := fh.Stat()
+	if err != nil {
+		return "", "", observado{}, err
+	}
+	obs := observado{tam: fi.Size(), mod: fi.ModTime().UTC()}
+
 	if a.gz {
-		fh, err := e.Open(a.path)
-		if err != nil {
-			return "", "", err
-		}
-		defer fh.Close()
 		zr, err := gzip.NewReader(fh)
 		if err != nil {
-			return "", "", err
+			return "", "", obs, err
 		}
 		defer zr.Close()
 		tetoZ := int64(maxDescompactado)
@@ -852,7 +978,7 @@ func abreConteudoDeLog(e *env.Env, a alvoDeLog, orc *orcamento, fonte *FonteDeLo
 		}
 		b, err := io.ReadAll(io.LimitReader(zr, tetoZ+1))
 		if err != nil {
-			return "", "", err
+			return "", "", obs, err
 		}
 		if int64(len(b)) > tetoZ {
 			b = b[:tetoZ]
@@ -869,23 +995,28 @@ func abreConteudoDeLog(e *env.Env, a alvoDeLog, orc *orcamento, fonte *FonteDeLo
 		}
 		orc.bytes -= int64(len(b))
 		fonte.BytesLidos = int64(len(b))
-		return "", string(b), nil
+		return "", string(b), obs, nil
 	}
 
-	fh, err := e.OpenFD(a.path)
-	if err != nil {
-		return "", "", err
-	}
-	defer fh.Close()
-
-	if a.tam <= teto {
-		b, err := io.ReadAll(io.LimitReader(fh, teto))
+	if obs.tam <= teto {
+		// teto+1, e não teto: um byte além é o que distingue "coube" de
+		// "estourou". Sem ele, um arquivo que cresceu entre o fstat e a leitura
+		// era lido até o teto e declarado COMPLETO — o teto virava resposta.
+		b, err := io.ReadAll(io.LimitReader(fh, teto+1))
 		if err != nil {
-			return "", "", err
+			return "", "", obs, err
+		}
+		if int64(len(b)) > teto {
+			b = b[:teto]
+			fonte.Estado = FonteTruncada
+			fonte.CorteNoFim = true
+			fonte.Lacuna = a.path + ": o arquivo cresceu durante a leitura e passou " +
+				"do teto por arquivo — o que veio depois NÃO foi examinado"
+			orc.marca("de leitura por arquivo (" + strconv.FormatInt(teto>>20, 10) + " MB)")
 		}
 		orc.bytes -= int64(len(b))
 		fonte.BytesLidos = int64(len(b))
-		return "", string(b), nil
+		return "", string(b), obs, nil
 	}
 
 	// Arquivo maior que o teto: cabeça para datar a rotação, cauda para os
@@ -894,26 +1025,57 @@ func abreConteudoDeLog(e *env.Env, a alvoDeLog, orc *orcamento, fonte *FonteDeLo
 	n, _ := io.ReadFull(fh, cab)
 	cab = cab[:n]
 
-	if _, err := fh.Seek(a.tam-teto, io.SeekStart); err != nil {
-		return "", "", err
+	// A CAUDA É LOCALIZADA A PARTIR DO FIM.
+	//
+	// Um offset calculado de um tamanho lido antes aponta para o meio assim que
+	// o arquivo cresce, e o log VIVO cresce por definição. Perguntar o fim ao
+	// próprio descritor não tem essa janela: seja qual for o tamanho agora, o
+	// que vem daqui é o fim dele.
+	fim, err := fh.Seek(0, io.SeekEnd)
+	if err != nil {
+		return "", "", obs, err
+	}
+	inicio := fim - teto
+	if inicio < 0 {
+		// Encolheu abaixo do teto entre o fstat e o seek — truncamento no meio
+		// da coleta, que acontece. Ler do começo é o que sobra, e é correto.
+		inicio = 0
+	}
+	if _, err := fh.Seek(inicio, io.SeekStart); err != nil {
+		return "", "", obs, err
 	}
 	b, err := io.ReadAll(io.LimitReader(fh, teto))
 	if err != nil {
-		return "", "", err
+		return "", "", obs, err
 	}
 	// A primeira linha da cauda começa no meio de outra: descartá-la evita
 	// parsear meia linha como se fosse inteira.
-	if i := strings.IndexByte(string(b), '\n'); i >= 0 {
-		b = b[i+1:]
+	if inicio > 0 {
+		if i := strings.IndexByte(string(b), '\n'); i >= 0 {
+			b = b[i+1:]
+		}
 	}
 	orc.bytes -= int64(len(b)) + int64(n)
 	fonte.BytesLidos = int64(len(b)) + int64(n)
-	fonte.CorteNoInicio = true
-	fonte.LeituraDescontinua = true
-	fonte.Estado = FonteTruncada
-	fonte.Lacuna = a.path + ": maior que o teto por arquivo — só a CAUDA foi lida, e o " +
-		"miolo entre a cabeça e ela NÃO foi observado"
-	return string(cab), string(b), nil
+	// A CONDIÇÃO É `inicio > 0`, e não "a cabeça alcançou a cauda".
+	//
+	// A tentação é dizer que, quando a cabeça e o corpo se sobrepõem, não há
+	// miolo por observar. É falso: a cabeça NÃO é parseada para evento nenhum —
+	// ela existe só para datar a rotação, via primeiraDataDe. O que vira
+	// cobertura é o corpo, e o corpo começa em `inicio`.
+	//
+	// Um arquivo menor que os 64 KiB da cabeça e maior que o teto do orçamento
+	// cai exatamente nessa armadilha: a cabeça lê o arquivo inteiro, o corpo lê
+	// só a cauda, e a fonte sairia declarando FonteLida sobre um arquivo cujos
+	// eventos iniciais ninguém examinou.
+	if inicio > 0 {
+		fonte.CorteNoInicio = true
+		fonte.LeituraDescontinua = true
+		fonte.Estado = FonteTruncada
+		fonte.Lacuna = a.path + ": maior que o teto por arquivo — só a CAUDA foi lida, e o " +
+			"miolo entre a cabeça e ela NÃO foi observado"
+	}
+	return string(cab), string(b), obs, nil
 }
 
 // primeiraDataDe devolve o carimbo da primeira linha datável da cabeça.
@@ -1035,4 +1197,37 @@ func tipoDeObjeto(m fs.FileMode) string {
 		return "dispositivo"
 	}
 	return m.String()
+}
+
+// rankearNaSerie numera cada arquivo pela recência DENTRO da série dele.
+//
+// Rotação por contador já traz isso na geração, e o rank fica em zero. Rotação
+// DATADA é toda geração 1, então sem o rank o teto não tem como preferir
+// `secure-20260820` a `secure-20260801` — e preferir a mais nova é a única
+// política defensável numa triagem.
+//
+// Ele é por SÉRIE, e não global, porque é isso que faz o corte intercalar: com
+// um rank global, o orçamento seria gasto inteiro na série que tem mais
+// rotações, e a série ao lado — que pode ser a que interessa — ficaria de fora
+// com a geração dela mais recente ainda por examinar.
+func rankearNaSerie(out []alvoDeLog) {
+	porBase := map[string][]int{}
+	for i := range out {
+		if out[i].dataRot == "" {
+			continue
+		}
+		porBase[out[i].base] = append(porBase[out[i].base], i)
+	}
+	for _, idx := range porBase {
+		sort.Slice(idx, func(a, b int) bool {
+			ia, ib := idx[a], idx[b]
+			if out[ia].dataRot != out[ib].dataRot {
+				return out[ia].dataRot > out[ib].dataRot // mais nova primeiro
+			}
+			return out[ia].path < out[ib].path
+		})
+		for r, i := range idx {
+			out[i].rank = r
+		}
+	}
 }

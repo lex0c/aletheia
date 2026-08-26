@@ -30,7 +30,7 @@ func TestWtmpTruncadoNaoViraTestemunhaDeHistoricoLido(t *testing.T) {
 
 	f := &Facts{}
 	e := &env.Env{}
-	if lerUtmp(f, e, wtmp, false, false) {
+	if lerUtmp(f, e, wtmp, PapelHistorico, false, false) {
 		t.Error("wtmp de tamanho não interpretável devolveu TRUE: a testemunha " +
 			"de histórico lido fica ligada sobre um arquivo que não foi lido, e " +
 			"antiforense.wtmp_cleared passa a acusar histórico zerado")

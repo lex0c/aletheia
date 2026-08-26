@@ -193,6 +193,12 @@ var NaoCobertas = []Superficie{
 	{Nome: "binfmt.d completo", Campo: "binfmt_config_complete", Porque: "sinal de cobertura"},
 	{Nome: "config de boot lida", Campo: "boot_config_read", Porque: "sinal de cobertura"},
 	{Nome: "histórico de login lido", Campo: "login_history_read", Porque: "sinal de cobertura"},
+	{Nome: "fontes de login e o alcance de cada uma", Campo: "login_sources",
+		Porque: "sinal de cobertura — é o irmão de log_sources para os registros " +
+			"binários: impede 2000 registros de wtmp de serem lidos como o " +
+			"arquivo inteiro. Os números dele (total, lidos, sem data) mudam a " +
+			"cada coleta num host que recebe login, e comparar dois deles " +
+			"acusaria a passagem do tempo"},
 	{Nome: "lacunas de persistência", Campo: "persist_denied", Porque: "sinal de cobertura"},
 	{Nome: "lacunas por coletor", Campo: "partial", Porque: "sinal de cobertura"},
 

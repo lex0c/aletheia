@@ -667,12 +667,97 @@ Referência completa — catálogo de tools, contrato de resposta, modelo de
 segurança, limites declarados e diagnóstico: **[docs/MCP.md](docs/MCP.md)**.
 Fluxos de investigação: [docs/PLAYBOOKS.md](docs/PLAYBOOKS.md), cenários 16–20.
 
+## Comprometimento sem malware
+
+A maior parte do que uma triagem encontra não é um arquivo. É credencial
+roubada, ferramenta legítima e uma sequência operacional que não deveria ter
+acontecido: entrou, escalou, criou conta, saiu. Não há binário para achar, nem
+hash para comparar.
+
+O que sobra é o **rastro do uso** — e ele mora em duas testemunhas que não
+falam a mesma língua:
+
+```text
+/var/log/wtmp   registro BINÁRIO: quem entrou, de onde, quando, em que tty
+/var/log/btmp   quem TENTOU e falhou                      (só root lê)
+/run/utmp       quem está logado AGORA
+auth.log        TEXTO: o método, o fingerprint da chave, o COMMAND do sudo,
+                a conta criada, a execução que não existe mais
+```
+
+O comando `activity` junta as duas.
+
+```sh
+aletheia activity                                  # últimas 24h
+aletheia activity --since 7d --user deploy
+aletheia activity --around 2026-08-25T03:15Z --window 30m
+aletheia activity --group-by ip
+```
+
+```text
+2026-08-25
+  03:12:41  auth.login.refused   root@185.44.1.7 password       [btmp+log:/var/log/auth.log ⇄pid]
+  03:15:55  auth.login.accepted  deploy@185.44.1.7 publickey SHA256:AbCd pts/2  [wtmp+log:/var/log/auth.log ⇄pid]
+  03:17:29  privilege.sudo       deploy → /usr/bin/cat /etc/shadow          [log:/var/log/auth.log]
+  03:22:10  account.created      backup2                                    [log:/var/log/auth.log]
+
+cobertura
+  wtmp   2026-08-11T09:12Z → 2026-08-26T14:31Z · 2000 de 57412 registros (TRUNCADO: …)
+  btmp   NÃO EXAMINADO — permission denied
+  auth   2026-08-25T00:00Z → 2026-08-26T14:33Z
+  pedido --since 7d: auth alcança 1d14h
+```
+
+Três decisões carregam o comando:
+
+**A ligação é por identidade, não por proximidade.** O `ut_pid` do wtmp *é* o
+pid do sshd da sessão, e o envelope do syslog carrega o mesmo número. A força
+da ligação sai impressa (`⇄pid`), e a ligação FRACA — mesma conta e origem no
+mesmo dia — *relaciona* sem fundir: dois logins legítimos cabem num dia, e
+colapsá-los apagaria um evento real.
+
+**A cobertura é por fonte, e ela nunca some.** A leitura de login é da cauda,
+com teto de 2000 registros por arquivo: num host que recebe 400 tentativas por
+hora, o btmp alcança uma tarde. Pedir `--since 7d` não faz a leitura alcançar
+sete dias, e o rodapé diz isso. Sem root o btmp é ilegível, e ali sai
+`NÃO EXAMINADO` — nunca "0 recusas".
+
+**Divergência é estreita de propósito.** "O wtmp viu e o auth.log não" tem a
+forma da manipulação de log — e tem, idêntica, a forma de várias coisas
+rotineiras. As medidas que estreitaram a regra:
+
+```text
+recusa             btmp e auth.log não são 1:1 — uma conexão de bot escreve N
+                   linhas de log contra um registro de btmp
+console            login(1), gdm e lightdm escrevem wtmp e não escrevem
+                   "Accepted": o parser só produz login aceito daquele prefixo
+ssh não-interativo scp, rsync, git e ansible produzem "Accepted publickey" sem
+                   sessão, e portanto sem registro de wtmp
+```
+
+Então a acusação vale só para **login aceito**, só na direção **binário →
+texto**, e só quando a fonte ausente cobria o instante, não tem lacuna
+declarada pela camada de fatos, e já produziu evento daquele tipo **com a mesma
+forma de origem** — um auth.log que só registra login de rede não diz nada
+sobre a falta de um login de console. Falhando qualquer uma: `não confirmado`.
+
+O `wtf` traz um resumo disso em quatro linhas, com janela fixa de 24h. Ele
+decide *por onde começar*; o `activity` investiga.
+
+Em host **journald-only** (Debian 12, Fedora, RHEL moderno, Arch) não existe
+`auth.log`: a família sai `FORA DE ESCOPO` com a via nomeada (`journalctl`).
+Escopo declarado, nunca silêncio.
+
+`activity` **não conclui** — sai 0 sempre, salvo erro de invocação. Quem conclui
+é o `scan`, que traz os falsos positivos junto.
+
 ## Quando usar cada comando
 
 ```text
 preciso de uma visão rápida?             -> wtf
 quero uma triagem completa agora?        -> scan
 quero entender um processo/arquivo/IP?   -> info
+o que ACONTECEU aqui recentemente?       -> activity
 a evidência pode desaparecer?            -> preserve
 quero sair rápido do host?               -> collect
 quero analisar depois/offline?           -> analyze
@@ -746,6 +831,7 @@ ontem" tem a forma de um deploy.
 | `collect` | coleta fatos sem emitir veredito |
 | `analyze` | analisa um dump previamente coletado |
 | `info` | inspeciona processos, rede, arquivos, Git, IPs e portas |
+| `activity` | reconstrói o que aconteceu: login, sudo, execução e conta, com a cobertura de cada testemunha |
 | `preserve` | preserva artefatos voláteis ou arquivos selecionados |
 | `baseline` | captura um estado de referência |
 | `drift` | compara com um retrato anterior: o que mudou desde ele |

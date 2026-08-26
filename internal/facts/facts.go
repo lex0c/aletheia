@@ -368,7 +368,31 @@ import (
 //	     pela mesma razão que PasswdLido e ShadowLido são dois. O terceiro decide
 //	     se as datas foram lidas com o offset do alvo ou supostas em UTC, e um
 //	     offset errado desloca toda correlação temporal.
-const SchemaVersion = 23
+//	24 FontesDeLogin  o ALCANCE da leitura de wtmp/btmp/utmp, por arquivo. É o
+//	   irmão de FontesDeLog para os registros binários, e entra pela mesma razão
+//	   que aquele: sem ele a lista de logins não sabe dizer o que representa.
+//
+//	   A leitura é da CAUDA, com teto de 2000 registros por arquivo. Num dump
+//	   v23 o campo vem vazio, e vazio ali obriga quem lê a deduzir o
+//	   truncamento por `len(f.Logins) == 2000` — que é indecidível: um wtmp com
+//	   exatamente 2000 registros e um wtmp de 57.000 lido pelo fim produzem o
+//	   mesmo número. A dedução erra nas duas direções, e a cara é sempre a de
+//	   dado bom:
+//
+//	     arquivo pequeno lido inteiro   sai como "há mais passado que não olhei"
+//	     cauda de arquivo enorme        sai como "este é o histórico do host"
+//
+//	   A segunda é a que custa: é sobre ela que alguém afirma "nenhuma entrada
+//	   antes das 14h" num host onde a leitura alcançou as 13h50.
+//
+//	   Vazio também apaga três coisas que só o coletor sabe: o layout de
+//	   registro escolhido (384 ou 400 — a decisão que, errada, produz inventário
+//	   de login lido do byte errado SEM lacuna, ver nativoDeUtmp), a contagem de
+//	   registros que entraram sem data (sem ela, "observado desde X" afirma um
+//	   intervalo contínuo sobre uma leitura que pode ter buracos), e a diferença
+//	   entre arquivo AUSENTE e arquivo ILEGÍVEL — que é a que separa "este host
+//	   não tem btmp" de "esta execução não é root".
+const SchemaVersion = 24
 
 // Facts é o retrato do host.
 type Facts struct {
@@ -611,22 +635,26 @@ type Facts struct {
 	ArvoreDeModulos bool `json:"module_tree_read,omitempty"`
 	// Protecao é o que o kernel deixa acontecer com ele mesmo: lockdown,
 	// assinatura de módulo, IMA. Não é achado, é o contexto que pesa os achados.
-	Protecao       ProtecaoKernel          `json:"kernel_protection"`
-	PkgEstranho    []ReivindicacaoEstranha `json:"pkg_odd_claims,omitempty"`
-	HashDiff       []HashDivergente        `json:"hash_mismatch,omitempty"`
-	Timestomps     []Timestomp             `json:"timestomps,omitempty"`
-	HashOK         []string                `json:"hash_verified,omitempty"`
-	Atributos      []AtributoInode         `json:"inode_attrs,omitempty"`
-	Mounts         []Montagem              `json:"mounts,omitempty"`
-	Logins         []Login                 `json:"logins,omitempty"`
-	Ftrace         []HookFtrace            `json:"ftrace_hooks,omitempty"`
-	BPF            BPF                     `json:"bpf"`
-	Taint          Taint                   `json:"kernel_taint"`
-	ChavesPrivadas []ChavePrivada          `json:"private_keys,omitempty"`
-	Destinos       []DestinoConhecido      `json:"known_hosts,omitempty"`
-	Historicos     []HistoricoShell        `json:"shell_history,omitempty"`
-	Audit          Auditoria               `json:"audit"`
-	Logs           []ArquivoDeLog          `json:"logs,omitempty"`
+	Protecao    ProtecaoKernel          `json:"kernel_protection"`
+	PkgEstranho []ReivindicacaoEstranha `json:"pkg_odd_claims,omitempty"`
+	HashDiff    []HashDivergente        `json:"hash_mismatch,omitempty"`
+	Timestomps  []Timestomp             `json:"timestomps,omitempty"`
+	HashOK      []string                `json:"hash_verified,omitempty"`
+	Atributos   []AtributoInode         `json:"inode_attrs,omitempty"`
+	Mounts      []Montagem              `json:"mounts,omitempty"`
+	Logins      []Login                 `json:"logins,omitempty"`
+	// FontesDeLogin é o ALCANCE da lista acima, por arquivo. Sem ela, 2000
+	// registros de wtmp são indistinguíveis do arquivo inteiro — ver
+	// FonteDeLogin.
+	FontesDeLogin  []FonteDeLogin     `json:"login_sources,omitempty"`
+	Ftrace         []HookFtrace       `json:"ftrace_hooks,omitempty"`
+	BPF            BPF                `json:"bpf"`
+	Taint          Taint              `json:"kernel_taint"`
+	ChavesPrivadas []ChavePrivada     `json:"private_keys,omitempty"`
+	Destinos       []DestinoConhecido `json:"known_hosts,omitempty"`
+	Historicos     []HistoricoShell   `json:"shell_history,omitempty"`
+	Audit          Auditoria          `json:"audit"`
+	Logs           []ArquivoDeLog     `json:"logs,omitempty"`
 
 	// EventosDeLog são as ALEGAÇÕES que o host faz sobre o próprio passado —
 	// o CONTEÚDO dos logs, normalizado. Logs (acima) é a ESTRUTURA: inventário,
@@ -1009,6 +1037,61 @@ func CollectVolatile(e *env.Env) *Facts {
 	} else {
 		f.partial("proc", e.Reason(env.CapProcfs))
 	}
+	f.Index()
+	return f
+}
+
+// CollectAtividade é a coleta do comando `activity`: só as TESTEMUNHAS DO
+// PASSADO.
+//
+// O que ela deliberadamente NÃO faz é o que a define. Nada de processos,
+// sockets, kernel, BPF, varredura de filesystem, varredura de código ou hash —
+// esses respondem "o que existe agora?", e o `activity` pergunta outra coisa.
+// Rodar a coleta inteira para reconstruir uma linha do tempo transformaria o
+// comando num segundo `scan` com outro nome e outro custo.
+//
+// A ordem importa em dois pontos:
+//
+//	collectHost   antes de collectLogins: o layout do registro utmp (384 ou
+//	              400 bytes) é escolhido pela LIBC do host, e sem ele o
+//	              inventário de login sai lido do byte errado
+//	collectLogs   antes de collectEventosDeLog: é o inventário de rotação dele
+//	              que diz quais gerações existem ao lado de cada arquivo vivo
+//
+// Volatil é defensivo, e não descritivo: este retrato não tem processo nem
+// socket, e se ele alcançar o motor de checks ou um dump, o que ele precisa
+// fazer é DEGRADAR — nunca deixar um check concluir ausência sobre um
+// subsistema que ninguém coletou.
+func CollectAtividade(e *env.Env) *Facts {
+	f := &Facts{
+		SchemaVersion: SchemaVersion,
+		CollectedAt:   e.Now.Format("2006-01-02T15:04:05Z"),
+		Source:        e.Source.String(),
+		Volatil:       true,
+	}
+	e.Stage("host")
+	rodarColetor(f, "proc", "collectHost", func() { collectHost(f, e) })
+	if !e.Has(env.CapFilesystem) {
+		f.partial("login", e.Reason(env.CapFilesystem))
+		f.Index()
+		return f
+	}
+
+	// O passwd sozinho, e não o collectUsers inteiro: aqui ele serve para
+	// NOMEAR uid, e sudoers/doas/shadow são pergunta de escalada, que é do
+	// `scan`.
+	f.Accounts = NomesDeUsuario(e)
+
+	e.Stage("login")
+	rodarColetor(f, "login", "collectLogins", func() { collectLogins(f, e) })
+	// A configuração do auditd decide se a ausência de execução no audit.log
+	// significa "não houve" ou "não estava registrando".
+	rodarColetor(f, "audit", "collectAuditoria", func() { collectAuditoria(f, e) })
+
+	e.Stage("logs")
+	rodarColetor(f, "logs", "collectLogs", func() { collectLogs(f, e) })
+	rodarColetor(f, "logeventos", "collectEventosDeLog", func() { collectEventosDeLog(f, e) })
+
 	f.Index()
 	return f
 }

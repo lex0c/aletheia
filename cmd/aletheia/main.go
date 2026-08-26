@@ -82,6 +82,8 @@ COMANDOS
   preserve      guarda a evidência antes que ela suma — inclusive tráfego
                 (--pcap). O ÚNICO que escreve
   info          responde sobre UM alvo: process, net, git, ip, port, file
+  activity      o que ACONTECEU aqui: linha do tempo de login, sudo e execução,
+                com a cobertura de cada testemunha. Reconstrói, não conclui
   mcp           serve um retrato a um agente por MCP, sobre stdio. Concede
                 OBSERVAÇÃO, não execução
   checks        catálogo: id, §ref, modo, grupo, requires, falsos positivos
@@ -206,6 +208,60 @@ INFO — a pergunta que vem ANTES do veredito
   O censo compara as tarefas de cada uid com o RLIMIT_NPROC dele — é o número
   que explica Resource temporarily unavailable em su, fork e execve — e NOMEIA
   a repetição quando ela tem forma conhecida (cron que se sobrepõe, pool).
+
+ACTIVITY — o que ACONTECEU aqui
+  aletheia activity                        linha do tempo das últimas 24h
+  aletheia activity --since 7d --user deploy
+  aletheia activity --around 2026-08-25T03:15Z --window 30m
+  aletheia activity --summary
+  aletheia activity --group-by ip
+
+  A terceira pergunta. O scan responde "há evidência de comprometimento
+  AGORA?" e o wtf responde "por onde começo?"; esta aparece toda vez que
+  alguém entra numa VM depois de um alerta.
+
+  É onde o comprometimento SEM MALWARE aparece: credencial roubada, ferramenta
+  legítima, nenhum arquivo para achar — só uma sequência operacional estranha.
+
+  O que ele acrescenta a last, lastb, who e grep encadeados:
+
+  junta      o registro binário e o log em texto do MESMO login viram um evento
+             só, com as duas testemunhas nomeadas. A ligação é por PID — o
+             ut_pid do wtmp é o pid do sshd, e o envelope do syslog carrega o
+             mesmo número —, e a FORÇA dela sai impressa. Ligação fraca
+             (mesma conta e origem no mesmo dia) RELACIONA e não funde: dois
+             logins legítimos cabem num dia
+  declara    toda saída traz a cobertura POR FONTE. A leitura de login é da
+             cauda, com teto de 2000 registros por arquivo: num host que recebe
+             400 tentativas por hora o btmp alcança uma tarde, e pedir 7d não
+             faz a leitura alcançar 7d. Sem root o btmp é ilegível, e ali sai
+             NÃO EXAMINADO — nunca "0 recusas"
+  divergência  quando o registro binário viu um login aceito e o log em texto,
+             cobrindo aquele instante e sem lacuna declarada, NÃO registrou. É
+             a forma da manipulação de log — e a regra é estreita porque
+             rotação, parser cego, login de console e ssh não-interativo
+             (scp, rsync, ansible) produzem a MESMA forma. Falhando qualquer
+             condição sai "não confirmado", nunca acusação
+
+  Ele NÃO conclui: sai 0 sempre, salvo erro de invocação. Quem acusa é o
+  scan, que traz os falsos positivos junto.
+
+  Em host journald-only (Debian 12, Fedora, RHEL moderno, Arch) não há
+  auth.log: a família sai FORA DE ESCOPO, com a via nomeada. Escopo declarado,
+  nunca silêncio.
+
+  --since S     duração (24h, 7d) ou instante. Padrão 24h
+  --until S     fim da janela
+  --around T    centrar a janela num instante — o horário do alerta
+  --window D    raio do --around (padrão 15m). Combinar --around com
+                --since/--until é RECUSADO: são janelas diferentes
+  --kind K      casa por PREFIXO: auth, auth.login, privilege.sudo, exec, account
+  --user U      --ip IP    recorte por conta e por origem
+  --group-by X  tabela agregada por ip | user | kind
+  --summary     só os agregados
+  --from DUMP   responder sobre um retrato (a janela conta do relógio DELE)
+  --root PATH   responder sobre uma imagem montada
+  --json FILE   a mesma reconstrução em JSON ("-" = stdout)
 
 MCP — a pergunta que a IA faz DE VOLTA
   aletheia mcp --snapshot host.json
@@ -429,6 +485,8 @@ func main() {
 		os.Exit(runAnalyze(os.Args[2:]))
 	case "info":
 		os.Exit(runInfo(os.Args[2:]))
+	case "activity":
+		os.Exit(runActivity(os.Args[2:]))
 	case "checks":
 		os.Exit(runChecks(os.Args[2:]))
 	case "mcp":

@@ -184,7 +184,7 @@ var forcaBrutaComSucesso = check.Check{
 			l := &f.Logins[i]
 			// Tentativa recusada é registrada como login em curso ou concluído; o
 			// marcador de boot nunca é uma tentativa.
-			if !l.Falhou || l.Tipo == facts.TipoBoot || !origemDeRede(l.Origem) {
+			if !l.Falhou || l.Tipo == facts.TipoBoot || !facts.OrigemDeRede(l.Origem) {
 				continue
 			}
 			falhas[l.Origem]++
@@ -231,7 +231,7 @@ var forcaBrutaComSucesso = check.Check{
 		espalhado := map[string][]entrada{}
 		for i := range f.Logins {
 			l := &f.Logins[i]
-			if l.Falhou || l.Tipo != facts.TipoLoginUsuario || !origemDeRede(l.Origem) {
+			if l.Falhou || l.Tipo != facts.TipoLoginUsuario || !facts.OrigemDeRede(l.Origem) {
 				continue
 			}
 			if falhas[l.Origem] >= minFalhasParaForcaBruta {
@@ -336,17 +336,6 @@ var forcaBrutaComSucesso = check.Check{
 		r.Partial = append(r.Partial, f.PersistDenied["login"]...)
 		return r
 	},
-}
-
-// origemDeRede descarta o que não é um endereço de onde alguém possa tentar
-// entrar: `:0` é o display do X, `~` é o marcador de boot e vazio é tty física.
-//
-// O registro de BOOT também tem texto no campo de origem — a versão do kernel —
-// e a primeira versão disto o descartava procurando "MANJARO" na string. Isso
-// funcionava num host e em nenhum outro. Quem separa boot de login é o TIPO do
-// registro, e é o chamador que o filtra.
-func origemDeRede(o string) bool {
-	return o != "" && o != "~" && !strings.HasPrefix(o, ":")
 }
 
 // entrada é um login bem-sucedido, guardado para o cruzamento.

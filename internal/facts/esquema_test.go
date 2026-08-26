@@ -33,7 +33,7 @@ import (
 // teste: daria uma sensação de cobertura que não existe.
 func TestImpressaoDoEsquema(t *testing.T) {
 	const (
-		esquemaEsperado = 23
+		esquemaEsperado = 24
 		// Atualizada sem subir o SchemaVersion, e a razão fica aqui porque a
 		// catraca manda escrevê-la.
 		//
@@ -107,7 +107,17 @@ func TestImpressaoDoEsquema(t *testing.T) {
 		// diferentes) e FonteDeLog ganhou a confiança das datas da COBERTURA.
 		// Tudo dentro de estruturas que o 23 introduziu, e nenhum artefato
 		// anterior a elas existe.
-		impressaoGravada = "e2d7b644746c7da6"
+		//
+		// 23 -> 24, e desta vez o SchemaVersion SOBE. Facts.FontesDeLogin é o
+		// ALCANCE da leitura de wtmp/btmp/utmp, por arquivo. A pergunta da
+		// regra — "um dump v23 traz o campo vazio, e vazio significa alguma
+		// coisa para algum consumidor?" — tem resposta sim, e nos dois sentidos:
+		// sem ela, truncamento da cauda só se deduz por `len(f.Logins) == 2000`,
+		// e essa dedução é INDECIDÍVEL (um wtmp de 2000 registros e um de
+		// 57.000 lido pelo fim dão o mesmo número). O lado caro é a cauda de
+		// arquivo enorme passar por histórico completo, que é sobre o que
+		// alguém afirma ausência de entrada.
+		impressaoGravada = "3233c42f1edc750c"
 	)
 	if SchemaVersion != esquemaEsperado {
 		t.Fatalf("SchemaVersion=%d e este teste conhece o %d: atualize os dois "+
